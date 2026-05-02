@@ -16,10 +16,11 @@ LegoClicker is a Windows utility client for Lunar Client.
 - Aim Assist
 - Triggerbot
 - Reach and Velocity controls
+- AutoTotem (fall/explosion detection, Ghost and Anarchy modes)
 - GTB Helper
 - Discord Rich Presence
 - Nametags, Closest Player panel, Chest ESP
-- Per-module keybinds
+- Per-module keybinds (all unbound by default)
 - Profiles saved in `%AppData%\LegoClicker\profiles\`
 - GUI customization (palette, module list style, show logo)
 
@@ -41,7 +42,7 @@ LegoClicker is a Windows utility client for Lunar Client.
 1. Start Lunar Client.
 2. Run `LegoClicker.exe`.
 3. Click **Inject**.
-4. Use the external GUI.
+4. Use the external GUI (bind keys under the Keybinds tab).
 
 _If you are playing on 1.8.9, it is recommended to inject while in a world/server, to ensure all features work correctly_
 

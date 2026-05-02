@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="description" content="LegoClicker is a Lunar utility client supporting 1.8.9, 1.21.x, and 26.1. It includes autoclicker, aim assist, triggerbot, reach, velocity, GTB helper, render modules, profiles, keybinds, and GUI customization." />
+  <meta name="description" content="LegoClicker is a Lunar utility client supporting 1.8.9, 1.21.x, and 26.1. It includes autoclicker, aim assist, triggerbot, reach, velocity, auto totem, GTB helper, render modules, profiles, keybinds, and GUI customization." />
   <meta name="robots" content="index,follow" />
   <meta name="theme-color" content="#b28cff" />
 
@@ -12,14 +12,14 @@
   <meta property="og:type" content="website" />
   <meta property="og:site_name" content="LegoClicker" />
   <meta property="og:title" content="LegoClicker — Minecraft Utility Client" />
-  <meta property="og:description" content="Lunar utility client supporting 1.8.9, 1.21.x, and 26.1." />
+  <meta property="og:description" content="Lunar utility client supporting 1.8.9, 1.21.x, and 26.1 with combat, auto totem, render, profiles, and GUI customization." />
   <meta property="og:url" content="https://naczo5.github.io/LegoClicker/" />
   <meta property="og:image" content="https://naczo5.github.io/LegoClicker/screenshots/gameplay.png" />
   <meta property="og:image:alt" content="LegoClicker gameplay HUD preview" />
 
   <meta name="twitter:card" content="summary_large_image" />
   <meta name="twitter:title" content="LegoClicker — Minecraft Utility Client" />
-  <meta name="twitter:description" content="Lunar utility client supporting 1.8.9, 1.21.x, and 26.1 with combat, render, profiles, and GUI customization." />
+  <meta name="twitter:description" content="Lunar utility client supporting 1.8.9, 1.21.x, and 26.1 with combat, auto totem, render, profiles, and GUI customization." />
   <meta name="twitter:image" content="https://naczo5.github.io/LegoClicker/screenshots/gameplay.png" />
   <title>LegoClicker — Minecraft Utility Client</title>
   <link rel="stylesheet" href="style.css" />
@@ -83,7 +83,7 @@
       <div class="category">
         <div class="cat-title"><span class="cat-icon">⚔</span> Combat</div>
         <div class="feature-card">
-          <div class="feat-name">AutoClicker<span class="feat-bind">` (backtick)</span></div>
+          <div class="feat-name">AutoClicker<span class="feat-bind">Unbound</span></div>
           <div class="feat-desc">Left and right click with configurable CPS, jitter, block-only mode, and GUI/chest safety checks.</div>
           <div class="feat-tags"><span>LMB</span><span>RMB</span><span>Block-Only</span><span>CPS Jitter</span></div>
         </div>
@@ -101,6 +101,11 @@
           <div class="feat-name">Reach + Velocity</div>
           <div class="feat-desc">Additional combat settings.</div>
           <div class="feat-tags"><span>Reach</span><span>Velocity</span><span>Chance</span></div>
+        </div>
+        <div class="feature-card">
+          <div class="feat-name">AutoTotem</div>
+          <div class="feat-desc">Fall &amp; explosion detection with Ghost (inventory only) and Anarchy modes, health threshold, and Elytra switch.</div>
+          <div class="feat-tags"><span>Ghost</span><span>Anarchy</span><span>Health</span><span>Elytra</span></div>
         </div>
       </div>
 
@@ -252,7 +257,7 @@
           <li>Run <code>LegoClicker.exe</code></li>
           <li>Click <strong>Inject</strong></li>
           <li>Use the external control center after inject</li>
-          <li>Press <strong>backtick (` )</strong> to toggle autoclicker</li>
+          <li>Bind keys under the <strong>Keybinds</strong> tab to toggle modules</li>
         </ol>
       </div>
     </div>
@@ -270,7 +275,7 @@
         <div class="dl-row"><span>Version</span><span class="dl-val">latest (main)</span></div>
         <div class="dl-row"><span>Target</span><span class="dl-val">Lunar Client 1.8.9, 1.21.x, and 26.1</span></div>
         <div class="dl-row"><span>Platform</span><span class="dl-val">Windows x64</span></div>
-        <div class="dl-row"><span>License</span><span class="dl-val">Open Source</span></div>
+        <div class="dl-row"><span>License</span><span class="dl-val">GPL-3</span></div>
       </div>
       <a href="https://github.com/naczo5/LegoClicker/releases" class="btn-primary btn-lg" id="github-link">
         OPEN LATEST RELEASES
