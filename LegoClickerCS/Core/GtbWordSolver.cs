@@ -349,12 +349,12 @@ public static class GtbWordSolver
 
     private static bool IsMatch(string word, string mask)
     {
-        if (IsMatchCore(word, mask)) return true;
+        bool maskHasSpace = mask.Contains(' ');
+        bool wordHasSpace = word.Contains(' ');
+        if (maskHasSpace != wordHasSpace)
+            return false;
 
-        string compactWord = word.Replace(" ", "");
-        string compactMask = mask.Replace(" ", "");
-        if (compactWord == word && compactMask == mask) return false;
-        return IsMatchCore(compactWord, compactMask);
+        return IsMatchCore(word, mask);
     }
 
     private static bool IsMatchCore(string word, string mask)

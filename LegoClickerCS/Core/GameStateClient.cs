@@ -642,7 +642,7 @@ public class GameStateClient : INotifyPropertyChanged
         return NormalizeDetectedVersion(major);
     }
 
-    private static string? NormalizeDetectedVersion(string? raw)
+    internal static string? NormalizeDetectedVersion(string? raw)
     {
         if (string.IsNullOrWhiteSpace(raw))
             return null;
@@ -701,7 +701,7 @@ public class GameStateClient : INotifyPropertyChanged
     /// </summary>
     public float PlayerHealth => IsConnected ? CurrentState.Health : -1;
 
-    private static int ModuleListStyleToIndex(string? styleName)
+    internal static int ModuleListStyleToIndex(string? styleName)
     {
         if (string.IsNullOrWhiteSpace(styleName))
             return 0;
@@ -791,6 +791,12 @@ public class GameStateClient : INotifyPropertyChanged
                     velocityHorizontal = clicker.VelocityHorizontal,
                     velocityVertical = clicker.VelocityVertical,
                     velocityChance = clicker.VelocityChance,
+                    autoTotemEnabled = clicker.AutoTotemEnabled,
+                    autoTotemMode = clicker.AutoTotemMode,
+                    autoTotemHealth = clicker.AutoTotemHealth,
+                    autoTotemElytra = clicker.AutoTotemElytra,
+                    autoTotemDelay = clicker.AutoTotemDelay,
+                    autoTotemBehaviorMode = clicker.AutoTotemBehaviorMode,
                     // Per-module keybinds
                     keybindAutoclicker   = InputHooks.GetModuleKey("autoclicker"),
                     keybindRightClick    = InputHooks.GetModuleKey("rightclick"),
@@ -938,6 +944,24 @@ public class GameStateClient : INotifyPropertyChanged
                     break;
                 case "toggleVelocity":
                     clicker.VelocityEnabled = !clicker.VelocityEnabled;
+                    break;
+                case "toggleAutoTotem":
+                    clicker.AutoTotemEnabled = !clicker.AutoTotemEnabled;
+                    break;
+                case "setAutoTotemMode":
+                    clicker.AutoTotemMode = (int)(node?["value"]?.GetValue<float>() ?? 0f);
+                    break;
+                case "setAutoTotemHealth":
+                    clicker.AutoTotemHealth = (int)(node?["value"]?.GetValue<float>() ?? 10f);
+                    break;
+                case "toggleAutoTotemElytra":
+                    clicker.AutoTotemElytra = !clicker.AutoTotemElytra;
+                    break;
+                case "setAutoTotemDelay":
+                    clicker.AutoTotemDelay = (int)(node?["value"]?.GetValue<float>() ?? 0f);
+                    break;
+                case "setAutoTotemBehaviorMode":
+                    clicker.AutoTotemBehaviorMode = (int)(node?["value"]?.GetValue<float>() ?? 0f);
                     break;
                 case "setVelocityHorizontal":
                     clicker.VelocityHorizontal = (int)(node?["value"]?.GetValue<float>() ?? 100f);

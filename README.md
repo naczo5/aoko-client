@@ -66,6 +66,11 @@ Run from repository root unless noted.
 
 - `build_release.bat`
 
+## Tests
+
+- Run C# tests: `dotnet test LegoClickerCS.Tests\LegoClickerCS.Tests.csproj`
+- Run native harness tests: `McInjector\run_tests.bat`
+
 ## Notes on versions
 
 - `bridge_261.dll` is the modern bridge used for both 26.1 and 1.21 injection.
@@ -104,4 +109,4 @@ legoclickerC/
 
 ## TODO
 
-
+- Add Linux support

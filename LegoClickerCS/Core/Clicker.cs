@@ -64,9 +64,9 @@ public class Clicker : INotifyPropertyChanged
     // Settings
     private float _minCPS = 8.0f;
     private float _maxCPS = 12.0f;
-    private bool _leftClickEnabled = true;
+    private bool _leftClickEnabled = false;
     private bool _rightClickEnabled = false;
-    private bool _jitterEnabled = true;
+    private bool _jitterEnabled = false;
 
     
     // Right Click Settings
@@ -404,6 +404,7 @@ public class Clicker : INotifyPropertyChanged
             ChestEspEnabled = false;
             ReachEnabled = false;
             VelocityEnabled = false;
+            AutoTotemEnabled = false;
 
             ShowModuleList = false;
             ShowLogo = false;
@@ -770,7 +771,7 @@ public class Clicker : INotifyPropertyChanged
         }
     }
 
-    private float _reachMax = 6.0f;
+    private float _reachMax = 3.0f;
     public float ReachMax
     {
         get => _reachMax;
@@ -857,6 +858,94 @@ public class Clicker : INotifyPropertyChanged
             {
                 _velocityChance = clamped;
                 OnPropertyChanged(nameof(VelocityChance));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    private bool _autoTotemEnabled = false;
+    public bool AutoTotemEnabled
+    {
+        get => _autoTotemEnabled;
+        set
+        {
+            _autoTotemEnabled = value;
+            OnPropertyChanged(nameof(AutoTotemEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private int _autoTotemMode = 0;
+    public int AutoTotemMode
+    {
+        get => _autoTotemMode;
+        set
+        {
+            int clamped = Math.Clamp(value, 0, 1);
+            if (_autoTotemMode != clamped)
+            {
+                _autoTotemMode = clamped;
+                OnPropertyChanged(nameof(AutoTotemMode));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    private int _autoTotemHealth = 10;
+    public int AutoTotemHealth
+    {
+        get => _autoTotemHealth;
+        set
+        {
+            int clamped = Math.Clamp(value, 0, 36);
+            if (_autoTotemHealth != clamped)
+            {
+                _autoTotemHealth = clamped;
+                OnPropertyChanged(nameof(AutoTotemHealth));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    private bool _autoTotemElytra = true;
+    public bool AutoTotemElytra
+    {
+        get => _autoTotemElytra;
+        set
+        {
+            _autoTotemElytra = value;
+            OnPropertyChanged(nameof(AutoTotemElytra));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private int _autoTotemDelay = 0;
+    public int AutoTotemDelay
+    {
+        get => _autoTotemDelay;
+        set
+        {
+            int clamped = Math.Clamp(value, 0, 20);
+            if (_autoTotemDelay != clamped)
+            {
+                _autoTotemDelay = clamped;
+                OnPropertyChanged(nameof(AutoTotemDelay));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    private int _autoTotemBehaviorMode = 0; // 0 = Ghost (inventory only), 1 = Anarchy
+    public int AutoTotemBehaviorMode
+    {
+        get => _autoTotemBehaviorMode;
+        set
+        {
+            int clamped = Math.Clamp(value, 0, 1);
+            if (_autoTotemBehaviorMode != clamped)
+            {
+                _autoTotemBehaviorMode = clamped;
+                OnPropertyChanged(nameof(AutoTotemBehaviorMode));
                 StateChanged?.Invoke();
             }
         }

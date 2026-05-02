@@ -51,13 +51,20 @@ public class Profile
 
     public bool ReachEnabled { get; set; } = false;
     public float ReachMin { get; set; } = 3.0f;
-    public float ReachMax { get; set; } = 6.0f;
+    public float ReachMax { get; set; } = 3.0f;
     public int ReachChance { get; set; } = 100;
 
     public bool VelocityEnabled { get; set; } = false;
     public int VelocityHorizontal { get; set; } = 100;
     public int VelocityVertical { get; set; } = 100;
     public int VelocityChance { get; set; } = 100;
+
+    public bool AutoTotemEnabled { get; set; } = false;
+    public int AutoTotemMode { get; set; } = 0;
+    public int AutoTotemHealth { get; set; } = 10;
+    public bool AutoTotemElytra { get; set; } = true;
+    public int AutoTotemDelay { get; set; } = 0;
+    public int AutoTotemBehaviorMode { get; set; } = 0;
 
     public Dictionary<string, int> ModuleKeys { get; set; } = new()
     {
@@ -74,6 +81,7 @@ public class Profile
         ["chestesp"]      = 0,
         ["reach"]         = 0,
         ["velocity"]      = 0,
+        ["autototem"]     = 0,
         ["panic"]         = 0,
     };
     public string Theme { get; set; } = "Dark";
@@ -201,6 +209,13 @@ public static class ProfileManager
             VelocityVertical = clicker.VelocityVertical,
             VelocityChance = clicker.VelocityChance,
 
+            AutoTotemEnabled = clicker.AutoTotemEnabled,
+            AutoTotemMode = clicker.AutoTotemMode,
+            AutoTotemHealth = clicker.AutoTotemHealth,
+            AutoTotemElytra = clicker.AutoTotemElytra,
+            AutoTotemDelay = clicker.AutoTotemDelay,
+            AutoTotemBehaviorMode = clicker.AutoTotemBehaviorMode,
+
             ModuleKeys = new Dictionary<string, int>(InputHooks.ModuleKeys),
             Theme = ThemeManager.CurrentTheme
         };
@@ -266,6 +281,13 @@ public static class ProfileManager
         clicker.VelocityHorizontal = profile.VelocityHorizontal;
         clicker.VelocityVertical = profile.VelocityVertical;
         clicker.VelocityChance = profile.VelocityChance;
+
+        clicker.AutoTotemEnabled = profile.AutoTotemEnabled;
+        clicker.AutoTotemMode = profile.AutoTotemMode;
+        clicker.AutoTotemHealth = profile.AutoTotemHealth;
+        clicker.AutoTotemElytra = profile.AutoTotemElytra;
+        clicker.AutoTotemDelay = profile.AutoTotemDelay;
+        clicker.AutoTotemBehaviorMode = profile.AutoTotemBehaviorMode;
 
         foreach (var kvp in profile.ModuleKeys)
             InputHooks.SetModuleKey(kvp.Key, kvp.Value);

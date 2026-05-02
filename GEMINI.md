@@ -44,7 +44,8 @@ Run these from the repository root unless noted otherwise:
 
 ## Development Conventions & Constraints
 
-- **Safety Constraint (CRITICAL):** The bridge-side (C++) logic must be treated as **read-only** for the game state. **Do not** add direct packet sending or invoke in-game combat methods via JNI.
-- **Input Simulation:** All input actions (e.g., clicking, aiming) must be performed using Win32 `SendInput` from the external C# or appropriate safe native channels, adhering to the read-only constraint.
+- **Safety Constraint (CRITICAL):** The bridge-side (C++) logic should treat the game state as **read-first**. **Do not** add direct packet sending or invoke in-game combat methods via JNI.
+- **Input Simulation:** All input actions (e.g., clicking, aiming) must be performed using Win32 `SendInput` from the external C# or appropriate safe native channels.
+- **Limited State Writes:** Thoughtful, minimal JNI state modifications are permitted when ghost-safe and undetectable (e.g., reach via entity attributes, velocity scaling, nametag visibility). Keep overlay work draw-only; mutate state only when justified and stealthy.
 - **Version Scope:** Keep all supported versions (`bridge_261.dll` for 26.1/1.21, `bridge.dll` for 1.8.9) working through the same external GUI flow.
 - **UI Modifications:** The C# external GUI (`LegoClickerCS/MainWindow.xaml`) is the primary user interface.

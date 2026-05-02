@@ -369,6 +369,7 @@ public sealed class DiscordRichPresenceService
         if (clicker.ChestEspEnabled) count++;
         if (clicker.ReachEnabled) count++;
         if (clicker.VelocityEnabled) count++;
+        if (clicker.AutoTotemEnabled) count++;
 
         return count;
     }

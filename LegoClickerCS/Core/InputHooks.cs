@@ -63,10 +63,9 @@ public static class InputHooks
     private static LowLevelProc? _mouseProc;
     
     // Per-module keybinds: moduleId -> VK code (0 = unbound)
-    // Autoclicker keeps backtick (0xC0) by default; all others start unbound.
     public static Dictionary<string, int> ModuleKeys { get; } = new()
     {
-        ["autoclicker"]   = 0xC0,
+        ["autoclicker"]   = 0,
         ["rightclick"]    = 0,
         ["jitter"]        = 0,
         ["clickinchests"] = 0,
@@ -137,6 +136,7 @@ public static class InputHooks
             case "chestesp":      c.ChestEspEnabled             = !c.ChestEspEnabled;             break;
             case "reach":         c.ReachEnabled                = !c.ReachEnabled;                break;
             case "velocity":      c.VelocityEnabled             = !c.VelocityEnabled;             break;
+            case "autototem":     c.AutoTotemEnabled            = !c.AutoTotemEnabled;            break;
         }
     }
     

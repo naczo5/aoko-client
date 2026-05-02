@@ -129,7 +129,7 @@
                                     BorderBrush="{DynamicResource SliderFgBrush}" 
                                     BorderThickness="1" CornerRadius="4" VerticalAlignment="Center">
                                 <TextBlock x:Name="checkMark" Text="✓" FontSize="10" 
-                                           Foreground="White" HorizontalAlignment="Center" 
+                                           Foreground="{DynamicResource AccentBrush}" HorizontalAlignment="Center" 
                                            VerticalAlignment="Center" Visibility="Collapsed"/>
                             </Border>
                             <ContentPresenter Margin="6,0,0,0" VerticalAlignment="Center"/>
@@ -165,7 +165,7 @@
                                     CornerRadius="12" Background="{DynamicResource SliderBgBrush}"
                                     BorderBrush="{DynamicResource SliderFgBrush}" BorderThickness="1"/>
                             <Ellipse x:Name="switchThumb" Grid.Column="1" Width="18" Height="18"
-                                     Fill="#EDE9FF" HorizontalAlignment="Left" Margin="3,0,0,0"
+                                     Fill="{DynamicResource SliderFgBrush}" HorizontalAlignment="Left" Margin="3,0,0,0"
                                      VerticalAlignment="Center"/>
                         </Grid>
                         <ControlTemplate.Triggers>
@@ -174,7 +174,7 @@
                                 <Setter TargetName="switchTrack" Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
                                 <Setter TargetName="switchThumb" Property="HorizontalAlignment" Value="Right"/>
                                 <Setter TargetName="switchThumb" Property="Margin" Value="0,0,3,0"/>
-                                <Setter TargetName="switchThumb" Property="Fill" Value="White"/>
+                                <Setter TargetName="switchThumb" Property="Fill" Value="{DynamicResource TextBrush}"/>
                             </Trigger>
                             <Trigger Property="IsMouseOver" Value="True">
                                 <Setter TargetName="switchTrack" Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>

@@ -33,15 +33,19 @@
 #include <algorithm>
 #include <cctype>
 #include <unordered_map>
+#include <unordered_set>
 #include <fstream>
 #include <sstream>
 #include <cmath>
+#include <cstring>
 #include <GL/gl.h>
 #include "gl_loader.h"
 #include "MinHook.h"
 #include "imgui.h"
 #include "imgui_impl_win32.h"
 #include "imgui_impl_opengl3.h"
+#include "json_config_reader.h"
+#include "bridge_capabilities.h"
 
 // MinGW's <GL/gl.h> may not declare modern GL enums used with glGetIntegerv.
 #ifndef GL_CURRENT_PROGRAM
@@ -162,6 +166,12 @@ struct Config {
     int   velocityVertical = 100;
     int   velocityChance = 100;
     int   reloadMappingsNonce = 0;
+    bool  autoTotemEnabled = false;
+    int   autoTotemMode = 0; // 0=Smart, 1=Strict
+    int   autoTotemHealth = 10;
+    bool  autoTotemElytra = true;
+    int   autoTotemDelay = 0;
+    int   autoTotemBehaviorMode = 0; // 0=Ghost (inventory only), 1=Anarchy
 };
 static Config g_config;
 static Mutex  g_configMutex;
@@ -187,80 +197,60 @@ static void SendCmdFloat(const char* action, float val) {
 // ===================== CONFIG PARSER =====================
 static void ParseConfig(const std::string& line) {
     TRACE261_PATH("enter");
-    auto getStr = [&](const char* key) -> std::string {
-        std::string k = std::string("\"") + key + "\":";
-        size_t p = line.find(k);
-        if (p == std::string::npos) return "";
-        p += k.length();
-        if (p >= line.size()) return "";
-        if (line[p] == '"') {
-            size_t e = line.find('"', p+1);
-            return (e == std::string::npos) ? "" : line.substr(p+1, e-p-1);
-        }
-        size_t e = line.find_first_of(",}", p);
-        std::string res = (e == std::string::npos) ? line.substr(p) : line.substr(p, e-p);
-        // trim leading spaces just in case
-        while(!res.empty() && res[0] == ' ') res.erase(0, 1);
-        return res;
-    };
-    auto getBool  = [&](const char* k) { return getStr(k) == "true"; };
-    auto getFloat = [&](const char* k) -> float {
-        std::string v = getStr(k);
-        if (v.empty()) return 0.0f;
-        try { return std::stof(v); } catch(...) { return 0.0f; }
-    };
-    auto getInt = [&](const char* k, int def) -> int {
-        std::string v = getStr(k);
-        if (v.empty()) return def;
-        try { return std::stoi(v); } catch(...) { return def; }
-    };
+    lc::SimpleJsonConfigReader reader(line);
 
-    bool isConfig = TRACE261_IF("isConfigPacket", getStr("type") == "config");
+    bool isConfig = TRACE261_IF("isConfigPacket", reader.GetString("type") == "config");
     if (!isConfig) return;
 
     LockGuard lk(g_configMutex);
     int prevReloadNonce = g_config.reloadMappingsNonce;
-    g_config.armed         = getBool("armed");
-    g_config.clicking      = getBool("clicking");
-    g_config.minCPS        = getFloat("minCPS");
-    g_config.maxCPS        = getFloat("maxCPS");
-    g_config.jitter        = getBool("jitter");
-    g_config.clickInChests = getBool("clickInChests");
-    g_config.aimAssist     = getBool("aimAssist");
-    g_config.triggerbot    = getBool("triggerbot");
-    g_config.nametags      = getBool("nametags");
-    g_config.chestEsp      = getBool("chestEsp");
-    std::string showModuleListRaw = getStr("showModuleList");
+    g_config.armed         = reader.GetBool("armed");
+    g_config.clicking      = reader.GetBool("clicking");
+    g_config.minCPS        = reader.GetFloat("minCPS");
+    g_config.maxCPS        = reader.GetFloat("maxCPS");
+    g_config.jitter        = reader.GetBool("jitter");
+    g_config.clickInChests = reader.GetBool("clickInChests");
+    g_config.aimAssist     = reader.GetBool("aimAssist");
+    g_config.triggerbot    = reader.GetBool("triggerbot");
+    g_config.nametags      = reader.GetBool("nametags");
+    g_config.chestEsp      = reader.GetBool("chestEsp");
+    std::string showModuleListRaw = reader.GetString("showModuleList");
     g_config.showModuleList = showModuleListRaw.empty() ? true : (showModuleListRaw == "true");
-    g_config.closestPlayer = getBool("closestPlayerInfo");
-    g_config.nametagHealth = getBool("nametagShowHealth");
-    g_config.nametagArmor  = getBool("nametagShowArmor");
-    g_config.nametagHideVanilla = getBool("nametagHideVanilla");
-    g_config.nametagMaxCount = (std::max)(1, (std::min)(20, getInt("nametagMaxCount", g_config.nametagMaxCount)));
-    g_config.chestEspMaxCount = (std::max)(1, (std::min)(20, getInt("chestEspMaxCount", g_config.chestEspMaxCount)));
-    g_config.rightClick    = getBool("right");
-    g_config.rightMinCPS   = getFloat("rightMinCPS");
-    g_config.rightMaxCPS   = getFloat("rightMaxCPS");
-    g_config.moduleListStyle = (std::max)(0, (std::min)(4, getInt("moduleListStyle", 0)));
-    std::string showLogoRaw = getStr("showLogo");
+    g_config.closestPlayer = reader.GetBool("closestPlayerInfo");
+    g_config.nametagHealth = reader.GetBool("nametagShowHealth");
+    g_config.nametagArmor  = reader.GetBool("nametagShowArmor");
+    g_config.nametagHideVanilla = reader.GetBool("nametagHideVanilla");
+    g_config.nametagMaxCount = lc::ClampInt(reader.GetInt("nametagMaxCount", g_config.nametagMaxCount), 1, 20);
+    g_config.chestEspMaxCount = lc::ClampInt(reader.GetInt("chestEspMaxCount", g_config.chestEspMaxCount), 1, 20);
+    g_config.rightClick    = reader.GetBool("right");
+    g_config.rightMinCPS   = reader.GetFloat("rightMinCPS");
+    g_config.rightMaxCPS   = reader.GetFloat("rightMaxCPS");
+    g_config.moduleListStyle = lc::ClampInt(reader.GetInt("moduleListStyle", 0), 0, 4);
+    std::string showLogoRaw = reader.GetString("showLogo");
     g_config.showLogo = showLogoRaw.empty() ? true : (showLogoRaw == "true");
-    std::string guiThemeRaw = getStr("guiTheme");
+    std::string guiThemeRaw = reader.GetString("guiTheme");
     g_config.guiTheme = guiThemeRaw.empty() ? "Default" : guiThemeRaw;
-    g_config.rightBlockOnly= getBool("rightBlock");
-    g_config.breakBlocks   = getBool("breakBlocks");
-    g_config.gtbHelper     = getBool("gtbHelper");
-    g_config.gtbHint       = getStr("gtbHint");
-    g_config.gtbCount      = getInt("gtbCount", 0);
-    g_config.gtbPreview    = getStr("gtbPreview");
-    g_config.reachEnabled  = getBool("reachEnabled");
-    g_config.reachMin      = getFloat("reachMin");
-    g_config.reachMax      = getFloat("reachMax");
-    g_config.reachChance   = getInt("reachChance", 100);
-    g_config.velocityEnabled = getBool("velocityEnabled");
-    g_config.velocityHorizontal = (std::max)(1, (std::min)(100, getInt("velocityHorizontal", 100)));
-    g_config.velocityVertical = (std::max)(1, (std::min)(100, getInt("velocityVertical", 100)));
-    g_config.velocityChance = (std::max)(1, (std::min)(100, getInt("velocityChance", 100)));
-    g_config.reloadMappingsNonce = getInt("reloadMappingsNonce", g_config.reloadMappingsNonce);
+    g_config.rightBlockOnly= reader.GetBool("rightBlock");
+    g_config.breakBlocks   = reader.GetBool("breakBlocks");
+    g_config.gtbHelper     = reader.GetBool("gtbHelper");
+    g_config.gtbHint       = reader.GetString("gtbHint");
+    g_config.gtbCount      = reader.GetInt("gtbCount", 0);
+    g_config.gtbPreview    = reader.GetString("gtbPreview");
+    g_config.reachEnabled  = reader.GetBool("reachEnabled");
+    g_config.reachMin      = reader.GetFloat("reachMin");
+    g_config.reachMax      = reader.GetFloat("reachMax");
+    g_config.reachChance   = reader.GetInt("reachChance", 100);
+    g_config.velocityEnabled = reader.GetBool("velocityEnabled");
+    g_config.velocityHorizontal = lc::ClampInt(reader.GetInt("velocityHorizontal", 100), 1, 100);
+    g_config.velocityVertical = lc::ClampInt(reader.GetInt("velocityVertical", 100), 1, 100);
+    g_config.velocityChance = lc::ClampInt(reader.GetInt("velocityChance", 100), 1, 100);
+    g_config.autoTotemEnabled = reader.GetBool("autoTotemEnabled");
+    g_config.autoTotemMode = lc::ClampInt(reader.GetInt("autoTotemMode", 0), 0, 1);
+    g_config.autoTotemHealth = lc::ClampInt(reader.GetInt("autoTotemHealth", 10), 0, 36);
+    g_config.autoTotemElytra = reader.GetBool("autoTotemElytra");
+    g_config.autoTotemDelay = lc::ClampInt(reader.GetInt("autoTotemDelay", 0), 0, 20);
+    g_config.autoTotemBehaviorMode = lc::ClampInt(reader.GetInt("autoTotemBehaviorMode", 0), 0, 1);
+    g_config.reloadMappingsNonce = reader.GetInt("reloadMappingsNonce", g_config.reloadMappingsNonce);
     bool reloadPulse = (g_config.reloadMappingsNonce != prevReloadNonce);
     TRACE261_BRANCH("reloadMappingsPulse", reloadPulse);
     if (reloadPulse) {
@@ -272,13 +262,8 @@ static void ParseConfig(const std::string& line) {
 static bool TrySendCapabilities(SOCKET sock) {
     if (sock == INVALID_SOCKET) return false;
 
-    static const std::string kCapabilitiesJson =
-        "{\"type\":\"capabilities\","
-        "\"modules\":[\"autoclicker\",\"rightclick\",\"jitter\",\"clickinchests\",\"breakblocks\",\"aimassist\",\"triggerbot\",\"gtbhelper\",\"nametags\",\"closestplayer\",\"chestesp\",\"reach\",\"velocity\"],"
-        "\"settings\":[\"mincps\",\"maxcps\",\"left\",\"right\",\"rightmincps\",\"rightmaxcps\",\"rightblock\",\"breakblocks\",\"jitter\",\"clickinchests\",\"triggerbot\",\"gtbhint\",\"gtbcount\",\"gtbpreview\",\"nametags\",\"closestplayerinfo\",\"nametagshowhealth\",\"nametagshowarmor\",\"nametaghidevanilla\",\"nametagmaxcount\",\"chestesp\",\"chestespmaxcount\",\"reachenabled\",\"reachmin\",\"reachmax\",\"reachchance\",\"velocityenabled\",\"velocityhorizontal\",\"velocityvertical\",\"velocitychance\",\"reloadmappingsnonce\",\"showmodulelist\",\"moduleliststyle\",\"showlogo\",\"guitheme\"],"
-        "\"state\":[\"actionbar\",\"holdingblock\",\"lookingatblock\",\"lookingatentity\",\"lookingatentitylatched\",\"breakingblock\",\"attackcooldown\",\"attackcooldownpertick\",\"statems\"]}\n";
-
-    int sent = send(sock, kCapabilitiesJson.c_str(), (int)kCapabilitiesJson.size(), 0);
+    const char* capabilitiesJson = lc::ModernCapabilitiesJson();
+    int sent = send(sock, capabilitiesJson, (int)strlen(capabilitiesJson), 0);
     if (sent == SOCKET_ERROR) {
         int err = WSAGetLastError();
         if (err == WSAEWOULDBLOCK) return false;
@@ -576,6 +561,39 @@ static jmethodID g_vec3dCtor_121 = nullptr;
 static int g_lastHurtTime_121 = 0;
 static bool g_loggedVelocityResolveFail_121 = false;
 
+// ===================== AUTOTOTEM MODULE JNI GLOBALS =====================
+static bool g_autoTotemMethodsResolved = false;
+static jmethodID g_handleContainerInput_121 = nullptr; // MultiPlayerGameMode.handleContainerInput
+static jmethodID g_getInventory_121 = nullptr;         // Player.getInventory()
+static jmethodID g_inventoryGetItem_121 = nullptr;     // Inventory.getItem(int)
+static jmethodID g_inventoryGetContainerSize_121 = nullptr; // Inventory.getContainerSize()
+static jmethodID g_itemStackGetItem_121 = nullptr;     // ItemStack.getItem()
+static jmethodID g_itemStackIs_121 = nullptr;          // ItemStack.is(Item)
+// Note: g_getHealth_121 and g_getAbsorptionAmount_121 already declared in closest-player section
+static jmethodID g_getOffhandItem_121 = nullptr;       // Player.getOffhandItem()
+static jmethodID g_getItemBySlot_121 = nullptr;        // Player.getItemBySlot(EquipmentSlot)
+static jmethodID g_isFallFlying_121 = nullptr;         // Player.isFallFlying()
+static jfieldID  g_totemOfUndyingField_121 = nullptr;  // Items.TOTEM_OF_UNDYING
+static jclass    g_itemsClass_121 = nullptr;           // net.minecraft.world.item.Items
+static jclass    g_equipmentSlotClass_121 = nullptr;   // net.minecraft.world.entity.EquipmentSlot
+static jobject   g_equipmentSlotChest_121 = nullptr;   // EquipmentSlot.CHEST
+static int       g_autoTotemTicks = 0;
+static bool      g_autoTotemLocked = false;
+static bool      g_loggedAutoTotemResolveFail_121 = false;
+static DWORD     g_lastAutoTotemTickMs = 0;   // Throttle to ~20 tps
+static float     g_autoTotemPrevHealth = 20.0f; // For totem-pop / damage detection
+static int       g_autoTotemPendingSlot = -1; // Anarchy mode: step-2 pending slot
+
+// Cached JNI lookups for UpdateAutoTotem hot path (resolved once in EnsureAutoTotemJni)
+static jmethodID g_getConnectionMethod_121 = nullptr; // Minecraft.getConnection()
+static jfieldID  g_gameModeFieldCached_121 = nullptr;  // Minecraft.gameMode
+static jmethodID g_getCarriedMethod_121 = nullptr;     // AbstractContainerMenu.getCarried()
+static jmethodID g_isEmptyMethod_121 = nullptr;        // ItemStack.isEmpty()
+
+static jobject   g_lastAutoTotemWorld_121 = nullptr;   // Tracks world obj to detect transitions
+
+
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -849,6 +867,7 @@ static jmethodID g_getZ_121 = nullptr;
 static jmethodID g_getYaw_121 = nullptr;
 static jmethodID g_getPitch_121 = nullptr;
 static jmethodID g_getHealth_121 = nullptr;
+static jmethodID g_getAbsorptionAmount_121 = nullptr;
 static jmethodID g_getName_121 = nullptr;      // Entity.getName() -> Text
 static jmethodID g_setCustomNameVisible_121 = nullptr; // Entity.setCustomNameVisible(bool)
 static jmethodID g_isCustomNameVisible_121 = nullptr;  // Entity.isCustomNameVisible()
@@ -866,11 +885,14 @@ static jmethodID g_scoreboardGetHolderTeam_121 = nullptr;      // Scoreboard.get
 static jmethodID g_scoreboardClearTeam_121 = nullptr;          // Scoreboard.clearTeam(String)
 static jmethodID g_abstractTeamGetName_121 = nullptr;          // AbstractTeam.getName() -> String
 static jmethodID g_teamSetNameTagVisibilityRule_121 = nullptr; // Team.setNameTagVisibilityRule(VisibilityRule)
+static jmethodID g_teamGetNameTagVisibilityRule_121 = nullptr; // Team.getNameTagVisibilityRule() -> VisibilityRule
 static jobject   g_visibilityRuleNever_121 = nullptr;          // AbstractTeam.VisibilityRule.NEVER
 static bool g_nametagSuppressionActive_121 = false;
 static bool g_loggedNametagSuppressionUnavailable_121 = false;
 static bool g_loggedNametagRestoreUnavailable_121 = false;
-static std::unordered_map<std::string, std::string> g_hiddenNametagOriginalTeamByPlayer_121;
+static std::unordered_map<std::string, std::string> g_hiddenNametagOriginalTeamByPlayer_121; // DEPRECATED: kept for compatibility, no longer populated
+static std::unordered_map<std::string, jobject> g_modifiedTeamVisibility_121; // team name -> original VisibilityRule (global ref)
+static std::unordered_set<std::string> g_lcHideTagsMembers_121;
 static jobject g_lastNametagSuppressionWorld_121 = nullptr;
 static DWORD g_nextNametagSuppressionResolveRetryMs_121 = 0;
 static int g_nametagSuppressionResolveRetryCount_121 = 0;
@@ -1704,6 +1726,7 @@ static bool AreNametagSuppressionCoreMappingsReady121();
 static bool AreNametagSuppressionRestoreMappingsReady121();
 static void LogNametagSuppressionMissingMappings121(JNIEnv* env, jobject worldObj);
 static void ResetNametagSuppressionCaches121(JNIEnv* env, const char* reason);
+static void ResetAutoTotemCaches(JNIEnv* env);
 static void ResetModernJniRuntimeCaches121(JNIEnv* env, const char* reason);
 static bool TrackSuppressionWorldContext121(JNIEnv* env, jobject worldObj);
 static bool EnsureNametagSuppressionTeamMappings121(JNIEnv* env, jobject worldObj);
@@ -2359,6 +2382,845 @@ static void UpdateVelocity(JNIEnv* env, const Config& cfg) {
     env->DeleteLocalRef(selfObj);
 }
 
+// ===================== AUTOTOTEM JNI RESOLUTION =====================
+static void EnsureAutoTotemJni(JNIEnv* env) {
+    if (!env || g_autoTotemMethodsResolved) return;
+
+    static bool s_methodListDumped_261 = false;
+
+    // Resolve MultiPlayerGameMode.handleContainerClick (or variants)
+    if (!g_handleContainerInput_121) {
+        // Try to get the runtime gameMode field class instead of loading by name
+        if (g_mcInstance) {
+            jclass mcCls = env->GetObjectClass(g_mcInstance);
+            if (mcCls && !env->ExceptionCheck()) {
+                // Try field names for the game mode
+                const char* gmFieldNames[] = { "gameMode", "f_91078_", "field_1761", nullptr };
+                const char* gmSigs[] = {
+                    "Lnet/minecraft/client/multiplayer/MultiPlayerGameMode;",
+                    "Lnet/minecraft/class_636;",
+                    nullptr
+                };
+                jfieldID gmFid = nullptr;
+                const char* gmFoundName = nullptr;
+                const char* gmFoundSig = nullptr;
+                for (int ni = 0; gmFieldNames[ni] && !gmFid; ni++) {
+                    for (int si = 0; gmSigs[si] && !gmFid; si++) {
+                        gmFid = env->GetFieldID(mcCls, gmFieldNames[ni], gmSigs[si]);
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); gmFid = nullptr; }
+                        if (gmFid) { gmFoundName = gmFieldNames[ni]; gmFoundSig = gmSigs[si]; }
+                    }
+                }
+                Log(std::string("AutoTotem: gameMode field=") + (gmFid ? (std::string(gmFoundName) + "/" + gmFoundSig) : "NOT FOUND"));
+                if (gmFid) {
+                    jobject gameModeObj = env->GetObjectField(g_mcInstance, gmFid);
+                    if (gameModeObj && !env->ExceptionCheck()) {
+                        jclass modeCls = env->GetObjectClass(gameModeObj);
+                        if (modeCls && !env->ExceptionCheck()) {
+                            std::string modeClassName = GetClassNameFromClass(env, modeCls);
+                            Log(std::string("AutoTotem: gameMode class=") + modeClassName);
+                            
+                            // Dump ALL declared methods to log (once)
+                            if (!s_methodListDumped_261) {
+                                s_methodListDumped_261 = true;
+                                Log("AutoTotem: dumping ALL declared methods on " + modeClassName);
+                                
+                                // Use Java reflection: modeCls.getDeclaredMethods()
+                                jclass clsClass = env->FindClass("java/lang/Class");
+                                if (clsClass && !env->ExceptionCheck()) {
+                                    jmethodID getDeclaredMethods = env->GetMethodID(clsClass, "getDeclaredMethods", "()[Ljava/lang/reflect/Method;");
+                                    if (!env->ExceptionCheck() && getDeclaredMethods) {
+                                        jobjectArray methods = (jobjectArray)env->CallObjectMethod(modeCls, getDeclaredMethods);
+                                        if (!env->ExceptionCheck() && methods) {
+                                            jclass methodClass = env->FindClass("java/lang/reflect/Method");
+                                            jmethodID getName = methodClass ? env->GetMethodID(methodClass, "getName", "()Ljava/lang/String;") : nullptr;
+                                            jmethodID toGenericString = methodClass ? env->GetMethodID(methodClass, "toGenericString", "()Ljava/lang/String;") : nullptr;
+                                            jint count = env->GetArrayLength(methods);
+                                            Log("AutoTotem: found " + std::to_string(count) + " methods (logging those with 'click','slot','container','input','item' in name)");
+                                            for (jint k = 0; k < count; k++) {
+                                                jobject methodObj = env->GetObjectArrayElement(methods, k);
+                                                if (methodObj && toGenericString) {
+                                                    jstring jSig = (jstring)env->CallObjectMethod(methodObj, toGenericString);
+                                                    if (!env->ExceptionCheck() && jSig) {
+                                                        const char* cs = env->GetStringUTFChars(jSig, nullptr);
+                                                        if (cs) {
+                                                            std::string fullSig(cs);
+                                                            std::string lower = fullSig;
+                                                            for (auto& c : lower) c = (char)std::tolower((unsigned char)c);
+                                                            if (lower.find("click") != std::string::npos ||
+                                                                lower.find("slot") != std::string::npos ||
+                                                                lower.find("container") != std::string::npos ||
+                                                                lower.find("input") != std::string::npos ||
+                                                                lower.find("item") != std::string::npos ||
+                                                                lower.find("pick") != std::string::npos ||
+                                                                lower.find("swap") != std::string::npos) {
+                                                                Log("  AUTO-TOTEM-METHOD: " + fullSig);
+                                                            }
+                                                            env->ReleaseStringUTFChars(jSig, cs);
+                                                        }
+                                                        env->DeleteLocalRef(jSig);
+                                                    } else { env->ExceptionClear(); }
+                                                    env->DeleteLocalRef(methodObj);
+                                                }
+                                            }
+                                            if (methodClass) env->DeleteLocalRef(methodClass);
+                                        } else { env->ExceptionClear(); }
+                                    } else { env->ExceptionClear(); }
+                                    env->DeleteLocalRef(clsClass);
+                                } else { env->ExceptionClear(); }
+                            }
+
+                            const char* methodNames[] = {
+                                "handleContainerClick", "handleContainerInput",
+                                "method_2906", "method_2907", "handleClick",
+                                "handleInventoryInteraction", "handleSlotClick", nullptr
+                            };
+                            const char* clickSigs[] = {
+                                "(IIILnet/minecraft/world/inventory/ContainerInput;Lnet/minecraft/world/entity/player/Player;)V",
+                                "(IIILnet/minecraft/world/inventory/ClickAction;Lnet/minecraft/world/entity/player/Player;)V",
+                                "(IIILnet/minecraft/world/inventory/ClickType;Lnet/minecraft/world/entity/player/Player;)V",
+                                "(IIILnet/minecraft/class_1713;Lnet/minecraft/class_1657;)V",
+                                "(IIILnet/minecraft/class_1713;Lnet/minecraft/class_1309;)V",
+                                "()V",
+                                nullptr
+                            };
+                            const char* foundMethodName = nullptr;
+                            for (int ni = 0; methodNames[ni] && !g_handleContainerInput_121; ni++) {
+                                for (int si = 0; clickSigs[si] && !g_handleContainerInput_121; si++) {
+                                    g_handleContainerInput_121 = env->GetMethodID(modeCls, methodNames[ni], clickSigs[si]);
+                                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_handleContainerInput_121 = nullptr; }
+                                    if (g_handleContainerInput_121) foundMethodName = methodNames[ni];
+                                }
+                            }
+                            Log(std::string("AutoTotem: handleContainerClick method=") + (g_handleContainerInput_121 ? foundMethodName : "NOT FOUND on ") + modeClassName);
+                            env->DeleteLocalRef(modeCls);
+                        } else { env->ExceptionClear(); }
+                        env->DeleteLocalRef(gameModeObj);
+                    } else { env->ExceptionClear(); }
+                }
+                env->DeleteLocalRef(mcCls);
+            } else { env->ExceptionClear(); }
+        }
+
+        // Fallback: try loading by known class names
+        if (!g_handleContainerInput_121) {
+            const char* modeNames[] = {
+                "net.minecraft.client.multiplayer.MultiPlayerGameMode",
+                "net.minecraft.client.SingleplayerGameMode",
+                "net.minecraft.client.multiplayer.ClientPackSource",
+                "net.minecraft.class_636",
+                nullptr
+            };
+            jclass modeCls = nullptr;
+            for (int i = 0; modeNames[i] && !modeCls; i++) {
+                modeCls = LoadClassWithLoader(env, g_gameClassLoader, modeNames[i]);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); modeCls = nullptr; }
+            }
+            if (modeCls) {
+                const char* methodNames[] = {
+                    "handleContainerClick", "handleContainerInput",
+                    "method_2906", "method_2907", "handleClick", nullptr
+                };
+                const char* clickSigs[] = {
+                    "(IIILnet/minecraft/world/inventory/ContainerInput;Lnet/minecraft/world/entity/player/Player;)V",
+                    "(IIILnet/minecraft/world/inventory/ClickAction;Lnet/minecraft/world/entity/player/Player;)V",
+                    "(IIILnet/minecraft/world/inventory/ClickType;Lnet/minecraft/world/entity/player/Player;)V",
+                    "(IIILnet/minecraft/class_1713;Lnet/minecraft/class_1657;)V",
+                    "(IIILnet/minecraft/class_1713;Lnet/minecraft/class_1309;)V",
+                    nullptr
+                };
+                for (int ni = 0; methodNames[ni] && !g_handleContainerInput_121; ni++) {
+                    for (int si = 0; clickSigs[si] && !g_handleContainerInput_121; si++) {
+                        g_handleContainerInput_121 = env->GetMethodID(modeCls, methodNames[ni], clickSigs[si]);
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); g_handleContainerInput_121 = nullptr; }
+                    }
+                }
+                env->DeleteLocalRef(modeCls);
+            }
+        }
+    }
+
+    // Resolve Player.getInventory() -> Inventory
+    if (!g_getInventory_121 && g_playerEntityClass_121) {
+        const char* names[] = { "getInventory", "method_31548", nullptr };
+        const char* sigs[] = {
+            "()Lnet/minecraft/class_1661;",
+            "()Lnet/minecraft/world/entity/player/Inventory;",
+            nullptr
+        };
+        for (int ni = 0; names[ni] && !g_getInventory_121; ni++) {
+            for (int si = 0; sigs[si] && !g_getInventory_121; si++) {
+                g_getInventory_121 = env->GetMethodID(g_playerEntityClass_121, names[ni], sigs[si]);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_getInventory_121 = nullptr; }
+            }
+        }
+    }
+
+    // Resolve Inventory methods
+    if (!g_inventoryGetItem_121 || !g_inventoryGetContainerSize_121) {
+        const char* invNames[] = {
+            "net.minecraft.class_1661",
+            "net.minecraft.world.entity.player.Inventory",
+            "net.minecraft.world.entity.inventory.Inventory",
+            nullptr
+        };
+        jclass invCls = nullptr;
+        for (int i = 0; invNames[i] && !invCls; i++) {
+            invCls = LoadClassWithLoader(env, g_gameClassLoader, invNames[i]);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); invCls = nullptr; }
+        }
+        if (invCls) {
+            if (!g_inventoryGetItem_121) {
+                const char* names[] = { "getItem", "method_5438", nullptr };
+                const char* sigs[] = { "(I)Lnet/minecraft/class_1799;", "(I)Lnet/minecraft/world/item/ItemStack;", nullptr };
+                for (int ni = 0; names[ni] && !g_inventoryGetItem_121; ni++) {
+                    for (int si = 0; sigs[si] && !g_inventoryGetItem_121; si++) {
+                        g_inventoryGetItem_121 = env->GetMethodID(invCls, names[ni], sigs[si]);
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); g_inventoryGetItem_121 = nullptr; }
+                    }
+                }
+            }
+            if (!g_inventoryGetContainerSize_121) {
+                const char* names[] = { "getContainerSize", "method_5439", nullptr };
+                for (int i = 0; names[i] && !g_inventoryGetContainerSize_121; i++) {
+                    g_inventoryGetContainerSize_121 = env->GetMethodID(invCls, names[i], "()I");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_inventoryGetContainerSize_121 = nullptr; }
+                }
+            }
+            env->DeleteLocalRef(invCls);
+        }
+    }
+
+    // Resolve ItemStack.getItem() and ItemStack.is(Item)
+    if (!g_itemStackGetItem_121) {
+        const char* stackNames[] = {
+            "net.minecraft.class_1799",
+            "net.minecraft.world.item.ItemStack",
+            nullptr
+        };
+        jclass stackCls = nullptr;
+        for (int i = 0; stackNames[i] && !stackCls; i++) {
+            stackCls = LoadClassWithLoader(env, g_gameClassLoader, stackNames[i]);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); stackCls = nullptr; }
+        }
+        if (stackCls) {
+            const char* names[] = { "getItem", "method_7909", nullptr };
+            const char* sigs[] = {
+                "()Lnet/minecraft/class_1792;",
+                "()Lnet/minecraft/world/item/Item;",
+                nullptr
+            };
+            for (int ni = 0; names[ni] && !g_itemStackGetItem_121; ni++) {
+                for (int si = 0; sigs[si] && !g_itemStackGetItem_121; si++) {
+                    g_itemStackGetItem_121 = env->GetMethodID(stackCls, names[ni], sigs[si]);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_itemStackGetItem_121 = nullptr; }
+                }
+            }
+            env->DeleteLocalRef(stackCls);
+        }
+    }
+
+    // Resolve Items.TOTEM_OF_UNDYING
+    if (!g_totemOfUndyingField_121) {
+        const char* itemsNames[] = {
+            "net.minecraft.class_1802",
+            "net.minecraft.world.item.Items",
+            nullptr
+        };
+        for (int i = 0; itemsNames[i] && !g_itemsClass_121; i++) {
+            g_itemsClass_121 = LoadClassWithLoader(env, g_gameClassLoader, itemsNames[i]);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_itemsClass_121 = nullptr; }
+            if (g_itemsClass_121) {
+                g_itemsClass_121 = (jclass)env->NewGlobalRef(g_itemsClass_121);
+            }
+        }
+        if (g_itemsClass_121) {
+            const char* fieldNames[] = { "TOTEM_OF_UNDYING", "f_42577_", nullptr };
+            const char* sigs[] = {
+                "Lnet/minecraft/class_1792;",
+                "Lnet/minecraft/world/item/Item;",
+                nullptr
+            };
+            for (int ni = 0; fieldNames[ni] && !g_totemOfUndyingField_121; ni++) {
+                for (int si = 0; sigs[si] && !g_totemOfUndyingField_121; si++) {
+                    g_totemOfUndyingField_121 = env->GetStaticFieldID(g_itemsClass_121, fieldNames[ni], sigs[si]);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_totemOfUndyingField_121 = nullptr; }
+                }
+            }
+        }
+    }
+
+    // Resolve LivingEntity health methods
+    if (!g_getHealth_121 || !g_getAbsorptionAmount_121) {
+        const char* leNames[] = {
+            "net.minecraft.class_1309",
+            "net.minecraft.world.entity.LivingEntity",
+            nullptr
+        };
+        jclass leCls = nullptr;
+        for (int i = 0; leNames[i] && !leCls; i++) {
+            leCls = LoadClassWithLoader(env, g_gameClassLoader, leNames[i]);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); leCls = nullptr; }
+        }
+        if (leCls) {
+            if (!g_getHealth_121) {
+                const char* names[] = { "getHealth", "method_6032", nullptr };
+                g_getHealth_121 = env->GetMethodID(leCls, names[0], "()F");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_getHealth_121 = nullptr; }
+                if (!g_getHealth_121) {
+                    g_getHealth_121 = env->GetMethodID(leCls, names[1], "()F");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_getHealth_121 = nullptr; }
+                }
+            }
+            if (!g_getAbsorptionAmount_121) {
+                const char* names[] = { "getAbsorptionAmount", "method_6067", nullptr };
+                g_getAbsorptionAmount_121 = env->GetMethodID(leCls, names[0], "()F");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_getAbsorptionAmount_121 = nullptr; }
+                if (!g_getAbsorptionAmount_121) {
+                    g_getAbsorptionAmount_121 = env->GetMethodID(leCls, names[1], "()F");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_getAbsorptionAmount_121 = nullptr; }
+                }
+            }
+            env->DeleteLocalRef(leCls);
+        }
+    }
+
+    // Resolve Player offhand/chest slot/fallFlying
+    if (!g_getOffhandItem_121 || !g_getItemBySlot_121 || !g_isFallFlying_121) {
+        jclass playerCls = g_playerEntityClass_121;
+        if (!playerCls && g_mcInstance && g_playerField_121) {
+            jobject p = env->GetObjectField(g_mcInstance, g_playerField_121);
+            if (p) { playerCls = env->GetObjectClass(p); env->DeleteLocalRef(p); }
+        }
+        if (playerCls) {
+            if (!g_getOffhandItem_121) {
+                const char* names[] = { "getOffhandItem", "method_6079", nullptr };
+                const char* sigs[] = {
+                    "()Lnet/minecraft/class_1799;",
+                    "()Lnet/minecraft/world/item/ItemStack;",
+                    nullptr
+                };
+                for (int ni = 0; names[ni] && !g_getOffhandItem_121; ni++) {
+                    for (int si = 0; sigs[si] && !g_getOffhandItem_121; si++) {
+                        g_getOffhandItem_121 = env->GetMethodID(playerCls, names[ni], sigs[si]);
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); g_getOffhandItem_121 = nullptr; }
+                    }
+                }
+            }
+            if (!g_getItemBySlot_121) {
+                const char* names[] = { "getItemBySlot", "method_6112", nullptr };
+                const char* sigs[] = {
+                    "(Lnet/minecraft/class_1304;)Lnet/minecraft/class_1799;",
+                    "(Lnet/minecraft/world/entity/EquipmentSlot;)Lnet/minecraft/world/item/ItemStack;",
+                    nullptr
+                };
+                for (int ni = 0; names[ni] && !g_getItemBySlot_121; ni++) {
+                    for (int si = 0; sigs[si] && !g_getItemBySlot_121; si++) {
+                        g_getItemBySlot_121 = env->GetMethodID(playerCls, names[ni], sigs[si]);
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); g_getItemBySlot_121 = nullptr; }
+                    }
+                }
+            }
+            if (!g_isFallFlying_121) {
+                const char* names[] = { "isFallFlying", "method_7325", nullptr };
+                g_isFallFlying_121 = env->GetMethodID(playerCls, names[0], "()Z");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_isFallFlying_121 = nullptr; }
+                if (!g_isFallFlying_121) {
+                    g_isFallFlying_121 = env->GetMethodID(playerCls, names[1], "()Z");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_isFallFlying_121 = nullptr; }
+                }
+            }
+            if (playerCls != g_playerEntityClass_121) env->DeleteLocalRef(playerCls);
+        }
+    }
+
+    // Resolve EquipmentSlot.CHEST enum value
+    if (!g_equipmentSlotChest_121) {
+        const char* esNames[] = {
+            "net.minecraft.class_1304",
+            "net.minecraft.world.entity.EquipmentSlot",
+            nullptr
+        };
+        for (int i = 0; esNames[i] && !g_equipmentSlotClass_121; i++) {
+            g_equipmentSlotClass_121 = LoadClassWithLoader(env, g_gameClassLoader, esNames[i]);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_equipmentSlotClass_121 = nullptr; }
+            if (g_equipmentSlotClass_121) {
+                g_equipmentSlotClass_121 = (jclass)env->NewGlobalRef(g_equipmentSlotClass_121);
+            }
+        }
+        if (g_equipmentSlotClass_121) {
+            jfieldID chestField = env->GetStaticFieldID(g_equipmentSlotClass_121, "CHEST", "Lnet/minecraft/world/entity/EquipmentSlot;");
+            if (env->ExceptionCheck() || !chestField) {
+                env->ExceptionClear();
+                chestField = env->GetStaticFieldID(g_equipmentSlotClass_121, "CHEST", "Lnet/minecraft/class_1304;");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); chestField = nullptr; }
+            }
+            if (chestField) {
+                g_equipmentSlotChest_121 = env->GetStaticObjectField(g_equipmentSlotClass_121, chestField);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_equipmentSlotChest_121 = nullptr; }
+                if (g_equipmentSlotChest_121) {
+                    g_equipmentSlotChest_121 = env->NewGlobalRef(g_equipmentSlotChest_121);
+                }
+            }
+        }
+    }
+
+    // Resolve cached hot-path JNI IDs for UpdateAutoTotem
+    if (!g_getConnectionMethod_121) {
+        jclass mcCls2 = env->GetObjectClass(g_mcInstance);
+        if (mcCls2) {
+            g_getConnectionMethod_121 = env->GetMethodID(mcCls2, "getConnection", "()Lnet/minecraft/client/multiplayer/ClientPacketListener;");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_getConnectionMethod_121 = nullptr; }
+            if (!g_getConnectionMethod_121) {
+                g_getConnectionMethod_121 = env->GetMethodID(mcCls2, "method_1558", "()Lnet/minecraft/class_634;");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_getConnectionMethod_121 = nullptr; }
+            }
+
+            if (!g_gameModeFieldCached_121) {
+                g_gameModeFieldCached_121 = env->GetFieldID(mcCls2, "gameMode", "Lnet/minecraft/client/multiplayer/MultiPlayerGameMode;");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_gameModeFieldCached_121 = nullptr; }
+                if (!g_gameModeFieldCached_121) {
+                    g_gameModeFieldCached_121 = env->GetFieldID(mcCls2, "field_1761", "Lnet/minecraft/class_636;");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_gameModeFieldCached_121 = nullptr; }
+                }
+            }
+            env->DeleteLocalRef(mcCls2);
+        }
+    }
+
+    // Resolve getCarried on AbstractContainerMenu (hot path in UpdateAutoTotem)
+    if (!g_getCarriedMethod_121) {
+        const char* menuNames[] = {
+            "net.minecraft.world.inventory.AbstractContainerMenu",
+            "net.minecraft.class_1703",
+            nullptr
+        };
+        jclass menuCls = nullptr;
+        for (int i = 0; menuNames[i] && !menuCls; i++) {
+            menuCls = LoadClassWithLoader(env, g_gameClassLoader, menuNames[i]);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); menuCls = nullptr; }
+        }
+        if (menuCls) {
+            g_getCarriedMethod_121 = env->GetMethodID(menuCls, "getCarried", "()Lnet/minecraft/world/item/ItemStack;");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_getCarriedMethod_121 = nullptr; }
+            if (!g_getCarriedMethod_121) {
+                g_getCarriedMethod_121 = env->GetMethodID(menuCls, "method_7047", "()Lnet/minecraft/world/item/ItemStack;");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_getCarriedMethod_121 = nullptr; }
+            }
+            env->DeleteLocalRef(menuCls);
+        }
+    }
+
+    // Resolve isEmpty on ItemStack (hot path in UpdateAutoTotem)
+    if (!g_isEmptyMethod_121) {
+        const char* stackNames[] = {
+            "net.minecraft.world.item.ItemStack",
+            "net.minecraft.class_1799",
+            nullptr
+        };
+        jclass stkCls = nullptr;
+        for (int i = 0; stackNames[i] && !stkCls; i++) {
+            stkCls = LoadClassWithLoader(env, g_gameClassLoader, stackNames[i]);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); stkCls = nullptr; }
+        }
+        if (stkCls) {
+            g_isEmptyMethod_121 = env->GetMethodID(stkCls, "isEmpty", "()Z");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_isEmptyMethod_121 = nullptr; }
+            env->DeleteLocalRef(stkCls);
+        }
+    }
+
+    g_autoTotemMethodsResolved = (
+        g_handleContainerInput_121 != nullptr &&
+        g_getInventory_121 != nullptr &&
+        g_inventoryGetItem_121 != nullptr &&
+        g_inventoryGetContainerSize_121 != nullptr &&
+        g_itemStackGetItem_121 != nullptr &&
+        g_totemOfUndyingField_121 != nullptr &&
+        g_getHealth_121 != nullptr &&
+        g_getAbsorptionAmount_121 != nullptr &&
+        g_getOffhandItem_121 != nullptr
+    );
+
+    if (!g_autoTotemMethodsResolved && !g_loggedAutoTotemResolveFail_121) {
+        g_loggedAutoTotemResolveFail_121 = true;
+        Log(std::string("AutoTotem JNI unresolved: handleContainer=") + (g_handleContainerInput_121 ? "1" : "0") +
+            " getInv=" + (g_getInventory_121 ? "1" : "0") +
+            " getItem=" + (g_inventoryGetItem_121 ? "1" : "0") +
+            " getSize=" + (g_inventoryGetContainerSize_121 ? "1" : "0") +
+            " stackGetItem=" + (g_itemStackGetItem_121 ? "1" : "0") +
+            " totemField=" + (g_totemOfUndyingField_121 ? "1" : "0") +
+            " getHealth=" + (g_getHealth_121 ? "1" : "0") +
+            " getAbsorb=" + (g_getAbsorptionAmount_121 ? "1" : "0") +
+            " getOffhand=" + (g_getOffhandItem_121 ? "1" : "0") +
+            " (HandleContainerInput failed - try more method names/signatures);");
+    }
+}
+
+// Convert inventory index to PlayerInventory container slot ID
+static int InventoryIndexToContainerSlotId(int index) {
+    // Survival inventory slot IDs:
+    // Hotbar 0-8 -> 36-44
+    // Main 9-35 -> 9-35
+    // Armor 36-39 -> 5-8
+    // Offhand 40 -> 45
+    if (index >= 0 && index <= 8) return 36 + index;
+    if (index >= 9 && index <= 35) return index;
+    if (index == 40) return 45;
+    return -1;
+}
+
+static bool SendContainerClick(JNIEnv* env, jobject gameModeObj, int containerId, int slotId, jobject clickType, jobject player) {
+    if (!env || !gameModeObj || !g_handleContainerInput_121 || !clickType || !player) return false;
+    env->CallVoidMethod(gameModeObj, g_handleContainerInput_121, containerId, slotId, 0, clickType, player);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return false; }
+    return true;
+}
+
+static jobject ResolvePickupClickType(JNIEnv* env) {
+    const char* clickTypeNames[] = {
+        "net.minecraft.world.inventory.ContainerInput",
+        "net.minecraft.world.inventory.ClickType",
+        "net.minecraft.world.inventory.ClickAction",
+        "net.minecraft.class_1713",
+        nullptr
+    };
+    jclass clickTypeCls = nullptr;
+    for (int i = 0; clickTypeNames[i] && !clickTypeCls; i++) {
+        clickTypeCls = LoadClassWithLoader(env, g_gameClassLoader, clickTypeNames[i]);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); clickTypeCls = nullptr; }
+    }
+    jobject pickupValue = nullptr;
+    if (clickTypeCls) {
+        jfieldID pickupField = env->GetStaticFieldID(clickTypeCls, "PICKUP", "Lnet/minecraft/world/inventory/ContainerInput;");
+        if (env->ExceptionCheck() || !pickupField) {
+            env->ExceptionClear();
+            pickupField = env->GetStaticFieldID(clickTypeCls, "PICKUP", "Lnet/minecraft/world/inventory/ClickType;");
+            if (env->ExceptionCheck() || !pickupField) {
+                env->ExceptionClear();
+                pickupField = env->GetStaticFieldID(clickTypeCls, "PICKUP", "Lnet/minecraft/world/inventory/ClickAction;");
+                if (env->ExceptionCheck() || !pickupField) {
+                    env->ExceptionClear();
+                    pickupField = env->GetStaticFieldID(clickTypeCls, "PICKUP", "Lnet/minecraft/class_1713;");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); pickupField = nullptr; }
+                }
+            }
+        }
+        if (pickupField) {
+            pickupValue = env->GetStaticObjectField(clickTypeCls, pickupField);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); pickupValue = nullptr; }
+        }
+    }
+    if (clickTypeCls) env->DeleteLocalRef(clickTypeCls);
+    return pickupValue; // caller must DeleteLocalRef
+}
+
+static bool IsInventoryScreenOpen() {
+    // Ghost mode requires the player inventory screen specifically.
+    // Screen class names we expect:
+    // Mojmap: net.minecraft.client.gui.screens.inventory.InventoryScreen
+    // Yarn:   net.minecraft.client.gui.screen.ingame.InventoryScreen
+    if (g_jniScreenName.empty()) return false;
+    return g_jniScreenName.find("InventoryScreen") != std::string::npos;
+}
+
+static void UpdateAutoTotem(JNIEnv* env, const Config& cfg) {
+    if (!env || !g_mcInstance || !g_playerField_121) return;
+    if (!cfg.autoTotemEnabled) return;
+
+    if (!g_jniInWorld) return;
+    DWORD nowMs = GetTickCount();
+    if (nowMs < g_worldTransitionEndMs) return;
+
+    // Throttle to game tick rate (~20 tps)
+    if (nowMs - g_lastAutoTotemTickMs < 50) return;
+
+    // --- Ghost mode: only act when inventory GUI is open ---
+    if (cfg.autoTotemBehaviorMode == 0) {
+        if (!g_jniGuiOpen || !IsInventoryScreenOpen()) {
+            // Reset any pending anarchy state when switching / closing GUI
+            g_autoTotemPendingSlot = -1;
+            return;
+        }
+    }
+    // Anarchy mode: abort if any GUI is open (chests, crafting, etc.)
+    else if (g_jniGuiOpen) {
+        g_autoTotemPendingSlot = -1;
+        return;
+    }
+
+    EnsureAutoTotemJni(env);
+    if (!g_autoTotemMethodsResolved) return;
+
+    jobject selfObj = env->GetObjectField(g_mcInstance, g_playerField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); selfObj = nullptr; }
+    if (!selfObj) return;
+
+    // Tick delay (Meteor pattern)
+    if (g_autoTotemTicks < cfg.autoTotemDelay) {
+        g_autoTotemTicks++;
+        env->DeleteLocalRef(selfObj);
+        return;
+    }
+    g_autoTotemTicks = 0;
+
+    // Get inventory
+    jobject invObj = env->CallObjectMethod(selfObj, g_getInventory_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); invObj = nullptr; }
+    if (!invObj) {
+        env->DeleteLocalRef(selfObj);
+        return;
+    }
+
+    int containerSize = env->CallIntMethod(invObj, g_inventoryGetContainerSize_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); containerSize = 0; }
+
+    jobject totemItem = env->GetStaticObjectField(g_itemsClass_121, g_totemOfUndyingField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); totemItem = nullptr; }
+
+    int totemSlot = -1;
+    if (totemItem) {
+        for (int i = 0; i < containerSize && totemSlot == -1; i++) {
+            jobject stack = env->CallObjectMethod(invObj, g_inventoryGetItem_121, i);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); stack = nullptr; }
+            if (stack) {
+                jobject item = env->CallObjectMethod(stack, g_itemStackGetItem_121);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); item = nullptr; }
+                if (item && env->IsSameObject(item, totemItem)) {
+                    totemSlot = i;
+                }
+                if (item) env->DeleteLocalRef(item);
+                env->DeleteLocalRef(stack);
+            }
+        }
+    }
+
+    env->DeleteLocalRef(invObj);
+
+    if (totemSlot == -1) {
+        g_autoTotemLocked = false;
+        if (totemItem) env->DeleteLocalRef(totemItem);
+        env->DeleteLocalRef(selfObj);
+        g_autoTotemPendingSlot = -1;
+        return;
+    }
+
+    // Check offhand
+    jobject offhandStack = env->CallObjectMethod(selfObj, g_getOffhandItem_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); offhandStack = nullptr; }
+    bool offhandHasTotem = false;
+    if (offhandStack && totemItem) {
+        jobject offhandItem = env->CallObjectMethod(offhandStack, g_itemStackGetItem_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); offhandItem = nullptr; }
+        if (offhandItem) {
+            offhandHasTotem = env->IsSameObject(offhandItem, totemItem);
+            env->DeleteLocalRef(offhandItem);
+        }
+    }
+    if (offhandStack) env->DeleteLocalRef(offhandStack);
+
+    if (offhandHasTotem) {
+        if (totemItem) env->DeleteLocalRef(totemItem);
+        env->DeleteLocalRef(selfObj);
+        g_autoTotemPendingSlot = -1;
+        return;
+    }
+
+    // Smart / Strict checks
+    bool shouldLock = true;
+    if (cfg.autoTotemMode == 0) { // Smart
+        float health = env->CallFloatMethod(selfObj, g_getHealth_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); health = 20.0f; }
+        float absorption = env->CallFloatMethod(selfObj, g_getAbsorptionAmount_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); absorption = 0.0f; }
+
+        float currTotal = health + absorption;
+        if (g_autoTotemPrevHealth - currTotal > 8.0f || currTotal <= 5.0f) {
+            g_autoTotemTicks = 0;
+        }
+        g_autoTotemPrevHealth = currTotal;
+
+        bool lowHealth = currTotal <= (float)cfg.autoTotemHealth;
+
+        bool isFlyingElytra = false;
+        if (cfg.autoTotemElytra && g_getItemBySlot_121 && g_equipmentSlotChest_121 && g_isFallFlying_121) {
+            jobject chestStack = env->CallObjectMethod(selfObj, g_getItemBySlot_121, g_equipmentSlotChest_121);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); chestStack = nullptr; }
+            if (chestStack) {
+                jobject chestItem = env->CallObjectMethod(chestStack, g_itemStackGetItem_121);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); chestItem = nullptr; }
+                if (chestItem) env->DeleteLocalRef(chestItem);
+                env->DeleteLocalRef(chestStack);
+            }
+            isFlyingElytra = env->CallBooleanMethod(selfObj, g_isFallFlying_121);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); isFlyingElytra = false; }
+        }
+
+        shouldLock = lowHealth || isFlyingElytra;
+    } else {
+        float health = env->CallFloatMethod(selfObj, g_getHealth_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); health = 20.0f; }
+        float absorption = env->CallFloatMethod(selfObj, g_getAbsorptionAmount_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); absorption = 0.0f; }
+        g_autoTotemPrevHealth = health + absorption;
+    }
+    g_autoTotemLocked = shouldLock;
+
+    if (!g_autoTotemLocked) {
+        if (totemItem) env->DeleteLocalRef(totemItem);
+        env->DeleteLocalRef(selfObj);
+        g_autoTotemTicks = 0;
+        g_autoTotemPendingSlot = -1;
+        return;
+    }
+
+    // Connection sanity
+    if (g_getConnectionMethod_121) {
+        jobject conn = env->CallObjectMethod(g_mcInstance, g_getConnectionMethod_121);
+        if (env->ExceptionCheck() || !conn) {
+            env->ExceptionClear();
+            if (totemItem) env->DeleteLocalRef(totemItem);
+            env->DeleteLocalRef(selfObj);
+            return;
+        }
+        env->DeleteLocalRef(conn);
+    }
+
+    if (!g_gameModeFieldCached_121) {
+        if (totemItem) env->DeleteLocalRef(totemItem);
+        env->DeleteLocalRef(selfObj);
+        return;
+    }
+
+    jobject gameModeObj = env->GetObjectField(g_mcInstance, g_gameModeFieldCached_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); gameModeObj = nullptr; }
+    if (!gameModeObj) {
+        if (totemItem) env->DeleteLocalRef(totemItem);
+        env->DeleteLocalRef(selfObj);
+        return;
+    }
+
+    // Resolve containerMenu for containerId & carried-item safety
+    jclass playerCls = env->GetObjectClass(selfObj);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); playerCls = nullptr; }
+    jfieldID containerMenuField = nullptr;
+    if (playerCls) {
+        containerMenuField = env->GetFieldID(playerCls, "containerMenu", "Lnet/minecraft/world/inventory/AbstractContainerMenu;");
+        if (env->ExceptionCheck() || !containerMenuField) {
+            env->ExceptionClear();
+            containerMenuField = env->GetFieldID(playerCls, "field_7512", "Lnet/minecraft/class_1703;");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); containerMenuField = nullptr; }
+        }
+        env->DeleteLocalRef(playerCls);
+    }
+
+    int containerId = 0;
+    jobject menuObj = nullptr;
+    if (containerMenuField) {
+        menuObj = env->GetObjectField(selfObj, containerMenuField);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); menuObj = nullptr; }
+        if (menuObj) {
+            jclass menuCls = env->GetObjectClass(menuObj);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); menuCls = nullptr; }
+            jfieldID containerIdField = nullptr;
+            if (menuCls) {
+                containerIdField = env->GetFieldID(menuCls, "containerId", "I");
+                if (env->ExceptionCheck() || !containerIdField) {
+                    env->ExceptionClear();
+                    containerIdField = env->GetFieldID(menuCls, "field_7760", "I");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); containerIdField = nullptr; }
+                }
+                env->DeleteLocalRef(menuCls);
+            }
+            if (containerIdField) {
+                containerId = env->GetIntField(menuObj, containerIdField);
+            }
+        }
+    }
+
+    if (containerId != 0) {
+        if (menuObj) env->DeleteLocalRef(menuObj);
+        env->DeleteLocalRef(gameModeObj);
+        if (totemItem) env->DeleteLocalRef(totemItem);
+        env->DeleteLocalRef(selfObj);
+        g_autoTotemPendingSlot = -1;
+        return;
+    }
+
+    int fromSlotId = InventoryIndexToContainerSlotId(totemSlot);
+    int toSlotId = 45; // Offhand
+    if (fromSlotId < 0 || fromSlotId == toSlotId) {
+        if (menuObj) env->DeleteLocalRef(menuObj);
+        env->DeleteLocalRef(gameModeObj);
+        if (totemItem) env->DeleteLocalRef(totemItem);
+        env->DeleteLocalRef(selfObj);
+        g_autoTotemPendingSlot = -1;
+        return;
+    }
+
+    jobject pickupValue = ResolvePickupClickType(env);
+    if (!pickupValue) {
+        if (menuObj) env->DeleteLocalRef(menuObj);
+        env->DeleteLocalRef(gameModeObj);
+        if (totemItem) env->DeleteLocalRef(totemItem);
+        env->DeleteLocalRef(selfObj);
+        g_autoTotemPendingSlot = -1;
+        return;
+    }
+
+    if (cfg.autoTotemBehaviorMode == 0) {
+        // ========== Ghost mode ==========
+        // One-shot back-to-back clicks (legitimate because inventory is open)
+        bool hadEmptyCursor = true;
+        if (menuObj && g_getCarriedMethod_121 && g_isEmptyMethod_121) {
+            jobject carried = env->CallObjectMethod(menuObj, g_getCarriedMethod_121);
+            if (!env->ExceptionCheck() && carried) {
+                hadEmptyCursor = env->CallBooleanMethod(carried, g_isEmptyMethod_121);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); hadEmptyCursor = true; }
+                env->DeleteLocalRef(carried);
+            } else { env->ExceptionClear(); }
+        }
+
+        SendContainerClick(env, gameModeObj, containerId, fromSlotId, pickupValue, selfObj);
+        SendContainerClick(env, gameModeObj, containerId, toSlotId, pickupValue, selfObj);
+
+        if (hadEmptyCursor && menuObj && g_getCarriedMethod_121 && g_isEmptyMethod_121) {
+            jobject carried = env->CallObjectMethod(menuObj, g_getCarriedMethod_121);
+            if (!env->ExceptionCheck() && carried) {
+                bool stillHasItem = !env->CallBooleanMethod(carried, g_isEmptyMethod_121);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); stillHasItem = false; }
+                if (stillHasItem) {
+                    SendContainerClick(env, gameModeObj, containerId, fromSlotId, pickupValue, selfObj);
+                }
+                env->DeleteLocalRef(carried);
+            } else { env->ExceptionClear(); }
+        }
+
+        g_autoTotemPendingSlot = -1;
+        g_lastAutoTotemTickMs = nowMs;
+    } else {
+        // ========== Anarchy mode ==========
+        // Two-step state machine to avoid Matrix DELAY flag
+        if (g_autoTotemPendingSlot >= 0) {
+            // Step 2: place into offhand (must be ≥50ms after step 1)
+            SendContainerClick(env, gameModeObj, containerId, toSlotId, pickupValue, selfObj);
+            g_autoTotemPendingSlot = -1;
+            g_lastAutoTotemTickMs = nowMs;
+        } else {
+            // Step 1: pickup totem
+            SendContainerClick(env, gameModeObj, containerId, fromSlotId, pickupValue, selfObj);
+            g_autoTotemPendingSlot = fromSlotId;
+            g_lastAutoTotemTickMs = nowMs;
+        }
+    }
+
+    env->DeleteLocalRef(pickupValue);
+    if (menuObj) env->DeleteLocalRef(menuObj);
+    env->DeleteLocalRef(gameModeObj);
+    if (totemItem) env->DeleteLocalRef(totemItem);
+    env->DeleteLocalRef(selfObj);
+}
+
 static void UpdatePlayerListOverlay(JNIEnv* env) {
     Config cfg;
     { LockGuard lk(g_configMutex); cfg = g_config; }
@@ -2378,7 +3240,7 @@ static void UpdatePlayerListOverlay(JNIEnv* env) {
     jobject selfObj = env->GetObjectField(g_mcInstance, g_playerField_121);
     if (env->ExceptionCheck()) { env->ExceptionClear(); worldObj = nullptr; selfObj = nullptr; }
     if (!worldObj || !selfObj) {
-        if (g_nametagSuppressionActive_121 || !g_hiddenNametagOriginalTeamByPlayer_121.empty()) {
+        if (g_nametagSuppressionActive_121 || !g_modifiedTeamVisibility_121.empty() || !g_lcHideTagsMembers_121.empty()) {
             ResetNametagSuppressionCaches121(env, "world-or-player-null");
         }
         if (worldObj) env->DeleteLocalRef(worldObj);
@@ -2428,7 +3290,11 @@ static void UpdatePlayerListOverlay(JNIEnv* env) {
             RestoreVanillaNametagSuppression121(env, restoreScoreboard);
             env->DeleteLocalRef(restoreScoreboard);
         } else {
-            g_hiddenNametagOriginalTeamByPlayer_121.clear();
+            for (auto& entry : g_modifiedTeamVisibility_121) {
+                if (entry.second && env) env->DeleteGlobalRef(entry.second);
+            }
+            g_modifiedTeamVisibility_121.clear();
+            g_lcHideTagsMembers_121.clear();
         }
         g_nametagSuppressionActive_121 = false;
     }
@@ -4025,8 +4891,14 @@ static void ResetNametagSuppressionCaches121(JNIEnv* env, const char* reason) {
     g_scoreboardClearTeam_121 = nullptr;
     g_abstractTeamGetName_121 = nullptr;
     g_teamSetNameTagVisibilityRule_121 = nullptr;
+    g_teamGetNameTagVisibilityRule_121 = nullptr;
     g_worldPlayersListField_121 = nullptr;
 
+    for (auto& entry : g_modifiedTeamVisibility_121) {
+        if (entry.second && env) env->DeleteGlobalRef(entry.second);
+    }
+    g_modifiedTeamVisibility_121.clear();
+    g_lcHideTagsMembers_121.clear();
     g_hiddenNametagOriginalTeamByPlayer_121.clear();
     g_nametagSuppressionActive_121 = false;
     g_loggedNametagSuppressionUnavailable_121 = false;
@@ -4283,6 +5155,22 @@ static bool EnsureNametagSuppressionTeamMappings121(JNIEnv* env, jobject worldOb
         }
     }
 
+    if (g_teamClass_121 && !g_teamGetNameTagVisibilityRule_121) {
+        const char* names[] = { "getNameTagVisibility", "getNameTagVisibilityRule", "method_1148", "b", nullptr };
+        const char* sigs[] = {
+            "()Lnet/minecraft/world/scores/Team$Visibility;",
+            "()Lnet/minecraft/scoreboard/AbstractTeam$VisibilityRule;",
+            "()Lnet/minecraft/class_270$class_272;",
+            nullptr
+        };
+        for (int ni = 0; names[ni] && !g_teamGetNameTagVisibilityRule_121; ni++) {
+            for (int si = 0; sigs[si] && !g_teamGetNameTagVisibilityRule_121; si++) {
+                g_teamGetNameTagVisibilityRule_121 = env->GetMethodID(g_teamClass_121, names[ni], sigs[si]);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_teamGetNameTagVisibilityRule_121 = nullptr; }
+            }
+        }
+    }
+
     if (g_visibilityRuleClass_121 && !g_visibilityRuleNever_121) {
         const char* sigs[] = {
             "Lnet/minecraft/world/scores/Team$Visibility;",
@@ -4372,76 +5260,132 @@ static jobject EnsureNametagHideTeam121(JNIEnv* env, jobject scoreboardObj) {
 }
 
 static bool ApplyVanillaNametagSuppression121(JNIEnv* env, jobject scoreboardObj, jobject hideTeamObj, const std::string& playerName) {
-    if (!env || !scoreboardObj || !hideTeamObj || playerName.empty()) return false;
+    if (!env || !scoreboardObj || playerName.empty()) return false;
 
     jstring jPlayerName = env->NewStringUTF(playerName.c_str());
     if (!jPlayerName) return false;
 
-    if (g_hiddenNametagOriginalTeamByPlayer_121.find(playerName) == g_hiddenNametagOriginalTeamByPlayer_121.end()) {
-        std::string originalTeamName;
-        if (g_scoreboardGetHolderTeam_121 && g_abstractTeamGetName_121) {
-            jobject originalTeamObj = env->CallObjectMethod(scoreboardObj, g_scoreboardGetHolderTeam_121, jPlayerName);
-            if (env->ExceptionCheck()) { env->ExceptionClear(); originalTeamObj = nullptr; }
-            if (originalTeamObj) {
-                jstring jOriginalName = (jstring)env->CallObjectMethod(originalTeamObj, g_abstractTeamGetName_121);
-                if (env->ExceptionCheck()) { env->ExceptionClear(); jOriginalName = nullptr; }
-                if (jOriginalName) {
-                    originalTeamName = Utf8FromJString(env, jOriginalName);
-                    env->DeleteLocalRef(jOriginalName);
-                }
-                env->DeleteLocalRef(originalTeamObj);
-            }
-        }
-        g_hiddenNametagOriginalTeamByPlayer_121[playerName] = originalTeamName;
+    // Check if the player is already on a scoreboard team.
+    jobject currentTeamObj = nullptr;
+    if (g_scoreboardGetHolderTeam_121) {
+        currentTeamObj = env->CallObjectMethod(scoreboardObj, g_scoreboardGetHolderTeam_121, jPlayerName);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); currentTeamObj = nullptr; }
     }
 
-    jboolean added = env->CallBooleanMethod(scoreboardObj, g_scoreboardAddHolderToTeam_121, jPlayerName, hideTeamObj);
-    bool ok = !env->ExceptionCheck();
-    if (!ok) env->ExceptionClear();
-    env->DeleteLocalRef(jPlayerName);
-    return ok && (added == JNI_TRUE || added == JNI_FALSE);
+    if (currentTeamObj) {
+        // Player is on a server-managed team.  Instead of moving them (which
+        // desyncs the client scoreboard and causes protocol kicks), we modify
+        // the team's NameTagVisibility rule client-side to NEVER.
+        env->DeleteLocalRef(jPlayerName);
+
+        if (!g_teamSetNameTagVisibilityRule_121 || !g_visibilityRuleNever_121) {
+            env->DeleteLocalRef(currentTeamObj);
+            return false;
+        }
+
+        // Cache the original visibility on first encounter (for restore).
+        // If naming/getter methods are unresolved we still suppress below,
+        // just can't restore the exact original visibility on toggle-off.
+        if (g_abstractTeamGetName_121 && g_teamGetNameTagVisibilityRule_121) {
+            std::string teamName;
+            jstring jTeamName = (jstring)env->CallObjectMethod(currentTeamObj, g_abstractTeamGetName_121);
+            if (!env->ExceptionCheck() && jTeamName) {
+                teamName = Utf8FromJString(env, jTeamName);
+                env->DeleteLocalRef(jTeamName);
+            } else {
+                env->ExceptionClear();
+            }
+
+            if (!teamName.empty() && g_modifiedTeamVisibility_121.find(teamName) == g_modifiedTeamVisibility_121.end()) {
+                jobject originalVis = env->CallObjectMethod(currentTeamObj, g_teamGetNameTagVisibilityRule_121);
+                if (!env->ExceptionCheck() && originalVis) {
+                    g_modifiedTeamVisibility_121[teamName] = env->NewGlobalRef(originalVis);
+                    env->DeleteLocalRef(originalVis);
+                } else {
+                    env->ExceptionClear();
+                }
+            }
+        }
+
+        // Always apply NEVER (server may have reset it since last frame).
+        env->CallVoidMethod(currentTeamObj, g_teamSetNameTagVisibilityRule_121, g_visibilityRuleNever_121);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+
+        env->DeleteLocalRef(currentTeamObj);
+        return true;
+    } else {
+        // Player is not on any team.  It is safe to add them to a client-only
+        // hide team because the server does not track them.
+        if (!hideTeamObj || !g_scoreboardAddHolderToTeam_121) {
+            env->DeleteLocalRef(jPlayerName);
+            return false;
+        }
+
+        jboolean added = env->CallBooleanMethod(scoreboardObj, g_scoreboardAddHolderToTeam_121, jPlayerName, hideTeamObj);
+        bool ok = !env->ExceptionCheck();
+        if (!ok) env->ExceptionClear();
+
+        if (ok) {
+            g_lcHideTagsMembers_121.insert(playerName);
+        }
+
+        env->DeleteLocalRef(jPlayerName);
+        return ok;
+    }
 }
 
 static void RestoreVanillaNametagSuppression121(JNIEnv* env, jobject scoreboardObj) {
     if (!env || !scoreboardObj) {
-        g_hiddenNametagOriginalTeamByPlayer_121.clear();
+        for (auto& entry : g_modifiedTeamVisibility_121) {
+            if (entry.second && env) env->DeleteGlobalRef(entry.second);
+        }
+        g_modifiedTeamVisibility_121.clear();
+        g_lcHideTagsMembers_121.clear();
         return;
     }
 
-    if (!g_scoreboardClearTeam_121 && !g_loggedNametagRestoreUnavailable_121) {
-        g_loggedNametagRestoreUnavailable_121 = true;
-        Log("NametagHideVanilla: Scoreboard.clearTeam missing; using fallback restore path.");
-    }
-
-    for (const auto& entry : g_hiddenNametagOriginalTeamByPlayer_121) {
-        const std::string& playerName = entry.first;
-        const std::string& originalTeamName = entry.second;
-        if (playerName.empty()) continue;
-
-        jstring jPlayerName = env->NewStringUTF(playerName.c_str());
-        if (!jPlayerName) continue;
-        if (g_scoreboardClearTeam_121) {
-            env->CallBooleanMethod(scoreboardObj, g_scoreboardClearTeam_121, jPlayerName);
-            if (env->ExceptionCheck()) env->ExceptionClear();
-        }
-
-        if (!originalTeamName.empty() && g_scoreboardGetTeam_121 && g_scoreboardAddHolderToTeam_121) {
-            jstring jOriginalTeam = env->NewStringUTF(originalTeamName.c_str());
-            if (jOriginalTeam) {
-                jobject teamObj = env->CallObjectMethod(scoreboardObj, g_scoreboardGetTeam_121, jOriginalTeam);
-                if (env->ExceptionCheck()) { env->ExceptionClear(); teamObj = nullptr; }
-                if (teamObj) {
-                    env->CallBooleanMethod(scoreboardObj, g_scoreboardAddHolderToTeam_121, jPlayerName, teamObj);
+    // 1. Restore NameTagVisibility on every team we modified.
+    if (g_scoreboardGetTeam_121 && g_teamSetNameTagVisibilityRule_121) {
+        for (auto it = g_modifiedTeamVisibility_121.begin(); it != g_modifiedTeamVisibility_121.end(); ) {
+            jstring jTeamName = env->NewStringUTF(it->first.c_str());
+            if (jTeamName) {
+                jobject teamObj = env->CallObjectMethod(scoreboardObj, g_scoreboardGetTeam_121, jTeamName);
+                if (!env->ExceptionCheck() && teamObj) {
+                    env->CallVoidMethod(teamObj, g_teamSetNameTagVisibilityRule_121, it->second);
                     if (env->ExceptionCheck()) env->ExceptionClear();
                     env->DeleteLocalRef(teamObj);
+                } else {
+                    env->ExceptionClear();
                 }
-                env->DeleteLocalRef(jOriginalTeam);
+                env->DeleteLocalRef(jTeamName);
+            }
+            if (it->second) env->DeleteGlobalRef(it->second);
+            it = g_modifiedTeamVisibility_121.erase(it);
+        }
+    } else {
+        for (auto& entry : g_modifiedTeamVisibility_121) {
+            if (entry.second) env->DeleteGlobalRef(entry.second);
+        }
+        g_modifiedTeamVisibility_121.clear();
+    }
+
+    // 2. Remove team-less players from the client-only hide team.
+    if (g_scoreboardClearTeam_121) {
+        for (const auto& playerName : g_lcHideTagsMembers_121) {
+            jstring jPlayerName = env->NewStringUTF(playerName.c_str());
+            if (jPlayerName) {
+                env->CallBooleanMethod(scoreboardObj, g_scoreboardClearTeam_121, jPlayerName);
+                if (env->ExceptionCheck()) env->ExceptionClear();
+                env->DeleteLocalRef(jPlayerName);
             }
         }
-        env->DeleteLocalRef(jPlayerName);
+    } else if (!g_loggedNametagRestoreUnavailable_121) {
+        g_loggedNametagRestoreUnavailable_121 = true;
+        Log("NametagHideVanilla: Scoreboard.clearTeam missing; team-less players may remain hidden.");
     }
-    g_hiddenNametagOriginalTeamByPlayer_121.clear();
+    g_lcHideTagsMembers_121.clear();
 
+    // 3. Delete the client-only hide team.
     if (g_scoreboardGetTeam_121 && g_scoreboardRemoveTeam_121) {
         jstring jHideTeamName = env->NewStringUTF("lc_hide_tags");
         if (jHideTeamName) {
@@ -4615,6 +5559,38 @@ static void DeleteGlobalRefSafe(JNIEnv* env, jclass& cls) {
     }
 }
 
+// Reset ALL AutoTotem cached JNI lookups and runtime state.
+// Call on world transitions so stale method/field IDs are re-resolved.
+static void ResetAutoTotemCaches(JNIEnv* env) {
+    g_handleContainerInput_121 = nullptr;
+    g_getInventory_121 = nullptr;
+    g_inventoryGetItem_121 = nullptr;
+    g_inventoryGetContainerSize_121 = nullptr;
+    g_itemStackGetItem_121 = nullptr;
+    g_itemStackIs_121 = nullptr;
+    g_getOffhandItem_121 = nullptr;
+    g_getItemBySlot_121 = nullptr;
+    g_isFallFlying_121 = nullptr;
+    g_totemOfUndyingField_121 = nullptr;
+    g_getAbsorptionAmount_121 = nullptr;
+    g_getConnectionMethod_121 = nullptr;
+    g_gameModeFieldCached_121 = nullptr;
+    g_getCarriedMethod_121 = nullptr;
+    g_isEmptyMethod_121 = nullptr;
+
+    DeleteGlobalRefSafe(env, g_itemsClass_121);
+    DeleteGlobalRefSafe(env, g_equipmentSlotClass_121);
+    DeleteGlobalRefSafe(env, g_equipmentSlotChest_121);
+
+    g_autoTotemMethodsResolved = false;
+    g_loggedAutoTotemResolveFail_121 = false;
+    g_autoTotemLocked = false;
+    g_autoTotemTicks = 0;
+    g_lastAutoTotemTickMs = 0;
+    g_autoTotemPrevHealth = 20.0f;
+    g_autoTotemPendingSlot = -1;
+}
+
 static void CleanupJniGlobals(JNIEnv* env) {
     if (!env) return;
 
@@ -4635,12 +5611,16 @@ static void CleanupJniGlobals(JNIEnv* env) {
     DeleteGlobalRefSafe(env, g_blockPosClass_121);
     DeleteGlobalRefSafe(env, g_javaHashMapClass);
     DeleteGlobalRefSafe(env, g_playerEntityClass_121);
+    DeleteGlobalRefSafe(env, g_itemsClass_121);
+    DeleteGlobalRefSafe(env, g_equipmentSlotClass_121);
+    DeleteGlobalRefSafe(env, g_equipmentSlotChest_121);
     DeleteGlobalRefSafe(env, g_scoreboardClass_121);
     DeleteGlobalRefSafe(env, g_teamClass_121);
     DeleteGlobalRefSafe(env, g_abstractTeamClass_121);
     DeleteGlobalRefSafe(env, g_visibilityRuleClass_121);
     DeleteGlobalRefSafe(env, g_visibilityRuleNever_121);
     DeleteGlobalRefSafe(env, g_lastNametagSuppressionWorld_121);
+    DeleteGlobalRefSafe(env, g_lastAutoTotemWorld_121);
     DeleteGlobalRefSafe(env, g_itemStackClass_121);
     DeleteGlobalRefSafe(env, g_identifierClass_121);
     DeleteGlobalRefSafe(env, g_entityReachIdentifier_121);
@@ -4714,6 +5694,9 @@ static void ResetModernJniRuntimeCaches121(JNIEnv* env, const char* reason) {
     g_vec3dCtor_121 = nullptr;
     g_lastHurtTime_121 = 0;
     g_loggedVelocityResolveFail_121 = false;
+
+    // Auto-totem cached hot-path JNI lookups
+    ResetAutoTotemCaches(env);
 
     g_getProjectionMatrix_121 = nullptr;
     g_getModelViewMatrix_121 = nullptr;
@@ -5953,8 +6936,18 @@ static void EnsureHudTextFields(JNIEnv* env, jclass mcCls, jobject hudObj) {
     if (!hudCls || env->ExceptionCheck()) { env->ExceptionClear(); return; }
 
     auto addHudTextField = [&](const char* name) {
-        jfieldID fid = env->GetFieldID(hudCls, name, "Lnet/minecraft/class_2561;");
-        if (env->ExceptionCheck()) { env->ExceptionClear(); fid = nullptr; }
+        const char* sigs[] = {
+            "Lnet/minecraft/class_2561;",
+            "Lnet/minecraft/network/chat/Component;",
+            "Lnet/minecraft/text/Text;",
+            nullptr
+        };
+        jfieldID fid = nullptr;
+        for (int si = 0; sigs[si]; si++) {
+            fid = env->GetFieldID(hudCls, name, sigs[si]);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); fid = nullptr; }
+            if (fid) break;
+        }
         if (!fid) return;
         for (auto existing : g_hudTextFields_121)
             if (existing == fid) return;
@@ -5994,7 +6987,7 @@ static void EnsureHudTextFields(JNIEnv* env, jclass mcCls, jobject hudObj) {
                     if (env->ExceptionCheck()) { env->ExceptionClear(); ft = nullptr; }
                     std::string typeName = ft ? GetClassNameFromClass(env, ft) : "";
                     if (ft) env->DeleteLocalRef(ft);
-                    if (typeName != "net.minecraft.class_2561") { env->DeleteLocalRef(fld); continue; }
+                    if (typeName != "net.minecraft.class_2561" && typeName != "net.minecraft.network.chat.Component" && typeName != "net.minecraft.text.Text") { env->DeleteLocalRef(fld); continue; }
 
                     jstring jfn = (jstring)env->CallObjectMethod(fld, mFName);
                     if (env->ExceptionCheck()) { env->ExceptionClear(); jfn = nullptr; }
@@ -6075,9 +7068,14 @@ static void UpdateJniState() {
         if (!screenName.empty())
             Log("Screen chain: " + screenName);
         g_lastLoggedScreen = screenName;
-        // Any screen change (especially connecting/loading) = world may be transitioning.
-        // Pause chunk scanning for 5 seconds to avoid racing with world teardown.
-        g_worldTransitionEndMs = GetTickCount() + 5000;
+        // Only block modules for actual world transitions (loading/connecting/dying),
+        // not for regular GUI screens like inventory, chat, or pause.
+        bool isTransitionScreen =
+            screenName.find("LevelLoadingScreen") != std::string::npos
+            || screenName.find("ProgressScreen") != std::string::npos
+            || screenName.find("DeathScreen") != std::string::npos;
+        if (isTransitionScreen)
+            g_worldTransitionEndMs = GetTickCount() + 5000;
         // NOTE: avoid forcing per-screen cache resets here; it causes remap thrash and
         // prevents mapping convergence on some runtimes.
     }
@@ -7050,6 +8048,21 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
             bool inWorldNow = IsInWorldNow(env);
             { LockGuard lk(g_jniStateMtx); g_jniInWorld = inWorldNow; }
             if (inWorldNow) {
+                // Detect world changes to reset stale JNI caches (prevents crash on server switch)
+                if (g_worldField_121) {
+                    jobject worldObj = env->GetObjectField(g_mcInstance, g_worldField_121);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); worldObj = nullptr; }
+                    if (worldObj) {
+                        if (!g_lastAutoTotemWorld_121 || env->IsSameObject(worldObj, g_lastAutoTotemWorld_121) == JNI_FALSE) {
+                            if (env->ExceptionCheck()) env->ExceptionClear();
+                            ResetAutoTotemCaches(env);
+                            if (g_lastAutoTotemWorld_121) env->DeleteGlobalRef(g_lastAutoTotemWorld_121);
+                            g_lastAutoTotemWorld_121 = env->NewGlobalRef(worldObj);
+                        }
+                        env->DeleteLocalRef(worldObj);
+                    }
+                }
+
                 // Periodic diagnostic for chest esp config state
                 static DWORD s_cfgLogMs = 0;
                 DWORD nowMs = GetTickCount();
@@ -7070,6 +8083,12 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                     s_velocityWasEnabled = cfg.velocityEnabled;
                 }
 
+                static bool s_autoTotemWasEnabled = false;
+                if (cfg.autoTotemEnabled || s_autoTotemWasEnabled) {
+                    UpdateAutoTotem(env, cfg);
+                    s_autoTotemWasEnabled = cfg.autoTotemEnabled;
+                }
+
                 if (cfg.closestPlayer)
                     UpdateClosestPlayerOverlay(env);
                 if (cfg.nametags || cfg.closestPlayer || cfg.aimAssist || cfg.nametagHideVanilla || g_nametagSuppressionActive_121)
@@ -7077,7 +8096,10 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                 if (cfg.chestEsp)
                     UpdateChestList(env);
             } else {
-                if (g_nametagSuppressionActive_121 || !g_hiddenNametagOriginalTeamByPlayer_121.empty()) {
+                // Left world — reset caches so next world gets fresh JNI lookups
+                ResetAutoTotemCaches(env);
+                DeleteGlobalRefSafe(env, g_lastAutoTotemWorld_121);
+                if (g_nametagSuppressionActive_121 || !g_modifiedTeamVisibility_121.empty() || !g_lcHideTagsMembers_121.empty()) {
                     ResetNametagSuppressionCaches121(env, "left-world");
                 }
                 { LockGuard lk(g_playerListMutex); g_playerList.clear(); }
@@ -7085,7 +8107,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                 { LockGuard lk3(g_bgCamMutex); g_bgCamState = BgCamState(); }
             }
         } else {
-            if (g_nametagSuppressionActive_121 || !g_hiddenNametagOriginalTeamByPlayer_121.empty()) {
+            if (g_nametagSuppressionActive_121 || !g_modifiedTeamVisibility_121.empty() || !g_lcHideTagsMembers_121.empty()) {
                 ResetNametagSuppressionCaches121(env, "jni-not-ready");
             }
             { LockGuard lk(g_playerListMutex); g_playerList.clear(); }
@@ -7795,9 +8817,37 @@ BOOL WINAPI hwglSwapBuffers(HDC hDc) {
                     if (lines.empty()) lines.push_back(preview);
                 }
 
-                const float panelW = (std::min)(360.0f, io.DisplaySize.x - 20.0f);
                 const float lineH = ImGui::GetFontSize() + 2.0f;
-                const float panelH = 18.0f + lineH + (lines.empty() ? 0.0f : (8.0f + lineH * (float)lines.size())) + 10.0f;
+                const float headerH = 18.0f + lineH;
+                const float maxPanelH = io.DisplaySize.y - 20.0f;
+                const float availableH = maxPanelH - headerH - 16.0f;
+                size_t maxLinesPerCol = (size_t)(availableH / lineH);
+                if (maxLinesPerCol < 1) maxLinesPerCol = 1;
+
+                size_t totalLines = lines.size();
+                size_t numCols = (totalLines + maxLinesPerCol - 1) / maxLinesPerCol;
+                if (numCols < 1) numCols = 1;
+                if (numCols > 6) numCols = 6;
+                size_t linesPerCol = (totalLines + numCols - 1) / numCols;
+                if (linesPerCol > maxLinesPerCol) linesPerCol = maxLinesPerCol;
+
+                const float colPad = 8.0f;
+                float colW = 200.0f;
+                const float padX = 10.0f;
+                float panelW = padX * 2.0f + colW * (float)numCols + colPad * (float)(numCols > 0 ? numCols - 1 : 0);
+                const float maxPanelW = io.DisplaySize.x - 20.0f;
+                if (panelW > maxPanelW) {
+                    panelW = maxPanelW;
+                    float availW = panelW - padX * 2.0f - colPad * (float)(numCols - 1);
+                    if (availW < colW * (float)numCols && numCols > 0)
+                        colW = availW / (float)numCols;
+                    if (colW < 80.0f) colW = 80.0f;
+                }
+                if (panelW < 180.0f) panelW = 180.0f;
+
+                float panelH = headerH + lineH * (float)linesPerCol + 16.0f;
+                if (panelH > maxPanelH) panelH = maxPanelH;
+
                 const float x1 = io.DisplaySize.x - 10.0f;
                 const float y1 = io.DisplaySize.y - 10.0f;
                 const float x0 = (std::max)(10.0f, x1 - panelW);
@@ -7810,11 +8860,21 @@ BOOL WINAPI hwglSwapBuffers(HDC hDc) {
                 snprintf(hintBuf, sizeof(hintBuf), "GTB: %s (%d)", hint.c_str(), (std::max)(0, cfg.gtbCount));
                 fg->AddText(ImVec2(x0 + 9.0f, y0 + 8.0f), overlayTheme.gtbTitle, hintBuf);
 
-                float y = y0 + 8.0f + lineH + 6.0f;
-                for (const auto& line : lines) {
-                    std::string row = "- " + line;
-                    fg->AddText(ImVec2(x0 + 10.0f, y), overlayTheme.gtbRow, row.c_str());
-                    y += lineH;
+                size_t visiblePerCol = linesPerCol;
+                if (visiblePerCol < 1) visiblePerCol = 1;
+                for (size_t col = 0; col < numCols; col++) {
+                    size_t startIdx = col * linesPerCol;
+                    size_t endIdx = (std::min)(startIdx + linesPerCol, totalLines);
+                    if (startIdx >= totalLines) break;
+
+                    float cx = x0 + padX + (colW + colPad) * (float)col;
+                    float yy = y0 + 8.0f + lineH + 6.0f;
+
+                    for (size_t i = startIdx; i < endIdx; i++) {
+                        std::string row = "- " + lines[i];
+                        fg->AddText(ImVec2(cx, yy), overlayTheme.gtbRow, row.c_str());
+                        yy += lineH;
+                    }
                 }
             }
 
@@ -7848,9 +8908,10 @@ BOOL WINAPI hwglSwapBuffers(HDC hDc) {
                 if (cfg.nametags)      pushMod("Nametags", overlayTheme.accentPrimary);
                 if (cfg.gtbHelper)     pushMod("GTB Helper", overlayTheme.accentTertiary);
                 if (cfg.jitter)        pushMod("Jitter", overlayTheme.accentSecondary);
-                if (cfg.breakBlocks)   pushMod("Break Blocks", overlayTheme.moduleText);
+                if (cfg.breakBlocks)   pushMod("Break Blocks", overlayTheme.accentTertiary);
                 if (cfg.reachEnabled)  pushMod("Reach", overlayTheme.accentPrimary);
                 if (cfg.velocityEnabled) pushMod("Velocity", overlayTheme.accentTertiary);
+                if (cfg.autoTotemEnabled) pushMod("AutoTotem", overlayTheme.accentPrimary);
 
                 // Sort by width descending (staggered original look)
                 for (int a = 0; a < modCount; a++) {

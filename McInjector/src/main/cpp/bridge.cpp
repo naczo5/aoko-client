@@ -14,6 +14,8 @@
 #include <cmath>
 #include <cctype>
 #include <unordered_map>
+#include "json_config_reader.h"
+#include "bridge_capabilities.h"
 // Custom Mutex for MinGW win32 threads
 class Mutex {
     CRITICAL_SECTION cs;
@@ -4524,7 +4526,7 @@ void RenderHUD(int winW, int winH) {
     if (cfg.nametags)         pushMod("Nametags", theme.accentPrimary);
     if (cfg.gtbHelper)        pushMod("GTB Helper", theme.accentTertiary);
     if (cfg.jitter)           pushMod("Jitter", theme.accentSecondary);
-    if (cfg.breakBlocks)      pushMod("Break Blocks", theme.moduleText);
+    if (cfg.breakBlocks)      pushMod("Break Blocks", theme.accentTertiary);
     if (cfg.reachEnabled)     pushMod("Reach", theme.accentPrimary);
     if (cfg.velocityEnabled)  pushMod("Velocity", theme.accentTertiary);
 
@@ -4612,16 +4614,41 @@ void RenderHUD(int winW, int winH) {
             if (!line.empty()) lines.push_back(line);
         }
 
-        const size_t maxPreviewLines = 25;
+        const size_t maxPreviewLines = 200;
         if (lines.size() > maxPreviewLines) {
             lines.resize(maxPreviewLines);
         }
 
         float textScale = 0.52f;
         float lineH = CHAR_H * textScale + 2.0f;
-        float panelW = 180.0f;
-        float panelH = 12.0f + lineH;
-        panelH += lineH * (float)lines.size();
+        float headerH = 12.0f + lineH;
+        float maxPanelH = (float)winH - 20.0f;
+        float availableH = maxPanelH - headerH - 6.0f;
+        size_t maxLinesPerCol = (size_t)(availableH / lineH);
+        if (maxLinesPerCol < 1) maxLinesPerCol = 1;
+
+        size_t totalLines = lines.size();
+        size_t numCols = (totalLines + maxLinesPerCol - 1) / maxLinesPerCol;
+        if (numCols < 1) numCols = 1;
+        if (numCols > 6) numCols = 6;
+        size_t linesPerCol = (totalLines + numCols - 1) / numCols;
+        if (linesPerCol > maxLinesPerCol) linesPerCol = maxLinesPerCol;
+
+        float colPad = 8.0f;
+        float colW = 150.0f;
+        float panelPadX = 9.0f;
+        float panelW = panelPadX * 2.0f + colW * (float)numCols + colPad * (float)(numCols > 0 ? numCols - 1 : 0);
+        float maxPanelW = (float)winW - 20.0f;
+        if (panelW > maxPanelW) {
+            panelW = maxPanelW;
+            float availW = panelW - panelPadX * 2.0f - colPad * (float)(numCols - 1);
+            if (availW < colW * (float)numCols && numCols > 0)
+                colW = availW / (float)numCols;
+            if (colW < 60.0f) colW = 60.0f;
+        }
+
+        float panelH = headerH + lineH * (float)linesPerCol + 6.0f;
+        if (panelH > maxPanelH) panelH = maxPanelH;
 
         float x1 = (float)winW - 10.0f;
         float y1 = (float)winH - 10.0f;
@@ -4629,25 +4656,6 @@ void RenderHUD(int winW, int winH) {
         float y0 = y1 - panelH;
         if (x0 < 10.0f) x0 = 10.0f;
         if (y0 < 10.0f) y0 = 10.0f;
-
-        float maxPanelH = (float)winH - 20.0f;
-        if (panelH > maxPanelH) {
-            panelH = maxPanelH;
-        }
-
-        size_t maxVisibleLines = 0;
-        if (lineH > 0.0f && panelH > 12.0f + lineH) {
-            float visible = (panelH - (12.0f + lineH)) / lineH;
-            if (visible > 0.0f) {
-                maxVisibleLines = (size_t)visible;
-            }
-        }
-        if (maxVisibleLines < 1) {
-            maxVisibleLines = 1;
-        }
-        if (lines.size() > maxVisibleLines) {
-            lines.resize(maxVisibleLines);
-        }
 
         DrawRect(x0, y0, panelW, panelH, theme.moduleBg.r, theme.moduleBg.g, theme.moduleBg.b, 0.92f);
         DrawRect(x0, y0, panelW, 1.0f, theme.accentPrimary.r, theme.accentPrimary.g, theme.accentPrimary.b, 0.95f);
@@ -4660,12 +4668,22 @@ void RenderHUD(int winW, int winH) {
         DrawTextShadow(x0 + 8.0f, y0 + 6.0f, hintBuf,
             theme.moduleText.r, theme.moduleText.g, theme.moduleText.b, theme.moduleText.a, textScale);
 
-        float ty = y0 + 6.0f + lineH;
-        for (const std::string& raw : lines) {
-            std::string row = "- " + raw;
-            DrawTextShadow(x0 + 9.0f, ty, row.c_str(),
-                theme.accentTertiary.r, theme.accentTertiary.g, theme.accentTertiary.b, 0.95f, textScale);
-            ty += lineH;
+        size_t visiblePerCol = linesPerCol;
+        if (visiblePerCol < 1) visiblePerCol = 1;
+        for (size_t col = 0; col < numCols; col++) {
+            size_t startIdx = col * linesPerCol;
+            size_t endIdx = (std::min)(startIdx + linesPerCol, totalLines);
+            if (startIdx >= totalLines) break;
+
+            float cx = x0 + panelPadX + (colW + colPad) * (float)col;
+            float ty = y0 + headerH - 2.0f;
+
+            for (size_t i = startIdx; i < endIdx; i++) {
+                std::string row = "- " + lines[i];
+                DrawTextShadow(cx, ty, row.c_str(),
+                    theme.accentTertiary.r, theme.accentTertiary.g, theme.accentTertiary.b, 0.95f, textScale);
+                ty += lineH;
+            }
         }
     }
 }
@@ -6714,103 +6732,91 @@ void InstallSwapBuffersHook() {
 
 // ===================== TCP SERVER =====================
 void ParseConfig(const std::string& line) {
-    // Simple JSON parsing for config updates
-    auto getStr = [&](const char* key) -> std::string {
-        std::string k = std::string("\"") + key + "\":";
-        size_t p = line.find(k);
-        if (p == std::string::npos) return "";
-        p += k.length();
-        if (line[p] == '"') { size_t e = line.find('"', p+1); return line.substr(p+1, e-p-1); }
-        size_t e = line.find_first_of(",}", p);
-        return line.substr(p, e-p);
-    };
-    auto getBool = [&](const char* key) -> bool { return getStr(key) == "true"; };
-    auto getFloat = [&](const char* key) -> float { std::string v = getStr(key); return v.empty() ? 0 : std::stof(v); };
-    auto getInt   = [&](const char* key) -> int   { std::string v = getStr(key); return v.empty() ? -1 : std::stoi(v); };
+    lc::SimpleJsonConfigReader reader(line);
 
-    std::string type = getStr("type");
+    std::string type = reader.GetString("type");
     if (type == "config") {
         LockGuard lk(g_configMutex);
-        g_config.armed = getBool("armed");
-        g_config.clicking = getBool("clicking");
-        g_config.minCPS = getFloat("minCPS");
-        g_config.maxCPS = getFloat("maxCPS");
-        g_config.leftClick = getBool("left");
-        g_config.rightClick = getBool("right");
-        g_config.rightMinCPS = getFloat("rightMinCPS");
-        g_config.rightMaxCPS = getFloat("rightMaxCPS");
-        g_config.rightBlockOnly = getBool("rightBlock");
-        g_config.breakBlocks = getBool("breakBlocks");
-        g_config.jitter = getBool("jitter");
-        g_config.clickInChests = getBool("clickInChests");
-        g_config.aimAssist = getBool("aimAssist");
-        g_config.triggerbot = getBool("triggerbot");
-        g_config.gtbHelper = getBool("gtbHelper");
-        g_config.nametags = getBool("nametags");
-        g_config.closestPlayerInfo = getBool("closestPlayerInfo");
-        g_config.nametagShowHealth = getBool("nametagShowHealth");
-        g_config.nametagShowArmor = getBool("nametagShowArmor");
-        g_config.nametagHideVanilla = getBool("nametagHideVanilla");
-        g_config.chestEsp = getBool("chestEsp");
-        g_config.reachEnabled = getBool("reachEnabled");
-        g_config.velocityEnabled = getBool("velocityEnabled");
+        g_config.armed = reader.GetBool("armed");
+        g_config.clicking = reader.GetBool("clicking");
+        g_config.minCPS = reader.GetFloat("minCPS");
+        g_config.maxCPS = reader.GetFloat("maxCPS");
+        g_config.leftClick = reader.GetBool("left");
+        g_config.rightClick = reader.GetBool("right");
+        g_config.rightMinCPS = reader.GetFloat("rightMinCPS");
+        g_config.rightMaxCPS = reader.GetFloat("rightMaxCPS");
+        g_config.rightBlockOnly = reader.GetBool("rightBlock");
+        g_config.breakBlocks = reader.GetBool("breakBlocks");
+        g_config.jitter = reader.GetBool("jitter");
+        g_config.clickInChests = reader.GetBool("clickInChests");
+        g_config.aimAssist = reader.GetBool("aimAssist");
+        g_config.triggerbot = reader.GetBool("triggerbot");
+        g_config.gtbHelper = reader.GetBool("gtbHelper");
+        g_config.nametags = reader.GetBool("nametags");
+        g_config.closestPlayerInfo = reader.GetBool("closestPlayerInfo");
+        g_config.nametagShowHealth = reader.GetBool("nametagShowHealth");
+        g_config.nametagShowArmor = reader.GetBool("nametagShowArmor");
+        g_config.nametagHideVanilla = reader.GetBool("nametagHideVanilla");
+        g_config.chestEsp = reader.GetBool("chestEsp");
+        g_config.reachEnabled = reader.GetBool("reachEnabled");
+        g_config.velocityEnabled = reader.GetBool("velocityEnabled");
 
-        std::string showModuleListRaw = getStr("showModuleList");
+        std::string showModuleListRaw = reader.GetString("showModuleList");
         g_config.showModuleList = showModuleListRaw.empty() ? true : (showModuleListRaw == "true");
 
-        int style = getInt("moduleListStyle");
+        int style = reader.GetInt("moduleListStyle", -1);
         if (style >= 0) g_config.moduleListStyle = (std::max)(0, (std::min)(4, style));
 
-        std::string showLogoRaw = getStr("showLogo");
+        std::string showLogoRaw = reader.GetString("showLogo");
         g_config.showLogo = showLogoRaw.empty() ? true : (showLogoRaw == "true");
 
-        std::string guiThemeRaw = getStr("guiTheme");
+        std::string guiThemeRaw = reader.GetString("guiTheme");
         g_config.guiTheme = guiThemeRaw.empty() ? "Default" : guiThemeRaw;
 
-        g_config.nametagShowHealth = getBool("nametagShowHealth");
-        g_config.nametagShowArmor = getBool("nametagShowArmor");
-        g_config.nametagHideVanilla = getBool("nametagHideVanilla");
+        g_config.nametagShowHealth = reader.GetBool("nametagShowHealth");
+        g_config.nametagShowArmor = reader.GetBool("nametagShowArmor");
+        g_config.nametagHideVanilla = reader.GetBool("nametagHideVanilla");
 
-        int nametagMaxCount = getInt("nametagMaxCount");
+        int nametagMaxCount = reader.GetInt("nametagMaxCount", -1);
         if (nametagMaxCount < 1) nametagMaxCount = g_config.nametagMaxCount;
         if (nametagMaxCount > 20) nametagMaxCount = 20;
         g_config.nametagMaxCount = nametagMaxCount;
 
-        int chestEspMaxCount = getInt("chestEspMaxCount");
+        int chestEspMaxCount = reader.GetInt("chestEspMaxCount", -1);
         if (chestEspMaxCount < 1) chestEspMaxCount = g_config.chestEspMaxCount;
         if (chestEspMaxCount > 20) chestEspMaxCount = 20;
         g_config.chestEspMaxCount = chestEspMaxCount;
 
-        int reachChance = getInt("reachChance");
+        int reachChance = reader.GetInt("reachChance", -1);
         if (reachChance < 1) reachChance = g_config.reachChance;
         if (reachChance > 100) reachChance = 100;
         g_config.reachChance = reachChance;
 
-        int velocityHorizontal = getInt("velocityHorizontal");
+        int velocityHorizontal = reader.GetInt("velocityHorizontal", -1);
         if (velocityHorizontal < 1) velocityHorizontal = g_config.velocityHorizontal;
         if (velocityHorizontal > 100) velocityHorizontal = 100;
         g_config.velocityHorizontal = velocityHorizontal;
 
-        int velocityVertical = getInt("velocityVertical");
+        int velocityVertical = reader.GetInt("velocityVertical", -1);
         if (velocityVertical < 1) velocityVertical = g_config.velocityVertical;
         if (velocityVertical > 100) velocityVertical = 100;
         g_config.velocityVertical = velocityVertical;
 
-        int velocityChance = getInt("velocityChance");
+        int velocityChance = reader.GetInt("velocityChance", -1);
         if (velocityChance < 1) velocityChance = g_config.velocityChance;
         if (velocityChance > 100) velocityChance = 100;
         g_config.velocityChance = velocityChance;
 
-        std::string gtbHint = getStr("gtbHint");
-        int gtbCount = getInt("gtbCount");
+        std::string gtbHint = reader.GetString("gtbHint");
+        int gtbCount = reader.GetInt("gtbCount", g_config.gtbCount);
         if (gtbCount < 0) gtbCount = g_config.gtbCount;
-        std::string gtbPreview = getStr("gtbPreview");
+        std::string gtbPreview = reader.GetString("gtbPreview");
         if (!gtbHint.empty()) g_config.gtbHint = gtbHint;
         g_config.gtbCount = gtbCount;
         if (!gtbPreview.empty()) g_config.gtbPreview = gtbPreview;
 
-        float reachMin = getFloat("reachMin");
-        float reachMax = getFloat("reachMax");
+        float reachMin = reader.GetFloat("reachMin");
+        float reachMax = reader.GetFloat("reachMax");
         if (reachMin <= 0.0f) reachMin = g_config.reachMin;
         if (reachMax < reachMin) reachMax = reachMin;
         g_config.reachMin = reachMin;
@@ -6829,23 +6835,18 @@ void ParseConfig(const std::string& line) {
         }
 
         // Per-module keybinds (-1 means absent / don't override)
-        { int v = getInt("keybindAutoclicker");  if (v >= 0) g_config.keybindAutoclicker  = v; }
-        { int v = getInt("keybindNametags");      if (v >= 0) g_config.keybindNametags      = v; }
-        { int v = getInt("keybindClosestPlayer"); if (v >= 0) g_config.keybindClosestPlayer = v; }
-        { int v = getInt("keybindChestEsp");      if (v >= 0) g_config.keybindChestEsp      = v; }
+        { int v = reader.GetInt("keybindAutoclicker", -1);  if (v >= 0) g_config.keybindAutoclicker  = v; }
+        { int v = reader.GetInt("keybindNametags", -1);      if (v >= 0) g_config.keybindNametags      = v; }
+        { int v = reader.GetInt("keybindClosestPlayer", -1); if (v >= 0) g_config.keybindClosestPlayer = v; }
+        { int v = reader.GetInt("keybindChestEsp", -1);      if (v >= 0) g_config.keybindChestEsp      = v; }
     }
 }
 
 bool TrySendCapabilities(SOCKET sock) {
     if (sock == INVALID_SOCKET) return false;
 
-    static const char* kCapabilitiesJson =
-        "{\"type\":\"capabilities\","
-        "\"modules\":[\"autoclicker\",\"rightclick\",\"jitter\",\"clickinchests\",\"breakblocks\",\"aimassist\",\"gtbhelper\",\"nametags\",\"closestplayer\",\"chestesp\",\"reach\",\"velocity\"],"
-        "\"settings\":[\"mincps\",\"maxcps\",\"left\",\"right\",\"rightmincps\",\"rightmaxcps\",\"rightblock\",\"breakblocks\",\"jitter\",\"clickinchests\",\"aimassistfov\",\"aimassistrange\",\"aimassiststrength\",\"nametags\",\"closestplayerinfo\",\"nametagshowhealth\",\"nametagshowarmor\",\"nametaghidevanilla\",\"nametagmaxcount\",\"chestesp\",\"chestespmaxcount\",\"reachenabled\",\"reachmin\",\"reachmax\",\"reachchance\",\"velocityenabled\",\"velocityhorizontal\",\"velocityvertical\",\"velocitychance\",\"gtbhint\",\"gtbcount\",\"gtbpreview\",\"showmodulelist\",\"moduleliststyle\",\"showlogo\",\"guitheme\",\"keybindautoclicker\",\"keybindnametags\",\"keybindclosestplayer\",\"keybindchestesp\"],"
-        "\"state\":[\"actionbar\",\"holdingblock\",\"lookingatblock\",\"lookingatentity\",\"lookingatentitylatched\",\"breakingblock\",\"attackcooldown\",\"attackcooldownpertick\",\"statems\"]}\n";
-
-    int sent = send(sock, kCapabilitiesJson, (int)strlen(kCapabilitiesJson), 0);
+    const char* capabilitiesJson = lc::LegacyCapabilitiesJson();
+    int sent = send(sock, capabilitiesJson, (int)strlen(capabilitiesJson), 0);
     if (sent == SOCKET_ERROR) {
         int err = WSAGetLastError();
         if (err == WSAEWOULDBLOCK) return false;

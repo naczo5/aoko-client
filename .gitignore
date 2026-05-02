@@ -2,6 +2,8 @@
 LegoClickerCS/bin/
 LegoClickerCS/obj/
 LegoClickerCS/publish/
+LegoClickerCS.Tests/bin/
+LegoClickerCS.Tests/obj/
 
 # bridge.dll is built from source; don't track the copy inside LegoClickerCS
 LegoClickerCS/bridge.dll
@@ -10,6 +12,7 @@ LegoClickerCS/bridge.dll
 McInjector/bridge.dll
 McInjector/build/
 McInjector/dist/
+McInjector/tests/*.exe
 *.dll
 
 # ── Logs ─────────────────────────────────────────────────────────
@@ -28,6 +31,7 @@ CRASH_LOG_LOCATIONS.md
 .vscode/
 *.zip
 /AGENTS
+generate_analysis.py
 *.bat
 !/build_dll.bat
 !/build_exe.bat
@@ -40,6 +44,7 @@ CRASH_LOG_LOCATIONS.md
 !GUIDE.md
 /LegoClicker_Release
 /archive
+/meteor-source
 
 # ── OS ───────────────────────────────────────────────────────────
 Thumbs.db

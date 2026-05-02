@@ -44,7 +44,8 @@ public sealed class BridgeCapabilities
                     "closestplayer",
                     "chestesp",
                     "reach",
-                    "velocity"
+                    "velocity",
+                    "autototem"
                 ),
                 BuildSet(
                     "mincps",
@@ -85,7 +86,13 @@ public sealed class BridgeCapabilities
                     "showmodulelist",
                     "moduleliststyle",
                     "showlogo",
-                    "guitheme"
+                    "guitheme",
+                    "autototemenabled",
+                    "autototemmode",
+                    "autototemhealth",
+                    "autototemelytra",
+                    "autototemdelay",
+                    "autototembehaviormode"
                 ),
                 BuildSet(
                     "actionbar",

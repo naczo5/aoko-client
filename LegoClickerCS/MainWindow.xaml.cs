@@ -235,7 +235,6 @@ public partial class MainWindow : Window
 
         ShowInTaskbar = true;
         Show();
-        Activate();
     }
 
     private void ApplyNativeTitleBarTheme()
@@ -294,6 +293,7 @@ public partial class MainWindow : Window
         bool gtbSupported = IsModuleSupported("gtbhelper");
         bool reachSupported = IsModuleSupported("reach");
         bool velocitySupported = IsModuleSupported("velocity");
+        bool autoTotemSupported = IsModuleSupported("autototem");
         bool reloadMappingsSupported = GameStateClient.Instance.SupportsSetting("reloadMappingsNonce");
 
         AimAssistCard.IsEnabled = aimAssistSupported;
@@ -301,6 +301,7 @@ public partial class MainWindow : Window
         GtbHelperCard.IsEnabled = gtbSupported;
         ReachCard.IsEnabled = reachSupported;
         VelocityCard.IsEnabled = velocitySupported;
+        AutoTotemCard.IsEnabled = autoTotemSupported;
 
         var clicker = Clicker.Instance;
         if (!aimAssistSupported && clicker.AimAssistEnabled) clicker.AimAssistEnabled = false;
@@ -308,12 +309,14 @@ public partial class MainWindow : Window
         if (!gtbSupported && clicker.GtbHelperEnabled) clicker.GtbHelperEnabled = false;
         if (!reachSupported && clicker.ReachEnabled) clicker.ReachEnabled = false;
         if (!velocitySupported && clicker.VelocityEnabled) clicker.VelocityEnabled = false;
+        if (!autoTotemSupported && clicker.AutoTotemEnabled) clicker.AutoTotemEnabled = false;
 
         // Update availability text - only show unavailable message for Triggerbot (intentionally 1.21-only)
         AimAssistAvailabilityText.Text = aimAssistSupported ? "Available" : "Unavailable on current bridge";
         TriggerbotAvailabilityText.Text = triggerbotSupported ? "Available" : "Unavailable on 1.8.9 (cooldown-era PvP only)";
         ReachAvailabilityText.Text = reachSupported ? "Available" : "Unavailable on current bridge";
         VelocityAvailabilityText.Text = velocitySupported ? "Available" : "Unavailable on current bridge";
+        AutoTotemAvailabilityText.Text = autoTotemSupported ? "Available" : "Unavailable on current bridge";
         GtbHelperAvailabilityText.Text = gtbSupported
             ? "Hypixel Guess The Build helper using action-bar hints."
             : "Unavailable on current bridge";
@@ -323,6 +326,7 @@ public partial class MainWindow : Window
         KeybindGtbHelperButton.IsEnabled = gtbSupported;
         KeybindReachButton.IsEnabled = reachSupported;
         KeybindVelocityButton.IsEnabled = velocitySupported;
+        KeybindAutoTotemButton.IsEnabled = autoTotemSupported;
         KeybindPanicButton.IsEnabled = true;
         ReloadMappingsButton.IsEnabled = reloadMappingsSupported;
         ReloadMappingsAvailabilityText.Text = reloadMappingsSupported

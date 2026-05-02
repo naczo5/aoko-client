@@ -459,6 +459,7 @@
                                     <Button x:Name="KeybindClosestPlayerButton" Tag="closestplayer" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
                                     <Button x:Name="KeybindReachButton" Tag="reach" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
                                     <Button x:Name="KeybindVelocityButton" Tag="velocity" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
+                                    <Button x:Name="KeybindAutoTotemButton" Tag="autototem" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
                                     <Button x:Name="KeybindPanicButton" Tag="panic" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
                                 </WrapPanel>
                             </StackPanel>
@@ -502,7 +503,7 @@
                             </StackPanel>
                         </Border>
 
-                        <Border x:Name="VelocityCard" Style="{StaticResource ControlCardStyle}">
+                        <Border x:Name="VelocityCard" Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
                             <StackPanel>
                                 <TextBlock Text="Velocity" Foreground="{DynamicResource TextBrush}" FontSize="16" FontWeight="Bold" Margin="0,0,0,10" />
                                 <TextBlock x:Name="VelocityAvailabilityText" Text="Available" Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,0,0,8"/>
@@ -535,6 +536,68 @@
                                 <Slider Minimum="1" Maximum="100" TickFrequency="1" IsSnapToTickEnabled="True"
                                         Value="{Binding VelocityChance, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                         Style="{StaticResource DarkSlider}"/>
+                            </StackPanel>
+                        </Border>
+
+                        <Border x:Name="AutoTotemCard" Style="{StaticResource ControlCardStyle}">
+                            <StackPanel>
+                                <TextBlock Text="AutoTotem" Foreground="{DynamicResource TextBrush}" FontSize="16" FontWeight="Bold" Margin="0,0,0,10" />
+                                <TextBlock x:Name="AutoTotemAvailabilityText" Text="Available" Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,0,0,8"/>
+                                <CheckBox Content="Enable AutoTotem" IsChecked="{Binding AutoTotemEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+
+                                <DockPanel Margin="0,10,0,0">
+                                    <TextBlock Text="Mode" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left" />
+                                </DockPanel>
+                                <ComboBox SelectedIndex="{Binding AutoTotemMode, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" 
+                                          Style="{StaticResource DarkComboBox}"
+                                          Height="28" Margin="0,2,0,0">
+                                    <ComboBoxItem Content="Smart (health + elytra)"/>
+                                    <ComboBoxItem Content="Strict (always hold)"/>
+                                </ComboBox>
+
+                                <DockPanel Margin="0,8,0,0">
+                                    <TextBlock Text="Health Threshold" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left" />
+                                    <TextBlock Text="{Binding AutoTotemHealth}" Foreground="{DynamicResource DimTextBrush}" FontSize="12" HorizontalAlignment="Right" DockPanel.Dock="Right" />
+                                </DockPanel>
+                                <Slider Minimum="0" Maximum="36" TickFrequency="1" IsSnapToTickEnabled="True"
+                                        Value="{Binding AutoTotemHealth, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                        Style="{StaticResource DarkSlider}"/>
+
+                                <DockPanel Margin="0,8,0,0">
+                                    <TextBlock Text="Delay (ticks)" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left" />
+                                    <TextBlock Text="{Binding AutoTotemDelay}" Foreground="{DynamicResource DimTextBrush}" FontSize="12" HorizontalAlignment="Right" DockPanel.Dock="Right" />
+                                </DockPanel>
+                                <Slider Minimum="0" Maximum="20" TickFrequency="1" IsSnapToTickEnabled="True"
+                                        Value="{Binding AutoTotemDelay, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                        Style="{StaticResource DarkSlider}"/>
+
+                                <CheckBox Content="Elytra" IsChecked="{Binding AutoTotemElytra, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}" Margin="0,8,0,0"/>
+
+                                <DockPanel Margin="0,10,0,0">
+                                    <TextBlock Text="Behavior" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left" />
+                                </DockPanel>
+                                <ComboBox SelectedIndex="{Binding AutoTotemBehaviorMode, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                          Style="{StaticResource DarkComboBox}"
+                                          Height="28" Margin="0,2,0,0">
+                                    <ComboBoxItem Content="Ghost (inventory only)"/>
+                                    <ComboBoxItem Content="Anarchy (may flag on servers)"/>
+                                </ComboBox>
+                                <TextBlock Text="Anarchy works without opening inventory but may trigger anticheat flags on servers with GrimAC or Matrix."
+                                           Foreground="#FFA500"
+                                           FontSize="11"
+                                           TextWrapping="Wrap"
+                                           Margin="0,4,0,0">
+                                    <TextBlock.Style>
+                                        <Style TargetType="TextBlock">
+                                            <Setter Property="Visibility" Value="Collapsed"/>
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding AutoTotemBehaviorMode}" Value="1">
+                                                    <Setter Property="Visibility" Value="Visible"/>
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </TextBlock.Style>
+                                </TextBlock>
                             </StackPanel>
                         </Border>
                     </StackPanel>
