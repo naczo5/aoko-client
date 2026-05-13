@@ -46,6 +46,10 @@
 #include "imgui_impl_opengl3.h"
 #include "json_config_reader.h"
 #include "bridge_capabilities.h"
+#include "jni_core/scoped_env.h"
+#include "jni_core/local_frame.h"
+#include "jni_core/resolver.h"
+#include "jni_core/helper_bridge.h"
 
 // MinGW's <GL/gl.h> may not declare modern GL enums used with glGetIntegerv.
 #ifndef GL_CURRENT_PROGRAM
@@ -3415,34 +3419,125 @@ static void UpdatePlayerListOverlay(JNIEnv* env) {
         return a.dist < b.dist;
     });
 
-    // 2. Process heavy JNI only on nearest N (config-driven)
+    // 2. Process heavy JNI only on nearest N (config-driven).
+    // Fast path: use HelperBridge to pack all entity data in one JNI call.
     int processedCount = 0;
-    for (auto& lw : lwList) {
-        if (processedCount < maxPlayersToProcess) {
-            std::string name = GetStablePlayerName(env, lw.obj);
-            if (name.empty()) {
-                char fallback[24];
-                snprintf(fallback, sizeof(fallback), "Player_%d", processedCount + 1);
-                name = fallback;
-            }
-            if (LooksLikeFakePlayerLine(name)) {
-                env->DeleteLocalRef(lw.obj);
-                continue;
-            }
+    bool usedHelper = false;
 
-            double hp = 20.0;
-            if (g_getHealth_121) {
-                hp = env->CallFloatMethod(lw.obj, g_getHealth_121);
-                if (env->ExceptionCheck()) { env->ExceptionClear(); hp = 20.0; }
-            }
-            
-            int armor = GetEntityArmor(env, lw.obj);
-            std::string held = GetHeldItemInfo(env, lw.obj);
+    if (HelperBridge::IsLoaded() && !hideVanillaTags) {
+        // Build a java.util.List view from lwList objects for the helper.
+        // We pass listObj directly (already the world players list) and let the
+        // helper iterate it; selfObj is passed so the helper skips the local player.
+        // Reflection handles: use global refs cached during discovery.
+        // fPosVec / vec fields: g_entityPosField_121 / g_vec3dX_121 etc. are jfieldIDs,
+        // not reflect.Field objects — pass nullptr and let the helper use getX/Y/Z methods.
+        // mGetX/Y/Z / mGetHealth: wrap jmethodID as reflect.Method via ToReflectedMethod.
+        // To avoid the ToReflectedMethod overhead every call, cache the reflect.Method globals.
+        static jobject s_reflGetX = nullptr, s_reflGetY = nullptr, s_reflGetZ = nullptr;
+        static jobject s_reflGetHealth = nullptr, s_reflGetName = nullptr;
 
-            localList.emplace_back(PlayerData121{name, lw.dist, lw.x, lw.y, lw.z, hp, armor, held});
-            processedCount++;
+        if (!s_reflGetX && g_getX_121 && g_mcInstance) {
+            // Resolve the entity class to get ToReflectedMethod
+            jclass entCls = nullptr;
+            if (g_mcInstance) {
+                jobject plObj = g_playerField_121 ? env->GetObjectField(g_mcInstance, g_playerField_121) : nullptr;
+                if (plObj) { entCls = env->GetObjectClass(plObj); env->DeleteLocalRef(plObj); }
+            }
+            if (entCls) {
+                jobject r = env->ToReflectedMethod(entCls, g_getX_121, JNI_FALSE);
+                if (!env->ExceptionCheck() && r) s_reflGetX = env->NewGlobalRef(r);
+                else env->ExceptionClear();
+                if (r) env->DeleteLocalRef(r);
+
+                r = env->ToReflectedMethod(entCls, g_getY_121, JNI_FALSE);
+                if (!env->ExceptionCheck() && r) s_reflGetY = env->NewGlobalRef(r);
+                else env->ExceptionClear();
+                if (r) env->DeleteLocalRef(r);
+
+                r = env->ToReflectedMethod(entCls, g_getZ_121, JNI_FALSE);
+                if (!env->ExceptionCheck() && r) s_reflGetZ = env->NewGlobalRef(r);
+                else env->ExceptionClear();
+                if (r) env->DeleteLocalRef(r);
+
+                if (g_getHealth_121) {
+                    r = env->ToReflectedMethod(entCls, g_getHealth_121, JNI_FALSE);
+                    if (!env->ExceptionCheck() && r) s_reflGetHealth = env->NewGlobalRef(r);
+                    else env->ExceptionClear();
+                    if (r) env->DeleteLocalRef(r);
+                }
+                env->DeleteLocalRef(entCls);
+            }
         }
-        env->DeleteLocalRef(lw.obj);
+
+        if (s_reflGetX && s_reflGetY && s_reflGetZ) {
+            HelperBridge::EntityFrame frame;
+            int n = HelperBridge::CollectEntities(
+                env, listObj, selfObj,
+                nullptr,       // fPosVec (use method path)
+                nullptr, nullptr, nullptr,  // fVecX/Y/Z
+                s_reflGetX, s_reflGetY, s_reflGetZ,
+                s_reflGetHealth, s_reflGetName,
+                frame);
+
+            if (n >= 0) {
+                usedHelper = true;
+                // Merge helper results with lwList distance data
+                // (helper iterates in list order; lwList is sorted by distance)
+                // Build a name→snapshot map for O(1) lookup
+                std::unordered_map<std::string, const HelperBridge::EntitySnapshot*> snapMap;
+                for (auto& snap : frame.entities) {
+                    if (!snap.name.empty()) snapMap[snap.name] = &snap;
+                }
+
+                for (auto& lw : lwList) {
+                    if (processedCount >= maxPlayersToProcess) { env->DeleteLocalRef(lw.obj); continue; }
+                    // Get name via stable helper (still one JNI call per entity for name only)
+                    std::string name = GetStablePlayerName(env, lw.obj);
+                    env->DeleteLocalRef(lw.obj);
+                    if (name.empty() || LooksLikeFakePlayerLine(name)) continue;
+
+                    float hp = 20.0f;
+                    auto it = snapMap.find(name);
+                    if (it != snapMap.end()) hp = it->second->health;
+
+                    int armor = GetEntityArmor(env, nullptr); // skip armor in fast path
+                    std::string held;
+                    localList.emplace_back(PlayerData121{name, lw.dist, lw.x, lw.y, lw.z, hp, armor, held});
+                    processedCount++;
+                }
+            }
+        }
+    }
+
+    if (!usedHelper) {
+        // Slow path: original per-entity JNI calls
+        for (auto& lw : lwList) {
+            if (processedCount < maxPlayersToProcess) {
+                std::string name = GetStablePlayerName(env, lw.obj);
+                if (name.empty()) {
+                    char fallback[24];
+                    snprintf(fallback, sizeof(fallback), "Player_%d", processedCount + 1);
+                    name = fallback;
+                }
+                if (LooksLikeFakePlayerLine(name)) {
+                    env->DeleteLocalRef(lw.obj);
+                    continue;
+                }
+
+                double hp = 20.0;
+                if (g_getHealth_121) {
+                    hp = env->CallFloatMethod(lw.obj, g_getHealth_121);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); hp = 20.0; }
+                }
+
+                int armor = GetEntityArmor(env, lw.obj);
+                std::string held = GetHeldItemInfo(env, lw.obj);
+
+                localList.emplace_back(PlayerData121{name, lw.dist, lw.x, lw.y, lw.z, hp, armor, held});
+                processedCount++;
+            }
+            env->DeleteLocalRef(lw.obj);
+        }
     }
 
     // Clean up local references exactly once.
@@ -4034,10 +4129,18 @@ static bool ReadBlockPosCoords(JNIEnv* env, jobject bp, double& outX, double& ou
 
 static void UpdateChestList(JNIEnv* env) {
     DWORD now = GetTickCount();
-    if (now - g_lastChestScanMs < 100) return; // 0.1s throttle for responsive nearest-chest updates
-    // Skip during world transitions (joining server / loading terrain) to avoid racing
-    // with the render thread tearing down the old world's chunk data.
+    if (now - g_lastChestScanMs < 100) return;
     if (now < g_worldTransitionEndMs) return;
+    // Skip while a container screen is open: the game thread mutates the chunk BE map
+    // as the container opens/closes, causing a race that crashes via IsInstanceOf on
+    // a partially-constructed object.  The log shows BEs jumping to 595-727 exactly
+    // when ContainerScreen / AbstractContainerScreen appears in the screen chain.
+    {
+        std::string sn;
+        { LockGuard lk(g_jniStateMtx); sn = g_jniScreenName; }
+        if (sn.find("ContainerScreen") != std::string::npos ||
+            sn.find("AbstractContainerScreen") != std::string::npos) return;
+    }
     g_lastChestScanMs = now;
     std::vector<ChestData121> localList;
 
@@ -5629,6 +5732,7 @@ static void CleanupJniGlobals(JNIEnv* env) {
 
     DeleteGlobalRefSafe(env, g_cachedLocalPlayer);
     DeleteGlobalRefSafe(env, g_cachedReachAttrInst);
+    HelperBridge::Unload(env);
 }
 
 static void ResetModernJniRuntimeCaches121(JNIEnv* env, const char* reason) {
@@ -7114,36 +7218,47 @@ static void UpdateJniState() {
         }
 
         // ===== breakingBlock (actual mining) =====
+        // Use cached descriptors instead of repeated GetFieldID on every call.
         bool breakingBlock = false;
-        jfieldID imFld = env->GetFieldID(mcCls, "gameMode", "Lnet/minecraft/client/multiplayer/MultiPlayerGameMode;");
-        if (env->ExceptionCheck()) { env->ExceptionClear(); imFld = nullptr; }
-        if (!imFld) {
-            imFld = env->GetFieldID(mcCls, "field_1761", "Lnet/minecraft/class_636;");
-            if (env->ExceptionCheck()) { env->ExceptionClear(); imFld = nullptr; }
-        }
-        if (!imFld) {
-            imFld = env->GetFieldID(mcCls, "field_1761", "Lnet/minecraft/client/multiplayer/MultiPlayerGameMode;");
-            if (env->ExceptionCheck()) { env->ExceptionClear(); imFld = nullptr; }
-        }
-        if (imFld) {
-            jobject imObj = env->GetObjectField(g_mcInstance, imFld);
-            if (imObj && !env->ExceptionCheck()) {
-                jclass imCls = env->GetObjectClass(imObj);
-                if (imCls) {
-                    jfieldID brkFld = env->GetFieldID(imCls, "field_3716", "Z"); // breakingBlock (common Yarn name)
-                    if (env->ExceptionCheck()) { env->ExceptionClear(); brkFld = nullptr; }
-                    if (!brkFld) {
-                        brkFld = env->GetFieldID(imCls, "isDestroying", "Z");
-                        if (env->ExceptionCheck()) { env->ExceptionClear(); brkFld = nullptr; }
+        {
+            static const char* s_gameModeNames[] = { "field_1761", "gameMode", nullptr };
+            static const char* s_gameModeSigs[]  = {
+                "Lnet/minecraft/class_636;",
+                "Lnet/minecraft/client/multiplayer/MultiPlayerGameMode;",
+                nullptr
+            };
+            static jfieldID s_gameModeField = nullptr;
+            if (!s_gameModeField) {
+                for (int ni = 0; s_gameModeNames[ni] && !s_gameModeField; ni++) {
+                    for (int si = 0; s_gameModeSigs[si] && !s_gameModeField; si++) {
+                        s_gameModeField = env->GetFieldID(mcCls, s_gameModeNames[ni], s_gameModeSigs[si]);
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); s_gameModeField = nullptr; }
                     }
-                    if (brkFld) {
-                        breakingBlock = (env->GetBooleanField(imObj, brkFld) == JNI_TRUE);
-                        if (env->ExceptionCheck()) { env->ExceptionClear(); breakingBlock = false; }
-                    }
-                    env->DeleteLocalRef(imCls);
                 }
-                env->DeleteLocalRef(imObj);
-            } else env->ExceptionClear();
+            }
+            if (s_gameModeField) {
+                jobject imObj = env->GetObjectField(g_mcInstance, s_gameModeField);
+                if (imObj && !env->ExceptionCheck()) {
+                    jclass imCls = env->GetObjectClass(imObj);
+                    if (imCls) {
+                        static jfieldID s_brkFld = nullptr;
+                        if (!s_brkFld) {
+                            s_brkFld = env->GetFieldID(imCls, "field_3716", "Z");
+                            if (env->ExceptionCheck()) { env->ExceptionClear(); s_brkFld = nullptr; }
+                            if (!s_brkFld) {
+                                s_brkFld = env->GetFieldID(imCls, "isDestroying", "Z");
+                                if (env->ExceptionCheck()) { env->ExceptionClear(); s_brkFld = nullptr; }
+                            }
+                        }
+                        if (s_brkFld) {
+                            breakingBlock = (env->GetBooleanField(imObj, s_brkFld) == JNI_TRUE);
+                            if (env->ExceptionCheck()) { env->ExceptionClear(); breakingBlock = false; }
+                        }
+                        env->DeleteLocalRef(imCls);
+                    }
+                    env->DeleteLocalRef(imObj);
+                } else env->ExceptionClear();
+            }
         }
 
         // Fallback: if we can't read the internal breaking flag, derive it from input + target.

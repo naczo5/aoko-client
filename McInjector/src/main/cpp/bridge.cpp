@@ -16,6 +16,10 @@
 #include <unordered_map>
 #include "json_config_reader.h"
 #include "bridge_capabilities.h"
+#include "jni_core/scoped_env.h"
+#include "jni_core/local_frame.h"
+#include "jni_core/matrix_reader.h"
+#include "jni_core/helper_bridge.h"
 // Custom Mutex for MinGW win32 threads
 class Mutex {
     CRITICAL_SECTION cs;
@@ -46,7 +50,12 @@ public:
 // ===================== GLOBALS =====================
 JavaVM* g_jvm = nullptr;
 bool g_running = true;
-static Mutex g_jniMutex; // prevents concurrent JNI between Client thread (SwapBuffers) and LegoBridge thread
+static Mutex g_jniMutex; // kept for WndProc reach path (non-render thread)
+// Per-subsystem JNI locks (finer-grained than the old single g_jniMutex).
+// Render thread (SwapBuffers) holds g_renderJniMutex; LegoBridge thread holds
+// g_stateJniMutex.  They never contend with each other.
+static Mutex g_renderJniMutex;  // nametags / chest ESP / closest-player (render thread)
+static Mutex g_stateJniMutex;   // ReadGameState / reach / velocity (LegoBridge thread)
 SOCKET g_serverSocket = INVALID_SOCKET;
 SOCKET g_clientSocket = INVALID_SOCKET;
 static volatile LONG g_heavyDiscoveryInProgress = 0;
@@ -3289,16 +3298,23 @@ static void UpdateReach(JNIEnv* env, const Config& cfg, const GameState& state, 
 
 GameState ReadGameState(JNIEnv* env) {
     GameState s = {};
-    MaybeRefreshMappings(env);
+    static DWORD nextRefreshAt = 0;
+    DWORD now = GetTickCount();
+    if (now >= nextRefreshAt || !g_mapped) {
+        MaybeRefreshMappings(env);
+        nextRefreshAt = now + 2000;
+    }
     s.mapped = g_mapped;
     if (!g_mapped || !g_mcInstance) return s;
 
     TryResolveWorldMappings(env);
 
     bool gtbHelperEnabled = false;
+    bool shouldCheckHoldingBlock = false;
     {
         LockGuard lk(g_configMutex);
         gtbHelperEnabled = g_config.gtbHelper;
+        shouldCheckHoldingBlock = g_config.rightClick && g_config.rightBlockOnly;
     }
     TryResolveRenderMappings(env, gtbHelperEnabled);
     TryResolveHoldingBlockMappings(env);
@@ -3338,7 +3354,7 @@ GameState ReadGameState(JNIEnv* env) {
             
             // Check current item
             s.holdingBlock = false;
-            if (g_inventoryField) {
+            if (shouldCheckHoldingBlock && g_inventoryField) {
                 jobject inventory = env->GetObjectField(player, g_inventoryField);
                 if (inventory) {
                     if (!g_getCurrentItemMethod) {
@@ -4745,24 +4761,11 @@ bool WorldToScreen(LegoVec3 pos, LegoVec3 cam, float yaw, float pitch, float fov
     return true;
 }
 
+// ScopedJNIEnv replaced by JniEnv::Get() from jni_core/scoped_env.h.
+// Kept as a thin wrapper so existing call sites compile unchanged.
 struct ScopedJNIEnv {
     JNIEnv* env;
-    bool attached;
-    JavaVM* jvm;
-
-    ScopedJNIEnv(JavaVM* vm) : jvm(vm), env(nullptr), attached(false) {
-        if (vm->GetEnv((void**)&env, JNI_VERSION_1_8) != JNI_OK) {
-            vm->AttachCurrentThread((void**)&env, nullptr);
-            attached = true;
-        }
-    }
-
-    ~ScopedJNIEnv() {
-        if (attached && jvm) {
-            jvm->DetachCurrentThread();
-        }
-    }
-
+    explicit ScopedJNIEnv(JavaVM* vm) : env(JniEnv::Get(vm)) {}
     operator JNIEnv*() const { return env; }
     JNIEnv* operator->() const { return env; }
 };
@@ -4822,17 +4825,12 @@ Matrix4x4 GetMatrix(JNIEnv* env, jfieldID field) {
     jobject floatBuffer = env->GetStaticObjectField(g_activeRenderInfoClass, field);
     if (!floatBuffer) return m;
 
-    // Revert to safe path to prevent crashes/garbage data
-    if (g_floatBufferGet) {
-        for (int i = 0; i < 16; i++) {
-            m.m[i] = env->CallFloatMethod(floatBuffer, g_floatBufferGet, i);
-            if (env->ExceptionCheck()) {
-                env->ExceptionClear();
-                env->DeleteLocalRef(floatBuffer);
-                Matrix4x4 zero = {0};
-                return zero;
-            }
-        }
+    // Fast path: direct buffer address or array region copy (1 JNI call or memcpy).
+    // Falls back to CallFloatMethod×16 only if both fast paths fail.
+    if (!ReadFloatBuffer16(env, floatBuffer, m.m, g_floatBufferGet)) {
+        env->DeleteLocalRef(floatBuffer);
+        Matrix4x4 zero = {0};
+        return zero;
     }
     
     env->DeleteLocalRef(floatBuffer);
@@ -6468,22 +6466,13 @@ LRESULT CALLBACK HookedWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
                 stateSnapshot = g_gameState;
             }
 
-            JNIEnv* env = nullptr;
-            bool attached = false;
-            if (g_jvm && g_jvm->GetEnv((void**)&env, JNI_VERSION_1_8) != JNI_OK) {
-                if (g_jvm->AttachCurrentThread((void**)&env, nullptr) == JNI_OK) {
-                    attached = true;
-                } else {
-                    env = nullptr;
-                }
-            }
+            JNIEnv* env = JniEnv::Get(g_jvm);
             if (env) {
                 TryLockGuard jniTry(g_jniMutex);
                 if (jniTry.owns_lock()) {
                     UpdateReach(env, cfgSnapshot, stateSnapshot, true);
                 }
             }
-            if (attached && g_jvm) g_jvm->DetachCurrentThread();
         }
     }
 
@@ -6594,7 +6583,7 @@ BOOL WINAPI HookedSwapBuffers(HDC hdc) {
             GameState state;
             { LockGuard lk(g_stateMutex); state = g_gameState; }
             if (!ShouldHideWorldRenderModules(state)) {
-                TryLockGuard jniTry(g_jniMutex);
+                TryLockGuard jniTry(g_renderJniMutex);
                 if (jniTry.owns_lock()) {
                     RenderNametags(w, h);
                     RenderClosestPlayerInfo(w, h);
@@ -6603,7 +6592,7 @@ BOOL WINAPI HookedSwapBuffers(HDC hdc) {
                     static DWORD nextJniBusyLogAt = 0;
                     DWORD now = GetTickCount();
                     if (now >= nextJniBusyLogAt) {
-                        nextJniBusyLogAt = now + 3000;
+                        nextJniBusyLogAt = now + 15000;
                         bool heavy = (InterlockedCompareExchange(&g_heavyDiscoveryInProgress, 0, 0) != 0);
                         Log(std::string("Skipped world overlay frame: JNI busy")
                             + (heavy ? " (heavy discovery active)" : ""));
@@ -6908,7 +6897,7 @@ void ServerLoop() {
             // ALWAYS Read Game State to update global state (for block detection etc.)
             GameState state;
             {
-                LockGuard jniLk(g_jniMutex);
+                LockGuard jniLk(g_stateJniMutex);
                 state = ReadGameState(env);
                 if (cfgSnapshot.reachEnabled || g_reachAllowCurrentClick || g_reachClickPrevDown) {
                     UpdateReach(env, cfgSnapshot, state);
@@ -6921,7 +6910,7 @@ void ServerLoop() {
                 g_reachAllowCurrentClick = false;
                 g_reachCurrentClickRange = 3.0;
                 if (g_reachCurrentTarget) {
-                    LockGuard jniLk(g_jniMutex);
+                    LockGuard jniLk(g_stateJniMutex);
                     env->DeleteGlobalRef(g_reachCurrentTarget);
                     g_reachCurrentTarget = nullptr;
                 }
@@ -6973,7 +6962,9 @@ void ServerLoop() {
             }
             
             // Keep telemetry responsive without pegging CPU.
-            Sleep(needEntityTelemetry ? 6 : 12);
+            // 14ms (~71 Hz) avoids JNI mutex contention with the render thread
+            // while staying well within the 220ms aim-assist freshness window.
+            Sleep(14);
 
 
 
@@ -7048,6 +7039,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved) {
         CreateThread(nullptr, 0, MainThread, nullptr, 0, nullptr);
     } else if (reason == DLL_PROCESS_DETACH) {
         UnloadMinecraftiaPrivateFont();
+        HelperBridge::Unload(JniEnv::Get(g_jvm));
         Log("DLL_PROCESS_DETACH");
     }
     return TRUE;
