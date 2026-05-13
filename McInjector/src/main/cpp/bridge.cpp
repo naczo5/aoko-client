@@ -50,10 +50,10 @@ public:
 // ===================== GLOBALS =====================
 JavaVM* g_jvm = nullptr;
 bool g_running = true;
-static Mutex g_jniMutex; // kept for WndProc reach path (non-render thread)
-// Per-subsystem JNI locks (finer-grained than the old single g_jniMutex).
+// Per-subsystem JNI locks (finer-grained than the old single JNI lock).
 // Render thread (SwapBuffers) holds g_renderJniMutex; LegoBridge thread holds
-// g_stateJniMutex.  They never contend with each other.
+// g_stateJniMutex.  Reach state is shared by the LegoBridge thread and WndProc,
+// so both reach paths serialize on g_stateJniMutex.
 static Mutex g_renderJniMutex;  // nametags / chest ESP / closest-player (render thread)
 static Mutex g_stateJniMutex;   // ReadGameState / reach / velocity (LegoBridge thread)
 SOCKET g_serverSocket = INVALID_SOCKET;
@@ -3563,6 +3563,15 @@ GameState ReadGameState(JNIEnv* env) {
 extern "C" __declspec(dllexport) void Detach() {
     Log("Detach requested");
     g_running = false;
+
+    if (g_clientSocket != INVALID_SOCKET) {
+        closesocket(g_clientSocket);
+        g_clientSocket = INVALID_SOCKET;
+    }
+    if (g_serverSocket != INVALID_SOCKET) {
+        closesocket(g_serverSocket);
+        g_serverSocket = INVALID_SOCKET;
+    }
     
     // Restore WndProc
     if (g_wndProcHookedHwnd && g_origWndProc) {
@@ -6468,7 +6477,7 @@ LRESULT CALLBACK HookedWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
 
             JNIEnv* env = JniEnv::Get(g_jvm);
             if (env) {
-                TryLockGuard jniTry(g_jniMutex);
+                TryLockGuard jniTry(g_stateJniMutex);
                 if (jniTry.owns_lock()) {
                     UpdateReach(env, cfgSnapshot, stateSnapshot, true);
                 }
@@ -7002,6 +7011,10 @@ void ServerLoop() {
         closesocket(g_clientSocket); g_clientSocket = INVALID_SOCKET;
         Log("Client disconnected");
     }
+    {
+        LockGuard jniLk(g_stateJniMutex);
+        HelperBridge::Unload(env);
+    }
     g_jvm->DetachCurrentThread();
     closesocket(g_serverSocket); WSACleanup();
 }
@@ -7039,7 +7052,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved) {
         CreateThread(nullptr, 0, MainThread, nullptr, 0, nullptr);
     } else if (reason == DLL_PROCESS_DETACH) {
         UnloadMinecraftiaPrivateFont();
-        HelperBridge::Unload(JniEnv::Get(g_jvm));
         Log("DLL_PROCESS_DETACH");
     }
     return TRUE;

@@ -38,6 +38,7 @@ generate_analysis.py
 !/build_release.bat
 !/build_bridge.bat
 !/McInjector/build.bat
+!/McInjector/build_261.bat
 !/McInjector/build_121.bat
 *.md
 !README.md
