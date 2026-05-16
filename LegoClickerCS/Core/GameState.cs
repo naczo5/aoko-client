@@ -61,6 +61,9 @@ public class GameState
     [JsonPropertyName("posZ")]
     public double PosZ { get; set; }
 
+    [JsonPropertyName("pitch")]
+    public float Pitch { get; set; }
+
     [JsonPropertyName("entities")]
     public List<EntityInfo> Entities { get; set; } = new();
 

@@ -15,6 +15,7 @@ LegoClicker is a Windows utility client for Lunar Client.
 - Autoclicker (left/right, CPS range, jitter, block-only options)
 - Aim Assist
 - Triggerbot
+- SpeedBridge (edge sneak assist with safety gates)
 - Reach and Velocity controls
 - AutoTotem (fall/explosion detection, Ghost and Anarchy modes)
 - GTB Helper
@@ -44,7 +45,7 @@ LegoClicker is a Windows utility client for Lunar Client.
 3. Click **Inject**.
 4. Use the external GUI (bind keys under the Keybinds tab).
 
-_If you are playing on 1.8.9, it is recommended to inject while in a world/server, to ensure all features work correctly_
+1.8.9 supports menu/lobby injection. Some JNI mappings are completed lazily after a world is joined, so modules may become available once the bridge sees in-world state.
 
 ## Build
 
@@ -75,7 +76,7 @@ Run from repository root unless noted.
 ## Notes on versions
 
 - `bridge_261.dll` is the modern bridge used for both 26.1 and 1.21 injection.
-- `bridge.dll` (1.8.9) is supported.
+- `bridge.dll` (1.8.9) is supported and now builds with the shared ImGui/OpenGL backend.
 - Supported runtime bridges are configured through the external GUI.
 - Discord Rich Presence is configured from the external GUI under the Utility tab.
 
@@ -100,12 +101,13 @@ legoclickerC/
 
 - `LegoClickerCS` injects bridge DLL into Lunar and manages settings/UI.
 - Bridge and loader communicate over TCP (`25590`).
-- Bridge renders overlays and reads game state via JNI.
+- Bridge renders overlays through OpenGL/ImGui and reads game state via JNI.
 - Input actions are sent through Win32 `SendInput`.
+- Bridge capabilities gate version-specific modules and controls.
 
 ## Safety constraint used by this project
 
-- Bridge-side logic is intended to be read-only for game state.
+- Bridge-side logic is read-first. Limited ghost-safe JNI writes exist for modules such as Reach, Velocity, and nametag suppression.
 - Do not add direct packet sending or in-game combat method calls.
 
 ## TODO

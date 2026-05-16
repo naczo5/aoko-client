@@ -157,6 +157,11 @@ struct Config {
     float rightMaxCPS    = 14.0f;
     bool  rightBlockOnly = false;
     bool  breakBlocks    = false;
+    bool  speedBridge    = false;
+    bool  speedBridgeBlockOnly = true;
+    int   speedBridgeDelayMs = 85;
+    bool  speedBridgeHoldingShiftOnly = true;
+    bool  speedBridgeLookingDownOnly = true;
     bool  gtbHelper      = false;
     int   gtbCount       = 0;
     std::string gtbHint;
@@ -194,6 +199,12 @@ static void SendCmd(const char* action) {
 static void SendCmdFloat(const char* action, float val) {
     char buf[128];
     snprintf(buf, sizeof(buf), "{\"type\":\"cmd\",\"action\":\"%s\",\"value\":%.2f}\n", action, val);
+    LockGuard lk(g_cmdMutex);
+    g_pendingCmds.push_back(buf);
+}
+static void SendCmdInt(const char* action, int val) {
+    char buf[128];
+    snprintf(buf, sizeof(buf), "{\"type\":\"cmd\",\"action\":\"%s\",\"value\":%d}\n", action, val);
     LockGuard lk(g_cmdMutex);
     g_pendingCmds.push_back(buf);
 }
@@ -236,6 +247,11 @@ static void ParseConfig(const std::string& line) {
     g_config.guiTheme = guiThemeRaw.empty() ? "Default" : guiThemeRaw;
     g_config.rightBlockOnly= reader.GetBool("rightBlock");
     g_config.breakBlocks   = reader.GetBool("breakBlocks");
+    g_config.speedBridge   = reader.GetBool("speedBridge");
+    g_config.speedBridgeBlockOnly = reader.GetBool("speedBridgeBlockOnly");
+    g_config.speedBridgeDelayMs = lc::ClampInt(reader.GetInt("speedBridgeDelayMs", g_config.speedBridgeDelayMs), 20, 250);
+    g_config.speedBridgeHoldingShiftOnly = reader.GetBool("speedBridgeHoldingShiftOnly");
+    g_config.speedBridgeLookingDownOnly = reader.GetBool("speedBridgeLookingDownOnly");
     g_config.gtbHelper     = reader.GetBool("gtbHelper");
     g_config.gtbHint       = reader.GetString("gtbHint");
     g_config.gtbCount      = reader.GetInt("gtbCount", 0);
@@ -505,6 +521,21 @@ static HWND   g_hwnd     = nullptr;
 static WNDPROC o_WndProc = nullptr;
 static JavaVM* g_jvm     = nullptr;
 
+typedef void* (*PFN_glfwGetCurrentContext)();
+typedef void  (*PFN_glfwSetInputMode)(void* window, int mode, int value);
+typedef int   (*PFN_glfwGetInputMode)(void* window, int mode);
+typedef int   (*PFN_glfwGetKey)(void* window, int key);
+static PFN_glfwGetCurrentContext glfwGetCurrentContext_fn = nullptr;
+static PFN_glfwSetInputMode      glfwSetInputMode_fn     = nullptr;
+static PFN_glfwGetInputMode      glfwGetInputMode_fn     = nullptr;
+static PFN_glfwGetKey            glfwGetKey_fn           = nullptr;
+
+#define GLFW_CURSOR            0x00033001
+#define GLFW_CURSOR_NORMAL     0x00034001
+#define GLFW_CURSOR_DISABLED   0x00034003
+#define GLFW_RAW_MOUSE_MOTION  0x00033005
+#define GLFW_PRESS             1
+
 // Cached game ClassLoader (global ref) used for safe class loads.
 static jobject g_gameClassLoader = nullptr;
 
@@ -564,6 +595,23 @@ static jfieldID g_hurtTimeField_121 = nullptr;
 static jmethodID g_vec3dCtor_121 = nullptr;
 static int g_lastHurtTime_121 = 0;
 static bool g_loggedVelocityResolveFail_121 = false;
+
+// ===================== SPEEDBRIDGE MODULE JNI GLOBALS =====================
+static jfieldID  g_speedBridgeSneakKeyField_121 = nullptr;
+static jmethodID g_speedBridgeKeySetPressed_121 = nullptr;
+static jmethodID g_speedBridgeKeyIsPressed_121 = nullptr;
+static jmethodID g_speedBridgeKeyGetBoundKey_121 = nullptr;
+static jmethodID g_speedBridgeInputKeyGetCode_121 = nullptr;
+static jmethodID g_speedBridgeBlockPosCtor_121 = nullptr;
+static jmethodID g_speedBridgeWorldGetBlockState_121 = nullptr;
+static jmethodID g_speedBridgeBlockStateIsAir_121 = nullptr;
+static bool g_speedBridgeManagingSneak_121 = false;
+static bool g_speedBridgeHaveLastPos_121 = false;
+static double g_speedBridgeLastPosX_121 = 0.0;
+static double g_speedBridgeLastPosZ_121 = 0.0;
+static int g_speedBridgeDirX_121 = 0;
+static int g_speedBridgeDirZ_121 = 0;
+static bool g_loggedSpeedBridgeResolveFail_121 = false;
 
 // ===================== AUTOTOTEM MODULE JNI GLOBALS =====================
 static bool g_autoTotemMethodsResolved = false;
@@ -2384,6 +2432,394 @@ static void UpdateVelocity(JNIEnv* env, const Config& cfg) {
 
     g_lastHurtTime_121 = hurtTime;
     env->DeleteLocalRef(selfObj);
+}
+
+static jobject GetSpeedBridgeSneakKeyBinding(JNIEnv* env) {
+    if (!env || !g_mcInstance || !g_optionsField_121) return nullptr;
+
+    jobject opts = env->GetObjectField(g_mcInstance, g_optionsField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
+    if (!opts) return nullptr;
+
+    if (!g_speedBridgeSneakKeyField_121) {
+        jclass optsCls = env->GetObjectClass(opts);
+        if (optsCls) {
+            const char* names[] = { "sneakKey", "keyShift", "field_1832", nullptr };
+            const char* sigs[] = {
+                "Lnet/minecraft/client/KeyMapping;",
+                "Lnet/minecraft/client/option/KeyBinding;",
+                "Lnet/minecraft/class_304;",
+                nullptr
+            };
+            for (int ni = 0; names[ni] && !g_speedBridgeSneakKeyField_121; ni++) {
+                for (int si = 0; sigs[si] && !g_speedBridgeSneakKeyField_121; si++) {
+                    g_speedBridgeSneakKeyField_121 = env->GetFieldID(optsCls, names[ni], sigs[si]);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_speedBridgeSneakKeyField_121 = nullptr; }
+                }
+            }
+            env->DeleteLocalRef(optsCls);
+        } else if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        }
+    }
+
+    jobject key = nullptr;
+    if (g_speedBridgeSneakKeyField_121) {
+        key = env->GetObjectField(opts, g_speedBridgeSneakKeyField_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); key = nullptr; }
+    }
+    env->DeleteLocalRef(opts);
+    return key;
+}
+
+static void EnsureSpeedBridgeKeyMethods(JNIEnv* env, jobject key) {
+    if (!env || !key) return;
+    if (g_speedBridgeKeySetPressed_121 && g_speedBridgeKeyIsPressed_121 &&
+        g_speedBridgeKeyGetBoundKey_121 && g_speedBridgeInputKeyGetCode_121) return;
+
+    jclass keyCls = env->GetObjectClass(key);
+    if (!keyCls) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return;
+    }
+
+    if (!g_speedBridgeKeySetPressed_121) {
+        const char* names[] = { "setDown", "setPressed", "method_23481", nullptr };
+        for (int i = 0; names[i] && !g_speedBridgeKeySetPressed_121; i++) {
+            g_speedBridgeKeySetPressed_121 = env->GetMethodID(keyCls, names[i], "(Z)V");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_speedBridgeKeySetPressed_121 = nullptr; }
+        }
+    }
+
+    if (!g_speedBridgeKeyIsPressed_121) {
+        const char* names[] = { "isDown", "isPressed", "method_1434", nullptr };
+        for (int i = 0; names[i] && !g_speedBridgeKeyIsPressed_121; i++) {
+            g_speedBridgeKeyIsPressed_121 = env->GetMethodID(keyCls, names[i], "()Z");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_speedBridgeKeyIsPressed_121 = nullptr; }
+        }
+    }
+
+    if (!g_speedBridgeKeyGetBoundKey_121) {
+        const char* names[] = { "getKey", "getBoundKey", "method_1429", nullptr };
+        const char* sigs[] = {
+            "()Lcom/mojang/blaze3d/platform/InputConstants$Key;",
+            "()Lnet/minecraft/client/util/InputUtil$Key;",
+            "()Lnet/minecraft/class_3675$class_306;",
+            nullptr
+        };
+        for (int ni = 0; names[ni] && !g_speedBridgeKeyGetBoundKey_121; ni++) {
+            for (int si = 0; sigs[si] && !g_speedBridgeKeyGetBoundKey_121; si++) {
+                g_speedBridgeKeyGetBoundKey_121 = env->GetMethodID(keyCls, names[ni], sigs[si]);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_speedBridgeKeyGetBoundKey_121 = nullptr; }
+            }
+        }
+    }
+
+    if (g_speedBridgeKeyGetBoundKey_121 && !g_speedBridgeInputKeyGetCode_121) {
+        jobject inputKey = env->CallObjectMethod(key, g_speedBridgeKeyGetBoundKey_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); inputKey = nullptr; }
+        if (inputKey) {
+            jclass inputCls = env->GetObjectClass(inputKey);
+            if (inputCls) {
+                const char* names[] = { "getValue", "getCode", "method_1444", nullptr };
+                for (int i = 0; names[i] && !g_speedBridgeInputKeyGetCode_121; i++) {
+                    g_speedBridgeInputKeyGetCode_121 = env->GetMethodID(inputCls, names[i], "()I");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_speedBridgeInputKeyGetCode_121 = nullptr; }
+                }
+                env->DeleteLocalRef(inputCls);
+            } else if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+            }
+            env->DeleteLocalRef(inputKey);
+        }
+    }
+
+    env->DeleteLocalRef(keyCls);
+}
+
+static int GetSpeedBridgeSneakGlfwKeyCode(JNIEnv* env) {
+    jobject key = GetSpeedBridgeSneakKeyBinding(env);
+    if (!key) return -1;
+
+    EnsureSpeedBridgeKeyMethods(env, key);
+    int code = -1;
+    if (g_speedBridgeKeyGetBoundKey_121 && g_speedBridgeInputKeyGetCode_121) {
+        jobject inputKey = env->CallObjectMethod(key, g_speedBridgeKeyGetBoundKey_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); inputKey = nullptr; }
+        if (inputKey) {
+            code = env->CallIntMethod(inputKey, g_speedBridgeInputKeyGetCode_121);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); code = -1; }
+            env->DeleteLocalRef(inputKey);
+        }
+    }
+
+    env->DeleteLocalRef(key);
+    return code;
+}
+
+static bool IsConfiguredSneakPhysicallyDown121(JNIEnv* env) {
+    int keyCode = GetSpeedBridgeSneakGlfwKeyCode(env);
+    if (keyCode >= 0 && glfwGetCurrentContext_fn && glfwGetKey_fn) {
+        void* win = glfwGetCurrentContext_fn();
+        if (win && glfwGetKey_fn(win, keyCode) == GLFW_PRESS) return true;
+    }
+
+    return (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+}
+
+static bool SetSpeedBridgeSneakKeyState121(JNIEnv* env, bool pressed) {
+    jobject key = GetSpeedBridgeSneakKeyBinding(env);
+    if (!key) return false;
+
+    EnsureSpeedBridgeKeyMethods(env, key);
+    bool ok = false;
+    if (g_speedBridgeKeySetPressed_121) {
+        env->CallVoidMethod(key, g_speedBridgeKeySetPressed_121, pressed ? JNI_TRUE : JNI_FALSE);
+        ok = !env->ExceptionCheck();
+        if (!ok) env->ExceptionClear();
+    }
+
+    env->DeleteLocalRef(key);
+    return ok;
+}
+
+static void SetSpeedBridgeSneak121(JNIEnv* env, bool pressed) {
+    if (SetSpeedBridgeSneakKeyState121(env, pressed)) {
+        g_speedBridgeManagingSneak_121 = true;
+    }
+}
+
+static void ReleaseSpeedBridgeSneak121(JNIEnv* env) {
+    if (!g_speedBridgeManagingSneak_121) return;
+    if (IsConfiguredSneakPhysicallyDown121(env)) {
+        g_speedBridgeManagingSneak_121 = false;
+        return;
+    }
+
+    SetSpeedBridgeSneakKeyState121(env, false);
+    g_speedBridgeManagingSneak_121 = false;
+}
+
+static void ResetSpeedBridgeMovementTracking121() {
+    g_speedBridgeHaveLastPos_121 = false;
+    g_speedBridgeDirX_121 = 0;
+    g_speedBridgeDirZ_121 = 0;
+}
+
+static void UpdateSpeedBridgeDirection121(double posX, double posZ) {
+    if (!g_speedBridgeHaveLastPos_121) {
+        g_speedBridgeHaveLastPos_121 = true;
+        g_speedBridgeLastPosX_121 = posX;
+        g_speedBridgeLastPosZ_121 = posZ;
+        return;
+    }
+
+    double dx = posX - g_speedBridgeLastPosX_121;
+    double dz = posZ - g_speedBridgeLastPosZ_121;
+    g_speedBridgeLastPosX_121 = posX;
+    g_speedBridgeLastPosZ_121 = posZ;
+
+    const double movementEpsilon = 0.0008;
+    double ax = std::abs(dx);
+    double az = std::abs(dz);
+    if (ax < movementEpsilon && az < movementEpsilon) return;
+
+    int dirX = 0;
+    int dirZ = 0;
+    if (ax >= az * 0.65) dirX = (dx > 0.0) ? 1 : -1;
+    if (az >= ax * 0.65) dirZ = (dz > 0.0) ? 1 : -1;
+    g_speedBridgeDirX_121 = dirX;
+    g_speedBridgeDirZ_121 = dirZ;
+}
+
+static double SpeedBridgeSupportProbeDistance121(const Config& cfg) {
+    double t = ((double)cfg.speedBridgeDelayMs - 20.0) / 230.0;
+    if (t < 0.0) t = 0.0;
+    if (t > 1.0) t = 1.0;
+    return 0.31 + (0.14 * t);
+}
+
+static void EnsureSpeedBridgeBlockProbeJni(JNIEnv* env, jobject worldObj, jobject stateObj) {
+    if (!env) return;
+
+    if (!g_blockPosClass_121) {
+        const char* names[] = { "net.minecraft.class_2338", "net.minecraft.core.BlockPos", "net.minecraft.util.math.BlockPos", nullptr };
+        for (int i = 0; names[i] && !g_blockPosClass_121; i++) {
+            jclass c = LoadClassWithLoader(env, g_gameClassLoader, names[i]);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); c = nullptr; }
+            if (c) {
+                g_blockPosClass_121 = (jclass)env->NewGlobalRef(c);
+                env->DeleteLocalRef(c);
+            }
+        }
+    }
+
+    if (g_blockPosClass_121 && !g_speedBridgeBlockPosCtor_121) {
+        g_speedBridgeBlockPosCtor_121 = env->GetMethodID(g_blockPosClass_121, "<init>", "(III)V");
+        if (env->ExceptionCheck()) { env->ExceptionClear(); g_speedBridgeBlockPosCtor_121 = nullptr; }
+    }
+
+    if (worldObj && !g_speedBridgeWorldGetBlockState_121) {
+        jclass worldCls = env->GetObjectClass(worldObj);
+        if (worldCls) {
+            const char* names[] = { "getBlockState", "method_8320", nullptr };
+            const char* sigs[] = {
+                "(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/state/BlockState;",
+                "(Lnet/minecraft/class_2338;)Lnet/minecraft/class_2680;",
+                "(Lnet/minecraft/util/math/BlockPos;)Lnet/minecraft/block/BlockState;",
+                nullptr
+            };
+            for (int ni = 0; names[ni] && !g_speedBridgeWorldGetBlockState_121; ni++) {
+                for (int si = 0; sigs[si] && !g_speedBridgeWorldGetBlockState_121; si++) {
+                    g_speedBridgeWorldGetBlockState_121 = env->GetMethodID(worldCls, names[ni], sigs[si]);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_speedBridgeWorldGetBlockState_121 = nullptr; }
+                }
+            }
+            env->DeleteLocalRef(worldCls);
+        } else if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        }
+    }
+
+    if (stateObj && !g_speedBridgeBlockStateIsAir_121) {
+        jclass stateCls = env->GetObjectClass(stateObj);
+        if (stateCls) {
+            const char* names[] = { "isAir", "method_26215", nullptr };
+            for (int i = 0; names[i] && !g_speedBridgeBlockStateIsAir_121; i++) {
+                g_speedBridgeBlockStateIsAir_121 = env->GetMethodID(stateCls, names[i], "()Z");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_speedBridgeBlockStateIsAir_121 = nullptr; }
+            }
+            env->DeleteLocalRef(stateCls);
+        } else if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        }
+    }
+}
+
+static bool IsSolidBlockAt121(JNIEnv* env, double x, double y, double z) {
+    if (!env || !g_mcInstance || !g_worldField_121) return false;
+
+    jobject world = env->GetObjectField(g_mcInstance, g_worldField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return false; }
+    if (!world) return false;
+
+    EnsureSpeedBridgeBlockProbeJni(env, world, nullptr);
+    if (!g_blockPosClass_121 || !g_speedBridgeBlockPosCtor_121 || !g_speedBridgeWorldGetBlockState_121) {
+        env->DeleteLocalRef(world);
+        if (!g_loggedSpeedBridgeResolveFail_121) {
+            g_loggedSpeedBridgeResolveFail_121 = true;
+            Log(std::string("SpeedBridge JNI unresolved: blockPos=") + (g_blockPosClass_121 ? "1" : "0") +
+                " ctor=" + (g_speedBridgeBlockPosCtor_121 ? "1" : "0") +
+                " worldGetBlockState=" + (g_speedBridgeWorldGetBlockState_121 ? "1" : "0"));
+        }
+        return false;
+    }
+
+    int bx = (int)std::floor(x);
+    int by = (int)std::floor(y);
+    int bz = (int)std::floor(z);
+    jobject pos = env->NewObject(g_blockPosClass_121, g_speedBridgeBlockPosCtor_121, (jint)bx, (jint)by, (jint)bz);
+    if (env->ExceptionCheck() || !pos) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        env->DeleteLocalRef(world);
+        return false;
+    }
+
+    jobject state = env->CallObjectMethod(world, g_speedBridgeWorldGetBlockState_121, pos);
+    env->DeleteLocalRef(pos);
+    env->DeleteLocalRef(world);
+    if (env->ExceptionCheck() || !state) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return false;
+    }
+
+    EnsureSpeedBridgeBlockProbeJni(env, nullptr, state);
+    bool solid = false;
+    if (g_speedBridgeBlockStateIsAir_121) {
+        jboolean isAir = env->CallBooleanMethod(state, g_speedBridgeBlockStateIsAir_121);
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            solid = false;
+        } else {
+            solid = (isAir != JNI_TRUE);
+        }
+    }
+    env->DeleteLocalRef(state);
+    return solid;
+}
+
+static bool IsSpeedBridgeEdgeUnsupported121(JNIEnv* env, const Config& cfg, double posX, double posY, double posZ) {
+    if (g_speedBridgeDirX_121 == 0 && g_speedBridgeDirZ_121 == 0) return false;
+    double probe = SpeedBridgeSupportProbeDistance121(cfg);
+    double sx = posX + (double)g_speedBridgeDirX_121 * probe;
+    double sz = posZ + (double)g_speedBridgeDirZ_121 * probe;
+    double sy = posY - 0.05;
+    return !IsSolidBlockAt121(env, sx, sy, sz);
+}
+
+static void UpdateSpeedBridge(JNIEnv* env, const Config& cfg, bool inWorldNow) {
+    bool guiOpen = false;
+    bool holdingBlock = false;
+    {
+        LockGuard lk(g_jniStateMtx);
+        guiOpen = g_jniGuiOpen;
+        holdingBlock = g_jniHoldingBlock;
+    }
+
+    bool shouldRun = cfg.speedBridge && inWorldNow && !g_ShowMenu && !guiOpen;
+    if (shouldRun && cfg.speedBridgeBlockOnly && !holdingBlock) shouldRun = false;
+    if (shouldRun && cfg.speedBridgeHoldingShiftOnly && !IsConfiguredSneakPhysicallyDown121(env)) shouldRun = false;
+
+    if (!shouldRun || !env || !g_mcInstance) {
+        ResetSpeedBridgeMovementTracking121();
+        ReleaseSpeedBridgeSneak121(env);
+        return;
+    }
+
+    EnsureClosestPlayerCaches(env);
+    if (!g_playerField_121 || !g_worldField_121) {
+        ResetSpeedBridgeMovementTracking121();
+        ReleaseSpeedBridgeSneak121(env);
+        return;
+    }
+
+    jobject selfObj = env->GetObjectField(g_mcInstance, g_playerField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); selfObj = nullptr; }
+    if (!selfObj) {
+        ResetSpeedBridgeMovementTracking121();
+        ReleaseSpeedBridgeSneak121(env);
+        return;
+    }
+
+    EnsureEntityMethods(env, selfObj);
+    if (!g_getX_121 || !g_getY_121 || !g_getZ_121 || !g_getPitch_121) {
+        env->DeleteLocalRef(selfObj);
+        ResetSpeedBridgeMovementTracking121();
+        ReleaseSpeedBridgeSneak121(env);
+        return;
+    }
+
+    double posX = CallDoubleNoArgs(env, selfObj, g_getX_121);
+    double posY = CallDoubleNoArgs(env, selfObj, g_getY_121);
+    double posZ = CallDoubleNoArgs(env, selfObj, g_getZ_121);
+    float pitch = CallFloatNoArgs(env, selfObj, g_getPitch_121);
+    env->DeleteLocalRef(selfObj);
+
+    if (!std::isfinite(posX) || !std::isfinite(posY) || !std::isfinite(posZ) || !std::isfinite(pitch)) {
+        ResetSpeedBridgeMovementTracking121();
+        ReleaseSpeedBridgeSneak121(env);
+        return;
+    }
+
+    if (cfg.speedBridgeLookingDownOnly && pitch < 60.0f) {
+        ResetSpeedBridgeMovementTracking121();
+        ReleaseSpeedBridgeSneak121(env);
+        return;
+    }
+
+    UpdateSpeedBridgeDirection121(posX, posZ);
+    bool shouldSneak = IsSpeedBridgeEdgeUnsupported121(env, cfg, posX, posY, posZ);
+    SetSpeedBridgeSneak121(env, shouldSneak);
 }
 
 // ===================== AUTOTOTEM JNI RESOLUTION =====================
@@ -5598,21 +6034,10 @@ static void UpdateClosestPlayerOverlay(JNIEnv* env) {
 typedef BOOL (WINAPI* TwglSwapBuffers)(HDC);
 static TwglSwapBuffers o_wglSwapBuffers = nullptr;
 
-typedef void* (*PFN_glfwGetCurrentContext)();
-typedef void  (*PFN_glfwSetInputMode)(void* window, int mode, int value);
-typedef int   (*PFN_glfwGetInputMode)(void* window, int mode);
-static PFN_glfwGetCurrentContext glfwGetCurrentContext_fn = nullptr;
-static PFN_glfwSetInputMode      glfwSetInputMode_fn     = nullptr;
-static PFN_glfwGetInputMode      glfwGetInputMode_fn     = nullptr;
 static HMODULE g_hModule121 = nullptr;
 static HANDLE  g_mainThreadHandle = nullptr;
 static HANDLE  g_chestThreadHandle = nullptr;
 static HANDLE  g_fastPollThreadHandle = nullptr;
-
-#define GLFW_CURSOR            0x00033001
-#define GLFW_CURSOR_NORMAL     0x00034001
-#define GLFW_CURSOR_DISABLED   0x00034003
-#define GLFW_RAW_MOUSE_MOTION  0x00033005
 
 // ===================== LOGGER =====================
 static std::string g_logPath = "bridge_261_debug.log";
@@ -5798,6 +6223,18 @@ static void ResetModernJniRuntimeCaches121(JNIEnv* env, const char* reason) {
     g_vec3dCtor_121 = nullptr;
     g_lastHurtTime_121 = 0;
     g_loggedVelocityResolveFail_121 = false;
+
+    g_speedBridgeSneakKeyField_121 = nullptr;
+    g_speedBridgeKeySetPressed_121 = nullptr;
+    g_speedBridgeKeyIsPressed_121 = nullptr;
+    g_speedBridgeKeyGetBoundKey_121 = nullptr;
+    g_speedBridgeInputKeyGetCode_121 = nullptr;
+    g_speedBridgeBlockPosCtor_121 = nullptr;
+    g_speedBridgeWorldGetBlockState_121 = nullptr;
+    g_speedBridgeBlockStateIsAir_121 = nullptr;
+    g_speedBridgeManagingSneak_121 = false;
+    ResetSpeedBridgeMovementTracking121();
+    g_loggedSpeedBridgeResolveFail_121 = false;
 
     // Auto-totem cached hot-path JNI lookups
     ResetAutoTotemCaches(env);
@@ -7750,6 +8187,7 @@ static void RenderClickGUI() {
         ModuleRow("ac",   "AutoClicker",   cfg.armed,      0, "toggleArmed");
         ModuleRow("aa",   "Aim Assist",    cfg.aimAssist,  1, "toggleAimAssist");
         ModuleRow("tb",   "Triggerbot",    cfg.triggerbot, 2, "toggleTriggerbot");
+        ModuleRow("sb",   "SpeedBridge",   cfg.speedBridge, 3, "toggleSpeedBridge");
     } else if (selCategory == 1) {
         // Render
         ModuleRow("ce",  "Chest ESP",      cfg.chestEsp,   0, "toggleChestEsp");
@@ -7826,6 +8264,23 @@ static void RenderClickGUI() {
         bool tb = cfg.triggerbot;
         if (ImGui::Checkbox("Enable Triggerbot", &tb)) SendCmd("toggleTriggerbot");
         ImGui::TextDisabled("Cooldown-based timing (1.9+ combat). Tune in Control Center.");
+
+    } else if (selCategory == 0 && selModule == 3) {
+        bool sb = cfg.speedBridge;
+        if (ImGui::Checkbox("Enable SpeedBridge", &sb)) SendCmd("toggleSpeedBridge");
+
+        int delayMs = cfg.speedBridgeDelayMs;
+        if (ImGui::SliderInt("Safety", &delayMs, 20, 250))
+            SendCmdInt("setSpeedBridgeDelayMs", delayMs);
+
+        bool blockOnly = cfg.speedBridgeBlockOnly;
+        if (ImGui::Checkbox("Block Only", &blockOnly)) SendCmd("toggleSpeedBridgeBlockOnly");
+
+        bool holdSneak = cfg.speedBridgeHoldingShiftOnly;
+        if (ImGui::Checkbox("Hold Sneak Gate", &holdSneak)) SendCmd("toggleSpeedBridgeHoldingShiftOnly");
+
+        bool lookDown = cfg.speedBridgeLookingDownOnly;
+        if (ImGui::Checkbox("Looking Down", &lookDown)) SendCmd("toggleSpeedBridgeLookingDownOnly");
 
     } else if (selCategory == 1 && selModule == 0) {
         ImGui::TextDisabled("No extra settings.");
@@ -8134,6 +8589,8 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
             {
                 LockGuard remapGuard(g_jniRemapMtx);
                 TRACE261_PATH("manual-remap-cycle");
+                ReleaseSpeedBridgeSneak121(env);
+                ResetSpeedBridgeMovementTracking121();
                 ResetModernJniRuntimeCaches121(env, "manual-reload-request");
                 for (int attempt = 0; attempt < 8 && g_running; ++attempt) {
                     if (DiscoverJniMappings(env)) {
@@ -8204,6 +8661,12 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                     s_autoTotemWasEnabled = cfg.autoTotemEnabled;
                 }
 
+                static bool s_speedBridgeWasEnabled = false;
+                if (cfg.speedBridge || s_speedBridgeWasEnabled || g_speedBridgeManagingSneak_121) {
+                    UpdateSpeedBridge(env, cfg, inWorldNow);
+                    s_speedBridgeWasEnabled = cfg.speedBridge;
+                }
+
                 if (cfg.closestPlayer)
                     UpdateClosestPlayerOverlay(env);
                 if (cfg.nametags || cfg.closestPlayer || cfg.aimAssist || cfg.nametagHideVanilla || g_nametagSuppressionActive_121)
@@ -8217,6 +8680,8 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                 if (g_nametagSuppressionActive_121 || !g_modifiedTeamVisibility_121.empty() || !g_lcHideTagsMembers_121.empty()) {
                     ResetNametagSuppressionCaches121(env, "left-world");
                 }
+                ReleaseSpeedBridgeSneak121(env);
+                ResetSpeedBridgeMovementTracking121();
                 { LockGuard lk(g_playerListMutex); g_playerList.clear(); }
                 { LockGuard lk2(g_chestListMutex); g_chestList.clear(); }
                 { LockGuard lk3(g_bgCamMutex); g_bgCamState = BgCamState(); }
@@ -8225,12 +8690,16 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
             if (g_nametagSuppressionActive_121 || !g_modifiedTeamVisibility_121.empty() || !g_lcHideTagsMembers_121.empty()) {
                 ResetNametagSuppressionCaches121(env, "jni-not-ready");
             }
+            ReleaseSpeedBridgeSneak121(env);
+            ResetSpeedBridgeMovementTracking121();
             { LockGuard lk(g_playerListMutex); g_playerList.clear(); }
             { LockGuard lk2(g_chestListMutex); g_chestList.clear(); }
             { LockGuard lk3(g_bgCamMutex); g_bgCamState = BgCamState(); }
         }
         Sleep(cfg.aimAssist ? 5 : 50); // very fast poll for aim assist
     }
+    ReleaseSpeedBridgeSneak121(env);
+    ResetSpeedBridgeMovementTracking121();
     g_jvm->DetachCurrentThread();
     return 0;
 }
@@ -9019,6 +9488,7 @@ BOOL WINAPI hwglSwapBuffers(HDC hDc) {
                 if (cfg.rightClick)    pushMod("Rightclick", overlayTheme.accentTertiary);
                 if (cfg.aimAssist)     pushMod("Aim Assist", overlayTheme.accentPrimary);
                 if (cfg.triggerbot)    pushMod("Triggerbot", overlayTheme.accentSecondary);
+                if (cfg.speedBridge)   pushMod("SpeedBridge", overlayTheme.accentPrimary);
                 if (cfg.chestEsp)      pushMod("Chest ESP", overlayTheme.accentSecondary);
                 if (cfg.nametags)      pushMod("Nametags", overlayTheme.accentPrimary);
                 if (cfg.gtbHelper)     pushMod("GTB Helper", overlayTheme.accentTertiary);
@@ -9178,6 +9648,7 @@ DWORD WINAPI MainThread(LPVOID) {
             glfwGetCurrentContext_fn = (PFN_glfwGetCurrentContext)GetProcAddress(hGlfw, "glfwGetCurrentContext");
             glfwSetInputMode_fn      = (PFN_glfwSetInputMode)     GetProcAddress(hGlfw, "glfwSetInputMode");
             glfwGetInputMode_fn      = (PFN_glfwGetInputMode)     GetProcAddress(hGlfw, "glfwGetInputMode");
+            glfwGetKey_fn            = (PFN_glfwGetKey)           GetProcAddress(hGlfw, "glfwGetKey");
             if (glfwGetCurrentContext_fn && glfwSetInputMode_fn) {
                 Log("GLFW function pointers loaded from: " + std::string(names[i]));
                 goto glfw_done;

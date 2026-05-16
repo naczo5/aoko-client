@@ -263,6 +263,27 @@
                             </StackPanel>
                         </Border>
 
+                        <Border x:Name="SpeedBridgeCard" Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
+                            <StackPanel>
+                                <CheckBox Content="SpeedBridge" IsChecked="{Binding SpeedBridgeEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                <TextBlock x:Name="SpeedBridgeAvailabilityText" Text="Available" Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,6,0,0"/>
+
+                                <DockPanel Margin="0,10,0,0" IsEnabled="{Binding SpeedBridgeEnabled}">
+                                    <TextBlock Text="Safety" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left" />
+                                    <TextBlock Text="{Binding SpeedBridgeDelayMs}" Foreground="{DynamicResource DimTextBrush}" FontSize="12" HorizontalAlignment="Right" DockPanel.Dock="Right" />
+                                </DockPanel>
+                                <Slider Minimum="20" Maximum="250" TickFrequency="1" IsSnapToTickEnabled="True"
+                                        Value="{Binding SpeedBridgeDelayMs, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                        Style="{StaticResource DarkSlider}" IsEnabled="{Binding SpeedBridgeEnabled}"/>
+
+                                <WrapPanel Margin="0,10,0,0" IsEnabled="{Binding SpeedBridgeEnabled}">
+                                    <CheckBox Content="Block only" IsChecked="{Binding SpeedBridgeBlockOnly, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,0,14,6"/>
+                                    <CheckBox Content="Holding sneak only" IsChecked="{Binding SpeedBridgeHoldingShiftOnly, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,0,14,6"/>
+                                    <CheckBox Content="Looking down only" IsChecked="{Binding SpeedBridgeLookingDownOnly, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,0,14,6"/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </Border>
+
                         <Border x:Name="AimAssistCard" Style="{StaticResource ControlCardStyle}">
                             <StackPanel>
                                 <CheckBox Content="Aim Assist" IsChecked="{Binding AimAssistEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
@@ -453,6 +474,7 @@
                                     <Button x:Name="KeybindBreakBlocksButton" Tag="breakblocks" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
                                     <Button x:Name="KeybindAimAssistButton" Tag="aimassist" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
                                     <Button x:Name="KeybindTriggerbotButton" Tag="triggerbot" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
+                                    <Button x:Name="KeybindSpeedBridgeButton" Tag="speedbridge" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
                                     <Button x:Name="KeybindGtbHelperButton" Tag="gtbhelper" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
                                     <Button x:Name="KeybindNametagsButton" Tag="nametags" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
                                     <Button x:Name="KeybindChestEspButton" Tag="chestesp" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>

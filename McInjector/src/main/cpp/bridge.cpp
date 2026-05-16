@@ -14,12 +14,53 @@
 #include <cmath>
 #include <cctype>
 #include <unordered_map>
+#include "gl_loader.h"
+#include "MinHook.h"
+#include "imgui.h"
+#include "imgui_impl_win32.h"
+#include "imgui_impl_opengl3.h"
 #include "json_config_reader.h"
 #include "bridge_capabilities.h"
 #include "jni_core/scoped_env.h"
 #include "jni_core/local_frame.h"
 #include "jni_core/matrix_reader.h"
 #include "jni_core/helper_bridge.h"
+
+// MinGW's <GL/gl.h> may not declare modern GL enums used while preserving
+// Minecraft's render state around ImGui backend initialization.
+#ifndef GL_CURRENT_PROGRAM
+#define GL_CURRENT_PROGRAM 0x8B8D
+#endif
+#ifndef GL_ACTIVE_TEXTURE
+#define GL_ACTIVE_TEXTURE 0x84E0
+#endif
+#ifndef GL_TEXTURE_BINDING_2D
+#define GL_TEXTURE_BINDING_2D 0x8069
+#endif
+#ifndef GL_ARRAY_BUFFER
+#define GL_ARRAY_BUFFER 0x8892
+#endif
+#ifndef GL_ELEMENT_ARRAY_BUFFER
+#define GL_ELEMENT_ARRAY_BUFFER 0x8893
+#endif
+#ifndef GL_ARRAY_BUFFER_BINDING
+#define GL_ARRAY_BUFFER_BINDING 0x8894
+#endif
+#ifndef GL_ELEMENT_ARRAY_BUFFER_BINDING
+#define GL_ELEMENT_ARRAY_BUFFER_BINDING 0x8895
+#endif
+#ifndef GL_VERTEX_ARRAY_BINDING
+#define GL_VERTEX_ARRAY_BINDING 0x85B5
+#endif
+#ifndef GL_PIXEL_UNPACK_BUFFER
+#define GL_PIXEL_UNPACK_BUFFER 0x88EC
+#endif
+#ifndef GL_PIXEL_UNPACK_BUFFER_BINDING
+#define GL_PIXEL_UNPACK_BUFFER_BINDING 0x88EF
+#endif
+
+// Custom extension in our vendored imgui_impl_opengl3.cpp.
+void ImGui_ImplOpenGL3_SetSkipGLDeletes(bool skip);
 // Custom Mutex for MinGW win32 threads
 class Mutex {
     CRITICAL_SECTION cs;
@@ -63,6 +104,15 @@ static volatile LONG g_heavyDiscoveryInProgress = 0;
 // Rendering
 static GLuint g_fontTexture = 0;
 static bool g_glInitialized = false;
+static bool g_imguiPhase1Done = false;
+static bool g_imguiInitialized = false;
+static bool g_imguiGlBackendReady = false;
+static int g_imguiWarmupFrames = 0;
+static HGLRC g_imguiGlrc = nullptr;
+static bool g_imguiPendingBackendReset = false;
+static HGLRC g_imguiPendingGlrc = nullptr;
+static bool g_minhookInitialized = false;
+static HWND g_imguiHwnd = nullptr;
 static bool g_guiOpen = false;
 static WNDPROC g_origWndProc = nullptr;
 static HWND g_gameHwnd = nullptr;
@@ -77,6 +127,11 @@ struct Config {
     bool clickInChests = false;
     bool aimAssist = false;
     bool triggerbot = false;
+    bool speedBridge = false;
+    bool speedBridgeBlockOnly = true;
+    int speedBridgeDelayMs = 85;
+    bool speedBridgeHoldingShiftOnly = true;
+    bool speedBridgeLookingDownOnly = true;
     bool gtbHelper = false;
     bool nametags = false;
     bool closestPlayerInfo = false;
@@ -107,6 +162,7 @@ struct Config {
     bool clicking = false; // Internal state
     // Per-module keybinds (VK codes; 0 = unbound)
     int keybindAutoclicker = 0xC0; // backtick default
+    int keybindSpeedBridge = 0;
     int keybindNametags = 0;
     int keybindClosestPlayer = 0;
     int keybindChestEsp = 0;
@@ -122,6 +178,7 @@ struct GameState {
     std::string actionBar;
     float health = 20.0f;
     double posX = 0, posY = 0, posZ = 0;
+    float pitch = 0.0f;
     bool holdingBlock = false;
     bool lookingAtBlock = false;
     bool lookingAtEntity = false;
@@ -234,10 +291,26 @@ static jmethodID g_listGetMethod = nullptr;
 static jclass g_listClass = nullptr; // java/util/List
 static jfieldID g_gameSettingsField = nullptr;
 static jfieldID g_fovSettingField = nullptr;
+static jfieldID g_keyBindSneakField = nullptr;
+static jclass g_keyBindingClass = nullptr;
+static jmethodID g_keyBindingGetKeyCodeMethod = nullptr;
+static jmethodID g_keyBindingSetKeyBindStateMethod = nullptr;
+static jfieldID g_keyBindingKeyCodeField = nullptr;
+static jfieldID g_keyBindingPressedField = nullptr;
+static jclass g_lwjglKeyboardClass = nullptr;
+static jmethodID g_keyboardIsKeyDownMethod = nullptr;
+static jclass g_lwjglMouseClass = nullptr;
+static jmethodID g_mouseIsButtonDownMethod = nullptr;
 static jfieldID g_tileEntityPosField = nullptr;
+static jclass g_blockPosClass = nullptr;
+static jmethodID g_blockPosIntCtor = nullptr;
 static jmethodID g_blockPosGetX = nullptr;
 static jmethodID g_blockPosGetY = nullptr;
 static jmethodID g_blockPosGetZ = nullptr;
+static jmethodID g_worldGetBlockStateMethod = nullptr;
+static jmethodID g_blockStateGetBlockMethod = nullptr;
+static jmethodID g_blockGetMaterialMethod = nullptr;
+static jmethodID g_materialIsSolidMethod = nullptr;
 static jclass g_tileEntityChestClass = nullptr;
 static jclass g_tileEntityEnderChestClass = nullptr;
 
@@ -285,6 +358,12 @@ static DWORD g_reachClickWindowUntilMs = 0;
 static DWORD g_reachLastRollMs = 0;
 static DWORD g_lastReachDebugLogMs = 0;
 static jobject g_reachCurrentTarget = nullptr;
+static bool g_speedBridgeManagingSneak = false;
+static bool g_speedBridgeHaveLastPos = false;
+static double g_speedBridgeLastPosX = 0.0;
+static double g_speedBridgeLastPosZ = 0.0;
+static int g_speedBridgeDirX = 0;
+static int g_speedBridgeDirZ = 0;
 // NOTE: g_getItemMethod, g_getDisplayNameMethod, g_getUnlocalizedNameMethod,
 // g_getDamageVsEntityMethod are intentionally NOT cached globally — they must
 // be fetched from the actual object's class each call to avoid calling a
@@ -916,6 +995,10 @@ bool DiscoverMappings(JNIEnv* env) {
         if (env->ExceptionCheck()) env->ExceptionClear();
     }
     if (blockPosClass) {
+        if (!g_blockPosClass) g_blockPosClass = (jclass)env->NewGlobalRef(blockPosClass);
+        g_blockPosIntCtor = env->GetMethodID(blockPosClass, "<init>", "(III)V");
+        if (!g_blockPosIntCtor) env->ExceptionClear();
+
         g_blockPosGetX = env->GetMethodID(blockPosClass, "getX", "()I");
         if (!g_blockPosGetX) { env->ExceptionClear(); g_blockPosGetX = env->GetMethodID(blockPosClass, "func_177958_n", "()I"); }
         if (!g_blockPosGetX) env->ExceptionClear();
@@ -950,9 +1033,86 @@ bool DiscoverMappings(JNIEnv* env) {
             g_fovSettingField = env->GetFieldID(gsClass, "fovSetting", "F");
             if (!g_fovSettingField) g_fovSettingField = env->GetFieldID(gsClass, "field_74334_X", "F");
             if (g_fovSettingField) Log("Found fovSetting field");
+            g_keyBindSneakField = env->GetFieldID(gsClass, "keyBindSneak", "Lnet/minecraft/client/settings/KeyBinding;");
+            if (!g_keyBindSneakField) {
+                env->ExceptionClear();
+                g_keyBindSneakField = env->GetFieldID(gsClass, "field_74311_E", "Lnet/minecraft/client/settings/KeyBinding;");
+            }
+            if (!g_keyBindSneakField) env->ExceptionClear();
+            else Log("Found keyBindSneak field");
+
+            if (g_keyBindSneakField) {
+                jobject sneakKey = env->GetObjectField(gs, g_keyBindSneakField);
+                if (sneakKey && !env->ExceptionCheck()) {
+                    jclass kbClass = env->GetObjectClass(sneakKey);
+                    if (kbClass) {
+                        if (!g_keyBindingClass) g_keyBindingClass = (jclass)env->NewGlobalRef(kbClass);
+                        g_keyBindingGetKeyCodeMethod = env->GetMethodID(kbClass, "getKeyCode", "()I");
+                        if (!g_keyBindingGetKeyCodeMethod) {
+                            env->ExceptionClear();
+                            g_keyBindingGetKeyCodeMethod = env->GetMethodID(kbClass, "func_151463_i", "()I");
+                        }
+                        if (!g_keyBindingGetKeyCodeMethod) env->ExceptionClear();
+
+                        g_keyBindingKeyCodeField = env->GetFieldID(kbClass, "keyCode", "I");
+                        if (!g_keyBindingKeyCodeField) {
+                            env->ExceptionClear();
+                            g_keyBindingKeyCodeField = env->GetFieldID(kbClass, "field_74512_d", "I");
+                        }
+                        if (!g_keyBindingKeyCodeField) env->ExceptionClear();
+
+                        g_keyBindingPressedField = env->GetFieldID(kbClass, "pressed", "Z");
+                        if (!g_keyBindingPressedField) {
+                            env->ExceptionClear();
+                            g_keyBindingPressedField = env->GetFieldID(kbClass, "field_74513_e", "Z");
+                        }
+                        if (!g_keyBindingPressedField) env->ExceptionClear();
+
+                        g_keyBindingSetKeyBindStateMethod = env->GetStaticMethodID(kbClass, "setKeyBindState", "(IZ)V");
+                        if (!g_keyBindingSetKeyBindStateMethod) {
+                            env->ExceptionClear();
+                            g_keyBindingSetKeyBindStateMethod = env->GetStaticMethodID(kbClass, "func_74510_a", "(IZ)V");
+                        }
+                        if (!g_keyBindingSetKeyBindStateMethod) env->ExceptionClear();
+
+                        env->DeleteLocalRef(kbClass);
+                    }
+                    env->DeleteLocalRef(sneakKey);
+                } else if (env->ExceptionCheck()) {
+                    env->ExceptionClear();
+                }
+            }
             env->DeleteLocalRef(gsClass);
             env->DeleteLocalRef(gs);
         }
+    }
+
+    jclass keyboardClass = LoadClassWithLoader(env, gcl, "org.lwjgl.input.Keyboard");
+    if (!keyboardClass) {
+        keyboardClass = env->FindClass("org/lwjgl/input/Keyboard");
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+    if (keyboardClass && !env->ExceptionCheck()) {
+        g_lwjglKeyboardClass = (jclass)env->NewGlobalRef(keyboardClass);
+        g_keyboardIsKeyDownMethod = env->GetStaticMethodID(keyboardClass, "isKeyDown", "(I)Z");
+        if (!g_keyboardIsKeyDownMethod) env->ExceptionClear();
+        env->DeleteLocalRef(keyboardClass);
+    } else if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+    }
+
+    jclass mouseClass = LoadClassWithLoader(env, gcl, "org.lwjgl.input.Mouse");
+    if (!mouseClass) {
+        mouseClass = env->FindClass("org/lwjgl/input/Mouse");
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+    if (mouseClass && !env->ExceptionCheck()) {
+        g_lwjglMouseClass = (jclass)env->NewGlobalRef(mouseClass);
+        g_mouseIsButtonDownMethod = env->GetStaticMethodID(mouseClass, "isButtonDown", "(I)Z");
+        if (!g_mouseIsButtonDownMethod) env->ExceptionClear();
+        env->DeleteLocalRef(mouseClass);
+    } else if (env->ExceptionCheck()) {
+        env->ExceptionClear();
     }
 
     // objectMouseOver
@@ -3296,6 +3456,294 @@ static void UpdateReach(JNIEnv* env, const Config& cfg, const GameState& state, 
     env->DeleteLocalRef(player);
 }
 
+static jobject GetSneakKeyBinding(JNIEnv* env) {
+    if (!env || !g_mcInstance || !g_gameSettingsField || !g_keyBindSneakField) return nullptr;
+    jobject gs = env->GetObjectField(g_mcInstance, g_gameSettingsField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
+    if (!gs) return nullptr;
+
+    jobject key = env->GetObjectField(gs, g_keyBindSneakField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); key = nullptr; }
+    env->DeleteLocalRef(gs);
+    return key;
+}
+
+static int GetSneakKeyCode(JNIEnv* env) {
+    jobject key = GetSneakKeyBinding(env);
+    if (!key) return 0;
+
+    int keyCode = 0;
+    if (g_keyBindingGetKeyCodeMethod) {
+        keyCode = env->CallIntMethod(key, g_keyBindingGetKeyCodeMethod);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); keyCode = 0; }
+    } else if (g_keyBindingKeyCodeField) {
+        keyCode = env->GetIntField(key, g_keyBindingKeyCodeField);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); keyCode = 0; }
+    }
+
+    env->DeleteLocalRef(key);
+    return keyCode;
+}
+
+static bool IsConfiguredSneakPhysicallyDown(JNIEnv* env) {
+    int keyCode = GetSneakKeyCode(env);
+    if (keyCode >= 0) {
+        if (!g_lwjglKeyboardClass || !g_keyboardIsKeyDownMethod) return false;
+        jboolean down = env->CallStaticBooleanMethod(g_lwjglKeyboardClass, g_keyboardIsKeyDownMethod, (jint)keyCode);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); return false; }
+        return down == JNI_TRUE;
+    }
+
+    if (!g_lwjglMouseClass || !g_mouseIsButtonDownMethod) return false;
+    int mouseButton = keyCode + 100;
+    if (mouseButton < 0) return false;
+    jboolean down = env->CallStaticBooleanMethod(g_lwjglMouseClass, g_mouseIsButtonDownMethod, (jint)mouseButton);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return false; }
+    return down == JNI_TRUE;
+}
+
+static bool SetSneakKeyBindingState(JNIEnv* env, bool pressed) {
+    if (!env) return false;
+    jobject key = GetSneakKeyBinding(env);
+    if (!key) return false;
+
+    int keyCode = 0;
+    if (g_keyBindingGetKeyCodeMethod) {
+        keyCode = env->CallIntMethod(key, g_keyBindingGetKeyCodeMethod);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); keyCode = 0; }
+    } else if (g_keyBindingKeyCodeField) {
+        keyCode = env->GetIntField(key, g_keyBindingKeyCodeField);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); keyCode = 0; }
+    }
+
+    bool ok = false;
+    if (g_keyBindingClass && g_keyBindingSetKeyBindStateMethod) {
+        env->CallStaticVoidMethod(g_keyBindingClass, g_keyBindingSetKeyBindStateMethod, (jint)keyCode, pressed ? JNI_TRUE : JNI_FALSE);
+        ok = !env->ExceptionCheck();
+        if (!ok) env->ExceptionClear();
+    }
+
+    if (!ok && g_keyBindingPressedField) {
+        env->SetBooleanField(key, g_keyBindingPressedField, pressed ? JNI_TRUE : JNI_FALSE);
+        ok = !env->ExceptionCheck();
+        if (!ok) env->ExceptionClear();
+    }
+
+    env->DeleteLocalRef(key);
+    return ok;
+}
+
+static void SetSpeedBridgeSneak(JNIEnv* env, bool pressed) {
+    if (SetSneakKeyBindingState(env, pressed)) {
+        g_speedBridgeManagingSneak = true;
+    }
+}
+
+static void ReleaseSpeedBridgeSneak(JNIEnv* env) {
+    if (!g_speedBridgeManagingSneak) return;
+    if (IsConfiguredSneakPhysicallyDown(env)) {
+        g_speedBridgeManagingSneak = false;
+        return;
+    }
+
+    SetSneakKeyBindingState(env, false);
+    g_speedBridgeManagingSneak = false;
+}
+
+static void ResetSpeedBridgeMovementTracking() {
+    g_speedBridgeHaveLastPos = false;
+    g_speedBridgeDirX = 0;
+    g_speedBridgeDirZ = 0;
+}
+
+static void UpdateSpeedBridgeDirection(const GameState& state) {
+    if (!g_speedBridgeHaveLastPos) {
+        g_speedBridgeHaveLastPos = true;
+        g_speedBridgeLastPosX = state.posX;
+        g_speedBridgeLastPosZ = state.posZ;
+        return;
+    }
+
+    double dx = state.posX - g_speedBridgeLastPosX;
+    double dz = state.posZ - g_speedBridgeLastPosZ;
+    g_speedBridgeLastPosX = state.posX;
+    g_speedBridgeLastPosZ = state.posZ;
+
+    const double movementEpsilon = 0.0008;
+    double ax = std::abs(dx);
+    double az = std::abs(dz);
+    if (ax < movementEpsilon && az < movementEpsilon) return;
+
+    int dirX = 0;
+    int dirZ = 0;
+    if (ax >= az * 0.65) dirX = (dx > 0.0) ? 1 : -1;
+    if (az >= ax * 0.65) dirZ = (dz > 0.0) ? 1 : -1;
+    g_speedBridgeDirX = dirX;
+    g_speedBridgeDirZ = dirZ;
+}
+
+static double SpeedBridgeSupportProbeDistance(const Config& cfg) {
+    double t = ((double)cfg.speedBridgeDelayMs - 20.0) / 230.0;
+    if (t < 0.0) t = 0.0;
+    if (t > 1.0) t = 1.0;
+    return 0.31 + (0.14 * t);
+}
+
+static bool IsSolidBlockAt(JNIEnv* env, double x, double y, double z) {
+    if (!env || !g_mcInstance || !g_theWorldField || !g_blockPosClass || !g_blockPosIntCtor) return false;
+
+    jobject world = env->GetObjectField(g_mcInstance, g_theWorldField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return false; }
+    if (!world) return false;
+
+    if (!g_worldGetBlockStateMethod) {
+        jclass worldCls = env->GetObjectClass(world);
+        if (worldCls && !env->ExceptionCheck()) {
+            g_worldGetBlockStateMethod = env->GetMethodID(worldCls, "getBlockState", "(Lnet/minecraft/util/BlockPos;)Lnet/minecraft/block/state/IBlockState;");
+            if (!g_worldGetBlockStateMethod) {
+                env->ExceptionClear();
+                g_worldGetBlockStateMethod = env->GetMethodID(worldCls, "func_180495_p", "(Lnet/minecraft/util/BlockPos;)Lnet/minecraft/block/state/IBlockState;");
+            }
+            if (!g_worldGetBlockStateMethod) env->ExceptionClear();
+            env->DeleteLocalRef(worldCls);
+        } else if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        }
+    }
+
+    if (!g_worldGetBlockStateMethod) {
+        env->DeleteLocalRef(world);
+        return false;
+    }
+
+    int bx = (int)std::floor(x);
+    int by = (int)std::floor(y);
+    int bz = (int)std::floor(z);
+    jobject pos = env->NewObject(g_blockPosClass, g_blockPosIntCtor, (jint)bx, (jint)by, (jint)bz);
+    if (env->ExceptionCheck() || !pos) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        env->DeleteLocalRef(world);
+        return false;
+    }
+
+    jobject state = env->CallObjectMethod(world, g_worldGetBlockStateMethod, pos);
+    env->DeleteLocalRef(pos);
+    env->DeleteLocalRef(world);
+    if (env->ExceptionCheck() || !state) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return false;
+    }
+
+    if (!g_blockStateGetBlockMethod) {
+        jclass stateCls = env->GetObjectClass(state);
+        if (stateCls && !env->ExceptionCheck()) {
+            g_blockStateGetBlockMethod = env->GetMethodID(stateCls, "getBlock", "()Lnet/minecraft/block/Block;");
+            if (!g_blockStateGetBlockMethod) {
+                env->ExceptionClear();
+                g_blockStateGetBlockMethod = env->GetMethodID(stateCls, "func_177230_c", "()Lnet/minecraft/block/Block;");
+            }
+            if (!g_blockStateGetBlockMethod) env->ExceptionClear();
+            env->DeleteLocalRef(stateCls);
+        } else if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        }
+    }
+
+    if (!g_blockStateGetBlockMethod) {
+        env->DeleteLocalRef(state);
+        return false;
+    }
+
+    jobject block = env->CallObjectMethod(state, g_blockStateGetBlockMethod);
+    env->DeleteLocalRef(state);
+    if (env->ExceptionCheck() || !block) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return false;
+    }
+
+    if (!g_blockGetMaterialMethod) {
+        jclass blockCls = env->GetObjectClass(block);
+        if (blockCls && !env->ExceptionCheck()) {
+            g_blockGetMaterialMethod = env->GetMethodID(blockCls, "getMaterial", "()Lnet/minecraft/block/material/Material;");
+            if (!g_blockGetMaterialMethod) {
+                env->ExceptionClear();
+                g_blockGetMaterialMethod = env->GetMethodID(blockCls, "func_149688_o", "()Lnet/minecraft/block/material/Material;");
+            }
+            if (!g_blockGetMaterialMethod) env->ExceptionClear();
+            env->DeleteLocalRef(blockCls);
+        } else if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        }
+    }
+
+    if (!g_blockGetMaterialMethod) {
+        env->DeleteLocalRef(block);
+        return false;
+    }
+
+    jobject material = env->CallObjectMethod(block, g_blockGetMaterialMethod);
+    env->DeleteLocalRef(block);
+    if (env->ExceptionCheck() || !material) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return false;
+    }
+
+    if (!g_materialIsSolidMethod) {
+        jclass materialCls = env->GetObjectClass(material);
+        if (materialCls && !env->ExceptionCheck()) {
+            g_materialIsSolidMethod = env->GetMethodID(materialCls, "isSolid", "()Z");
+            if (!g_materialIsSolidMethod) {
+                env->ExceptionClear();
+                g_materialIsSolidMethod = env->GetMethodID(materialCls, "func_76220_a", "()Z");
+            }
+            if (!g_materialIsSolidMethod) env->ExceptionClear();
+            env->DeleteLocalRef(materialCls);
+        } else if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        }
+    }
+
+    bool solid = false;
+    if (g_materialIsSolidMethod) {
+        solid = env->CallBooleanMethod(material, g_materialIsSolidMethod) == JNI_TRUE;
+        if (env->ExceptionCheck()) { env->ExceptionClear(); solid = false; }
+    }
+    env->DeleteLocalRef(material);
+    return solid;
+}
+
+static bool IsSpeedBridgeEdgeUnsupported(JNIEnv* env, const Config& cfg, const GameState& state) {
+    if (g_speedBridgeDirX == 0 && g_speedBridgeDirZ == 0) return false;
+    double probe = SpeedBridgeSupportProbeDistance(cfg);
+    double sx = state.posX + (double)g_speedBridgeDirX * probe;
+    double sz = state.posZ + (double)g_speedBridgeDirZ * probe;
+    double sy = state.posY - 0.05;
+    return !IsSolidBlockAt(env, sx, sy, sz);
+}
+
+static void UpdateSpeedBridge(JNIEnv* env, const Config& cfg, const GameState& state) {
+    bool shouldRun =
+        cfg.speedBridge &&
+        state.mapped &&
+        !state.guiOpen &&
+        (!cfg.speedBridgeBlockOnly || state.holdingBlock) &&
+        (!cfg.speedBridgeLookingDownOnly || state.pitch >= 60.0f);
+
+    if (shouldRun && cfg.speedBridgeHoldingShiftOnly && !IsConfiguredSneakPhysicallyDown(env)) {
+        shouldRun = false;
+    }
+
+    if (!shouldRun) {
+        ResetSpeedBridgeMovementTracking();
+        ReleaseSpeedBridgeSneak(env);
+        return;
+    }
+
+    UpdateSpeedBridgeDirection(state);
+    bool shouldSneak = IsSpeedBridgeEdgeUnsupported(env, cfg, state);
+    SetSpeedBridgeSneak(env, shouldSneak);
+}
+
 GameState ReadGameState(JNIEnv* env) {
     GameState s = {};
     static DWORD nextRefreshAt = 0;
@@ -3314,7 +3762,9 @@ GameState ReadGameState(JNIEnv* env) {
     {
         LockGuard lk(g_configMutex);
         gtbHelperEnabled = g_config.gtbHelper;
-        shouldCheckHoldingBlock = g_config.rightClick && g_config.rightBlockOnly;
+        shouldCheckHoldingBlock =
+            (g_config.rightClick && g_config.rightBlockOnly) ||
+            (g_config.speedBridge && g_config.speedBridgeBlockOnly);
     }
     TryResolveRenderMappings(env, gtbHelperEnabled);
     TryResolveHoldingBlockMappings(env);
@@ -3351,7 +3801,8 @@ GameState ReadGameState(JNIEnv* env) {
             if (g_posXField) s.posX = env->GetDoubleField(player, g_posXField);
             if (g_posYField) s.posY = env->GetDoubleField(player, g_posYField);
             if (g_posZField) s.posZ = env->GetDoubleField(player, g_posZField);
-            
+            if (g_rotationPitchField) s.pitch = env->GetFloatField(player, g_rotationPitchField);
+
             // Check current item
             s.holdingBlock = false;
             if (shouldCheckHoldingBlock && g_inventoryField) {
@@ -3373,7 +3824,7 @@ GameState ReadGameState(JNIEnv* env) {
                             env->ExceptionClear();
                         }
                     }
-                    
+
                     if (g_getCurrentItemMethod) {
                         jobject itemStack = env->CallObjectMethod(inventory, g_getCurrentItemMethod);
                         if (itemStack) {
@@ -3560,6 +4011,76 @@ GameState ReadGameState(JNIEnv* env) {
 }
 
 // ===================== DETACH =====================
+static void CleanupImGuiAndHooks() {
+    if (g_wndProcHookedHwnd && g_origWndProc) {
+        SetWindowLongPtrA(g_wndProcHookedHwnd, GWLP_WNDPROC, (LONG_PTR)g_origWndProc);
+        g_wndProcHookedHwnd = nullptr;
+        g_origWndProc = nullptr;
+    }
+
+    if (g_imguiPhase1Done) {
+        ImGui_ImplWin32_Shutdown();
+        g_imguiPhase1Done = false;
+    }
+    if (g_imguiGlBackendReady || g_imguiInitialized) {
+        ImGui_ImplOpenGL3_SetSkipGLDeletes(true);
+        ImGui_ImplOpenGL3_Shutdown();
+        ImGui_ImplOpenGL3_SetSkipGLDeletes(false);
+    }
+    if (ImGui::GetCurrentContext()) {
+        ImGui::DestroyContext();
+    }
+
+    g_imguiInitialized = false;
+    g_imguiGlBackendReady = false;
+    g_imguiPendingBackendReset = false;
+    g_imguiPendingGlrc = nullptr;
+    g_imguiGlrc = nullptr;
+    g_imguiHwnd = nullptr;
+    g_glInitialized = false;
+    g_gameHwnd = nullptr;
+
+    if (g_minhookInitialized) {
+        MH_DisableHook(MH_ALL_HOOKS);
+        MH_Uninitialize();
+        g_minhookInitialized = false;
+    }
+}
+
+static void ResetImGuiBackendsForReinit(const char* reason) {
+    if (reason && *reason) {
+        Log(std::string("ImGui legacy: resetting backends for reinit (") + reason + ").");
+    }
+
+    if (g_wndProcHookedHwnd && g_origWndProc) {
+        SetWindowLongPtrA(g_wndProcHookedHwnd, GWLP_WNDPROC, (LONG_PTR)g_origWndProc);
+        g_wndProcHookedHwnd = nullptr;
+        g_origWndProc = nullptr;
+    }
+
+    if (g_imguiPhase1Done) {
+        ImGui_ImplWin32_Shutdown();
+    }
+    if (g_imguiGlBackendReady || g_imguiInitialized) {
+        ImGui_ImplOpenGL3_SetSkipGLDeletes(true);
+        ImGui_ImplOpenGL3_Shutdown();
+        ImGui_ImplOpenGL3_SetSkipGLDeletes(false);
+    }
+    if (ImGui::GetCurrentContext()) {
+        ImGui::DestroyContext();
+    }
+
+    g_imguiPhase1Done = false;
+    g_imguiInitialized = false;
+    g_imguiGlBackendReady = false;
+    g_imguiPendingBackendReset = false;
+    g_imguiPendingGlrc = nullptr;
+    g_imguiGlrc = nullptr;
+    g_imguiHwnd = nullptr;
+    g_imguiWarmupFrames = 0;
+    g_glInitialized = false;
+}
+
 extern "C" __declspec(dllexport) void Detach() {
     Log("Detach requested");
     g_running = false;
@@ -3573,11 +4094,7 @@ extern "C" __declspec(dllexport) void Detach() {
         g_serverSocket = INVALID_SOCKET;
     }
     
-    // Restore WndProc
-    if (g_wndProcHookedHwnd && g_origWndProc) {
-        SetWindowLongPtrA(g_wndProcHookedHwnd, GWLP_WNDPROC, (LONG_PTR)g_origWndProc);
-        g_wndProcHookedHwnd = nullptr;
-    }
+    CleanupImGuiAndHooks();
     
     // Restore SwapBuffers (simplified: just unhook IAT if possible, but honestly
     // safely unhooking IAT without race conditions is hard. 
@@ -3592,120 +4109,60 @@ extern "C" __declspec(dllexport) void Detach() {
     }, nullptr, 0, nullptr);
 }
 
-// ===================== FONT & GL RENDERING =====================
+// ===================== IMGUI RENDERING =====================
+static int ColorByte(float v) {
+    if (v < 0.0f) v = 0.0f;
+    if (v > 1.0f) v = 1.0f;
+    return (int)(v * 255.0f + 0.5f);
+}
+
+static ImU32 ImColorFromFloats(float r, float g, float b, float a) {
+    return IM_COL32(ColorByte(r), ColorByte(g), ColorByte(b), ColorByte(a));
+}
+
+static float LegacyTextPixelSize(float scale) {
+    return (std::max)(1.0f, (float)CHAR_H * scale);
+}
+
+static float LegacyTextScale(float scale) {
+    if (!ImGui::GetCurrentContext()) return (float)CHAR_W * scale;
+    float fontSize = ImGui::GetFontSize();
+    if (fontSize <= 0.0f) fontSize = 16.0f;
+    return LegacyTextPixelSize(scale) / fontSize;
+}
+
 void InitFont() {
-    HDC hdc = CreateCompatibleDC(NULL);
-    BITMAPINFO bmi = {}; bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = ATLAS_W; bmi.bmiHeader.biHeight = -ATLAS_H;
-    bmi.bmiHeader.biPlanes = 1; bmi.bmiHeader.biBitCount = 32; bmi.bmiHeader.biCompression = BI_RGB;
-    void* bits; HBITMAP hBmp = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &bits, NULL, 0);
-    SelectObject(hdc, hBmp);
-
-    LoadMinecraftiaPrivateFont();
-    HFONT hFont = CreateFontA(30, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, NONANTIALIASED_QUALITY,
-        FIXED_PITCH | FF_DONTCARE, "Minecraftia");
-    if (!hFont) {
-        hFont = CreateFontA(30, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-            ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-            VARIABLE_PITCH | FF_SWISS, "Consolas");
-    }
-
-    SelectObject(hdc, hFont);
-    char selectedFace[LF_FACESIZE] = {};
-    GetTextFaceA(hdc, LF_FACESIZE, selectedFace);
-    SetBkColor(hdc, RGB(0, 0, 0)); SetTextColor(hdc, RGB(255, 255, 255));
-    SetTextAlign(hdc, TA_LEFT | TA_TOP);
-    for (int i = 0; i < 128; i++) g_glyphAdvance[i] = (float)CHAR_W;
-
-    SIZE spaceSize = { CHAR_W, 0 };
-    char spaceCh = ' ';
-    if (!GetTextExtentPoint32A(hdc, &spaceCh, 1, &spaceSize) || spaceSize.cx <= 0) {
-        spaceSize.cx = CHAR_W;
-    }
-
-    for (int i = 0; i < 128; i++) {
-        char c = (char)i;
-        char glyph = (c < 32) ? ' ' : c;
-        int col = i % ATLAS_COLS, row = i / ATLAS_COLS;
-        TextOutA(hdc, col * CHAR_W, row * CHAR_H, &glyph, 1);
-
-        SIZE glyphSize = { 0, 0 };
-        if (!GetTextExtentPoint32A(hdc, &glyph, 1, &glyphSize) || glyphSize.cx <= 0) {
-            glyphSize.cx = spaceSize.cx;
-        }
-
-        float adv = (float)glyphSize.cx;
-        if (adv < 4.0f) adv = 4.0f;
-        if (adv > (float)CHAR_W) adv = (float)CHAR_W;
-        g_glyphAdvance[i] = adv;
-    }
-    unsigned char* px = new unsigned char[ATLAS_W * ATLAS_H * 4];
-    for (int i = 0; i < ATLAS_W * ATLAS_H; i++) {
-        unsigned char* s = ((unsigned char*)bits) + i * 4;
-        unsigned char bright = s[0] > s[1] ? (s[0] > s[2] ? s[0] : s[2]) : (s[1] > s[2] ? s[1] : s[2]);
-        px[i*4] = 255; px[i*4+1] = 255; px[i*4+2] = 255; px[i*4+3] = bright;
-    }
-    glGenTextures(1, &g_fontTexture);
-    glBindTexture(GL_TEXTURE_2D, g_fontTexture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, ATLAS_W, ATLAS_H, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
-    // Use linear filtering for better readability at small scales across the client.
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    delete[] px; DeleteObject(hBmp); DeleteObject(hFont); DeleteDC(hdc);
-    g_glInitialized = true;
-    Log(std::string("Font texture created (legacy) using face: ") + selectedFace);
+    // Font atlas creation is now owned by ImGui's OpenGL backend.
+    g_glInitialized = g_imguiInitialized;
 }
 
 void DrawRect(float x, float y, float w, float h, float r, float g, float b, float a) {
-    glDisable(GL_TEXTURE_2D);
-    glColor4f(r, g, b, a);
-    glBegin(GL_QUADS);
-    glVertex2f(x, y); glVertex2f(x+w, y); glVertex2f(x+w, y+h); glVertex2f(x, y+h);
-    glEnd();
+    if (!ImGui::GetCurrentContext() || w <= 0.0f || h <= 0.0f || a <= 0.0f) return;
+    ImGui::GetForegroundDrawList()->AddRectFilled(
+        ImVec2(x, y),
+        ImVec2(x + w, y + h),
+        ImColorFromFloats(r, g, b, a));
 }
 
 void DrawText2D(float x, float y, const char* text, float r, float g, float b, float a, float scale = 1.0f) {
-    glEnable(GL_TEXTURE_2D);
-    glBindTexture(GL_TEXTURE_2D, g_fontTexture);
-    glColor4f(r, g, b, a);
-    float cx = x;
-    float cw = CHAR_W * scale, ch = CHAR_H * scale;
-    glBegin(GL_QUADS);
-    for (int i = 0; text[i]; i++) {
-        unsigned char c = text[i];
-        if (c < 32 || c > 127) c = '?';
-        float adv = g_glyphAdvance[c] * scale;
-        float tx = (float)(c % ATLAS_COLS) / ATLAS_COLS;
-        float ty = (float)(c / ATLAS_COLS) / ATLAS_ROWS;
-        float tw = 1.0f / ATLAS_COLS, th = 1.0f / ATLAS_ROWS;
-        glTexCoord2f(tx, ty);      glVertex2f(cx, y);
-        glTexCoord2f(tx+tw, ty);   glVertex2f(cx+cw, y);
-        glTexCoord2f(tx+tw, ty+th);glVertex2f(cx+cw, y+ch);
-        glTexCoord2f(tx, ty+th);   glVertex2f(cx, y+ch);
-        cx += adv;
-    }
-    glEnd();
+    if (!ImGui::GetCurrentContext() || !text || !*text || a <= 0.0f) return;
+    ImGui::GetForegroundDrawList()->AddText(
+        ImGui::GetFont(),
+        LegacyTextPixelSize(scale),
+        ImVec2(x, y),
+        ImColorFromFloats(r, g, b, a),
+        text);
 }
 
 float TextWidth(const char* text, float scale = 1.0f) {
     if (!text || !*text) return 0.0f;
-    float width = 0.0f;
-    for (int i = 0; text[i]; i++) {
-        unsigned char c = (unsigned char)text[i];
-        if (c < 32 || c > 127) c = '?';
-        width += g_glyphAdvance[c] * scale;
-    }
-    return width;
+    if (!ImGui::GetCurrentContext()) return (float)strlen(text) * (float)CHAR_W * scale * 0.5f;
+    return ImGui::CalcTextSize(text).x * LegacyTextScale(scale);
 }
 
-// Text with shadow for readability
+// Text with shadow for readability.
 void DrawTextShadow(float x, float y, const char* text, float r, float g, float b, float a, float scale = 1.0f) {
-    DrawText2D(x - 1, y, text, 0, 0, 0, a * 0.42f, scale);
-    DrawText2D(x + 1, y, text, 0, 0, 0, a * 0.42f, scale);
-    DrawText2D(x, y - 1, text, 0, 0, 0, a * 0.42f, scale);
-    DrawText2D(x, y + 1, text, 0, 0, 0, a * 0.42f, scale);
-    DrawText2D(x + 1, y + 1, text, 0, 0, 0, a * 0.55f, scale);
+    DrawText2D(x + 1, y + 1, text, 0, 0, 0, a * 0.65f, scale);
     DrawText2D(x, y, text, r, g, b, a, scale);
 }
 
@@ -3954,6 +4411,14 @@ std::string ToLowerAscii(std::string s) {
 struct Color4 {
     float r, g, b, a;
 };
+
+static ImU32 ToImU32(const Color4& c) {
+    return ImColorFromFloats(c.r, c.g, c.b, c.a);
+}
+
+static ImU32 WithAlpha(const Color4& c, int alpha) {
+    return IM_COL32(ColorByte(c.r), ColorByte(c.g), ColorByte(c.b), alpha);
+}
 
 static Color4 MakeColor4(int r, int g, int b, int a) {
     Color4 c;
@@ -4521,134 +4986,136 @@ void RenderHUD(int winW, int winH) {
     }
 
     OverlayTheme theme = ResolveOverlayTheme(cfg.guiTheme);
+    ImDrawList* fg = ImGui::GetForegroundDrawList();
+    ImGuiIO& io = ImGui::GetIO();
 
-    struct ModLine {
-        std::string text;
-        Color4 accent;
-        float width;
-    };
-
+    struct ModLine { std::string text; ImU32 accent; float width; };
     std::vector<ModLine> mods;
     mods.reserve(16);
-    auto pushMod = [&](const std::string& text, const Color4& accent) {
+
+    auto pushMod = [&](const std::string& text, ImU32 accent) {
         if (text.empty()) return;
-        mods.push_back({ text, accent, TextWidth(text.c_str(), 0.58f) });
+        mods.push_back({ text, accent, ImGui::CalcTextSize(text.c_str()).x });
     };
 
+    char acBuf[64];
     if (cfg.armed) {
-        char acBuf[64];
         int lo = (int)cfg.minCPS;
         int hi = (int)cfg.maxCPS;
         if (hi < lo) std::swap(hi, lo);
         snprintf(acBuf, sizeof(acBuf), "Autoclicker %d-%d", lo, hi);
-        pushMod(acBuf, theme.accentPrimary);
+        pushMod(acBuf, ToImU32(theme.accentPrimary));
     }
-    if (cfg.clickInChests)    pushMod("Click in Chests", theme.accentTertiary);
-    if (cfg.closestPlayerInfo) pushMod("Closest Player", theme.accentSecondary);
-    if (cfg.rightClick)       pushMod("Rightclick", theme.accentTertiary);
-    if (cfg.aimAssist)        pushMod("Aim Assist", theme.accentPrimary);
-    if (cfg.chestEsp)         pushMod("Chest ESP", theme.accentSecondary);
-    if (cfg.nametags)         pushMod("Nametags", theme.accentPrimary);
-    if (cfg.gtbHelper)        pushMod("GTB Helper", theme.accentTertiary);
-    if (cfg.jitter)           pushMod("Jitter", theme.accentSecondary);
-    if (cfg.breakBlocks)      pushMod("Break Blocks", theme.accentTertiary);
-    if (cfg.reachEnabled)     pushMod("Reach", theme.accentPrimary);
-    if (cfg.velocityEnabled)  pushMod("Velocity", theme.accentTertiary);
+    if (cfg.clickInChests)     pushMod("Click in Chests", ToImU32(theme.accentTertiary));
+    if (cfg.closestPlayerInfo) pushMod("Closest Player", ToImU32(theme.accentSecondary));
+    if (cfg.rightClick)        pushMod("Rightclick", ToImU32(theme.accentTertiary));
+    if (cfg.aimAssist)         pushMod("Aim Assist", ToImU32(theme.accentPrimary));
+    if (cfg.triggerbot)        pushMod("Triggerbot", ToImU32(theme.accentSecondary));
+    if (cfg.speedBridge)       pushMod("SpeedBridge", ToImU32(theme.accentPrimary));
+    if (cfg.chestEsp)          pushMod("Chest ESP", ToImU32(theme.accentSecondary));
+    if (cfg.nametags)          pushMod("Nametags", ToImU32(theme.accentPrimary));
+    if (cfg.gtbHelper)         pushMod("GTB Helper", ToImU32(theme.accentTertiary));
+    if (cfg.jitter)            pushMod("Jitter", ToImU32(theme.accentSecondary));
+    if (cfg.breakBlocks)       pushMod("Break Blocks", ToImU32(theme.accentTertiary));
+    if (cfg.reachEnabled)      pushMod("Reach", ToImU32(theme.accentPrimary));
+    if (cfg.velocityEnabled)   pushMod("Velocity", ToImU32(theme.accentTertiary));
 
     std::sort(mods.begin(), mods.end(), [](const ModLine& a, const ModLine& b) {
         if (a.width != b.width) return a.width > b.width;
         return a.text < b.text;
     });
 
-    const float scale = 0.58f;
     const float marginX = 10.0f;
     float y = 10.0f;
 
     if (cfg.showLogo) {
         const char* logoText = "LegoClicker";
-        float logoW = TextWidth(logoText, scale);
-        float logoX = (float)winW - marginX - logoW;
-        DrawTextShadow(logoX, y, logoText, theme.logoColor.r, theme.logoColor.g, theme.logoColor.b, theme.logoColor.a, scale);
-        y += CHAR_H * scale + 8.0f;
+        ImVec2 logoSz = ImGui::CalcTextSize(logoText);
+        float logoX = io.DisplaySize.x - marginX - logoSz.x;
+        fg->AddText(ImVec2(logoX + 1, y + 1), ToImU32(theme.logoShadow), logoText);
+        fg->AddText(ImVec2(logoX, y), ToImU32(theme.logoColor), logoText);
+        y += logoSz.y + 8.0f;
     }
 
     const float padX = 8.0f;
     const float padY = 3.0f;
     const float barW = 3.0f;
     const float gapY = 2.0f;
-    const float fontH = CHAR_H * scale;
+    const float fontH = ImGui::GetFontSize();
     const int style = (std::max)(0, (std::min)(4, cfg.moduleListStyle));
 
     for (size_t i = 0; i < mods.size(); i++) {
         const ModLine& m = mods[i];
-        float textW = TextWidth(m.text.c_str(), scale);
-        float boxW = barW + padX + textW + padX;
+        ImVec2 textSz = ImGui::CalcTextSize(m.text.c_str());
+        float boxW = barW + padX + textSz.x + padX;
         float boxH = padY + fontH + padY;
-        float x0 = (float)winW - marginX - boxW;
-        float x1 = (float)winW - marginX;
+        float x0 = io.DisplaySize.x - marginX - boxW;
+        float x1 = io.DisplaySize.x - marginX;
         float y0 = y;
         float y1 = y + boxH;
 
         if (style == 0) {
-            DrawRect(x0, y0, boxW, boxH, theme.moduleBg.r, theme.moduleBg.g, theme.moduleBg.b, theme.moduleBg.a);
-            DrawRect(x0, y0, barW, boxH, m.accent.r, m.accent.g, m.accent.b, m.accent.a);
-            DrawRect(x0, y0, boxW, 1.0f, theme.moduleBorder.r, theme.moduleBorder.g, theme.moduleBorder.b, theme.moduleBorder.a);
-            DrawRect(x0, y1 - 1.0f, boxW, 1.0f, theme.moduleBorder.r, theme.moduleBorder.g, theme.moduleBorder.b, theme.moduleBorder.a);
-            DrawRect(x0, y0, 1.0f, boxH, theme.moduleBorder.r, theme.moduleBorder.g, theme.moduleBorder.b, theme.moduleBorder.a);
-            DrawRect(x1 - 1.0f, y0, 1.0f, boxH, theme.moduleBorder.r, theme.moduleBorder.g, theme.moduleBorder.b, theme.moduleBorder.a);
-            DrawTextShadow(x0 + barW + padX, y0 + padY, m.text.c_str(), theme.moduleText.r, theme.moduleText.g, theme.moduleText.b, theme.moduleText.a, scale);
+            fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleBg));
+            fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + barW, y1), m.accent);
+            fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleBorder));
+            ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
+            fg->AddText(ImVec2(tx.x + 1, tx.y + 1), ToImU32(theme.moduleTextShadow), m.text.c_str());
+            fg->AddText(tx, ToImU32(theme.moduleText), m.text.c_str());
         } else if (style == 1) {
-            float minW = textW + 4.0f;
-            DrawRect(x1 - minW, y0, minW, boxH, theme.moduleMinimalBg.r, theme.moduleMinimalBg.g, theme.moduleMinimalBg.b, theme.moduleMinimalBg.a);
-            DrawRect(x1 - 2.0f, y0, 2.0f, boxH, m.accent.r, m.accent.g, m.accent.b, m.accent.a);
-            DrawTextShadow(x1 - textW - 2.0f, y0 + padY, m.text.c_str(), m.accent.r, m.accent.g, m.accent.b, m.accent.a, scale);
+            fg->AddRectFilled(ImVec2(x1 - textSz.x - 4, y0), ImVec2(x1, y1), ToImU32(theme.moduleMinimalBg));
+            fg->AddRectFilled(ImVec2(x1 - 2, y0), ImVec2(x1, y1), m.accent);
+            ImVec2 tx = ImVec2(x1 - textSz.x - 2, y0 + padY);
+            fg->AddText(ImVec2(tx.x + 1, tx.y + 1), ToImU32(theme.moduleTextShadow), m.text.c_str());
+            fg->AddText(tx, m.accent, m.text.c_str());
         } else if (style == 2) {
-            DrawRect(x0, y0, boxW, boxH, theme.moduleOutlinedBg.r, theme.moduleOutlinedBg.g, theme.moduleOutlinedBg.b, theme.moduleOutlinedBg.a);
-            DrawRect(x0, y0, boxW, 1.5f, m.accent.r, m.accent.g, m.accent.b, m.accent.a);
-            DrawRect(x0, y1 - 1.5f, boxW, 1.5f, m.accent.r, m.accent.g, m.accent.b, m.accent.a);
-            DrawRect(x0, y0, 1.5f, boxH, m.accent.r, m.accent.g, m.accent.b, m.accent.a);
-            DrawRect(x1 - 1.5f, y0, 1.5f, boxH, m.accent.r, m.accent.g, m.accent.b, m.accent.a);
-            DrawTextShadow(x0 + barW + padX, y0 + padY, m.text.c_str(), m.accent.r, m.accent.g, m.accent.b, m.accent.a, scale);
+            fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleOutlinedBg));
+            fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), m.accent, 4.0f, 0, 1.5f);
+            ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
+            fg->AddText(ImVec2(tx.x + 1, tx.y + 1), ToImU32(theme.moduleTextShadow), m.text.c_str());
+            fg->AddText(tx, m.accent, m.text.c_str());
         } else if (style == 3) {
-            DrawRect(x0, y0, boxW, boxH, theme.moduleMinimalBg.r, theme.moduleMinimalBg.g, theme.moduleMinimalBg.b, theme.moduleMinimalBg.a);
-            DrawRect(x0, y0, boxW, 1.0f, theme.moduleGlassBorder.r, theme.moduleGlassBorder.g, theme.moduleGlassBorder.b, theme.moduleGlassBorder.a);
-            DrawRect(x0, y1 - 1.0f, boxW, 1.0f, theme.moduleGlassBorder.r, theme.moduleGlassBorder.g, theme.moduleGlassBorder.b, theme.moduleGlassBorder.a);
-            DrawRect(x0, y0, 1.0f, boxH, theme.moduleGlassBorder.r, theme.moduleGlassBorder.g, theme.moduleGlassBorder.b, theme.moduleGlassBorder.a);
-            DrawRect(x1 - 1.0f, y0, 1.0f, boxH, theme.moduleGlassBorder.r, theme.moduleGlassBorder.g, theme.moduleGlassBorder.b, theme.moduleGlassBorder.a);
-            DrawRect(x0 + 1.0f, y0 + 1.0f, barW, boxH - 2.0f, m.accent.r, m.accent.g, m.accent.b, m.accent.a);
-            DrawTextShadow(x0 + barW + padX, y0 + padY, m.text.c_str(), theme.moduleText.r, theme.moduleText.g, theme.moduleText.b, theme.moduleText.a, scale);
+            fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleMinimalBg), 4.0f);
+            fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleGlassBorder), 4.0f, 0, 1.0f);
+            fg->AddRectFilled(ImVec2(x0 + 1.0f, y0 + 1.0f), ImVec2(x0 + barW + 1.0f, y1 - 1.0f), m.accent);
+            ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
+            fg->AddText(ImVec2(tx.x + 1, tx.y + 1), ToImU32(theme.moduleTextShadow), m.text.c_str());
+            fg->AddText(tx, ToImU32(theme.moduleText), m.text.c_str());
         } else {
-            DrawRect(x0, y0, boxW, boxH, m.accent.r, m.accent.g, m.accent.b, m.accent.a);
-            DrawRect(x0, y0, boxW, 1.0f, theme.moduleBorder.r, theme.moduleBorder.g, theme.moduleBorder.b, theme.moduleBorder.a);
-            DrawRect(x0, y1 - 1.0f, boxW, 1.0f, theme.moduleBorder.r, theme.moduleBorder.g, theme.moduleBorder.b, theme.moduleBorder.a);
-            DrawRect(x0, y0, 1.0f, boxH, theme.moduleBorder.r, theme.moduleBorder.g, theme.moduleBorder.b, theme.moduleBorder.a);
-            DrawRect(x1 - 1.0f, y0, 1.0f, boxH, theme.moduleBorder.r, theme.moduleBorder.g, theme.moduleBorder.b, theme.moduleBorder.a);
-            DrawTextShadow(x0 + barW + padX, y0 + padY, m.text.c_str(), theme.moduleBoldText.r, theme.moduleBoldText.g, theme.moduleBoldText.b, theme.moduleBoldText.a, scale);
+            fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), m.accent, 4.0f);
+            fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleBorder), 4.0f, 0, 1.0f);
+            ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
+            fg->AddText(ImVec2(tx.x + 1, tx.y + 1), ToImU32(theme.moduleTextShadow), m.text.c_str());
+            fg->AddText(tx, ToImU32(theme.moduleBoldText), m.text.c_str());
         }
 
         y += boxH + gapY;
     }
 
-    if (cfg.gtbHelper && !cfg.gtbHint.empty()) {
+    if (cfg.gtbHelper) {
+        std::string hint = cfg.gtbHint;
+        std::string preview = cfg.gtbPreview;
+        if (hint.empty() || hint == "-") hint = "waiting for hint...";
+        if (preview == "-") preview.clear();
+
         std::vector<std::string> lines;
-        std::stringstream pss(cfg.gtbPreview);
-        std::string line;
-        while (std::getline(pss, line, ',')) {
-            while (!line.empty() && std::isspace((unsigned char)line.front())) line.erase(line.begin());
-            while (!line.empty() && std::isspace((unsigned char)line.back())) line.pop_back();
-            if (!line.empty()) lines.push_back(line);
+        if (!preview.empty()) {
+            std::stringstream pss(preview);
+            std::string line;
+            while (std::getline(pss, line, ',')) {
+                size_t b = line.find_first_not_of(' ');
+                size_t e = line.find_last_not_of(' ');
+                if (b == std::string::npos || e == std::string::npos) continue;
+                std::string clean = line.substr(b, e - b + 1);
+                if (clean.size() > 56) clean = clean.substr(0, 56) + "...";
+                lines.push_back(clean);
+            }
+            if (lines.empty()) lines.push_back(preview);
         }
 
-        const size_t maxPreviewLines = 200;
-        if (lines.size() > maxPreviewLines) {
-            lines.resize(maxPreviewLines);
-        }
-
-        float textScale = 0.52f;
-        float lineH = CHAR_H * textScale + 2.0f;
-        float headerH = 12.0f + lineH;
-        float maxPanelH = (float)winH - 20.0f;
-        float availableH = maxPanelH - headerH - 6.0f;
+        const float lineH = ImGui::GetFontSize() + 2.0f;
+        const float headerH = 18.0f + lineH;
+        const float maxPanelH = io.DisplaySize.y - 20.0f;
+        const float availableH = maxPanelH - headerH - 16.0f;
         size_t maxLinesPerCol = (size_t)(availableH / lineH);
         if (maxLinesPerCol < 1) maxLinesPerCol = 1;
 
@@ -4659,39 +5126,34 @@ void RenderHUD(int winW, int winH) {
         size_t linesPerCol = (totalLines + numCols - 1) / numCols;
         if (linesPerCol > maxLinesPerCol) linesPerCol = maxLinesPerCol;
 
-        float colPad = 8.0f;
-        float colW = 150.0f;
-        float panelPadX = 9.0f;
-        float panelW = panelPadX * 2.0f + colW * (float)numCols + colPad * (float)(numCols > 0 ? numCols - 1 : 0);
-        float maxPanelW = (float)winW - 20.0f;
+        const float colPad = 8.0f;
+        float colW = 200.0f;
+        const float padXGtb = 10.0f;
+        float panelW = padXGtb * 2.0f + colW * (float)numCols + colPad * (float)(numCols > 0 ? numCols - 1 : 0);
+        const float maxPanelW = io.DisplaySize.x - 20.0f;
         if (panelW > maxPanelW) {
             panelW = maxPanelW;
-            float availW = panelW - panelPadX * 2.0f - colPad * (float)(numCols - 1);
+            float availW = panelW - padXGtb * 2.0f - colPad * (float)(numCols - 1);
             if (availW < colW * (float)numCols && numCols > 0)
                 colW = availW / (float)numCols;
-            if (colW < 60.0f) colW = 60.0f;
+            if (colW < 80.0f) colW = 80.0f;
         }
+        if (panelW < 180.0f) panelW = 180.0f;
 
-        float panelH = headerH + lineH * (float)linesPerCol + 6.0f;
+        float panelH = headerH + lineH * (float)linesPerCol + 16.0f;
         if (panelH > maxPanelH) panelH = maxPanelH;
 
-        float x1 = (float)winW - 10.0f;
-        float y1 = (float)winH - 10.0f;
-        float x0 = x1 - panelW;
-        float y0 = y1 - panelH;
-        if (x0 < 10.0f) x0 = 10.0f;
-        if (y0 < 10.0f) y0 = 10.0f;
+        const float x1 = io.DisplaySize.x - 10.0f;
+        const float y1 = io.DisplaySize.y - 10.0f;
+        const float x0 = (std::max)(10.0f, x1 - panelW);
+        const float y0 = (std::max)(10.0f, y1 - panelH);
 
-        DrawRect(x0, y0, panelW, panelH, theme.moduleBg.r, theme.moduleBg.g, theme.moduleBg.b, 0.92f);
-        DrawRect(x0, y0, panelW, 1.0f, theme.accentPrimary.r, theme.accentPrimary.g, theme.accentPrimary.b, 0.95f);
-        DrawRect(x0, y0 + panelH - 1.0f, panelW, 1.0f, theme.moduleBorder.r, theme.moduleBorder.g, theme.moduleBorder.b, theme.moduleBorder.a);
-        DrawRect(x0, y0, 1.0f, panelH, theme.moduleBorder.r, theme.moduleBorder.g, theme.moduleBorder.b, theme.moduleBorder.a);
-        DrawRect(x0 + panelW - 1.0f, y0, 1.0f, panelH, theme.moduleBorder.r, theme.moduleBorder.g, theme.moduleBorder.b, theme.moduleBorder.a);
+        fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleBg), 5.0f);
+        fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), WithAlpha(theme.accentTertiary, 220), 5.0f, 0, 1.2f);
 
         char hintBuf[320];
-        snprintf(hintBuf, sizeof(hintBuf), "GTB: %s (%d)", cfg.gtbHint.c_str(), (std::max)(0, cfg.gtbCount));
-        DrawTextShadow(x0 + 8.0f, y0 + 6.0f, hintBuf,
-            theme.moduleText.r, theme.moduleText.g, theme.moduleText.b, theme.moduleText.a, textScale);
+        snprintf(hintBuf, sizeof(hintBuf), "GTB: %s (%d)", hint.c_str(), (std::max)(0, cfg.gtbCount));
+        fg->AddText(ImVec2(x0 + 9.0f, y0 + 8.0f), WithAlpha(theme.accentTertiary, 245), hintBuf);
 
         size_t visiblePerCol = linesPerCol;
         if (visiblePerCol < 1) visiblePerCol = 1;
@@ -4700,13 +5162,12 @@ void RenderHUD(int winW, int winH) {
             size_t endIdx = (std::min)(startIdx + linesPerCol, totalLines);
             if (startIdx >= totalLines) break;
 
-            float cx = x0 + panelPadX + (colW + colPad) * (float)col;
-            float ty = y0 + headerH - 2.0f;
+            float cx = x0 + padXGtb + (colW + colPad) * (float)col;
+            float ty = y0 + 8.0f + lineH + 6.0f;
 
             for (size_t i = startIdx; i < endIdx; i++) {
                 std::string row = "- " + lines[i];
-                DrawTextShadow(cx, ty, row.c_str(),
-                    theme.accentTertiary.r, theme.accentTertiary.g, theme.accentTertiary.b, 0.95f, textScale);
+                fg->AddText(ImVec2(cx, ty), ToImU32(theme.moduleText), row.c_str());
                 ty += lineH;
             }
         }
@@ -5331,11 +5792,6 @@ void RenderNametags(int w, int h) {
                       continue;
                   }
 
-                  float nameScale = (float)(0.78 / (dist * 0.04 + 1.0));
-                  if (nameScale < 0.38f) nameScale = 0.38f;
-                  if (nameScale > 0.60f) nameScale = 0.60f;
-
-                 float infoScale = nameScale * 0.88f;
                  float hpClamped = health < 0 ? 0 : (health > 40 ? 40 : health);
                  float hpBarValue = health < 0 ? 0 : (health > 20 ? 20 : health);
                  float hpPct = hpBarValue / 20.0f;
@@ -5363,24 +5819,6 @@ void RenderNametags(int w, int h) {
 
                  std::string heldText = GetEntityHeldItemInfo(env, entity, nullptr);
 
-                 bool hasStatsLine = !statsText.empty();
-                 bool hasHeldLine = !heldText.empty();
-                 bool lowHp = showHealth && hpClamped <= 8.0f;
-
-                 float nameW = TextWidth(displayName.c_str(), nameScale);
-                 float statsW = hasStatsLine ? TextWidth(statsText.c_str(), infoScale) : 0.0f;
-                 float heldScale = infoScale * 0.92f;
-                 float heldTextW = hasHeldLine ? TextWidth(heldText.c_str(), heldScale) : 0.0f;
-                 float heldW = hasHeldLine ? heldTextW : 0.0f;
-                 float contentW = nameW;
-                 if (statsW > contentW) contentW = statsW;
-                 if (heldW > contentW) contentW = heldW;
-                 float mainPanelW = contentW + 14.0f;
-                 float panelH = CHAR_H * nameScale + 8.0f;
-                 if (hasStatsLine) panelH += CHAR_H * infoScale;
-                 if (hasHeldLine) panelH += CHAR_H * heldScale;
-                 if (showHealth) panelH += 4.0f;
-                 float panelW = mainPanelW;
                  int key = 0;
                  if (g_objectHashCodeMethod) {
                      key = env->CallIntMethod(entity, g_objectHashCodeMethod);
@@ -5390,8 +5828,34 @@ void RenderNametags(int w, int h) {
                      key = (int)(iX * 17.0 + iZ * 31.0) ^ i;
                  }
 
-                 float px = sX - panelW * 0.5f;
-                 float py = sY - panelH - 6.0f;
+                 auto calcTextScaled = [](const char* text, float fontSize) -> ImVec2 {
+                     ImVec2 sz = ImGui::CalcTextSize(text ? text : "");
+                     float base = ImGui::GetFontSize();
+                     if (base <= 0.0f) base = 16.0f;
+                     float scale = fontSize / base;
+                     sz.x *= scale;
+                     sz.y *= scale;
+                     return sz;
+                 };
+
+                 float nameScale = 1.0f - (float)(dist / 64.0);
+                 if (nameScale < 0.65f) nameScale = 0.65f;
+                 if (nameScale > 1.0f) nameScale = 1.0f;
+                 const float nameFontSize = std::floor(ImGui::GetFontSize() * nameScale);
+                 const float infoFontSize = std::floor(nameFontSize * 0.85f);
+
+                 ImVec2 nameSz = calcTextScaled(displayName.c_str(), nameFontSize);
+                 ImVec2 statsSz = statsText.empty() ? ImVec2(0, 0) : calcTextScaled(statsText.c_str(), infoFontSize);
+                 ImVec2 itemSz = heldText.empty() ? ImVec2(0, 0) : calcTextScaled(heldText.c_str(), infoFontSize);
+
+                 float maxW = (std::max)(nameSz.x, (std::max)(statsSz.x, itemSz.x));
+                 float totalH = nameSz.y;
+                 if (statsSz.y > 0.0f) totalH += statsSz.y + 2.0f;
+                 if (itemSz.y > 0.0f) totalH += itemSz.y + 2.0f;
+
+                 float pad = std::floor(4.0f * nameScale);
+                 float px = std::floor(sX - maxW * 0.5f) - pad;
+                 float py = std::floor(sY - totalH - pad * 2.0f);
                  auto& smooth = g_tagSmoothing[key];
                  if (!smooth.init) {
                      smooth.x = px;
@@ -5423,48 +5887,37 @@ void RenderNametags(int w, int h) {
                  px = smooth.x;
                  py = smooth.y;
 
-                 float alpha = 0.86f - (float)(dist / 80.0);
-                 if (alpha < 0.42f) alpha = 0.42f;
-                 if (alpha > 0.9f) alpha = 0.9f;
+                 ImDrawList* fg = ImGui::GetForegroundDrawList();
+                 ImVec2 pMin(px, py);
+                 ImVec2 pMax(px + maxW + pad * 2.0f, py + totalH + pad * 2.0f + 2.0f);
+                 fg->AddRectFilled(pMin, pMax, IM_COL32(0, 0, 0, 160), 3.0f);
 
-                 float hpR = (1.0f - hpPct) * 0.95f + 0.05f;
-                 float hpG = hpPct * 0.85f + 0.15f;
-                 float hpB = 0.20f;
-                 float infoR = showHealth ? hpR : 0.88f;
-                 float infoG = showHealth ? hpG : 0.89f;
-                 float infoB = showHealth ? hpB : 0.92f;
+                 float curY = py + pad;
+                 float centerX = px + (maxW + pad * 2.0f) * 0.5f;
+                 float nameX = std::floor(centerX - nameSz.x * 0.5f);
+                 fg->AddText(ImGui::GetFont(), nameFontSize, ImVec2(nameX + 1, curY + 1), IM_COL32(0, 0, 0, 255), displayName.c_str());
+                 fg->AddText(ImGui::GetFont(), nameFontSize, ImVec2(nameX, curY), IM_COL32(255, 255, 255, 250), displayName.c_str());
+                 curY += nameSz.y + 2.0f;
 
-                 DrawRect(px - 1.0f, py - 1.0f, panelW + 2.0f, panelH + 2.0f, 0.0f, 0.0f, 0.0f, 0.55f * alpha);
-                 DrawRect(px, py, mainPanelW, panelH, 0.02f, 0.02f, 0.03f, 0.92f * alpha);
-                 DrawRect(px, py, mainPanelW, 1.0f, 0.70f, 0.88f, 1.0f, 0.82f * alpha);
-                 DrawRect(px, py + panelH - 1.0f, mainPanelW, 1.0f, 0.0f, 0.0f, 0.0f, 0.35f * alpha);
-
-                 float nameX = px + (mainPanelW - nameW) * 0.5f;
-                 float nameY = py + 2.0f;
-                 DrawTextShadow(nameX, nameY, displayName.c_str(), 0.98f, 0.99f, 1.0f, alpha, nameScale);
-
-                 float lineY = py + 4.0f + CHAR_H * nameScale;
-                 if (hasStatsLine) {
-                     float statsX = px + (mainPanelW - statsW) * 0.5f;
-                     DrawTextShadow(statsX, lineY, statsText.c_str(), infoR, infoG, infoB, alpha, infoScale);
-                     lineY += CHAR_H * infoScale;
+                 if (!statsText.empty()) {
+                     float statsX = std::floor(centerX - statsSz.x * 0.5f);
+                     ImU32 statCol = hpClamped <= 8.0f ? IM_COL32(255, 100, 100, 250) : IM_COL32(200, 220, 255, 250);
+                     fg->AddText(ImGui::GetFont(), infoFontSize, ImVec2(statsX + 1, curY + 1), IM_COL32(0, 0, 0, 255), statsText.c_str());
+                     fg->AddText(ImGui::GetFont(), infoFontSize, ImVec2(statsX, curY), statCol, statsText.c_str());
+                     curY += statsSz.y + 2.0f;
                  }
 
-                 if (hasHeldLine) {
-                     float heldX = px + (mainPanelW - heldTextW) * 0.5f;
-                     DrawTextShadow(heldX, lineY, heldText.c_str(), 0.84f, 0.88f, 0.95f, alpha, heldScale);
+                 if (!heldText.empty()) {
+                     float heldX = std::floor(centerX - itemSz.x * 0.5f);
+                     fg->AddText(ImGui::GetFont(), infoFontSize, ImVec2(heldX + 1, curY + 1), IM_COL32(0, 0, 0, 255), heldText.c_str());
+                     fg->AddText(ImGui::GetFont(), infoFontSize, ImVec2(heldX, curY), IM_COL32(255, 200, 80, 250), heldText.c_str());
                  }
 
                  if (showHealth) {
-                     float barX = px + 4.0f;
-                     float barY = py + panelH - 5.0f;
-                     float barW = mainPanelW - 8.0f;
-                     DrawRect(barX, barY, barW, 2.0f, 0.08f, 0.08f, 0.10f, 0.9f * alpha);
-                     DrawRect(barX, barY, barW * hpPct, 2.0f, hpR, hpG, hpB, 1.0f * alpha);
-                 }
-
-                 if (lowHp) {
-                     DrawTextShadow(px + mainPanelW - TextWidth("LOW", infoScale * 0.9f) - 4.0f, py + 2.0f, "LOW", 1.0f, 0.32f, 0.32f, alpha, infoScale * 0.9f);
+                     float barW = (pMax.x - pMin.x) * hpPct;
+                     ImU32 hpCol = IM_COL32((int)(255 * (1.0f - hpPct)), (int)(220 * hpPct + 35), 60, 255);
+                     fg->AddRectFilled(ImVec2(pMin.x, pMax.y),
+                                       ImVec2(pMin.x + barW, pMax.y + std::floor(3.0f * nameScale)), hpCol);
                  }
                  if (count < kEntityJsonCap) {
                      if (count > 0) ss << ",";
@@ -5638,52 +6091,77 @@ void RenderClosestPlayerInfo(int w, int h) {
         statsText += ar;
     }
 
+    char dirArrow = '^';
     std::string dirText = RelativeDirectionText(localYaw, bestDx, bestDz);
-    char distDir[64];
-    snprintf(distDir, sizeof(distDir), "%.1fm [%s]", (float)bestDist, dirText.c_str());
+    if (dirText == "Back") dirArrow = 'v';
+    else if (dirText == "Left") dirArrow = '<';
+    else if (dirText == "Right") dirArrow = '>';
 
-    float nameScale = 0.56f;
-    float infoScale = 0.46f;
-    float heldScale = 0.42f;
+    char nameRow[96];
+    snprintf(nameRow, sizeof(nameRow), "%c %s  %.0fm", dirArrow, name.c_str(), (float)bestDist);
 
-    float nameW = TextWidth(name.c_str(), nameScale);
-    float distDirW = TextWidth(distDir, infoScale);
-    float statsW = statsText.empty() ? 0.0f : TextWidth(statsText.c_str(), infoScale);
-    float heldTextW = heldText.empty() ? 0.0f : TextWidth(heldText.c_str(), heldScale);
-    float heldW = heldText.empty() ? 0.0f : heldTextW;
-    float mainPanelW = nameW;
-    if (distDirW > mainPanelW) mainPanelW = distDirW;
-    if (statsW > mainPanelW) mainPanelW = statsW;
-    if (heldW > mainPanelW) mainPanelW = heldW;
-    mainPanelW += 22.0f;
-
-    float panelH = 10.0f + CHAR_H * nameScale + CHAR_H * infoScale;
-    if (!statsText.empty()) panelH += CHAR_H * infoScale;
-    if (!heldText.empty()) panelH += CHAR_H * heldScale;
-    float panelW = mainPanelW;
-
-    float px = (float)w * 0.5f + 98.0f;
-    float py = (float)h - 94.0f - panelH;
-    if (px + panelW > w - 8.0f) px = (float)w - panelW - 8.0f;
-
-    DrawRect(px - 1.0f, py - 1.0f, panelW + 2.0f, panelH + 2.0f, 0.0f, 0.0f, 0.0f, 0.60f);
-    DrawRect(px, py, mainPanelW, panelH, 0.03f, 0.03f, 0.04f, 0.92f);
-    DrawRect(px, py, mainPanelW, 1.0f, 0.66f, 0.86f, 1.0f, 0.85f);
-
-    float y = py + 3.0f;
-    DrawTextShadow(px + (mainPanelW - nameW) * 0.5f, y, name.c_str(), 0.98f, 0.99f, 1.0f, 1.0f, nameScale);
-    y += CHAR_H * nameScale;
-
-    DrawTextShadow(px + (mainPanelW - distDirW) * 0.5f, y, distDir, 0.82f, 0.88f, 0.98f, 0.98f, infoScale);
-    y += CHAR_H * infoScale;
-
-    if (!statsText.empty()) {
-        DrawTextShadow(px + (mainPanelW - statsW) * 0.5f, y, statsText.c_str(), 0.86f, 0.92f, 0.88f, 0.98f, infoScale);
-        y += CHAR_H * infoScale;
+    std::string statsRow;
+    if (showHealth) {
+        char hb[24]; snprintf(hb, sizeof(hb), "HP %.0f/20", health);
+        statsRow += hb;
+    }
+    if (showArmor && armorPoints > 0) {
+        if (!statsRow.empty()) statsRow += "  |  ";
+        char ab[16]; snprintf(ab, sizeof(ab), "ARM %d", armorPoints);
+        statsRow += ab;
+    }
+    if (!heldText.empty()) {
+        if (!statsRow.empty()) statsRow += "  ";
+        statsRow += heldText;
     }
 
-    if (!heldText.empty()) {
-        DrawTextShadow(px + (mainPanelW - heldTextW) * 0.5f, y, heldText.c_str(), 0.84f, 0.88f, 0.95f, 0.98f, heldScale);
+    ImDrawList* fg = ImGui::GetForegroundDrawList();
+    const float fontSz = ImGui::GetFontSize();
+    const float smallSz = std::floor(fontSz * 0.82f);
+    const float padX = 10.0f;
+    const float padY = 6.0f;
+    const float boxW = 220.0f;
+    const float hpBarH = 4.0f;
+    const float gapRow = 3.0f;
+
+    ImVec2 nameSz = ImGui::CalcTextSize(nameRow);
+    ImVec2 statsSz = statsRow.empty() ? ImVec2(0, 0) : ImGui::CalcTextSize(statsRow.c_str());
+
+    float contentW = (std::max)(boxW, (std::max)(nameSz.x + padX * 2.0f, statsSz.x + padX * 2.0f));
+    float contentH = padY + fontSz + gapRow + hpBarH + gapRow;
+    if (!statsRow.empty()) contentH += smallSz + gapRow;
+    contentH += padY;
+
+    float cx = (float)w * 0.5f;
+    float by = (float)h - 120.0f;
+    float rx = std::floor(cx - contentW * 0.5f);
+    float ry = std::floor(by - contentH);
+
+    ImVec2 pMin(rx, ry);
+    ImVec2 pMax(rx + contentW, ry + contentH);
+    fg->AddRectFilled(pMin, pMax, IM_COL32(10, 10, 18, 210), 6.0f);
+    fg->AddRect(pMin, pMax, IM_COL32(80, 120, 255, 120), 6.0f, 0, 1.0f);
+
+    float curY = ry + padY;
+    float ntx = std::floor(cx - nameSz.x * 0.5f);
+    fg->AddText(ImVec2(ntx + 1, curY + 1), IM_COL32(0, 0, 0, 160), nameRow);
+    fg->AddText(ImVec2(ntx, curY), IM_COL32(255, 255, 255, 240), nameRow);
+    curY += fontSz + gapRow;
+
+    float hpPct = (std::max)(0.0f, (std::min)(health / 20.0f, 1.0f));
+    float barX0 = rx + padX;
+    float barX1 = rx + contentW - padX;
+    float barFill = barX0 + (barX1 - barX0) * hpPct;
+    ImU32 barCol = IM_COL32((int)(255 * (1.0f - hpPct)), (int)(220 * hpPct + 35), 60, 255);
+    fg->AddRectFilled(ImVec2(barX0, curY), ImVec2(barX1, curY + hpBarH), IM_COL32(40, 40, 40, 200), 2.0f);
+    fg->AddRectFilled(ImVec2(barX0, curY), ImVec2(barFill, curY + hpBarH), barCol, 2.0f);
+    curY += hpBarH + gapRow;
+
+    if (!statsRow.empty()) {
+        float stx = std::floor(cx - statsSz.x * 0.5f);
+        fg->AddText(ImGui::GetFont(), smallSz, ImVec2(stx + 1, curY + 1), IM_COL32(0, 0, 0, 160), statsRow.c_str());
+        ImU32 sCol = health <= 6.0f ? IM_COL32(255, 100, 100, 240) : IM_COL32(160, 200, 255, 230);
+        fg->AddText(ImGui::GetFont(), smallSz, ImVec2(stx, curY), sCol, statsRow.c_str());
     }
 
     finish();
@@ -5874,7 +6352,7 @@ void RenderChestESP(int w, int h) {
         double dy = cy - localPY;
         double dz = cz - localPZ;
         double dist = sqrt(dx*dx + dy*dy + dz*dz);
-        if (dist > 32.0) {
+        if (dist > 64.0) {
             env->DeleteLocalRef(te);
             continue;
         }
@@ -5906,13 +6384,20 @@ void RenderChestESP(int w, int h) {
         }
 
         if (projected && right > left && bottom > top) {
-            float alpha = 0.34f - (float)(dist / 120.0);
-            if (alpha < 0.14f) alpha = 0.14f;
-            DrawRect(left, top, right - left, bottom - top, 0.10f, 0.80f, 0.70f, alpha);
-            DrawRect(left, top, right - left, 1.0f, 0.35f, 1.00f, 0.85f, 0.75f);
-            DrawRect(left, bottom - 1.0f, right - left, 1.0f, 0.35f, 1.00f, 0.85f, 0.75f);
-            DrawRect(left, top, 1.0f, bottom - top, 0.35f, 1.00f, 0.85f, 0.75f);
-            DrawRect(right - 1.0f, top, 1.0f, bottom - top, 0.35f, 1.00f, 0.85f, 0.75f);
+            left = (std::max)(left, 0.0f);
+            top = (std::max)(top, 0.0f);
+            right = (std::min)(right, (float)w);
+            bottom = (std::min)(bottom, (float)h);
+            if (right <= left || bottom <= top) {
+                env->DeleteLocalRef(te);
+                continue;
+            }
+
+            float t = (std::min)((float)(dist / 40.0), 1.0f);
+            ImU32 boxColor = IM_COL32(255, 165 + (int)(90 * t), 0 + (int)(80 * t), (int)(220 - 40 * t));
+            ImDrawList* fg = ImGui::GetForegroundDrawList();
+            fg->AddRectFilled(ImVec2(left, top), ImVec2(right, bottom), IM_COL32(0, 0, 0, 90));
+            fg->AddRect(ImVec2(left, top), ImVec2(right, bottom), boxColor, 0.0f, 0, 1.5f);
             drawn++;
         }
 
@@ -5947,6 +6432,7 @@ static std::string VkToName(int vk) {
 // Retrieve the keybind VK for a given module id from cfg
 static int GetModuleKeybind(const Config& cfg, const char* id) {
     if (strcmp(id, "autoclicker")  == 0) return cfg.keybindAutoclicker;
+    if (strcmp(id, "speedbridge")  == 0) return cfg.keybindSpeedBridge;
     if (strcmp(id, "nametags")     == 0) return cfg.keybindNametags;
     if (strcmp(id, "closestplayer")== 0) return cfg.keybindClosestPlayer;
     if (strcmp(id, "chestesp")     == 0) return cfg.keybindChestEsp;
@@ -5967,6 +6453,7 @@ struct ModuleSpec {
 
 static const ModuleSpec g_modules[] = {
     { "autoclicker", "AutoClicker", "toggleArmed", CAT_COMBAT },
+    { "speedbridge", "SpeedBridge", "toggleSpeedBridge", CAT_COMBAT },
     { "nametags", "Nametags", "toggleNametags", CAT_RENDER },
     { "closestplayer", "Closest Player", "toggleClosestPlayerInfo", CAT_RENDER },
     { "chestesp", "Chest ESP", "toggleChestEsp", CAT_RENDER },
@@ -6106,6 +6593,7 @@ bool IsModuleEnabled(const ModuleSpec& m, const Config& cfg) {
     if (strcmp(m.id, "leftclick") == 0) return cfg.leftClick;
     if (strcmp(m.id, "rightclick") == 0) return cfg.rightClick;
     if (strcmp(m.id, "jitter") == 0) return cfg.jitter;
+    if (strcmp(m.id, "speedbridge") == 0) return cfg.speedBridge;
 
     if (strcmp(m.id, "nametags") == 0) return cfg.nametags;
     if (strcmp(m.id, "closestplayer") == 0) return cfg.closestPlayerInfo;
@@ -6420,6 +6908,24 @@ void RenderClickGUI(int winW, int winH) {
         if (GuiSettingToggle(settingsX + 8.0f, sy, settingsW - 16.0f, "Jitter", cfg.jitter, scale * 0.88f)) queueToggle("toggleJitter");
         sy += 25.0f;
         if (GuiSettingToggle(settingsX + 8.0f, sy, settingsW - 16.0f, "Click In Chests", cfg.clickInChests, scale * 0.88f)) queueToggle("toggleClickInChests");
+    } else if (strcmp(selected.id, "speedbridge") == 0) {
+        if (GuiSettingToggle(settingsX + 8.0f, sy, settingsW - 16.0f, "Enabled", cfg.speedBridge, scale * 0.88f)) queueToggle("toggleSpeedBridge");
+        sy += 28.0f;
+
+        float delayVal = GuiSettingSlider(settingsX + 8.0f, sy, settingsW - 16.0f, "speedbridge_delay", "Safety", (float)cfg.speedBridgeDelayMs, 20.0f, 250.0f, scale * 0.88f, true);
+        sy += 32.0f;
+        int delayInt = (int)(delayVal + 0.5f);
+        if (delayInt != cfg.speedBridgeDelayMs) {
+            char b[128];
+            snprintf(b, sizeof(b), "{\"type\":\"cmd\",\"action\":\"setSpeedBridgeDelayMs\",\"value\":%d}\n", delayInt);
+            queueCmd(b);
+        }
+
+        if (GuiSettingToggle(settingsX + 8.0f, sy, settingsW - 16.0f, "Block Only", cfg.speedBridgeBlockOnly, scale * 0.88f)) queueToggle("toggleSpeedBridgeBlockOnly");
+        sy += 25.0f;
+        if (GuiSettingToggle(settingsX + 8.0f, sy, settingsW - 16.0f, "Hold Sneak Gate", cfg.speedBridgeHoldingShiftOnly, scale * 0.88f)) queueToggle("toggleSpeedBridgeHoldingShiftOnly");
+        sy += 25.0f;
+        if (GuiSettingToggle(settingsX + 8.0f, sy, settingsW - 16.0f, "Looking Down", cfg.speedBridgeLookingDownOnly, scale * 0.88f)) queueToggle("toggleSpeedBridgeLookingDownOnly");
     } else if (strcmp(selected.id, "nametags") == 0) {
         if (GuiSettingToggle(settingsX + 8.0f, sy, settingsW - 16.0f, "Show Health", cfg.nametagShowHealth, scale * 0.88f)) queueToggle("toggleNametagHealth");
         sy += 30.0f;
@@ -6454,6 +6960,8 @@ void RenderClickGUI(int winW, int winH) {
 
 // ===================== INPUT HOOK =====================
 // WndProc only handles mouse for ClickGUI. Keyboard uses GetAsyncKeyState.
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
+
 LRESULT CALLBACK HookedWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     bool leftNowDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
     bool rawInputClickEdge = (msg == WM_INPUT) && leftNowDown && !g_reachRawInputPrevDown;
@@ -6483,6 +6991,16 @@ LRESULT CALLBACK HookedWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
                 }
             }
         }
+    }
+
+    if (msg == WM_INPUT && g_guiOpen) {
+        return DefWindowProcA(hwnd, msg, wParam, lParam);
+    }
+
+    if (g_imguiInitialized && g_guiOpen) {
+        ImGui_ImplWin32_WndProcHandler(hwnd, msg, wParam, lParam);
+        if (msg >= WM_MOUSEFIRST && msg <= WM_MOUSELAST) return TRUE;
+        if (msg >= WM_KEYFIRST && msg <= WM_KEYLAST) return TRUE;
     }
 
     switch (msg) {
@@ -6561,63 +7079,237 @@ void EnsureWndProcHook(HWND targetHwnd) {
     }
 }
 
-// ===================== SWAPBUFFERS HOOK (IAT) =====================
-BOOL WINAPI HookedSwapBuffers(HDC hdc) {
-    // First-time init
-    if (!g_glInitialized) InitFont();
+static BOOL CallOriginalSwapBuffers(HDC hdc) {
+    if (!g_origSwapBuffers) {
+        HMODULE hGdi = GetModuleHandleA("gdi32.dll");
+        if (hGdi) g_origSwapBuffers = (SwapBuffersFn)GetProcAddress(hGdi, "SwapBuffers");
+    }
+    return g_origSwapBuffers ? g_origSwapBuffers(hdc) : FALSE;
+}
 
-    if (g_glInitialized) {
-        HWND currentHwnd = WindowFromDC(hdc);
-        if (currentHwnd) g_gameHwnd = currentHwnd;
-        EnsureWndProcHook(currentHwnd);
+static void ConfigureImGuiFontAndStyle(HWND hwnd) {
+    ImGuiIO& io = ImGui::GetIO();
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    io.IniFilename = nullptr;
 
-        // Get window size
-        RECT rect; GetClientRect(WindowFromDC(hdc), &rect);
-        int w = rect.right, h = rect.bottom;
+    float dpiScale = 1.0f;
+    UINT dpi = 96;
+    HMODULE hUser32 = GetModuleHandleA("user32.dll");
+    if (hUser32) {
+        typedef UINT (WINAPI* FnGetDpiForWindow)(HWND);
+        FnGetDpiForWindow fn = (FnGetDpiForWindow)GetProcAddress(hUser32, "GetDpiForWindow");
+        if (fn && hwnd) dpi = fn(hwnd);
+    }
+    dpiScale = (dpi > 0) ? ((float)dpi / 96.0f) : 1.0f;
+    if (dpiScale < 0.75f) dpiScale = 0.75f;
+    if (dpiScale > 2.5f) dpiScale = 2.5f;
 
-        if (w > 0 && h > 0) {
-            // Capture game-space matrices before overlay code overrides projection/modelview.
-            CaptureCurrentRenderMatrices();
+    io.Fonts->Clear();
+    ImFontConfig fontCfg;
+    fontCfg.RasterizerDensity = 1.0f;
+    fontCfg.SizePixels = 16.0f * dpiScale;
+    fontCfg.OversampleH = 3;
+    fontCfg.OversampleV = 2;
+    fontCfg.PixelSnapH = true;
 
-            // Save GL state
-            glPushAttrib(GL_ALL_ATTRIB_BITS);
-            glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity();
-            glOrtho(0, w, h, 0, -1, 1);
-            glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity();
+    ImFont* loadedFont = nullptr;
+    std::string bridgeDir = GetBridgeDir();
+    std::vector<std::string> fontCandidates = {
+        bridgeDir + "\\minecraftia.ttf",
+        bridgeDir + "\\Minecraftia.ttf",
+        bridgeDir + "\\Data\\minecraftia.ttf",
+        bridgeDir + "\\Data\\Minecraftia.ttf",
+        "C:\\Windows\\Fonts\\minecraftia.ttf",
+        "C:\\Windows\\Fonts\\Minecraftia.ttf"
+    };
 
-            glDisable(GL_DEPTH_TEST); glDisable(GL_CULL_FACE); glDisable(GL_LIGHTING);
-            glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-            RenderHUD(w, h);
-            GameState state;
-            { LockGuard lk(g_stateMutex); state = g_gameState; }
-            if (!ShouldHideWorldRenderModules(state)) {
-                TryLockGuard jniTry(g_renderJniMutex);
-                if (jniTry.owns_lock()) {
-                    RenderNametags(w, h);
-                    RenderClosestPlayerInfo(w, h);
-                    RenderChestESP(w, h);
-                } else {
-                    static DWORD nextJniBusyLogAt = 0;
-                    DWORD now = GetTickCount();
-                    if (now >= nextJniBusyLogAt) {
-                        nextJniBusyLogAt = now + 15000;
-                        bool heavy = (InterlockedCompareExchange(&g_heavyDiscoveryInProgress, 0, 0) != 0);
-                        Log(std::string("Skipped world overlay frame: JNI busy")
-                            + (heavy ? " (heavy discovery active)" : ""));
-                    }
-                }
-            }
-
-            // Restore GL state
-            glMatrixMode(GL_PROJECTION); glPopMatrix();
-            glMatrixMode(GL_MODELVIEW); glPopMatrix();
-            glPopAttrib();
+    for (const std::string& fontPath : fontCandidates) {
+        if (!FileExistsLocal(fontPath) || !IsLikelyFontBinary(fontPath)) continue;
+        loadedFont = io.Fonts->AddFontFromFileTTF(fontPath.c_str(), fontCfg.SizePixels, &fontCfg);
+        if (loadedFont) {
+            Log("Loaded ImGui font: " + fontPath);
+            break;
         }
     }
+    if (!loadedFont) {
+        io.Fonts->AddFontDefault(&fontCfg);
+        Log("Minecraftia not found, using default ImGui font.");
+    }
 
-    // Call original SwapBuffers via saved pointer (IAT hook - no trampoline)
-    return g_origSwapBuffers(hdc);
+    io.FontGlobalScale = 1.0f;
+    ImGuiStyle& st = ImGui::GetStyle();
+    st.WindowRounding = 0.0f;
+    st.ChildRounding = 0.0f;
+    st.FrameRounding = 2.0f;
+    st.GrabRounding = 2.0f;
+    st.ScrollbarRounding = 0.0f;
+    st.ScaleAllSizes(dpiScale);
+}
+
+// ===================== SWAPBUFFERS HOOK =====================
+BOOL WINAPI HookedSwapBuffers(HDC hdc) {
+    if (!hdc) return CallOriginalSwapBuffers(hdc);
+
+    HGLRC currentRc = wglGetCurrentContext();
+    if (!currentRc) return CallOriginalSwapBuffers(hdc);
+
+    HWND currentHwnd = WindowFromDC(hdc);
+    if (!currentHwnd || !IsWindow(currentHwnd)) return CallOriginalSwapBuffers(hdc);
+    g_gameHwnd = currentHwnd;
+
+    if (g_imguiPhase1Done && g_imguiHwnd && currentHwnd != g_imguiHwnd) {
+        ResetImGuiBackendsForReinit("window changed");
+        return CallOriginalSwapBuffers(hdc);
+    }
+
+    if (!g_imguiPhase1Done) {
+        ImGui::CreateContext();
+        ConfigureImGuiFontAndStyle(currentHwnd);
+        ImGui_ImplWin32_InitForOpenGL(currentHwnd);
+        EnsureWndProcHook(currentHwnd);
+
+        g_imguiPhase1Done = true;
+        g_imguiWarmupFrames = 3;
+        g_imguiGlrc = currentRc;
+        g_imguiHwnd = currentHwnd;
+        Log("ImGui phase-1 done for legacy bridge (context + Win32).");
+        return CallOriginalSwapBuffers(hdc);
+    }
+
+    EnsureWndProcHook(currentHwnd);
+
+    if (g_imguiWarmupFrames > 0) {
+        g_imguiWarmupFrames--;
+        return CallOriginalSwapBuffers(hdc);
+    }
+
+    if (g_imguiInitialized && g_imguiGlBackendReady && g_imguiGlrc && currentRc != g_imguiGlrc) {
+        Log("OpenGL context changed; scheduling legacy ImGui backend reset.");
+        g_imguiPendingBackendReset = true;
+        g_imguiPendingGlrc = currentRc;
+        g_imguiWarmupFrames = 3;
+        return CallOriginalSwapBuffers(hdc);
+    }
+
+    if (g_imguiPendingBackendReset) {
+        Log("ImGui legacy: executing deferred OpenGL backend shutdown (skip GL deletes)");
+        ImGui_ImplOpenGL3_SetSkipGLDeletes(true);
+        ImGui_ImplOpenGL3_Shutdown();
+        ImGui_ImplOpenGL3_SetSkipGLDeletes(false);
+        g_imguiGlBackendReady = false;
+        g_imguiInitialized = false;
+        g_glInitialized = false;
+        g_imguiGlrc = g_imguiPendingGlrc;
+        g_imguiPendingBackendReset = false;
+        g_imguiWarmupFrames = 3;
+        return CallOriginalSwapBuffers(hdc);
+    }
+
+    if (g_imguiInitialized && !ImGui::GetCurrentContext()) {
+        ResetImGuiBackendsForReinit("missing ImGui context");
+        return CallOriginalSwapBuffers(hdc);
+    }
+
+    if (!g_imguiInitialized) {
+        static bool glModernLoadedLogged = false;
+        if (!glModernLoadedLogged) {
+            bool ok = LoadModernOpenGL();
+            Log(std::string("Legacy ImGui OpenGL loader: ") + (ok ? "ok" : "FAILED"));
+            glModernLoadedLogged = true;
+        }
+
+        GLint last_program = 0;
+        GLint last_active_texture = 0;
+        GLint last_texture_2d = 0;
+        GLint last_array_buffer = 0;
+        GLint last_element_array_buffer = 0;
+        GLint last_vertex_array = 0;
+        GLint last_pixel_unpack_buffer = 0;
+
+        glGetIntegerv(GL_CURRENT_PROGRAM, &last_program);
+        glGetIntegerv(GL_ACTIVE_TEXTURE, &last_active_texture);
+        glGetIntegerv(GL_TEXTURE_BINDING_2D, &last_texture_2d);
+        glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &last_array_buffer);
+        glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &last_element_array_buffer);
+        if (glBindVertexArray_) glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &last_vertex_array);
+        if (glBindBuffer_) glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &last_pixel_unpack_buffer);
+
+        // Let the backend choose the GLSL version for 1.8.9's older GL context.
+        ImGui_ImplOpenGL3_Init(nullptr);
+
+        if (glUseProgram_) glUseProgram_((GLuint)last_program);
+        if (glActiveTexture_) glActiveTexture_((GLenum)last_active_texture);
+        glBindTexture(GL_TEXTURE_2D, (GLuint)last_texture_2d);
+        if (glBindBuffer_) {
+            glBindBuffer_(GL_ARRAY_BUFFER, (GLuint)last_array_buffer);
+            glBindBuffer_(GL_ELEMENT_ARRAY_BUFFER, (GLuint)last_element_array_buffer);
+            glBindBuffer_(GL_PIXEL_UNPACK_BUFFER, (GLuint)last_pixel_unpack_buffer);
+        }
+        if (glBindVertexArray_) glBindVertexArray_((GLuint)last_vertex_array);
+
+        g_imguiGlBackendReady = true;
+        g_imguiInitialized = true;
+        g_glInitialized = true;
+        g_imguiGlrc = currentRc;
+        g_imguiWarmupFrames = 3;
+        Log("ImGui phase-2 done for legacy bridge (OpenGL backend).");
+        return CallOriginalSwapBuffers(hdc);
+    }
+
+    RECT rect{};
+    if (!GetClientRect(currentHwnd, &rect)) return CallOriginalSwapBuffers(hdc);
+    int w = rect.right - rect.left;
+    int h = rect.bottom - rect.top;
+    if (w <= 0 || h <= 0) return CallOriginalSwapBuffers(hdc);
+
+    GameState state;
+    { LockGuard lk(g_stateMutex); state = g_gameState; }
+
+    static bool s_wasNonChatMinecraftScreen = false;
+    bool nonChatScreenOpen = ShouldHideWorldRenderModules(state);
+    if (nonChatScreenOpen) {
+        s_wasNonChatMinecraftScreen = true;
+    } else if (s_wasNonChatMinecraftScreen && g_imguiInitialized) {
+        s_wasNonChatMinecraftScreen = false;
+        ResetImGuiBackendsForReinit("minecraft screen closed");
+        return CallOriginalSwapBuffers(hdc);
+    }
+
+    // Capture game-space matrices before ImGui renders and restores GL state.
+    CaptureCurrentRenderMatrices();
+
+    ImGui_ImplOpenGL3_NewFrame();
+    ImGui_ImplWin32_NewFrame();
+    ImGui::NewFrame();
+
+    RenderHUD(w, h);
+    if (!ShouldHideWorldRenderModules(state)) {
+        TryLockGuard jniTry(g_renderJniMutex);
+        if (jniTry.owns_lock()) {
+            RenderNametags(w, h);
+            RenderClosestPlayerInfo(w, h);
+            RenderChestESP(w, h);
+        } else {
+            static DWORD nextJniBusyLogAt = 0;
+            DWORD now = GetTickCount();
+            if (now >= nextJniBusyLogAt) {
+                nextJniBusyLogAt = now + 15000;
+                bool heavy = (InterlockedCompareExchange(&g_heavyDiscoveryInProgress, 0, 0) != 0);
+                Log(std::string("Skipped world overlay frame: JNI busy")
+                    + (heavy ? " (heavy discovery active)" : ""));
+            }
+        }
+    }
+    RenderClickGUI(w, h);
+
+    ImGui::Render();
+    ImGuiIO& io = ImGui::GetIO();
+    if (io.DisplaySize.x > 1.0f && io.DisplaySize.y > 1.0f) {
+        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+    }
+    glFlush();
+
+    return CallOriginalSwapBuffers(hdc);
 }
 
 // IAT hook: patch import table entries for SwapBuffers in a specific module
@@ -6656,6 +7348,27 @@ bool PatchIAT(HMODULE hModule, const char* targetDll, const char* funcName, void
 }
 
 void InstallSwapBuffersHook() {
+    MH_STATUS mhInit = MH_Initialize();
+    if (mhInit == MH_OK || mhInit == MH_ERROR_ALREADY_INITIALIZED) {
+        g_minhookInitialized = true;
+        HMODULE hGdiHook = GetModuleHandleA("gdi32.dll");
+        if (hGdiHook) {
+            void* pSwap = (void*)GetProcAddress(hGdiHook, "SwapBuffers");
+            if (pSwap) {
+                MH_STATUS createStatus = MH_CreateHook(pSwap, (void*)HookedSwapBuffers, (void**)&g_origSwapBuffers);
+                MH_STATUS enableStatus = (createStatus == MH_OK) ? MH_EnableHook(pSwap) : createStatus;
+                if (createStatus == MH_OK && enableStatus == MH_OK) {
+                    Log("MinHook hooked gdi32!SwapBuffers for legacy ImGui rendering.");
+                    return;
+                }
+                Log("WARNING: MinHook SwapBuffers hook failed, falling back to IAT scan. create="
+                    + std::to_string((int)createStatus) + " enable=" + std::to_string((int)enableStatus));
+            }
+        }
+    } else {
+        Log("WARNING: MinHook init failed, falling back to IAT scan. status=" + std::to_string((int)mhInit));
+    }
+
     // Enumerate ALL loaded modules and find the one that imports SwapBuffers
     HANDLE hProc = GetCurrentProcess();
     HMODULE hMods[1024];
@@ -6749,6 +7462,10 @@ void ParseConfig(const std::string& line) {
         g_config.clickInChests = reader.GetBool("clickInChests");
         g_config.aimAssist = reader.GetBool("aimAssist");
         g_config.triggerbot = reader.GetBool("triggerbot");
+        g_config.speedBridge = reader.GetBool("speedBridge");
+        g_config.speedBridgeBlockOnly = reader.GetBool("speedBridgeBlockOnly");
+        g_config.speedBridgeHoldingShiftOnly = reader.GetBool("speedBridgeHoldingShiftOnly");
+        g_config.speedBridgeLookingDownOnly = reader.GetBool("speedBridgeLookingDownOnly");
         g_config.gtbHelper = reader.GetBool("gtbHelper");
         g_config.nametags = reader.GetBool("nametags");
         g_config.closestPlayerInfo = reader.GetBool("closestPlayerInfo");
@@ -6805,6 +7522,11 @@ void ParseConfig(const std::string& line) {
         if (velocityChance > 100) velocityChance = 100;
         g_config.velocityChance = velocityChance;
 
+        int speedBridgeDelayMs = reader.GetInt("speedBridgeDelayMs", -1);
+        if (speedBridgeDelayMs < 20) speedBridgeDelayMs = g_config.speedBridgeDelayMs;
+        if (speedBridgeDelayMs > 250) speedBridgeDelayMs = 250;
+        g_config.speedBridgeDelayMs = speedBridgeDelayMs;
+
         std::string gtbHint = reader.GetString("gtbHint");
         int gtbCount = reader.GetInt("gtbCount", g_config.gtbCount);
         if (gtbCount < 0) gtbCount = g_config.gtbCount;
@@ -6834,6 +7556,7 @@ void ParseConfig(const std::string& line) {
 
         // Per-module keybinds (-1 means absent / don't override)
         { int v = reader.GetInt("keybindAutoclicker", -1);  if (v >= 0) g_config.keybindAutoclicker  = v; }
+        { int v = reader.GetInt("keybindSpeedBridge", -1);  if (v >= 0) g_config.keybindSpeedBridge  = v; }
         { int v = reader.GetInt("keybindNametags", -1);      if (v >= 0) g_config.keybindNametags      = v; }
         { int v = reader.GetInt("keybindClosestPlayer", -1); if (v >= 0) g_config.keybindClosestPlayer = v; }
         { int v = reader.GetInt("keybindChestEsp", -1);      if (v >= 0) g_config.keybindChestEsp      = v; }
@@ -6908,6 +7631,7 @@ void ServerLoop() {
             {
                 LockGuard jniLk(g_stateJniMutex);
                 state = ReadGameState(env);
+                UpdateSpeedBridge(env, cfgSnapshot, state);
                 if (cfgSnapshot.reachEnabled || g_reachAllowCurrentClick || g_reachClickPrevDown) {
                     UpdateReach(env, cfgSnapshot, state);
                 }
@@ -6939,6 +7663,7 @@ void ServerLoop() {
             jsonToSend += "\"posX\":" + std::to_string(state.posX) + ",";
             jsonToSend += "\"posY\":" + std::to_string(state.posY) + ",";
             jsonToSend += "\"posZ\":" + std::to_string(state.posZ) + ",";
+            jsonToSend += "\"pitch\":" + std::to_string(state.pitch) + ",";
             jsonToSend += "\"holdingBlock\":" + std::string(state.holdingBlock ? "true" : "false") + ",";
             jsonToSend += "\"lookingAtBlock\":" + std::string(state.lookingAtBlock ? "true" : "false") + ",";
             jsonToSend += "\"lookingAtEntity\":" + std::string(state.lookingAtEntity ? "true" : "false") + ",";
@@ -6982,14 +7707,14 @@ void ServerLoop() {
             std::vector<std::string> cmds;
             { LockGuard lk(g_cmdMutex);
               cmds = g_pendingCommands;
-              g_pendingCommands.clear(); 
+              g_pendingCommands.clear();
             }
-            
-            
+
+
             for (const auto& c : cmds) {
                  int s = send(g_clientSocket, c.c_str(), (int)c.length(), 0);
                  if (s == SOCKET_ERROR && WSAGetLastError() != WSAEWOULDBLOCK) {
-                     break; 
+                     break;
                  }
             }
 
@@ -7004,15 +7729,27 @@ void ServerLoop() {
                     readBuf.erase(0, pos + 1);
                     if (!line.empty()) ParseConfig(line);
                 }
+            } else if (r == 0) {
+                break;
+            } else {
+                int err = WSAGetLastError();
+                if (err != WSAEWOULDBLOCK) break;
             }
 
             Sleep(needEntityTelemetry ? 10 : 25);
+        }
+        {
+            LockGuard jniLk(g_stateJniMutex);
+            ReleaseSpeedBridgeSneak(env);
+            ResetSpeedBridgeMovementTracking();
         }
         closesocket(g_clientSocket); g_clientSocket = INVALID_SOCKET;
         Log("Client disconnected");
     }
     {
         LockGuard jniLk(g_stateJniMutex);
+        ReleaseSpeedBridgeSneak(env);
+        ResetSpeedBridgeMovementTracking();
         HelperBridge::Unload(env);
     }
     g_jvm->DetachCurrentThread();
@@ -7051,6 +7788,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved) {
         Log("Log path: " + g_logPath);
         CreateThread(nullptr, 0, MainThread, nullptr, 0, nullptr);
     } else if (reason == DLL_PROCESS_DETACH) {
+        CleanupImGuiAndHooks();
         UnloadMinecraftiaPrivateFont();
         Log("DLL_PROCESS_DETACH");
     }

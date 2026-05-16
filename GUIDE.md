@@ -16,7 +16,7 @@ LegoClicker is a split-architecture utility client designed for Lunar Client (Mi
     *   `bridge_261.dll`: Modern bridge for Minecraft 1.21.x and Lunar 26.1.
     *   Uses JNI to read game state data directly from the JVM.
     *   Hosts the TCP server on port `25590` to send JSON data to the C# client and receive configuration updates.
-    *   Hooks OpenGL (`wglSwapBuffers`) for rendering in-game overlays (ImGui for modern, raw GL for legacy).
+    *   Hooks OpenGL (`wglSwapBuffers` / `SwapBuffers`) for rendering in-game overlays. Both active bridges now render through ImGui/OpenGL backends.
     *   Hooks `WndProc` to manage cursor state and block game input when the internal ClickGUI is open.
 
 **Note on Unused Code:**
@@ -53,11 +53,12 @@ For legacy 1.8.9, menu injection is supported: you can inject while in menus/lob
 2.  Add a new Loop method (e.g., `MyNewCheatLoop`) and manage its lifecycle via `CancellationTokenSource`, similar to `AimAssistLoop` or `TriggerbotLoop`.
 3.  Simulate input using Win32 `SendInput` (`_leftClickInputs`, `_aimAssistMoveInput`, etc.). Do not send packets directly.
 4.  Update the TCP config payload in `GameStateClient.cs` (`ConfigSenderLoop`) to send the toggle state to the bridge (so the in-game GUI knows about it).
+5.  Update `BridgeCapabilities.cs`, `bridge_capabilities.h`, profile persistence, keybind maps, and tests when the feature is gated by bridge/version support.
 
 ### Adding Visual Overlays
 **Where:** `McInjector/src/main/cpp/bridge_261.cpp` (and `bridge.cpp` for legacy)
 1.  Read the incoming config state in `ParseConfig` in the bridge.
-2.  Implement rendering logic inside the `wglSwapBuffers` hook using ImGui (for modern) or raw OpenGL (for legacy).
+2.  Implement rendering logic inside the swap-buffer hook using ImGui draw lists. The legacy 1.8.9 bridge keeps helper names such as `DrawText2D`, but those helpers now feed ImGui foreground draw lists instead of owning a separate raw-GL font path.
 3.  Use the `WorldToScreen` functions to project 3D game coordinates to 2D screen coordinates.
 
 ### Extracting New Game State
@@ -90,6 +91,8 @@ The codebase is split strictly into two runtime paradigms due to massive differe
 *   **Discovery:** The bridge uses deep reflection and heuristic scanning. For example, it finds the `thePlayer` field by scanning for a singleton object, checking its methods for one returning a `float` named `getHealth`, and verifying field types.
 *   **World Structure:** Entities and TileEntities (chests) are stored in flat lists (`playerEntities`, `loadedTileEntityList`) on the `WorldClient` object.
 *   **Camera:** Matrix data is retrieved from `ActiveRenderInfo` (`MODELVIEW` and `PROJECTION` FloatBuffers). Viewer position is taken from `RenderManager`.
+*   **Rendering:** The 1.8.9 bridge links the same vendored ImGui, OpenGL loader, and MinHook sources as the modern bridge. ImGui initialization is split across clean swap frames and preserves GL state to avoid destabilizing Lunar rendering.
+*   **State:** The legacy state payload now includes `pitch`.
 
 ### Modern Bridge (`bridge_261.cpp` - Minecraft 1.21 / Lunar 26.1)
 *   **The 1.21 vs 26.1 Mapping Shift:** There is a profound difference in how Minecraft 1.21 and Minecraft 26.1 are structured, which is why `bridge_261.cpp` relies on a fallback array mechanism:
@@ -132,7 +135,7 @@ Because the rendering and state extraction differ heavily, the design of visual 
 
 ### Visual Modules (Nametags, Chest ESP, ClickGUI)
 *   **Modern Design (1.21.x / 26.1):** Heavily utilizes **ImGui**. The ClickGUI uses standard ImGui windows. Overlays use `ImGui::GetBackgroundDrawList()` to draw text/rectangles. Entity and chunk iterations are used for Nametags and Chest ESP with JOML matrices for projection.
-*   **Legacy Design (1.8.9):** Uses **Raw OpenGL** (`glBegin`, `glVertex2f`). Custom font rendering (`g_fontTexture`) is used right inside the `wglSwapBuffers` hook.
+*   **Legacy Design (1.8.9):** Also uses ImGui now. The bridge still exposes legacy drawing helpers for module code, but text/rectangles are emitted through ImGui foreground draw lists and the build includes `imgui_impl_win32`, `imgui_impl_opengl3`, `gl_loader.cpp`, and MinHook.
 *   **Nametags Option:** Nametags include a hide-vanilla toggle that attempts native nametag visibility suppression (no visual mask fallback). The modern bridge now supports Mojmap/Yarn scoreboard variants, retries mapping resolution when startup mapping is incomplete, and exposes **Reload Mappings** as a full JNI remap across modules (not nametag-only). If required mappings are unsupported on a runtime/build, it fails open and logs exactly what is missing.
 
 ### Internal Game State Modules (Reach & Velocity)
@@ -149,6 +152,6 @@ These modules modify the game state and execute within the C++ bridges, presenti
 ## 7. Logs and Debugging
 
 When working with JNI and class mappings, failures are common.
-*   The C++ bridges output extensive debug information to a file named `bridge_debug.log` located in the same directory as the injected DLL.
-*   Always check `bridge_debug.log` to see the "Mapping Report" output. It will explicitly list which fields (Player, World, Matrices, etc.) failed to resolve via JNI.
+*   The C++ bridges output extensive debug information next to the injected DLL: `bridge_debug.log` for 1.8.9 and `bridge_261_debug.log` for 1.21.x / 26.1.
+*   Always check the matching bridge log to see mapping reports and feature-specific unresolved JNI messages. It will explicitly list which fields, methods, or runtime caches failed to resolve.
 *   C# logging is routed to `Debug.WriteLine` and can be viewed in Visual Studio's output window or via a standard debugger attached to the loader process.

@@ -14,20 +14,20 @@ public class Clicker : INotifyPropertyChanged
     private const int TriggerbotStateFreshMs = 35;
     private static Clicker? _instance;
     public static Clicker Instance => _instance ??= new Clicker();
-    
+
     // P/Invoke declarations
     [DllImport("user32.dll", SetLastError = true)]
     private static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
     [DllImport("user32.dll")]
     private static extern short GetAsyncKeyState(int vKey);
-    
+
     [StructLayout(LayoutKind.Sequential)]
     private struct INPUT
     {
         public uint Type;
         public MOUSEINPUT Mi;
     }
-    
+
     [StructLayout(LayoutKind.Sequential)]
     private struct MOUSEINPUT
     {
@@ -38,7 +38,7 @@ public class Clicker : INotifyPropertyChanged
         public uint Time;
         public IntPtr DwExtraInfo;
     }
-    
+
     private const uint INPUT_MOUSE = 0;
     private const uint MOUSEEVENTF_MOVE = 0x0001;
     private const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
@@ -397,6 +397,7 @@ public class Clicker : INotifyPropertyChanged
 
             AimAssistEnabled = false;
             TriggerbotEnabled = false;
+            SpeedBridgeEnabled = false;
             GtbHelperEnabled = false;
             NametagsEnabled = false;
             NametagHideVanilla = false;
@@ -973,6 +974,72 @@ public class Clicker : INotifyPropertyChanged
             OnPropertyChanged(nameof(TriggerbotEnabled));
             if (_triggerbotEnabled) StartTriggerbotLoop();
             else StopTriggerbotLoop();
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _speedBridgeEnabled = false;
+    public bool SpeedBridgeEnabled
+    {
+        get => _speedBridgeEnabled;
+        set
+        {
+            if (_speedBridgeEnabled == value) return;
+            _speedBridgeEnabled = value;
+            OnPropertyChanged(nameof(SpeedBridgeEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _speedBridgeBlockOnly = true;
+    public bool SpeedBridgeBlockOnly
+    {
+        get => _speedBridgeBlockOnly;
+        set
+        {
+            if (_speedBridgeBlockOnly == value) return;
+            _speedBridgeBlockOnly = value;
+            OnPropertyChanged(nameof(SpeedBridgeBlockOnly));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private int _speedBridgeDelayMs = 85;
+    public int SpeedBridgeDelayMs
+    {
+        get => _speedBridgeDelayMs;
+        set
+        {
+            int clamped = Math.Clamp(value, 20, 250);
+            if (_speedBridgeDelayMs == clamped) return;
+            _speedBridgeDelayMs = clamped;
+            OnPropertyChanged(nameof(SpeedBridgeDelayMs));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _speedBridgeHoldingShiftOnly = true;
+    public bool SpeedBridgeHoldingShiftOnly
+    {
+        get => _speedBridgeHoldingShiftOnly;
+        set
+        {
+            if (_speedBridgeHoldingShiftOnly == value) return;
+            _speedBridgeHoldingShiftOnly = value;
+            OnPropertyChanged(nameof(SpeedBridgeHoldingShiftOnly));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _speedBridgeLookingDownOnly = true;
+    public bool SpeedBridgeLookingDownOnly
+    {
+        get => _speedBridgeLookingDownOnly;
+        set
+        {
+            if (_speedBridgeLookingDownOnly == value) return;
+            _speedBridgeLookingDownOnly = value;
+            OnPropertyChanged(nameof(SpeedBridgeLookingDownOnly));
             StateChanged?.Invoke();
         }
     }

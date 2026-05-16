@@ -36,6 +36,11 @@ public class Profile
     public int TriggerbotCooldownThreshold { get; set; } = 92;
     public int TriggerbotHitChance { get; set; } = 100;
     public bool TriggerbotRequireClick { get; set; } = true;
+    public bool SpeedBridgeEnabled { get; set; } = false;
+    public bool SpeedBridgeBlockOnly { get; set; } = true;
+    public int SpeedBridgeDelayMs { get; set; } = 85;
+    public bool SpeedBridgeHoldingShiftOnly { get; set; } = true;
+    public bool SpeedBridgeLookingDownOnly { get; set; } = true;
     public bool GtbHelperEnabled { get; set; } = false;
     public bool NametagsEnabled { get; set; } = false;
     public bool ShowModuleList { get; set; } = true;
@@ -75,6 +80,7 @@ public class Profile
         ["breakblocks"]   = 0,
         ["aimassist"]     = 0,
         ["triggerbot"]    = 0,
+        ["speedbridge"]   = 0,
         ["gtbhelper"]     = 0,
         ["nametags"]      = 0,
         ["closestplayer"] = 0,
@@ -187,6 +193,11 @@ public static class ProfileManager
             TriggerbotCooldownThreshold = clicker.TriggerbotCooldownThreshold,
             TriggerbotHitChance = clicker.TriggerbotHitChance,
             TriggerbotRequireClick = clicker.TriggerbotRequireClick,
+            SpeedBridgeEnabled = clicker.SpeedBridgeEnabled,
+            SpeedBridgeBlockOnly = clicker.SpeedBridgeBlockOnly,
+            SpeedBridgeDelayMs = clicker.SpeedBridgeDelayMs,
+            SpeedBridgeHoldingShiftOnly = clicker.SpeedBridgeHoldingShiftOnly,
+            SpeedBridgeLookingDownOnly = clicker.SpeedBridgeLookingDownOnly,
             GtbHelperEnabled = clicker.GtbHelperEnabled,
             NametagsEnabled = clicker.NametagsEnabled,
             ShowModuleList = clicker.ShowModuleList,
@@ -260,6 +271,11 @@ public static class ProfileManager
         clicker.TriggerbotCooldownThreshold = profile.TriggerbotCooldownThreshold;
         clicker.TriggerbotHitChance = profile.TriggerbotHitChance;
         clicker.TriggerbotRequireClick = profile.TriggerbotRequireClick;
+        clicker.SpeedBridgeEnabled = profile.SpeedBridgeEnabled;
+        clicker.SpeedBridgeBlockOnly = profile.SpeedBridgeBlockOnly;
+        clicker.SpeedBridgeDelayMs = profile.SpeedBridgeDelayMs;
+        clicker.SpeedBridgeHoldingShiftOnly = profile.SpeedBridgeHoldingShiftOnly;
+        clicker.SpeedBridgeLookingDownOnly = profile.SpeedBridgeLookingDownOnly;
         clicker.GtbHelperEnabled = profile.GtbHelperEnabled;
         clicker.NametagsEnabled = profile.NametagsEnabled;
         clicker.ShowModuleList = profile.ShowModuleList;

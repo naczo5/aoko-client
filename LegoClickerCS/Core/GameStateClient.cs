@@ -765,6 +765,11 @@ public class GameStateClient : INotifyPropertyChanged
                     aimAssistRange = clicker.AimAssistRange,
                     aimAssistStrength = clicker.AimAssistStrength,
                     triggerbot = clicker.TriggerbotEnabled,
+                    speedBridge = clicker.SpeedBridgeEnabled,
+                    speedBridgeBlockOnly = clicker.SpeedBridgeBlockOnly,
+                    speedBridgeDelayMs = clicker.SpeedBridgeDelayMs,
+                    speedBridgeHoldingShiftOnly = clicker.SpeedBridgeHoldingShiftOnly,
+                    speedBridgeLookingDownOnly = clicker.SpeedBridgeLookingDownOnly,
                     gtbHelper = clicker.GtbHelperEnabled,
                     gtbHint = clicker.GtbCurrentHint,
                     gtbCount = clicker.GtbMatchCount,
@@ -805,6 +810,7 @@ public class GameStateClient : INotifyPropertyChanged
                     keybindBreakBlocks   = InputHooks.GetModuleKey("breakblocks"),
                     keybindAimAssist     = InputHooks.GetModuleKey("aimassist"),
                     keybindTriggerbot    = InputHooks.GetModuleKey("triggerbot"),
+                    keybindSpeedBridge   = InputHooks.GetModuleKey("speedbridge"),
                     keybindGtbHelper     = InputHooks.GetModuleKey("gtbhelper"),
                     keybindNametags      = InputHooks.GetModuleKey("nametags"),
                     keybindClosestPlayer = InputHooks.GetModuleKey("closestplayer"),
@@ -869,6 +875,18 @@ public class GameStateClient : INotifyPropertyChanged
                 case "toggleTriggerbot":
                     clicker.TriggerbotEnabled = !clicker.TriggerbotEnabled;
                     break;
+                case "toggleSpeedBridge":
+                    clicker.SpeedBridgeEnabled = !clicker.SpeedBridgeEnabled;
+                    break;
+                case "toggleSpeedBridgeBlockOnly":
+                    clicker.SpeedBridgeBlockOnly = !clicker.SpeedBridgeBlockOnly;
+                    break;
+                case "toggleSpeedBridgeHoldingShiftOnly":
+                    clicker.SpeedBridgeHoldingShiftOnly = !clicker.SpeedBridgeHoldingShiftOnly;
+                    break;
+                case "toggleSpeedBridgeLookingDownOnly":
+                    clicker.SpeedBridgeLookingDownOnly = !clicker.SpeedBridgeLookingDownOnly;
+                    break;
                 case "toggleGtbHelper":
                     clicker.GtbHelperEnabled = !clicker.GtbHelperEnabled;
                     break;
@@ -929,6 +947,9 @@ public class GameStateClient : INotifyPropertyChanged
                     break;
                 case "setAimAssistStrength":
                     clicker.AimAssistStrength = node?["value"]?.GetValue<int>() ?? 40;
+                    break;
+                case "setSpeedBridgeDelayMs":
+                    clicker.SpeedBridgeDelayMs = (int)(node?["value"]?.GetValue<float>() ?? 85f);
                     break;
                 case "toggleReach":
                     clicker.ReachEnabled = !clicker.ReachEnabled;

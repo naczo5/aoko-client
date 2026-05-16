@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="description" content="LegoClicker is a Lunar utility client supporting 1.8.9, 1.21.x, and 26.1. It includes autoclicker, aim assist, triggerbot, reach, velocity, auto totem, GTB helper, render modules, profiles, keybinds, and GUI customization." />
+  <meta name="description" content="LegoClicker is a Lunar utility client supporting 1.8.9, 1.21.x, and 26.1. It includes autoclicker, aim assist, triggerbot, SpeedBridge, reach, velocity, auto totem, GTB helper, render modules, profiles, keybinds, and GUI customization." />
   <meta name="robots" content="index,follow" />
   <meta name="theme-color" content="#b28cff" />
 
@@ -12,14 +12,14 @@
   <meta property="og:type" content="website" />
   <meta property="og:site_name" content="LegoClicker" />
   <meta property="og:title" content="LegoClicker — Minecraft Utility Client" />
-  <meta property="og:description" content="Lunar utility client supporting 1.8.9, 1.21.x, and 26.1 with combat, auto totem, render, profiles, and GUI customization." />
+  <meta property="og:description" content="Lunar utility client supporting 1.8.9, 1.21.x, and 26.1 with combat, SpeedBridge, auto totem, render, profiles, and GUI customization." />
   <meta property="og:url" content="https://naczo5.github.io/LegoClicker/" />
   <meta property="og:image" content="https://naczo5.github.io/LegoClicker/screenshots/gameplay.png" />
   <meta property="og:image:alt" content="LegoClicker gameplay HUD preview" />
 
   <meta name="twitter:card" content="summary_large_image" />
   <meta name="twitter:title" content="LegoClicker — Minecraft Utility Client" />
-  <meta name="twitter:description" content="Lunar utility client supporting 1.8.9, 1.21.x, and 26.1 with combat, auto totem, render, profiles, and GUI customization." />
+  <meta name="twitter:description" content="Lunar utility client supporting 1.8.9, 1.21.x, and 26.1 with combat, SpeedBridge, auto totem, render, profiles, and GUI customization." />
   <meta name="twitter:image" content="https://naczo5.github.io/LegoClicker/screenshots/gameplay.png" />
   <title>LegoClicker — Minecraft Utility Client</title>
   <link rel="stylesheet" href="style.css" />
@@ -96,6 +96,11 @@
           <div class="feat-name">Triggerbot</div>
           <div class="feat-desc">Crosshair-based triggerbot with cooldown threshold and hit chance controls.</div>
           <div class="feat-tags"><span>Crosshair</span><span>Cooldown</span><span>Chance</span></div>
+        </div>
+        <div class="feature-card">
+          <div class="feat-name">SpeedBridge</div>
+          <div class="feat-desc">Edge sneak assist with block-only, hold-sneak, looking-down, and safety timing controls.</div>
+          <div class="feat-tags"><span>Edge Probe</span><span>Sneak Gate</span><span>Keybind</span></div>
         </div>
         <div class="feature-card">
           <div class="feat-name">Reach + Velocity</div>
@@ -223,7 +228,7 @@
       <div class="arch-step">
         <div class="arch-num">02</div>
         <div class="arch-title">C++ Bridge DLL</div>
-        <div class="arch-desc">The bridge attaches to JVM/JNI, reads state, and renders overlays through <code>SwapBuffers</code>.</div>
+        <div class="arch-desc">The bridge attaches to JVM/JNI, reads state, and renders ImGui overlays through <code>SwapBuffers</code>.</div>
       </div>
       <div class="arch-arrow">→</div>
       <div class="arch-step">

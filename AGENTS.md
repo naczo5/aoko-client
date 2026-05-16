@@ -85,6 +85,7 @@ C# tests use **xUnit** (`LegoClickerCS.Tests\`). Native harness tests are a stan
 - Loader and bridge communicate over TCP on port `25590`.
 - Input simulation happens in C# via Win32 `SendInput`; bridge code must NOT send packets or call gameplay methods.
 - `bridge_261.cpp` uses Yarn-first, Mojmap-fallback class name arrays to support both 1.21 (obfuscated, Yarn mappings) and 26.1 (unobfuscated, Mojang mappings) from a single DLL.
+- `bridge.cpp` (1.8.9) now links the shared ImGui/OpenGL backend and MinHook sources. Do not assume legacy rendering is raw GL-only.
 - **Menu-injection compatibility (1.8.9):** mappings and features must recover correctly when injected while in menus/lobby, not only when already in a world.
 - Release publish `build_release.bat` copies DLLs from `McInjector\` (not `LegoClickerCS\`), so both bridges must be built first.
 
@@ -124,6 +125,8 @@ When adding a setting, update ALL of:
 - `Clicker` property
 - `Profile` save/load mapping
 - `GameStateClient` config payload (if bridge-relevant)
+- `BridgeCapabilities.cs` and `bridge_capabilities.h` if version/module gating changes
+- `InputHooks` and keybind UI maps if a module gets a keybind
 - bridge parser/usage (if native overlay/module behavior depends on it)
 
 ## High-Signal Gotchas

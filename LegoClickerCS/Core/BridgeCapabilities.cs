@@ -39,6 +39,7 @@ public sealed class BridgeCapabilities
                     "breakblocks",
                     "aimassist",
                     "triggerbot",
+                    "speedbridge",
                     "gtbhelper",
                     "nametags",
                     "closestplayer",
@@ -62,6 +63,11 @@ public sealed class BridgeCapabilities
                     "aimassistrange",
                     "aimassiststrength",
                     "triggerbot",
+                    "speedbridge",
+                    "speedbridgeblockonly",
+                    "speedbridgedelayms",
+                    "speedbridgeholdingshiftonly",
+                    "speedbridgelookingdownonly",
                     "gtbhint",
                     "gtbcount",
                     "gtbpreview",
@@ -114,6 +120,7 @@ public sealed class BridgeCapabilities
                 "clickinchests",
                 "breakblocks",
                 "aimassist",
+                "speedbridge",
                 "gtbhelper",
                 "nametags",
                 "closestplayer",
@@ -135,6 +142,11 @@ public sealed class BridgeCapabilities
                 "aimassistfov",
                 "aimassistrange",
                 "aimassiststrength",
+                "speedbridge",
+                "speedbridgeblockonly",
+                "speedbridgedelayms",
+                "speedbridgeholdingshiftonly",
+                "speedbridgelookingdownonly",
                 "nametags",
                 "closestplayerinfo",
                 "nametagshowhealth",
@@ -154,6 +166,7 @@ public sealed class BridgeCapabilities
                 "showlogo",
                 "guitheme",
                 "keybindautoclicker",
+                "keybindspeedbridge",
                 "keybindnametags",
                 "keybindclosestplayer",
                 "keybindchestesp"
@@ -167,7 +180,8 @@ public sealed class BridgeCapabilities
                 "breakingblock",
                 "attackcooldown",
                 "attackcooldownpertick",
-                "statems"
+                "statems",
+                "pitch"
             )
         );
     }

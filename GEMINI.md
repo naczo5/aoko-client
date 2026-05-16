@@ -8,13 +8,13 @@ Primary reference: see `GUIDE.md` for the deeper architecture/mapping notes and 
 
 **LegoClicker** is a Windows utility client for Lunar Client (Minecraft).
 - **Supported versions:** **26.1**, **1.21.x**, and **1.8.9**.
-- **Features:** Autoclicker, Aim Assist, Triggerbot, Reach and Velocity controls, GTB Helper, Nametags, Closest Player panel, Chest ESP, and customizable GUI with per-module keybinds.
+- **Features:** Autoclicker, Aim Assist, Triggerbot, SpeedBridge, Reach and Velocity controls, GTB Helper, Nametags, Closest Player panel, Chest ESP, and customizable GUI with per-module keybinds.
 
 ### Architecture
 
 The project consists of two main components communicating over TCP on port `25590`:
 1. **LegoClickerCS (.NET 8 WPF):** The external GUI and loader. It manages settings, profiles (saved in `%AppData%\LegoClicker\profiles\`), and injects the native bridge DLL into the Lunar Client process.
-2. **McInjector (Native C++ / Java):** The bridge DLL injected into Lunar Client. It renders overlays using ImGui/OpenGL, hooks functions using MinHook, and reads the game state via JNI.
+2. **McInjector (Native C++):** The bridge DLL injected into Lunar Client. It renders overlays using ImGui/OpenGL, hooks functions using MinHook, and reads the game state via JNI. The Java agent sources under `McInjector/src/main/java` are obsolete.
 
 ## Building and Running
 
@@ -49,3 +49,4 @@ Run these from the repository root unless noted otherwise:
 - **Limited State Writes:** Thoughtful, minimal JNI state modifications are permitted when ghost-safe and undetectable (e.g., reach via entity attributes, velocity scaling, nametag visibility). Keep overlay work draw-only; mutate state only when justified and stealthy.
 - **Version Scope:** Keep all supported versions (`bridge_261.dll` for 26.1/1.21, `bridge.dll` for 1.8.9) working through the same external GUI flow.
 - **UI Modifications:** The C# external GUI (`LegoClickerCS/MainWindow.xaml`) is the primary user interface.
+- **Capability Sync:** Bridge capability packets drive version-aware UI gating. Keep `BridgeCapabilities.cs`, `bridge_capabilities.h`, profiles, keybinds, TCP config, and tests in sync when adding modules.

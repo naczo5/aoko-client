@@ -8,6 +8,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Threading;
 using LegoClickerCS.Core;
 
 namespace LegoClickerCS;
@@ -47,6 +48,7 @@ public partial class MainWindow : Window
         ["breakblocks"] = "Break Blocks",
         ["aimassist"] = "Aim Assist",
         ["triggerbot"] = "Triggerbot",
+        ["speedbridge"] = "SpeedBridge",
         ["gtbhelper"] = "GTB Helper",
         ["nametags"] = "Nametags",
         ["chestesp"] = "Chest ESP",
@@ -170,6 +172,12 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         SourceInitialized += (_, _) => ApplyNativeTitleBarTheme();
+        Activated += (_, _) => QueueRenderRefresh();
+        StateChanged += (_, _) =>
+        {
+            if (WindowState != WindowState.Minimized)
+                QueueRenderRefresh();
+        };
 
         DataContext = Clicker.Instance;
         
@@ -215,6 +223,23 @@ public partial class MainWindow : Window
 
         Show();
         Activate();
+        QueueRenderRefresh();
+    }
+
+    private void QueueRenderRefresh()
+    {
+        if (Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished) return;
+
+        Dispatcher.BeginInvoke(() =>
+        {
+            if (!IsVisible) return;
+
+            InvalidateVisual();
+            if (Content is UIElement content)
+                content.InvalidateVisual();
+
+            UpdateLayout();
+        }, DispatcherPriority.ContextIdle);
     }
 
     private void EnterControlMode()
@@ -235,6 +260,7 @@ public partial class MainWindow : Window
 
         ShowInTaskbar = true;
         Show();
+        QueueRenderRefresh();
     }
 
     private void ApplyNativeTitleBarTheme()
@@ -290,6 +316,7 @@ public partial class MainWindow : Window
     {
         bool aimAssistSupported = IsModuleSupported("aimassist");
         bool triggerbotSupported = IsModuleSupported("triggerbot");
+        bool speedBridgeSupported = IsModuleSupported("speedbridge");
         bool gtbSupported = IsModuleSupported("gtbhelper");
         bool reachSupported = IsModuleSupported("reach");
         bool velocitySupported = IsModuleSupported("velocity");
@@ -298,6 +325,7 @@ public partial class MainWindow : Window
 
         AimAssistCard.IsEnabled = aimAssistSupported;
         TriggerbotCard.IsEnabled = triggerbotSupported;
+        SpeedBridgeCard.IsEnabled = speedBridgeSupported;
         GtbHelperCard.IsEnabled = gtbSupported;
         ReachCard.IsEnabled = reachSupported;
         VelocityCard.IsEnabled = velocitySupported;
@@ -306,6 +334,7 @@ public partial class MainWindow : Window
         var clicker = Clicker.Instance;
         if (!aimAssistSupported && clicker.AimAssistEnabled) clicker.AimAssistEnabled = false;
         if (!triggerbotSupported && clicker.TriggerbotEnabled) clicker.TriggerbotEnabled = false;
+        if (!speedBridgeSupported && clicker.SpeedBridgeEnabled) clicker.SpeedBridgeEnabled = false;
         if (!gtbSupported && clicker.GtbHelperEnabled) clicker.GtbHelperEnabled = false;
         if (!reachSupported && clicker.ReachEnabled) clicker.ReachEnabled = false;
         if (!velocitySupported && clicker.VelocityEnabled) clicker.VelocityEnabled = false;
@@ -314,6 +343,7 @@ public partial class MainWindow : Window
         // Update availability text - only show unavailable message for Triggerbot (intentionally 1.21-only)
         AimAssistAvailabilityText.Text = aimAssistSupported ? "Available" : "Unavailable on current bridge";
         TriggerbotAvailabilityText.Text = triggerbotSupported ? "Available" : "Unavailable on 1.8.9 (cooldown-era PvP only)";
+        SpeedBridgeAvailabilityText.Text = speedBridgeSupported ? "Available" : "Unavailable on current bridge";
         ReachAvailabilityText.Text = reachSupported ? "Available" : "Unavailable on current bridge";
         VelocityAvailabilityText.Text = velocitySupported ? "Available" : "Unavailable on current bridge";
         AutoTotemAvailabilityText.Text = autoTotemSupported ? "Available" : "Unavailable on current bridge";
@@ -323,6 +353,7 @@ public partial class MainWindow : Window
 
         KeybindAimAssistButton.IsEnabled = aimAssistSupported;
         KeybindTriggerbotButton.IsEnabled = triggerbotSupported;
+        KeybindSpeedBridgeButton.IsEnabled = speedBridgeSupported;
         KeybindGtbHelperButton.IsEnabled = gtbSupported;
         KeybindReachButton.IsEnabled = reachSupported;
         KeybindVelocityButton.IsEnabled = velocitySupported;
@@ -638,12 +669,14 @@ public partial class MainWindow : Window
         SetKeybindButtonContent(KeybindBreakBlocksButton, "breakblocks");
         SetKeybindButtonContent(KeybindAimAssistButton, "aimassist");
         SetKeybindButtonContent(KeybindTriggerbotButton, "triggerbot");
+        SetKeybindButtonContent(KeybindSpeedBridgeButton, "speedbridge");
         SetKeybindButtonContent(KeybindGtbHelperButton, "gtbhelper");
         SetKeybindButtonContent(KeybindNametagsButton, "nametags");
         SetKeybindButtonContent(KeybindChestEspButton, "chestesp");
         SetKeybindButtonContent(KeybindClosestPlayerButton, "closestplayer");
         SetKeybindButtonContent(KeybindReachButton, "reach");
         SetKeybindButtonContent(KeybindVelocityButton, "velocity");
+        SetKeybindButtonContent(KeybindAutoTotemButton, "autototem");
         SetKeybindButtonContent(KeybindPanicButton, "panic");
     }
 

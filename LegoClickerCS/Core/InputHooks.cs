@@ -72,6 +72,7 @@ public static class InputHooks
         ["breakblocks"]   = 0,
         ["aimassist"]     = 0,
         ["triggerbot"]    = 0,
+        ["speedbridge"]   = 0,
         ["gtbhelper"]     = 0,
         ["nametags"]      = 0,
         ["closestplayer"] = 0,
@@ -130,6 +131,7 @@ public static class InputHooks
             case "breakblocks":   c.BreakBlocksEnabled = !c.BreakBlocksEnabled; break;
             case "aimassist":     c.AimAssistEnabled = !c.AimAssistEnabled; break;
             case "triggerbot":    c.TriggerbotEnabled = !c.TriggerbotEnabled; break;
+            case "speedbridge":   c.SpeedBridgeEnabled = !c.SpeedBridgeEnabled; break;
             case "gtbhelper":     c.GtbHelperEnabled = !c.GtbHelperEnabled; break;
             case "nametags":      c.NametagsEnabled             = !c.NametagsEnabled;             break;
             case "closestplayer": c.ClosestPlayerInfoEnabled    = !c.ClosestPlayerInfoEnabled;    break;
