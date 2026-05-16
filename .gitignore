@@ -29,6 +29,7 @@ CRASH_LOG_LOCATIONS.md
 *.suo
 *.DotSettings.user
 .vscode/
+.idea/
 *.zip
 /AGENTS
 generate_analysis.py
