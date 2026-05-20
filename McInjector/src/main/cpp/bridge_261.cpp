@@ -142,6 +142,8 @@ struct Config {
     bool  triggerbot     = false;
     bool  nametags       = false;
     bool  chestEsp       = false;
+    bool  chestStealer   = false;
+    int   chestStealerDelayMs = 120;
     bool  showModuleList = true;
     bool  closestPlayer  = false;
     bool  nametagHealth  = true;
@@ -229,6 +231,7 @@ static void ParseConfig(const std::string& line) {
     g_config.triggerbot    = reader.GetBool("triggerbot");
     g_config.nametags      = reader.GetBool("nametags");
     g_config.chestEsp      = reader.GetBool("chestEsp");
+    g_config.chestStealer  = reader.GetBool("chestStealerEnabled");
     std::string showModuleListRaw = reader.GetString("showModuleList");
     g_config.showModuleList = showModuleListRaw.empty() ? true : (showModuleListRaw == "true");
     g_config.closestPlayer = reader.GetBool("closestPlayerInfo");
@@ -237,6 +240,7 @@ static void ParseConfig(const std::string& line) {
     g_config.nametagHideVanilla = reader.GetBool("nametagHideVanilla");
     g_config.nametagMaxCount = lc::ClampInt(reader.GetInt("nametagMaxCount", g_config.nametagMaxCount), 1, 20);
     g_config.chestEspMaxCount = lc::ClampInt(reader.GetInt("chestEspMaxCount", g_config.chestEspMaxCount), 1, 20);
+    g_config.chestStealerDelayMs = lc::ClampInt(reader.GetInt("chestStealerDelayMs", g_config.chestStealerDelayMs), 50, 500);
     g_config.rightClick    = reader.GetBool("right");
     g_config.rightMinCPS   = reader.GetFloat("rightMinCPS");
     g_config.rightMaxCPS   = reader.GetFloat("rightMaxCPS");
@@ -491,6 +495,7 @@ static bool        g_jniBreakingBlock  = false;
 static bool        g_jniHoldingBlock   = false;
 static float       g_jniAttackCooldown = 1.0f;
 static float       g_jniAttackCooldownPerTick = 0.08f;
+static std::string g_jniChestStealerStateJson;
 static unsigned long long g_jniStateMs = 0;
 static unsigned long long g_lastEntitySeenMs = 0;
 static bool        g_loggedCooldownProgressResolve = false;
@@ -541,6 +546,21 @@ static double g_speedBridgeLastPosZ_121 = 0.0;
 static int g_speedBridgeDirX_121 = 0;
 static int g_speedBridgeDirZ_121 = 0;
 static bool g_loggedSpeedBridgeResolveFail_121 = false;
+
+// ===================== CHEST STEALER JNI GLOBALS =====================
+static jfieldID  g_chestStealerScreenHandlerField_121 = nullptr;
+static jfieldID  g_chestStealerScreenXField_121 = nullptr;
+static jfieldID  g_chestStealerScreenYField_121 = nullptr;
+static jfieldID  g_chestStealerScreenWidthField_121 = nullptr;
+static jfieldID  g_chestStealerScreenHeightField_121 = nullptr;
+static jfieldID  g_chestStealerHandlerSyncIdField_121 = nullptr;
+static jfieldID  g_chestStealerHandlerSlotsField_121 = nullptr;
+static jfieldID  g_chestStealerSlotIdField_121 = nullptr;
+static jfieldID  g_chestStealerSlotXField_121 = nullptr;
+static jfieldID  g_chestStealerSlotYField_121 = nullptr;
+static jmethodID g_chestStealerSlotHasStackMethod_121 = nullptr;
+static DWORD     g_lastChestStealerMappingLogMs_121 = 0;
+static DWORD     g_lastChestStealerSkipLogMs_121 = 0;
 
 // ===================== AUTOTOTEM MODULE JNI GLOBALS =====================
 static bool g_autoTotemMethodsResolved = false;
@@ -4492,6 +4512,243 @@ static bool ReadBlockPosCoords(JNIEnv* env, jobject bp, double& outX, double& ou
     return hasX && hasY && hasZ;
 }
 
+static jfieldID TryGetFieldAny121(JNIEnv* env, jclass cls, const char* const* names, const char* const* sigs) {
+    if (!env || !cls) return nullptr;
+    for (int ni = 0; names[ni]; ni++) {
+        for (int si = 0; sigs[si]; si++) {
+            jfieldID fid = env->GetFieldID(cls, names[ni], sigs[si]);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); fid = nullptr; }
+            if (fid) return fid;
+        }
+    }
+    return nullptr;
+}
+
+static void LogChestStealerMappingMissing121(const char* detail) {
+    DWORD now = GetTickCount();
+    if (now - g_lastChestStealerMappingLogMs_121 < 5000) return;
+    g_lastChestStealerMappingLogMs_121 = now;
+    Log(std::string("Modern ChestStealer JNI unresolved: ") + (detail ? detail : "unknown"));
+}
+
+static void LogChestStealerSkippedMenu121(const std::string& screenName) {
+    DWORD now = GetTickCount();
+    if (now - g_lastChestStealerSkipLogMs_121 < 5000) return;
+    g_lastChestStealerSkipLogMs_121 = now;
+    Log("Modern ChestStealer skipped non-physical container screen=\"" + screenName + "\"");
+}
+
+static bool ResolveModernChestStealerMappings(JNIEnv* env, jobject screenObj) {
+    if (!env || !screenObj) return false;
+    jclass screenCls = env->GetObjectClass(screenObj);
+    if (!screenCls) return false;
+
+    const char* intSigs[] = { "I", nullptr };
+    if (!g_chestStealerScreenHandlerField_121) {
+        const char* names[] = { "handler", "menu", "field_2792", "f_97732_", nullptr };
+        const char* sigs[] = {
+            "Lnet/minecraft/class_1703;",
+            "Lnet/minecraft/screen/ScreenHandler;",
+            "Lnet/minecraft/world/inventory/AbstractContainerMenu;",
+            nullptr
+        };
+        g_chestStealerScreenHandlerField_121 = TryGetFieldAny121(env, screenCls, names, sigs);
+    }
+    if (!g_chestStealerScreenXField_121) {
+        const char* names[] = { "x", "leftPos", "field_2776", "f_97735_", nullptr };
+        g_chestStealerScreenXField_121 = TryGetFieldAny121(env, screenCls, names, intSigs);
+    }
+    if (!g_chestStealerScreenYField_121) {
+        const char* names[] = { "y", "topPos", "field_2800", "f_97736_", nullptr };
+        g_chestStealerScreenYField_121 = TryGetFieldAny121(env, screenCls, names, intSigs);
+    }
+    if (!g_chestStealerScreenWidthField_121) {
+        const char* names[] = { "width", "field_22789", "f_96543_", nullptr };
+        g_chestStealerScreenWidthField_121 = TryGetFieldAny121(env, screenCls, names, intSigs);
+    }
+    if (!g_chestStealerScreenHeightField_121) {
+        const char* names[] = { "height", "field_22790", "f_96544_", nullptr };
+        g_chestStealerScreenHeightField_121 = TryGetFieldAny121(env, screenCls, names, intSigs);
+    }
+
+    jobject handlerObj = g_chestStealerScreenHandlerField_121 ? env->GetObjectField(screenObj, g_chestStealerScreenHandlerField_121) : nullptr;
+    if (env->ExceptionCheck()) { env->ExceptionClear(); handlerObj = nullptr; }
+    if (!handlerObj) {
+        env->DeleteLocalRef(screenCls);
+        return false;
+    }
+
+    jclass handlerCls = env->GetObjectClass(handlerObj);
+    if (handlerCls) {
+        if (!g_chestStealerHandlerSyncIdField_121) {
+            const char* names[] = { "syncId", "containerId", "field_7763", "f_38840_", nullptr };
+            g_chestStealerHandlerSyncIdField_121 = TryGetFieldAny121(env, handlerCls, names, intSigs);
+        }
+        if (!g_chestStealerHandlerSlotsField_121) {
+            const char* names[] = { "slots", "field_7761", "f_38839_", nullptr };
+            const char* sigs[] = { "Ljava/util/List;", "Lnet/minecraft/class_2371;", nullptr };
+            g_chestStealerHandlerSlotsField_121 = TryGetFieldAny121(env, handlerCls, names, sigs);
+        }
+        env->DeleteLocalRef(handlerCls);
+    }
+
+    env->DeleteLocalRef(handlerObj);
+    env->DeleteLocalRef(screenCls);
+    return g_chestStealerScreenHandlerField_121 && g_chestStealerScreenXField_121 &&
+        g_chestStealerScreenYField_121 && g_chestStealerScreenWidthField_121 &&
+        g_chestStealerScreenHeightField_121 && g_chestStealerHandlerSyncIdField_121 &&
+        g_chestStealerHandlerSlotsField_121;
+}
+
+static bool ResolveModernChestStealerSlotMappings(JNIEnv* env, jobject slotObj) {
+    if (!env || !slotObj) return false;
+    jclass slotCls = env->GetObjectClass(slotObj);
+    if (!slotCls) return false;
+    const char* intSigs[] = { "I", nullptr };
+    if (!g_chestStealerSlotIdField_121) {
+        const char* names[] = { "id", "index", "slot", "field_7874", "f_40220_", nullptr };
+        g_chestStealerSlotIdField_121 = TryGetFieldAny121(env, slotCls, names, intSigs);
+    }
+    if (!g_chestStealerSlotXField_121) {
+        const char* names[] = { "x", "xDisplayPosition", "field_7873", "f_40221_", nullptr };
+        g_chestStealerSlotXField_121 = TryGetFieldAny121(env, slotCls, names, intSigs);
+    }
+    if (!g_chestStealerSlotYField_121) {
+        const char* names[] = { "y", "yDisplayPosition", "field_7872", "f_40222_", nullptr };
+        g_chestStealerSlotYField_121 = TryGetFieldAny121(env, slotCls, names, intSigs);
+    }
+    if (!g_chestStealerSlotHasStackMethod_121) {
+        const char* names[] = { "hasStack", "hasItem", "method_7681", "m_6657_", nullptr };
+        for (int i = 0; names[i] && !g_chestStealerSlotHasStackMethod_121; i++) {
+            g_chestStealerSlotHasStackMethod_121 = env->GetMethodID(slotCls, names[i], "()Z");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_chestStealerSlotHasStackMethod_121 = nullptr; }
+        }
+    }
+    env->DeleteLocalRef(slotCls);
+    return g_chestStealerSlotIdField_121 && g_chestStealerSlotXField_121 &&
+        g_chestStealerSlotYField_121 && g_chestStealerSlotHasStackMethod_121;
+}
+
+static bool IsModernChestStealerPhysicalContainer() {
+    std::vector<ChestData121> chests;
+    { LockGuard lk(g_chestListMutex); chests = g_chestList; }
+    for (const auto& c : chests) {
+        if (c.dist <= 6.5) return true;
+    }
+    return false;
+}
+
+static bool IsModernContainerScreenName(const std::string& screenName) {
+    return screenName.find("ContainerScreen") != std::string::npos ||
+        screenName.find("AbstractContainerScreen") != std::string::npos ||
+        screenName.find("HandledScreen") != std::string::npos ||
+        screenName.find("GenericContainerScreen") != std::string::npos ||
+        screenName.find("class_465") != std::string::npos ||
+        screenName.find("class_476") != std::string::npos;
+}
+
+static std::string BuildModernChestStealerStateJson(JNIEnv* env, jobject screenObj, const std::string& screenName, bool enabled) {
+    if (!enabled || !env || !screenObj || !IsModernContainerScreenName(screenName)) return "null";
+    if (!ResolveModernChestStealerMappings(env, screenObj)) {
+        LogChestStealerMappingMissing121("screen handler/layout fields");
+        return "null";
+    }
+
+    jobject handlerObj = env->GetObjectField(screenObj, g_chestStealerScreenHandlerField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); handlerObj = nullptr; }
+    if (!handlerObj) return "null";
+
+    int windowId = env->GetIntField(handlerObj, g_chestStealerHandlerSyncIdField_121);
+    int guiX = env->GetIntField(screenObj, g_chestStealerScreenXField_121);
+    int guiY = env->GetIntField(screenObj, g_chestStealerScreenYField_121);
+    int screenWidth = env->GetIntField(screenObj, g_chestStealerScreenWidthField_121);
+    int screenHeight = env->GetIntField(screenObj, g_chestStealerScreenHeightField_121);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        env->DeleteLocalRef(handlerObj);
+        return "null";
+    }
+
+    bool physical = IsModernChestStealerPhysicalContainer();
+    if (!physical) {
+        LogChestStealerSkippedMenu121(screenName);
+        std::ostringstream skipped;
+        skipped << "{\"ready\":false,\"physical\":false,\"windowId\":" << windowId
+                << ",\"screenWidth\":" << screenWidth
+                << ",\"screenHeight\":" << screenHeight
+                << ",\"slots\":[]}";
+        env->DeleteLocalRef(handlerObj);
+        return skipped.str();
+    }
+
+    jobject slotsObj = env->GetObjectField(handlerObj, g_chestStealerHandlerSlotsField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); slotsObj = nullptr; }
+    env->DeleteLocalRef(handlerObj);
+    if (!slotsObj) return "null";
+
+    jclass listCls = env->FindClass("java/util/List");
+    jmethodID sizeMid = listCls ? env->GetMethodID(listCls, "size", "()I") : nullptr;
+    jmethodID getMid = listCls ? env->GetMethodID(listCls, "get", "(I)Ljava/lang/Object;") : nullptr;
+    if (env->ExceptionCheck()) { env->ExceptionClear(); sizeMid = nullptr; getMid = nullptr; }
+    if (!sizeMid || !getMid) {
+        if (listCls) env->DeleteLocalRef(listCls);
+        env->DeleteLocalRef(slotsObj);
+        return "null";
+    }
+
+    int size = env->CallIntMethod(slotsObj, sizeMid);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); size = 0; }
+    int chestSlotCount = size - 36;
+    if (chestSlotCount <= 0 || screenWidth <= 0 || screenHeight <= 0) {
+        env->DeleteLocalRef(listCls);
+        env->DeleteLocalRef(slotsObj);
+        return "null";
+    }
+
+    std::ostringstream slotsJson;
+    int count = 0;
+    for (int i = 0; i < chestSlotCount; i++) {
+        jobject slotObj = env->CallObjectMethod(slotsObj, getMid, i);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); slotObj = nullptr; }
+        if (!slotObj) continue;
+        if (!ResolveModernChestStealerSlotMappings(env, slotObj)) {
+            env->DeleteLocalRef(slotObj);
+            continue;
+        }
+        bool hasStack = env->CallBooleanMethod(slotObj, g_chestStealerSlotHasStackMethod_121) == JNI_TRUE;
+        if (env->ExceptionCheck()) { env->ExceptionClear(); hasStack = false; }
+        if (hasStack) {
+            int slotNumber = env->GetIntField(slotObj, g_chestStealerSlotIdField_121);
+            int slotX = env->GetIntField(slotObj, g_chestStealerSlotXField_121);
+            int slotY = env->GetIntField(slotObj, g_chestStealerSlotYField_121);
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+            } else {
+                if (count > 0) slotsJson << ",";
+                slotsJson << "{\"index\":" << i
+                          << ",\"slotNumber\":" << slotNumber
+                          << ",\"x\":" << (guiX + slotX + 8)
+                          << ",\"y\":" << (guiY + slotY + 8)
+                          << "}";
+                count++;
+            }
+        }
+        env->DeleteLocalRef(slotObj);
+    }
+
+    env->DeleteLocalRef(listCls);
+    env->DeleteLocalRef(slotsObj);
+
+    std::ostringstream out;
+    out << "{\"ready\":" << (count > 0 ? "true" : "false")
+        << ",\"physical\":true"
+        << ",\"windowId\":" << windowId
+        << ",\"screenWidth\":" << screenWidth
+        << ",\"screenHeight\":" << screenHeight
+        << ",\"slots\":[" << slotsJson.str() << "]}";
+    return out.str();
+}
+
 static void UpdateChestList(JNIEnv* env) {
     DWORD now = GetTickCount();
     if (now - g_lastChestScanMs < 100) return;
@@ -7530,8 +7787,12 @@ static void UpdateJniState() {
         }
         if (walk) env->DeleteLocalRef(walk);
         if (classClass) env->DeleteLocalRef(classClass);
-        env->DeleteLocalRef(scr);
     }
+
+    bool chestStealerEnabled = false;
+    { LockGuard lk(g_configMutex); chestStealerEnabled = g_config.chestStealer; }
+    std::string chestStealerStateJson = BuildModernChestStealerStateJson(env, scr, screenName, chestStealerEnabled);
+    if (scr) env->DeleteLocalRef(scr);
 
     // Debug: log screen changes (helps diagnose Click-in-Chests matching).
     if (screenName != g_lastLoggedScreen) {
@@ -7895,6 +8156,7 @@ static void UpdateJniState() {
             g_jniHoldingBlock = holdingBlock;
             g_jniAttackCooldown = attackCooldown;
             g_jniAttackCooldownPerTick = attackCooldownPerTick;
+            g_jniChestStealerStateJson = chestStealerStateJson;
             g_jniStateMs = nowMs;
         }
         return;
@@ -8080,7 +8342,7 @@ static void RenderClickGUI() {
     }
     ImGui::PopStyleColor();
     catStyle(selCategory == 2);
-    if (ImGui::Selectable("  Risky", selCategory == 2, 0, ImVec2(SIDE_W-4, 28))) {
+    if (ImGui::Selectable("  Utility", selCategory == 2, 0, ImVec2(SIDE_W-4, 28))) {
         if (selCategory != 2) { selCategory = 2; selModule = 0; }
     }
     ImGui::PopStyleColor();
@@ -8116,7 +8378,6 @@ static void RenderClickGUI() {
         ModuleRow("ac",   "AutoClicker",   cfg.armed,      0, "toggleArmed");
         ModuleRow("aa",   "Aim Assist",    cfg.aimAssist,  1, "toggleAimAssist");
         ModuleRow("tb",   "Triggerbot",    cfg.triggerbot, 2, "toggleTriggerbot");
-        ModuleRow("sb",   "SpeedBridge",   cfg.speedBridge, 3, "toggleSpeedBridge");
     } else if (selCategory == 1) {
         // Render
         ModuleRow("ce",  "Chest ESP",      cfg.chestEsp,   0, "toggleChestEsp");
@@ -8124,9 +8385,11 @@ static void RenderClickGUI() {
         ModuleRow("cp",  "Closest Player", cfg.closestPlayer, 2, "toggleClosestPlayerInfo");
         ModuleRow("gtb", "GTB Helper",     cfg.gtbHelper,  3, "toggleGtbHelper");
     } else {
-        // Risky
-        ModuleRow("rh",  "Reach",          cfg.reachEnabled, 0, "toggleReach");
-        ModuleRow("vl",  "Velocity",       cfg.velocityEnabled, 1, "toggleVelocity");
+        // Utility
+        ModuleRow("sb",  "SpeedBridge",    cfg.speedBridge, 0, "toggleSpeedBridge");
+        ModuleRow("cs",  "Chest Stealer",  cfg.chestStealer, 1, "toggleChestStealer");
+        ModuleRow("rh",  "Reach",          cfg.reachEnabled, 2, "toggleReach");
+        ModuleRow("vl",  "Velocity",       cfg.velocityEnabled, 3, "toggleVelocity");
     }
     ImGui::EndChild();
 
@@ -8194,7 +8457,7 @@ static void RenderClickGUI() {
         if (ImGui::Checkbox("Enable Triggerbot", &tb)) SendCmd("toggleTriggerbot");
         ImGui::TextDisabled("Cooldown-based timing (1.9+ combat). Tune in external gui.");
 
-    } else if (selCategory == 0 && selModule == 3) {
+    } else if (selCategory == 2 && selModule == 0) {
         bool sb = cfg.speedBridge;
         if (ImGui::Checkbox("Enable SpeedBridge", &sb)) SendCmd("toggleSpeedBridge");
 
@@ -8211,6 +8474,14 @@ static void RenderClickGUI() {
         bool lookDown = cfg.speedBridgeLookingDownOnly;
         if (ImGui::Checkbox("Looking Down", &lookDown)) SendCmd("toggleSpeedBridgeLookingDownOnly");
 
+    } else if (selCategory == 2 && selModule == 1) {
+        bool cs = cfg.chestStealer;
+        if (ImGui::Checkbox("Enable Chest Stealer", &cs)) SendCmd("toggleChestStealer");
+
+        int delayMs = cfg.chestStealerDelayMs;
+        if (ImGui::SliderInt("Delay (ms)", &delayMs, 50, 500))
+            SendCmdInt("setChestStealerDelayMs", delayMs);
+
     } else if (selCategory == 1 && selModule == 0) {
         ImGui::TextDisabled("No extra settings.");
 
@@ -8226,7 +8497,7 @@ static void RenderClickGUI() {
         ImGui::TextDisabled("No extra settings.");
     } else if (selCategory == 1 && selModule == 3) {
         ImGui::TextDisabled("In-game hint panel only.");
-    } else if (selCategory == 2 && selModule == 0) {
+    } else if (selCategory == 2 && selModule == 2) {
         bool reach = cfg.reachEnabled;
         if (ImGui::Checkbox("Enable Reach", &reach)) SendCmd("toggleReach");
 
@@ -8244,7 +8515,7 @@ static void RenderClickGUI() {
             
         ImGui::Spacing();
         ImGui::TextDisabled("Attribute modification for 1.21.");
-    } else if (selCategory == 2 && selModule == 1) {
+    } else if (selCategory == 2 && selModule == 3) {
         bool velocity = cfg.velocityEnabled;
         if (ImGui::Checkbox("Enable Velocity", &velocity)) SendCmd("toggleVelocity");
 
@@ -8600,7 +8871,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                     UpdateClosestPlayerOverlay(env);
                 if (cfg.nametags || cfg.closestPlayer || cfg.aimAssist || cfg.nametagHideVanilla || g_nametagSuppressionActive_121)
                     UpdatePlayerListOverlay(env);
-                if (cfg.chestEsp)
+                if (cfg.chestEsp || cfg.chestStealer)
                     UpdateChestList(env);
             } else {
                 // Left world — reset caches so next world gets fresh JNI lookups
@@ -9656,6 +9927,7 @@ glfw_done:;
                 bool holdBlock;
                 float attackCooldown;
                 float attackCooldownPerTick;
+                std::string chestStealerStateJson;
                 unsigned long long stateMs;
                 { LockGuard lk(g_jniStateMtx);
                     sn = g_jniScreenName;
@@ -9668,6 +9940,7 @@ glfw_done:;
                     holdBlock = g_jniHoldingBlock;
                     attackCooldown = g_jniAttackCooldown;
                     attackCooldownPerTick = g_jniAttackCooldownPerTick;
+                    chestStealerStateJson = g_jniChestStealerStateJson;
                     stateMs = g_jniStateMs;
                 }
 
@@ -9732,6 +10005,8 @@ glfw_done:;
                 snprintf(attackCooldownPerTickBuf, sizeof(attackCooldownPerTickBuf), "%.3f", attackCooldownPerTick);
                 state += ",\"attackCooldownPerTick\":";
                 state += attackCooldownPerTickBuf;
+                state += ",\"chestStealerState\":";
+                state += chestStealerStateJson.empty() ? "null" : chestStealerStateJson;
                 state += ",\"entities\":[";
 
                 bool first = true;

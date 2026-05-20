@@ -788,6 +788,8 @@ public class GameStateClient : INotifyPropertyChanged
                     nametagMaxCount = clicker.NametagMaxCount,
                     chestEsp = clicker.ChestEspEnabled,
                     chestEspMaxCount = clicker.ChestEspMaxCount,
+                    chestStealerEnabled = clicker.ChestStealerEnabled,
+                    chestStealerDelayMs = clicker.ChestStealerDelayMs,
                     reachEnabled = clicker.ReachEnabled,
                     reachMin = clicker.ReachMin,
                     reachMax = clicker.ReachMax,
@@ -814,7 +816,8 @@ public class GameStateClient : INotifyPropertyChanged
                     keybindGtbHelper     = InputHooks.GetModuleKey("gtbhelper"),
                     keybindNametags      = InputHooks.GetModuleKey("nametags"),
                     keybindClosestPlayer = InputHooks.GetModuleKey("closestplayer"),
-                    keybindChestEsp      = InputHooks.GetModuleKey("chestesp")
+                    keybindChestEsp      = InputHooks.GetModuleKey("chestesp"),
+                    keybindChestStealer  = InputHooks.GetModuleKey("cheststealer")
                 };
 
                 string json = JsonSerializer.Serialize(config) + "\n";
@@ -910,6 +913,12 @@ public class GameStateClient : INotifyPropertyChanged
                     break;
                 case "toggleChestEsp":
                     clicker.ChestEspEnabled = !clicker.ChestEspEnabled;
+                    break;
+                case "toggleChestStealer":
+                    clicker.ChestStealerEnabled = !clicker.ChestStealerEnabled;
+                    break;
+                case "setChestStealerDelayMs":
+                    clicker.ChestStealerDelayMs = (int)(node?["value"]?.GetValue<float>() ?? 120f);
                     break;
                 case "setKeybind":
                     string? moduleId = node?["module"]?.GetValue<string>();

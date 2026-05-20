@@ -78,6 +78,7 @@ public class Clicker : INotifyPropertyChanged
     
     private readonly Random _random = new();
     private readonly object _sendInputLock = new();
+    private readonly ChestStealerController _chestStealerController = new();
     private readonly INPUT[] _leftClickInputs;
     private readonly INPUT[] _rightClickInputs;
     private readonly INPUT[] _aimAssistMoveInput;
@@ -367,6 +368,7 @@ public class Clicker : INotifyPropertyChanged
         Disarm();
         StopAimAssistLoop();
         StopTriggerbotLoop();
+        _chestStealerController.Stop();
     }
 
     public void TriggerPanic()
@@ -403,6 +405,7 @@ public class Clicker : INotifyPropertyChanged
             NametagHideVanilla = false;
             ClosestPlayerInfoEnabled = false;
             ChestEspEnabled = false;
+            ChestStealerEnabled = false;
             ReachEnabled = false;
             VelocityEnabled = false;
             AutoTotemEnabled = false;
@@ -727,6 +730,39 @@ public class Clicker : INotifyPropertyChanged
             {
                 _chestEspMaxCount = clamped;
                 OnPropertyChanged(nameof(ChestEspMaxCount));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    private bool _chestStealerEnabled = false;
+    public bool ChestStealerEnabled
+    {
+        get => _chestStealerEnabled;
+        set
+        {
+            if (_chestStealerEnabled == value) return;
+            _chestStealerEnabled = value;
+            if (value)
+                _chestStealerController.Start();
+            else
+                _chestStealerController.Stop();
+            OnPropertyChanged(nameof(ChestStealerEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private int _chestStealerDelayMs = 120;
+    public int ChestStealerDelayMs
+    {
+        get => _chestStealerDelayMs;
+        set
+        {
+            int clamped = Math.Clamp(value, 50, 500);
+            if (_chestStealerDelayMs != clamped)
+            {
+                _chestStealerDelayMs = clamped;
+                OnPropertyChanged(nameof(ChestStealerDelayMs));
                 StateChanged?.Invoke();
             }
         }

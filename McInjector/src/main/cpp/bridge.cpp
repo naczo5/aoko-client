@@ -141,6 +141,8 @@ struct Config {
     int nametagMaxCount = 8;
     bool chestEsp = false;
     int chestEspMaxCount = 5;
+    bool chestStealer = false;
+    int chestStealerDelayMs = 120;
     std::string gtbHint;
     int gtbCount = 0;
     std::string gtbPreview;
@@ -166,6 +168,7 @@ struct Config {
     int keybindNametags = 0;
     int keybindClosestPlayer = 0;
     int keybindChestEsp = 0;
+    int keybindChestStealer = 0;
 };
 static Config g_config;
 static Mutex g_configMutex;
@@ -187,6 +190,7 @@ struct GameState {
     float attackCooldown = 1.0f;
     float attackCooldownPerTick = 0.08f;
     unsigned long long stateMs = 0;
+    std::string chestStealerStateJson;
 };
 static GameState g_gameState;
 static Mutex g_stateMutex;
@@ -313,6 +317,20 @@ static jmethodID g_blockGetMaterialMethod = nullptr;
 static jmethodID g_materialIsSolidMethod = nullptr;
 static jclass g_tileEntityChestClass = nullptr;
 static jclass g_tileEntityEnderChestClass = nullptr;
+static jfieldID g_playerControllerField = nullptr;
+static jmethodID g_windowClickMethod = nullptr;
+static jclass g_guiChestClass = nullptr;
+static jfieldID g_guiContainerInventorySlotsField = nullptr;
+static jfieldID g_containerWindowIdField = nullptr;
+static jfieldID g_containerInventorySlotsField = nullptr;
+static jmethodID g_slotGetHasStackMethod = nullptr;
+static jfieldID g_slotSlotNumberField = nullptr;
+static jfieldID g_slotXDisplayPositionField = nullptr;
+static jfieldID g_slotYDisplayPositionField = nullptr;
+static jfieldID g_guiLeftField = nullptr;
+static jfieldID g_guiTopField = nullptr;
+static jfieldID g_guiWidthField = nullptr;
+static jfieldID g_guiHeightField = nullptr;
 
 // Interpolation globals
 static jfieldID g_timerField = nullptr;
@@ -364,6 +382,15 @@ static double g_speedBridgeLastPosX = 0.0;
 static double g_speedBridgeLastPosZ = 0.0;
 static int g_speedBridgeDirX = 0;
 static int g_speedBridgeDirZ = 0;
+static DWORD g_chestStealerNextClickMs = 0;
+static int g_chestStealerWindowId = -1;
+static int g_chestStealerLastSlotCount = -1;
+static DWORD g_chestStealerWindowOpenedMs = 0;
+static bool g_chestStealerWindowCompleted = false;
+static std::vector<int> g_chestStealerSlots;
+static unsigned int g_chestStealerRng = 0xA0C0123u;
+static DWORD g_lastChestStealerMappingLogMs = 0;
+static DWORD g_lastChestStealerSkipLogMs = 0;
 // NOTE: g_getItemMethod, g_getDisplayNameMethod, g_getUnlocalizedNameMethod,
 // g_getDamageVsEntityMethod are intentionally NOT cached globally — they must
 // be fetched from the actual object's class each call to avoid calling a
@@ -3744,6 +3771,670 @@ static void UpdateSpeedBridge(JNIEnv* env, const Config& cfg, const GameState& s
     SetSpeedBridgeSneak(env, shouldSneak);
 }
 
+static unsigned int ChestStealerRand() {
+    if (g_chestStealerRng == 0xA0C0123u) {
+        g_chestStealerRng ^= (unsigned int)GetTickCount();
+        if (g_chestStealerRng == 0) g_chestStealerRng = 0x6D2B79F5u;
+    }
+    unsigned int x = g_chestStealerRng;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    g_chestStealerRng = x ? x : 0x6D2B79F5u;
+    return g_chestStealerRng;
+}
+
+static int ChestStealerRandRange(int minVal, int maxVal) {
+    if (maxVal <= minVal) return minVal;
+    unsigned int span = (unsigned int)(maxVal - minVal + 1);
+    return minVal + (int)(ChestStealerRand() % span);
+}
+
+static void ShuffleChestStealerSlots(std::vector<int>& slots) {
+    for (int i = (int)slots.size() - 1; i > 0; --i) {
+        int j = ChestStealerRandRange(0, i);
+        std::swap(slots[i], slots[j]);
+    }
+}
+
+static int NextChestStealerDelayMs(const Config& cfg) {
+    int baseDelay = (std::max)(50, (std::min)(500, cfg.chestStealerDelayMs));
+    baseDelay = (std::max)(180, baseDelay);
+    int variance = (std::max)(70, baseDelay / 2);
+    int delay = baseDelay + ChestStealerRandRange(-variance, variance);
+    return (std::max)(160, (std::min)(900, delay));
+}
+
+static void ResetChestStealerRuntime() {
+    g_chestStealerNextClickMs = 0;
+    g_chestStealerWindowId = -1;
+    g_chestStealerLastSlotCount = -1;
+    g_chestStealerWindowOpenedMs = 0;
+    g_chestStealerWindowCompleted = false;
+    g_chestStealerSlots.clear();
+}
+
+static void LogChestStealerMappingMissing(const char* detail) {
+    DWORD now = GetTickCount();
+    if (now - g_lastChestStealerMappingLogMs < 5000) return;
+    g_lastChestStealerMappingLogMs = now;
+    Log(std::string("ChestStealer JNI unresolved: ") + (detail ? detail : "unknown"));
+}
+
+static std::string ChestStealerLower(std::string s) {
+    for (char& ch : s) ch = (char)std::tolower((unsigned char)ch);
+    return s;
+}
+
+static void LogChestStealerSkippedMenu(const std::string& title) {
+    DWORD now = GetTickCount();
+    if (now - g_lastChestStealerSkipLogMs < 5000) return;
+    g_lastChestStealerSkipLogMs = now;
+    Log("ChestStealer skipped non-physical GuiChest title=\"" + title + "\"");
+}
+
+static bool ResolveChestStealerMappings(JNIEnv* env, jobject currentScreen) {
+    if (!env || !g_mcInstance || !g_mcClass) return false;
+    jobject gcl = EnsureGameClassLoader(env);
+
+    if (!g_guiChestClass && gcl) {
+        jclass cls = LoadClassWithLoader(env, gcl, "net.minecraft.client.gui.inventory.GuiChest");
+        if (env->ExceptionCheck()) { env->ExceptionClear(); cls = nullptr; }
+        if (cls) {
+            g_guiChestClass = (jclass)env->NewGlobalRef(cls);
+            env->DeleteLocalRef(cls);
+        }
+    }
+
+    if (!g_playerControllerField) {
+        g_playerControllerField = env->GetFieldID(g_mcClass, "playerController", "Lnet/minecraft/client/multiplayer/PlayerControllerMP;");
+        if (env->ExceptionCheck() || !g_playerControllerField) {
+            env->ExceptionClear();
+            g_playerControllerField = env->GetFieldID(g_mcClass, "field_71442_b", "Lnet/minecraft/client/multiplayer/PlayerControllerMP;");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_playerControllerField = nullptr; }
+        }
+    }
+
+    jobject controller = g_playerControllerField ? env->GetObjectField(g_mcInstance, g_playerControllerField) : nullptr;
+    if (env->ExceptionCheck()) { env->ExceptionClear(); controller = nullptr; }
+    if (controller && !g_windowClickMethod) {
+        jclass controllerClass = env->GetObjectClass(controller);
+        if (controllerClass) {
+            g_windowClickMethod = env->GetMethodID(controllerClass, "windowClick", "(IIIILnet/minecraft/entity/player/EntityPlayer;)Lnet/minecraft/item/ItemStack;");
+            if (env->ExceptionCheck() || !g_windowClickMethod) {
+                env->ExceptionClear();
+                g_windowClickMethod = env->GetMethodID(controllerClass, "func_78753_a", "(IIIILnet/minecraft/entity/player/EntityPlayer;)Lnet/minecraft/item/ItemStack;");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_windowClickMethod = nullptr; }
+            }
+            env->DeleteLocalRef(controllerClass);
+        }
+    }
+    if (controller) env->DeleteLocalRef(controller);
+
+    if (currentScreen && (!g_guiContainerInventorySlotsField || !g_guiLeftField || !g_guiTopField || !g_guiWidthField || !g_guiHeightField)) {
+        jclass screenClass = env->GetObjectClass(currentScreen);
+        if (screenClass) {
+            g_guiContainerInventorySlotsField = env->GetFieldID(screenClass, "inventorySlots", "Lnet/minecraft/inventory/Container;");
+            if (env->ExceptionCheck() || !g_guiContainerInventorySlotsField) {
+                env->ExceptionClear();
+                g_guiContainerInventorySlotsField = env->GetFieldID(screenClass, "field_147002_h", "Lnet/minecraft/inventory/Container;");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_guiContainerInventorySlotsField = nullptr; }
+            }
+            if (!g_guiLeftField) {
+                g_guiLeftField = env->GetFieldID(screenClass, "guiLeft", "I");
+                if (env->ExceptionCheck() || !g_guiLeftField) {
+                    env->ExceptionClear();
+                    g_guiLeftField = env->GetFieldID(screenClass, "field_147003_i", "I");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_guiLeftField = nullptr; }
+                }
+            }
+            if (!g_guiTopField) {
+                g_guiTopField = env->GetFieldID(screenClass, "guiTop", "I");
+                if (env->ExceptionCheck() || !g_guiTopField) {
+                    env->ExceptionClear();
+                    g_guiTopField = env->GetFieldID(screenClass, "field_147009_r", "I");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_guiTopField = nullptr; }
+                }
+            }
+            if (!g_guiWidthField) {
+                g_guiWidthField = env->GetFieldID(screenClass, "width", "I");
+                if (env->ExceptionCheck() || !g_guiWidthField) {
+                    env->ExceptionClear();
+                    g_guiWidthField = env->GetFieldID(screenClass, "field_146294_l", "I");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_guiWidthField = nullptr; }
+                }
+            }
+            if (!g_guiHeightField) {
+                g_guiHeightField = env->GetFieldID(screenClass, "height", "I");
+                if (env->ExceptionCheck() || !g_guiHeightField) {
+                    env->ExceptionClear();
+                    g_guiHeightField = env->GetFieldID(screenClass, "field_146295_m", "I");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_guiHeightField = nullptr; }
+                }
+            }
+            env->DeleteLocalRef(screenClass);
+        }
+    }
+
+    if (currentScreen && g_guiContainerInventorySlotsField) {
+        jobject container = env->GetObjectField(currentScreen, g_guiContainerInventorySlotsField);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); container = nullptr; }
+        if (container) {
+            jclass containerClass = env->GetObjectClass(container);
+            if (containerClass) {
+                if (!g_containerWindowIdField) {
+                    g_containerWindowIdField = env->GetFieldID(containerClass, "windowId", "I");
+                    if (env->ExceptionCheck() || !g_containerWindowIdField) {
+                        env->ExceptionClear();
+                        g_containerWindowIdField = env->GetFieldID(containerClass, "field_75152_c", "I");
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); g_containerWindowIdField = nullptr; }
+                    }
+                }
+                if (!g_containerInventorySlotsField) {
+                    g_containerInventorySlotsField = env->GetFieldID(containerClass, "inventorySlots", "Ljava/util/List;");
+                    if (env->ExceptionCheck() || !g_containerInventorySlotsField) {
+                        env->ExceptionClear();
+                        g_containerInventorySlotsField = env->GetFieldID(containerClass, "field_75151_b", "Ljava/util/List;");
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); g_containerInventorySlotsField = nullptr; }
+                    }
+                }
+                env->DeleteLocalRef(containerClass);
+            }
+
+            if (g_containerInventorySlotsField && g_listSizeMethod && g_listGetMethod &&
+                (!g_slotGetHasStackMethod || !g_slotSlotNumberField || !g_slotXDisplayPositionField || !g_slotYDisplayPositionField)) {
+                jobject slotsList = env->GetObjectField(container, g_containerInventorySlotsField);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); slotsList = nullptr; }
+                if (slotsList) {
+                    int size = env->CallIntMethod(slotsList, g_listSizeMethod);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); size = 0; }
+                    if (size > 0) {
+                        jobject slot = env->CallObjectMethod(slotsList, g_listGetMethod, 0);
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); slot = nullptr; }
+                        if (slot) {
+                            jclass slotClass = env->GetObjectClass(slot);
+                            if (slotClass) {
+                                if (!g_slotGetHasStackMethod) {
+                                    g_slotGetHasStackMethod = env->GetMethodID(slotClass, "getHasStack", "()Z");
+                                    if (env->ExceptionCheck() || !g_slotGetHasStackMethod) {
+                                        env->ExceptionClear();
+                                        g_slotGetHasStackMethod = env->GetMethodID(slotClass, "func_75216_d", "()Z");
+                                        if (env->ExceptionCheck()) { env->ExceptionClear(); g_slotGetHasStackMethod = nullptr; }
+                                    }
+                                }
+                                if (!g_slotSlotNumberField) {
+                                    g_slotSlotNumberField = env->GetFieldID(slotClass, "slotNumber", "I");
+                                    if (env->ExceptionCheck() || !g_slotSlotNumberField) {
+                                        env->ExceptionClear();
+                                        g_slotSlotNumberField = env->GetFieldID(slotClass, "field_75222_d", "I");
+                                        if (env->ExceptionCheck()) { env->ExceptionClear(); g_slotSlotNumberField = nullptr; }
+                                    }
+                                }
+                                if (!g_slotXDisplayPositionField) {
+                                    g_slotXDisplayPositionField = env->GetFieldID(slotClass, "xDisplayPosition", "I");
+                                    if (env->ExceptionCheck() || !g_slotXDisplayPositionField) {
+                                        env->ExceptionClear();
+                                        g_slotXDisplayPositionField = env->GetFieldID(slotClass, "field_75223_e", "I");
+                                        if (env->ExceptionCheck()) { env->ExceptionClear(); g_slotXDisplayPositionField = nullptr; }
+                                    }
+                                }
+                                if (!g_slotYDisplayPositionField) {
+                                    g_slotYDisplayPositionField = env->GetFieldID(slotClass, "yDisplayPosition", "I");
+                                    if (env->ExceptionCheck() || !g_slotYDisplayPositionField) {
+                                        env->ExceptionClear();
+                                        g_slotYDisplayPositionField = env->GetFieldID(slotClass, "field_75221_f", "I");
+                                        if (env->ExceptionCheck()) { env->ExceptionClear(); g_slotYDisplayPositionField = nullptr; }
+                                    }
+                                }
+                                env->DeleteLocalRef(slotClass);
+                            }
+                            env->DeleteLocalRef(slot);
+                        }
+                    }
+                    env->DeleteLocalRef(slotsList);
+                }
+            }
+            env->DeleteLocalRef(container);
+        }
+    }
+
+    return g_guiContainerInventorySlotsField && g_containerWindowIdField &&
+        g_containerInventorySlotsField && g_slotGetHasStackMethod &&
+        g_slotSlotNumberField && g_slotXDisplayPositionField && g_slotYDisplayPositionField &&
+        g_guiLeftField && g_guiTopField && g_guiWidthField && g_guiHeightField &&
+        g_listSizeMethod && g_listGetMethod;
+}
+
+static bool IsLegacyChestScreen(JNIEnv* env, jobject currentScreen) {
+    if (!env || !currentScreen) return false;
+    if (g_guiChestClass && env->IsInstanceOf(currentScreen, g_guiChestClass)) return true;
+    jclass cls = env->GetObjectClass(currentScreen);
+    if (!cls) return false;
+    std::string name = GetClassNameFromClass(env, cls);
+    env->DeleteLocalRef(cls);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    return name.find("GuiChest") != std::string::npos;
+}
+
+static bool EnsureLegacyChatTextMethod(JNIEnv* env) {
+    if (!env) return false;
+    if (g_chatComponentGetTextMethod) return true;
+    jobject gcl = EnsureGameClassLoader(env);
+    jclass chatCompClass = gcl ? LoadClassWithLoader(env, gcl, "net.minecraft.util.IChatComponent") : nullptr;
+    if (env->ExceptionCheck()) { env->ExceptionClear(); chatCompClass = nullptr; }
+    if (!chatCompClass) {
+        chatCompClass = env->FindClass("net/minecraft/util/IChatComponent");
+        if (env->ExceptionCheck()) { env->ExceptionClear(); chatCompClass = nullptr; }
+    }
+    if (!chatCompClass) return false;
+
+    g_chatComponentGetTextMethod = env->GetMethodID(chatCompClass, "getUnformattedText", "()Ljava/lang/String;");
+    if (env->ExceptionCheck() || !g_chatComponentGetTextMethod) {
+        env->ExceptionClear();
+        g_chatComponentGetTextMethod = env->GetMethodID(chatCompClass, "func_150260_c", "()Ljava/lang/String;");
+        if (env->ExceptionCheck()) { env->ExceptionClear(); g_chatComponentGetTextMethod = nullptr; }
+    }
+    env->DeleteLocalRef(chatCompClass);
+    return g_chatComponentGetTextMethod != nullptr;
+}
+
+static std::string ReadLegacyChatText(JNIEnv* env, jobject chatComponent) {
+    if (!env || !chatComponent || !EnsureLegacyChatTextMethod(env)) return "";
+    jstring js = (jstring)env->CallObjectMethod(chatComponent, g_chatComponentGetTextMethod);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return ""; }
+    std::string text = Utf8FromJStringLegacy(env, js);
+    if (js) env->DeleteLocalRef(js);
+    return text;
+}
+
+static std::string ReadInventoryDisplayName(JNIEnv* env, jobject inventory) {
+    if (!env || !inventory) return "";
+    jclass invClass = env->GetObjectClass(inventory);
+    if (!invClass) return "";
+
+    jmethodID displayName = env->GetMethodID(invClass, "getDisplayName", "()Lnet/minecraft/util/IChatComponent;");
+    if (env->ExceptionCheck() || !displayName) {
+        env->ExceptionClear();
+        displayName = env->GetMethodID(invClass, "func_145748_c_", "()Lnet/minecraft/util/IChatComponent;");
+        if (env->ExceptionCheck()) { env->ExceptionClear(); displayName = nullptr; }
+    }
+    env->DeleteLocalRef(invClass);
+    if (!displayName) return "";
+
+    jobject textObj = env->CallObjectMethod(inventory, displayName);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return ""; }
+    std::string title = ReadLegacyChatText(env, textObj);
+    if (textObj) env->DeleteLocalRef(textObj);
+    return title;
+}
+
+static std::string GetLegacyChestScreenTitle(JNIEnv* env, jobject currentScreen) {
+    if (!env || !currentScreen) return "";
+    jclass screenClass = env->GetObjectClass(currentScreen);
+    if (!screenClass) return "";
+
+    jclass classClass = env->FindClass("java/lang/Class");
+    jclass fieldClass = env->FindClass("java/lang/reflect/Field");
+    jmethodID getFields = classClass ? env->GetMethodID(classClass, "getDeclaredFields", "()[Ljava/lang/reflect/Field;") : nullptr;
+    jmethodID getType = fieldClass ? env->GetMethodID(fieldClass, "getType", "()Ljava/lang/Class;") : nullptr;
+    std::string bestTitle;
+
+    if (getFields && getType) {
+        jobjectArray fields = (jobjectArray)env->CallObjectMethod(screenClass, getFields);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); fields = nullptr; }
+        if (fields) {
+            jsize count = env->GetArrayLength(fields);
+            for (int i = 0; i < count; ++i) {
+                jobject field = env->GetObjectArrayElement(fields, i);
+                if (!field) continue;
+                jclass fieldType = (jclass)env->CallObjectMethod(field, getType);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); fieldType = nullptr; }
+                std::string typeName = fieldType ? GetClassNameFromClass(env, fieldType) : "";
+                if (fieldType) env->DeleteLocalRef(fieldType);
+
+                if (typeName.find("IInventory") != std::string::npos) {
+                    jfieldID fid = env->FromReflectedField(field);
+                    if (fid) {
+                        jobject inv = env->GetObjectField(currentScreen, fid);
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); inv = nullptr; }
+                        if (inv) {
+                            std::string title = ReadInventoryDisplayName(env, inv);
+                            env->DeleteLocalRef(inv);
+                            std::string lower = ChestStealerLower(title);
+                            if (!title.empty() && lower != "inventory") {
+                                bestTitle = title;
+                            } else if (bestTitle.empty() && !title.empty()) {
+                                bestTitle = title;
+                            }
+                        }
+                    }
+                }
+                env->DeleteLocalRef(field);
+            }
+            env->DeleteLocalRef(fields);
+        }
+    }
+
+    if (fieldClass) env->DeleteLocalRef(fieldClass);
+    if (classClass) env->DeleteLocalRef(classClass);
+    env->DeleteLocalRef(screenClass);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    return bestTitle;
+}
+
+static bool IsChestTileEntityLegacy(JNIEnv* env, jobject te) {
+    if (!env || !te) return false;
+    if (g_tileEntityChestClass && env->IsInstanceOf(te, g_tileEntityChestClass)) return true;
+    if (g_tileEntityEnderChestClass && env->IsInstanceOf(te, g_tileEntityEnderChestClass)) return true;
+    jclass teClass = env->GetObjectClass(te);
+    if (!teClass) return false;
+    std::string clsName = GetClassNameFromClass(env, teClass);
+    env->DeleteLocalRef(teClass);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    return clsName.find("Chest") != std::string::npos;
+}
+
+static bool HasPhysicalChestNearPlayer(JNIEnv* env, jobject player) {
+    if (!env || !g_mcInstance || !player) return false;
+    TryResolveWorldMappings(env);
+    TryResolveChestEspMappings(env);
+
+    if (!g_theWorldField || !g_loadedTileEntityListField || !g_tileEntityPosField ||
+        !g_blockPosGetX || !g_blockPosGetY || !g_blockPosGetZ ||
+        !g_posXField || !g_posYField || !g_posZField ||
+        !g_listSizeMethod || !g_listGetMethod) {
+        LogChestStealerMappingMissing("physical chest validation mappings");
+        return false;
+    }
+
+    jobject world = env->GetObjectField(g_mcInstance, g_theWorldField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); world = nullptr; }
+    if (!world) return false;
+    jobject tileList = env->GetObjectField(world, g_loadedTileEntityListField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); tileList = nullptr; }
+    env->DeleteLocalRef(world);
+    if (!tileList) return false;
+
+    double px = env->GetDoubleField(player, g_posXField);
+    double py = env->GetDoubleField(player, g_posYField);
+    double pz = env->GetDoubleField(player, g_posZField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); env->DeleteLocalRef(tileList); return false; }
+
+    int size = env->CallIntMethod(tileList, g_listSizeMethod);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); env->DeleteLocalRef(tileList); return false; }
+
+    bool found = false;
+    const double maxDistSq = 6.5 * 6.5;
+    for (int i = 0; i < size && !found; ++i) {
+        jobject te = env->CallObjectMethod(tileList, g_listGetMethod, i);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); break; }
+        if (!te) continue;
+
+        if (IsChestTileEntityLegacy(env, te)) {
+            jobject posObj = env->GetObjectField(te, g_tileEntityPosField);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); posObj = nullptr; }
+            if (posObj) {
+                int bx = env->CallIntMethod(posObj, g_blockPosGetX);
+                int by = env->CallIntMethod(posObj, g_blockPosGetY);
+                int bz = env->CallIntMethod(posObj, g_blockPosGetZ);
+                env->DeleteLocalRef(posObj);
+                if (env->ExceptionCheck()) {
+                    env->ExceptionClear();
+                } else {
+                    double dx = ((double)bx + 0.5) - px;
+                    double dy = ((double)by + 0.5) - py;
+                    double dz = ((double)bz + 0.5) - pz;
+                    found = (dx * dx + dy * dy + dz * dz) <= maxDistSq;
+                }
+            }
+        }
+        env->DeleteLocalRef(te);
+    }
+
+    env->DeleteLocalRef(tileList);
+    return found;
+}
+
+static std::string BuildChestStealerStateJson(JNIEnv* env, bool enabled) {
+    if (!enabled || !env || !g_mcInstance || !g_currentScreenField || !g_thePlayerField) return "null";
+
+    if (env->PushLocalFrame(128) < 0) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return "null";
+    }
+
+    jobject currentScreen = env->GetObjectField(g_mcInstance, g_currentScreenField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); currentScreen = nullptr; }
+    if (!currentScreen || !IsLegacyChestScreen(env, currentScreen)) {
+        env->PopLocalFrame(nullptr);
+        return "null";
+    }
+
+    if (!ResolveChestStealerMappings(env, currentScreen)) {
+        LogChestStealerMappingMissing("container/slot geometry mappings");
+        env->PopLocalFrame(nullptr);
+        return "null";
+    }
+
+    jobject player = env->GetObjectField(g_mcInstance, g_thePlayerField);
+    jobject container = env->GetObjectField(currentScreen, g_guiContainerInventorySlotsField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); player = nullptr; container = nullptr; }
+    if (!player || !container) {
+        env->PopLocalFrame(nullptr);
+        return "null";
+    }
+
+    int windowId = env->GetIntField(container, g_containerWindowIdField);
+    int guiLeft = env->GetIntField(currentScreen, g_guiLeftField);
+    int guiTop = env->GetIntField(currentScreen, g_guiTopField);
+    int screenWidth = env->GetIntField(currentScreen, g_guiWidthField);
+    int screenHeight = env->GetIntField(currentScreen, g_guiHeightField);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        env->PopLocalFrame(nullptr);
+        return "null";
+    }
+
+    bool physical = HasPhysicalChestNearPlayer(env, player);
+    if (!physical) {
+        std::string title = GetLegacyChestScreenTitle(env, currentScreen);
+        if (title.empty()) title = "unknown";
+        LogChestStealerSkippedMenu(title);
+        std::ostringstream skipped;
+        skipped << "{\"ready\":false,\"physical\":false,\"windowId\":" << windowId
+                << ",\"screenWidth\":" << screenWidth
+                << ",\"screenHeight\":" << screenHeight
+                << ",\"slots\":[]}";
+        env->PopLocalFrame(nullptr);
+        return skipped.str();
+    }
+
+    jobject slotsList = env->GetObjectField(container, g_containerInventorySlotsField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); slotsList = nullptr; }
+    if (!slotsList) {
+        env->PopLocalFrame(nullptr);
+        return "null";
+    }
+
+    int size = env->CallIntMethod(slotsList, g_listSizeMethod);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); size = 0; }
+    int chestSlotCount = size - 36;
+    if (chestSlotCount <= 0 || screenWidth <= 0 || screenHeight <= 0) {
+        env->PopLocalFrame(nullptr);
+        return "null";
+    }
+
+    std::ostringstream slotsJson;
+    int count = 0;
+    for (int i = 0; i < chestSlotCount; ++i) {
+        jobject slot = env->CallObjectMethod(slotsList, g_listGetMethod, i);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); slot = nullptr; }
+        if (!slot) continue;
+
+        bool hasStack = env->CallBooleanMethod(slot, g_slotGetHasStackMethod) != JNI_FALSE;
+        if (env->ExceptionCheck()) { env->ExceptionClear(); hasStack = false; }
+        if (hasStack) {
+            int slotNumber = env->GetIntField(slot, g_slotSlotNumberField);
+            int slotX = env->GetIntField(slot, g_slotXDisplayPositionField);
+            int slotY = env->GetIntField(slot, g_slotYDisplayPositionField);
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+            } else {
+                if (count > 0) slotsJson << ",";
+                slotsJson << "{\"index\":" << i
+                          << ",\"slotNumber\":" << slotNumber
+                          << ",\"x\":" << (guiLeft + slotX + 8)
+                          << ",\"y\":" << (guiTop + slotY + 8)
+                          << "}";
+                count++;
+            }
+        }
+        env->DeleteLocalRef(slot);
+    }
+
+    std::ostringstream out;
+    out << "{\"ready\":" << (count > 0 ? "true" : "false")
+        << ",\"physical\":true"
+        << ",\"windowId\":" << windowId
+        << ",\"screenWidth\":" << screenWidth
+        << ",\"screenHeight\":" << screenHeight
+        << ",\"slots\":[" << slotsJson.str() << "]}";
+
+    env->PopLocalFrame(nullptr);
+    return out.str();
+}
+
+static void UpdateChestStealer(JNIEnv* env, const Config& cfg) {
+    if (!cfg.chestStealer) {
+        ResetChestStealerRuntime();
+        return;
+    }
+    if (!env || !g_mcInstance || !g_currentScreenField || !g_thePlayerField) return;
+
+    DWORD now = GetTickCount();
+    if (now < g_chestStealerNextClickMs) return;
+
+    if (env->PushLocalFrame(128) < 0) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return;
+    }
+
+    jobject currentScreen = env->GetObjectField(g_mcInstance, g_currentScreenField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); currentScreen = nullptr; }
+    if (!currentScreen || !IsLegacyChestScreen(env, currentScreen)) {
+        ResetChestStealerRuntime();
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    if (!ResolveChestStealerMappings(env, currentScreen)) {
+        LogChestStealerMappingMissing("playerController/windowClick/container/slot mappings");
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    jobject player = env->GetObjectField(g_mcInstance, g_thePlayerField);
+    jobject controller = env->GetObjectField(g_mcInstance, g_playerControllerField);
+    jobject container = env->GetObjectField(currentScreen, g_guiContainerInventorySlotsField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); player = nullptr; controller = nullptr; container = nullptr; }
+    if (!player || !controller || !container) {
+        ResetChestStealerRuntime();
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    int windowId = env->GetIntField(container, g_containerWindowIdField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); ResetChestStealerRuntime(); env->PopLocalFrame(nullptr); return; }
+
+    if (!HasPhysicalChestNearPlayer(env, player)) {
+        std::string title = GetLegacyChestScreenTitle(env, currentScreen);
+        if (title.empty()) title = "unknown";
+        LogChestStealerSkippedMenu(title);
+        g_chestStealerWindowId = windowId;
+        g_chestStealerWindowCompleted = true;
+        g_chestStealerNextClickMs = now + 1000;
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    jobject slotsList = env->GetObjectField(container, g_containerInventorySlotsField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); slotsList = nullptr; }
+    if (!slotsList) {
+        ResetChestStealerRuntime();
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    int size = env->CallIntMethod(slotsList, g_listSizeMethod);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); size = 0; }
+    int chestSlotCount = size - 36;
+    if (chestSlotCount <= 0) {
+        ResetChestStealerRuntime();
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    bool newWindow = (windowId != g_chestStealerWindowId || chestSlotCount != g_chestStealerLastSlotCount);
+    if (newWindow) {
+        g_chestStealerWindowId = windowId;
+        g_chestStealerLastSlotCount = chestSlotCount;
+        g_chestStealerWindowOpenedMs = now;
+        g_chestStealerWindowCompleted = false;
+        g_chestStealerNextClickMs = now + (DWORD)ChestStealerRandRange(350, 700);
+        g_chestStealerSlots.clear();
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    if (g_chestStealerWindowCompleted) {
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    if (g_chestStealerWindowOpenedMs > 0 && now - g_chestStealerWindowOpenedMs < 350) {
+        g_chestStealerNextClickMs = g_chestStealerWindowOpenedMs + 350;
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    if (g_chestStealerSlots.empty()) {
+        g_chestStealerSlots.clear();
+        for (int i = 0; i < chestSlotCount; ++i) {
+            jobject slot = env->CallObjectMethod(slotsList, g_listGetMethod, i);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); slot = nullptr; }
+            if (!slot) continue;
+
+            bool hasStack = env->CallBooleanMethod(slot, g_slotGetHasStackMethod) != JNI_FALSE;
+            if (env->ExceptionCheck()) { env->ExceptionClear(); hasStack = false; }
+            if (hasStack) {
+                int slotNumber = g_slotSlotNumberField ? env->GetIntField(slot, g_slotSlotNumberField) : i;
+                if (env->ExceptionCheck()) { env->ExceptionClear(); slotNumber = i; }
+                g_chestStealerSlots.push_back(slotNumber);
+            }
+            env->DeleteLocalRef(slot);
+        }
+        ShuffleChestStealerSlots(g_chestStealerSlots);
+    }
+
+    if (g_chestStealerSlots.empty()) {
+        g_chestStealerWindowCompleted = true;
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    int slotNumber = g_chestStealerSlots.back();
+    g_chestStealerSlots.pop_back();
+
+    (void)controller;
+    (void)slotNumber;
+    // Chest Stealer uses C# physical mouse input. Do not emit direct windowClick packets here.
+    if (g_chestStealerSlots.empty()) {
+        g_chestStealerWindowCompleted = true;
+    }
+    g_chestStealerNextClickMs = now + (DWORD)NextChestStealerDelayMs(cfg);
+    env->PopLocalFrame(nullptr);
+}
+
 GameState ReadGameState(JNIEnv* env) {
     GameState s = {};
     static DWORD nextRefreshAt = 0;
@@ -3759,9 +4450,11 @@ GameState ReadGameState(JNIEnv* env) {
 
     bool gtbHelperEnabled = false;
     bool shouldCheckHoldingBlock = false;
+    bool chestStealerEnabled = false;
     {
         LockGuard lk(g_configMutex);
         gtbHelperEnabled = g_config.gtbHelper;
+        chestStealerEnabled = g_config.chestStealer;
         shouldCheckHoldingBlock =
             (g_config.rightClick && g_config.rightBlockOnly) ||
             (g_config.speedBridge && g_config.speedBridgeBlockOnly);
@@ -3887,6 +4580,7 @@ GameState ReadGameState(JNIEnv* env) {
     s.attackCooldown = 1.0f;
     s.attackCooldownPerTick = 0.08f;
     s.stateMs = (unsigned long long)GetTickCount64();
+    s.chestStealerStateJson = BuildChestStealerStateJson(env, chestStealerEnabled);
     s.actionBar.clear();
     if (g_objectMouseOverField && g_typeOfHitField && g_enumNameMethod) {
         jobject mop = env->GetObjectField(g_mcInstance, g_objectMouseOverField);
@@ -4953,6 +5647,7 @@ void RenderHUD(int winW, int winH) {
     if (cfg.triggerbot)        pushMod("Triggerbot", ToImU32(theme.accentSecondary));
     if (cfg.speedBridge)       pushMod("SpeedBridge", ToImU32(theme.accentPrimary));
     if (cfg.chestEsp)          pushMod("Chest ESP", ToImU32(theme.accentSecondary));
+    if (cfg.chestStealer)      pushMod("Chest Stealer", ToImU32(theme.accentTertiary));
     if (cfg.nametags)          pushMod("Nametags", ToImU32(theme.accentPrimary));
     if (cfg.gtbHelper)         pushMod("GTB Helper", ToImU32(theme.accentTertiary));
     if (cfg.jitter)            pushMod("Jitter", ToImU32(theme.accentSecondary));
@@ -6376,12 +7071,14 @@ static int GetModuleKeybind(const Config& cfg, const char* id) {
     if (strcmp(id, "nametags")     == 0) return cfg.keybindNametags;
     if (strcmp(id, "closestplayer")== 0) return cfg.keybindClosestPlayer;
     if (strcmp(id, "chestesp")     == 0) return cfg.keybindChestEsp;
+    if (strcmp(id, "cheststealer") == 0) return cfg.keybindChestStealer;
     return 0;
 }
 
 enum ClickCategory {
     CAT_COMBAT = 0,
-    CAT_RENDER = 1
+    CAT_RENDER = 1,
+    CAT_UTILITY = 2
 };
 
 struct ModuleSpec {
@@ -6393,10 +7090,11 @@ struct ModuleSpec {
 
 static const ModuleSpec g_modules[] = {
     { "autoclicker", "AutoClicker", "toggleArmed", CAT_COMBAT },
-    { "speedbridge", "SpeedBridge", "toggleSpeedBridge", CAT_COMBAT },
+    { "speedbridge", "SpeedBridge", "toggleSpeedBridge", CAT_UTILITY },
     { "nametags", "Nametags", "toggleNametags", CAT_RENDER },
     { "closestplayer", "Closest Player", "toggleClosestPlayerInfo", CAT_RENDER },
     { "chestesp", "Chest ESP", "toggleChestEsp", CAT_RENDER },
+    { "cheststealer", "Chest Stealer", "toggleChestStealer", CAT_UTILITY },
 };
 
 static bool g_guiWindowInit = false;
@@ -6538,6 +7236,7 @@ bool IsModuleEnabled(const ModuleSpec& m, const Config& cfg) {
     if (strcmp(m.id, "nametags") == 0) return cfg.nametags;
     if (strcmp(m.id, "closestplayer") == 0) return cfg.closestPlayerInfo;
     if (strcmp(m.id, "chestesp") == 0) return cfg.chestEsp;
+    if (strcmp(m.id, "cheststealer") == 0) return cfg.chestStealer;
     if (strcmp(m.id, "clickinchests") == 0) return cfg.clickInChests;
     return false;
 }
@@ -6709,9 +7408,9 @@ void RenderClickGUI(int winW, int winH) {
     DrawRect(settingsX, contentY, settingsW, contentH, 0.08f, 0.08f, 0.09f, 0.95f);
 
     // Sidebar categories
-    static const char* categoryNames[] = { "Combat", "Render" };
+    static const char* categoryNames[] = { "Combat", "Render", "Utility" };
     float catY = contentY + 8.0f;
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < 3; i++) {
         float btnH = 28.0f;
         bool hovered = IsPointInRect(sideX + 6.0f, catY, sidebarW - 12.0f, btnH);
         bool active = (int)g_selectedCategory == i;
@@ -6866,6 +7565,18 @@ void RenderClickGUI(int winW, int winH) {
         if (GuiSettingToggle(settingsX + 8.0f, sy, settingsW - 16.0f, "Hold Sneak Gate", cfg.speedBridgeHoldingShiftOnly, scale * 0.88f)) queueToggle("toggleSpeedBridgeHoldingShiftOnly");
         sy += 25.0f;
         if (GuiSettingToggle(settingsX + 8.0f, sy, settingsW - 16.0f, "Looking Down", cfg.speedBridgeLookingDownOnly, scale * 0.88f)) queueToggle("toggleSpeedBridgeLookingDownOnly");
+    } else if (strcmp(selected.id, "cheststealer") == 0) {
+        if (GuiSettingToggle(settingsX + 8.0f, sy, settingsW - 16.0f, "Enabled", cfg.chestStealer, scale * 0.88f)) queueToggle("toggleChestStealer");
+        sy += 28.0f;
+
+        float delayVal = GuiSettingSlider(settingsX + 8.0f, sy, settingsW - 16.0f, "cheststealer_delay", "Delay", (float)cfg.chestStealerDelayMs, 50.0f, 500.0f, scale * 0.88f, true);
+        sy += 32.0f;
+        int delayInt = (int)(delayVal + 0.5f);
+        if (delayInt != cfg.chestStealerDelayMs) {
+            char b[128];
+            snprintf(b, sizeof(b), "{\"type\":\"cmd\",\"action\":\"setChestStealerDelayMs\",\"value\":%d}\n", delayInt);
+            queueCmd(b);
+        }
     } else if (strcmp(selected.id, "nametags") == 0) {
         if (GuiSettingToggle(settingsX + 8.0f, sy, settingsW - 16.0f, "Show Health", cfg.nametagShowHealth, scale * 0.88f)) queueToggle("toggleNametagHealth");
         sy += 30.0f;
@@ -7413,6 +8124,7 @@ void ParseConfig(const std::string& line) {
         g_config.nametagShowArmor = reader.GetBool("nametagShowArmor");
         g_config.nametagHideVanilla = reader.GetBool("nametagHideVanilla");
         g_config.chestEsp = reader.GetBool("chestEsp");
+        g_config.chestStealer = reader.GetBool("chestStealerEnabled");
         g_config.reachEnabled = reader.GetBool("reachEnabled");
         g_config.velocityEnabled = reader.GetBool("velocityEnabled");
 
@@ -7467,6 +8179,11 @@ void ParseConfig(const std::string& line) {
         if (speedBridgeDelayMs > 250) speedBridgeDelayMs = 250;
         g_config.speedBridgeDelayMs = speedBridgeDelayMs;
 
+        int chestStealerDelayMs = reader.GetInt("chestStealerDelayMs", -1);
+        if (chestStealerDelayMs < 50) chestStealerDelayMs = g_config.chestStealerDelayMs;
+        if (chestStealerDelayMs > 500) chestStealerDelayMs = 500;
+        g_config.chestStealerDelayMs = chestStealerDelayMs;
+
         std::string gtbHint = reader.GetString("gtbHint");
         int gtbCount = reader.GetInt("gtbCount", g_config.gtbCount);
         if (gtbCount < 0) gtbCount = g_config.gtbCount;
@@ -7500,6 +8217,7 @@ void ParseConfig(const std::string& line) {
         { int v = reader.GetInt("keybindNametags", -1);      if (v >= 0) g_config.keybindNametags      = v; }
         { int v = reader.GetInt("keybindClosestPlayer", -1); if (v >= 0) g_config.keybindClosestPlayer = v; }
         { int v = reader.GetInt("keybindChestEsp", -1);      if (v >= 0) g_config.keybindChestEsp      = v; }
+        { int v = reader.GetInt("keybindChestStealer", -1);  if (v >= 0) g_config.keybindChestStealer  = v; }
     }
 }
 
@@ -7612,6 +8330,9 @@ void ServerLoop() {
             jsonToSend += "\"attackCooldown\":" + std::to_string(state.attackCooldown) + ",";
             jsonToSend += "\"attackCooldownPerTick\":" + std::to_string(state.attackCooldownPerTick) + ",";
             jsonToSend += "\"stateMs\":" + std::to_string(state.stateMs) + ",";
+            jsonToSend += "\"chestStealerState\":";
+            jsonToSend += state.chestStealerStateJson.empty() ? "null" : state.chestStealerStateJson;
+            jsonToSend += ",";
             jsonToSend += "\"entities\":";
 
             std::string entitiesJson = "[]";

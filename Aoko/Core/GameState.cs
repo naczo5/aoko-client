@@ -67,6 +67,9 @@ public class GameState
     [JsonPropertyName("entities")]
     public List<EntityInfo> Entities { get; set; } = new();
 
+    [JsonPropertyName("chestStealerState")]
+    public ChestStealerState? ChestStealerState { get; set; }
+
     /// <summary>
     /// Whether the agent is connected and sending data.
     /// </summary>
@@ -78,6 +81,42 @@ public class GameState
     /// </summary>
     [JsonIgnore]
     public DateTime LastUpdate { get; set; } = DateTime.MinValue;
+}
+
+public class ChestStealerState
+{
+    [JsonPropertyName("ready")]
+    public bool Ready { get; set; }
+
+    [JsonPropertyName("physical")]
+    public bool Physical { get; set; }
+
+    [JsonPropertyName("windowId")]
+    public int WindowId { get; set; } = -1;
+
+    [JsonPropertyName("screenWidth")]
+    public int ScreenWidth { get; set; }
+
+    [JsonPropertyName("screenHeight")]
+    public int ScreenHeight { get; set; }
+
+    [JsonPropertyName("slots")]
+    public List<ChestStealerSlot> Slots { get; set; } = new();
+}
+
+public class ChestStealerSlot
+{
+    [JsonPropertyName("index")]
+    public int Index { get; set; }
+
+    [JsonPropertyName("slotNumber")]
+    public int SlotNumber { get; set; }
+
+    [JsonPropertyName("x")]
+    public int X { get; set; }
+
+    [JsonPropertyName("y")]
+    public int Y { get; set; }
 }
 
 public class EntityInfo

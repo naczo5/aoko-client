@@ -77,6 +77,7 @@ public static class InputHooks
         ["nametags"]      = 0,
         ["closestplayer"] = 0,
         ["chestesp"]      = 0,
+        ["cheststealer"]  = 0,
         ["reach"]         = 0,
         ["velocity"]      = 0,
         ["panic"]         = 0,
@@ -136,6 +137,7 @@ public static class InputHooks
             case "nametags":      c.NametagsEnabled             = !c.NametagsEnabled;             break;
             case "closestplayer": c.ClosestPlayerInfoEnabled    = !c.ClosestPlayerInfoEnabled;    break;
             case "chestesp":      c.ChestEspEnabled             = !c.ChestEspEnabled;             break;
+            case "cheststealer":  c.ChestStealerEnabled         = !c.ChestStealerEnabled;         break;
             case "reach":         c.ReachEnabled                = !c.ReachEnabled;                break;
             case "velocity":      c.VelocityEnabled             = !c.VelocityEnabled;             break;
             case "autototem":     c.AutoTotemEnabled            = !c.AutoTotemEnabled;            break;

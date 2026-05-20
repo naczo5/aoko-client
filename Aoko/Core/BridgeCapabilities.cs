@@ -44,6 +44,7 @@ public sealed class BridgeCapabilities
                     "nametags",
                     "closestplayer",
                     "chestesp",
+                    "cheststealer",
                     "reach",
                     "velocity",
                     "autototem"
@@ -80,6 +81,8 @@ public sealed class BridgeCapabilities
                     "nametagmaxcount",
                     "chestesp",
                     "chestespmaxcount",
+                    "cheststealerenabled",
+                    "cheststealerdelayms",
                     "reachenabled",
                     "reachmin",
                     "reachmax",
@@ -107,7 +110,8 @@ public sealed class BridgeCapabilities
                     "breakingblock",
                     "attackcooldown",
                     "attackcooldownpertick",
-                    "statems"
+                    "statems",
+                    "cheststealerstate"
                 )
             );
         }
@@ -125,6 +129,7 @@ public sealed class BridgeCapabilities
                 "nametags",
                 "closestplayer",
                 "chestesp",
+                "cheststealer",
                 "reach",
                 "velocity"
             ),
@@ -153,6 +158,8 @@ public sealed class BridgeCapabilities
                 "nametagshowarmor",
                 "nametaghidevanilla",
                 "chestesp",
+                "cheststealerenabled",
+                "cheststealerdelayms",
                 "reachenabled",
                 "reachmin",
                 "reachmax",
@@ -169,7 +176,8 @@ public sealed class BridgeCapabilities
                 "keybindspeedbridge",
                 "keybindnametags",
                 "keybindclosestplayer",
-                "keybindchestesp"
+                "keybindchestesp",
+                "keybindcheststealer"
             ),
             BuildSet(
                 "actionbar",
@@ -181,6 +189,7 @@ public sealed class BridgeCapabilities
                 "attackcooldown",
                 "attackcooldownpertick",
                 "statems",
+                "cheststealerstate",
                 "pitch"
             )
         );

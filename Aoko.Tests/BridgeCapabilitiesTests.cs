@@ -11,6 +11,9 @@ public class BridgeCapabilitiesTests
         BridgeCapabilities caps = BridgeCapabilities.ForVersionFallback("26.1");
 
         Assert.True(caps.SupportsModule("triggerbot"));
+        Assert.True(caps.SupportsModule("cheststealer"));
+        Assert.True(caps.SupportsSetting("cheststealerenabled"));
+        Assert.True(caps.SupportsStateField("cheststealerstate"));
         Assert.True(caps.SupportsSetting("nametagshowhelditem"));
         Assert.True(caps.SupportsStateField("attackcooldown"));
     }
@@ -23,6 +26,18 @@ public class BridgeCapabilitiesTests
         Assert.False(caps.SupportsModule("triggerbot"));
         Assert.False(caps.SupportsSetting("triggerbot"));
         Assert.True(caps.SupportsStateField("holdingblock"));
+    }
+
+    [Fact]
+    public void LegacyFallback_ExposesChestStealer()
+    {
+        BridgeCapabilities caps = BridgeCapabilities.ForVersionFallback("1.8.9");
+
+        Assert.True(caps.SupportsModule("cheststealer"));
+        Assert.True(caps.SupportsSetting("cheststealerenabled"));
+        Assert.True(caps.SupportsSetting("cheststealerdelayms"));
+        Assert.True(caps.SupportsSetting("keybindcheststealer"));
+        Assert.True(caps.SupportsStateField("cheststealerstate"));
     }
 
     [Fact]

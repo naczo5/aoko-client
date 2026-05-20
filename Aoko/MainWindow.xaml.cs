@@ -52,6 +52,7 @@ public partial class MainWindow : Window
         ["gtbhelper"] = "GTB Helper",
         ["nametags"] = "Nametags",
         ["chestesp"] = "Chest ESP",
+        ["cheststealer"] = "Chest Stealer",
         ["closestplayer"] = "Closest Player",
         ["reach"] = "Reach",
         ["velocity"] = "Velocity",
@@ -270,6 +271,7 @@ public partial class MainWindow : Window
         bool triggerbotSupported = IsModuleSupported("triggerbot");
         bool speedBridgeSupported = IsModuleSupported("speedbridge");
         bool gtbSupported = IsModuleSupported("gtbhelper");
+        bool chestStealerSupported = IsModuleSupported("cheststealer");
         bool reachSupported = IsModuleSupported("reach");
         bool velocitySupported = IsModuleSupported("velocity");
         bool autoTotemSupported = IsModuleSupported("autototem");
@@ -279,6 +281,7 @@ public partial class MainWindow : Window
         TriggerbotCard.IsEnabled = triggerbotSupported;
         SpeedBridgeCard.IsEnabled = speedBridgeSupported;
         GtbHelperCard.IsEnabled = gtbSupported;
+        ChestStealerCard.IsEnabled = chestStealerSupported;
         ReachCard.IsEnabled = reachSupported;
         VelocityCard.IsEnabled = velocitySupported;
         AutoTotemCard.IsEnabled = autoTotemSupported;
@@ -288,6 +291,7 @@ public partial class MainWindow : Window
         if (!triggerbotSupported && clicker.TriggerbotEnabled) clicker.TriggerbotEnabled = false;
         if (!speedBridgeSupported && clicker.SpeedBridgeEnabled) clicker.SpeedBridgeEnabled = false;
         if (!gtbSupported && clicker.GtbHelperEnabled) clicker.GtbHelperEnabled = false;
+        if (!chestStealerSupported && clicker.ChestStealerEnabled) clicker.ChestStealerEnabled = false;
         if (!reachSupported && clicker.ReachEnabled) clicker.ReachEnabled = false;
         if (!velocitySupported && clicker.VelocityEnabled) clicker.VelocityEnabled = false;
         if (!autoTotemSupported && clicker.AutoTotemEnabled) clicker.AutoTotemEnabled = false;
@@ -299,6 +303,7 @@ public partial class MainWindow : Window
         ReachAvailabilityText.Text = reachSupported ? "Available" : "Unavailable on current bridge";
         VelocityAvailabilityText.Text = velocitySupported ? "Available" : "Unavailable on current bridge";
         AutoTotemAvailabilityText.Text = autoTotemSupported ? "Available" : "Unavailable on current bridge";
+        ChestStealerAvailabilityText.Text = chestStealerSupported ? "Available" : "Unavailable on current bridge";
         GtbHelperAvailabilityText.Text = gtbSupported
             ? "Hypixel Guess The Build helper using action-bar hints."
             : "Unavailable on current bridge";
@@ -307,6 +312,7 @@ public partial class MainWindow : Window
         KeybindTriggerbotButton.IsEnabled = triggerbotSupported;
         KeybindSpeedBridgeButton.IsEnabled = speedBridgeSupported;
         KeybindGtbHelperButton.IsEnabled = gtbSupported;
+        KeybindChestStealerButton.IsEnabled = chestStealerSupported;
         KeybindReachButton.IsEnabled = reachSupported;
         KeybindVelocityButton.IsEnabled = velocitySupported;
         KeybindAutoTotemButton.IsEnabled = autoTotemSupported;
@@ -625,6 +631,7 @@ public partial class MainWindow : Window
         SetKeybindButtonContent(KeybindGtbHelperButton, "gtbhelper");
         SetKeybindButtonContent(KeybindNametagsButton, "nametags");
         SetKeybindButtonContent(KeybindChestEspButton, "chestesp");
+        SetKeybindButtonContent(KeybindChestStealerButton, "cheststealer");
         SetKeybindButtonContent(KeybindClosestPlayerButton, "closestplayer");
         SetKeybindButtonContent(KeybindReachButton, "reach");
         SetKeybindButtonContent(KeybindVelocityButton, "velocity");

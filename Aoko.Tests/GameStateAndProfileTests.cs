@@ -36,6 +36,53 @@ public class GameStateAndProfileTests
     }
 
     [Fact]
+    public void GameState_DeserializesChestStealerState()
+    {
+        const string json = """
+            {
+              "mapped": true,
+              "guiOpen": true,
+              "screenName": "GuiChest",
+              "chestStealerState": {
+                "ready": true,
+                "physical": true,
+                "windowId": 2,
+                "screenWidth": 854,
+                "screenHeight": 480,
+                "slots": [
+                  { "index": 4, "slotNumber": 4, "x": 381, "y": 128 }
+                ]
+              },
+              "entities": []
+            }
+            """;
+
+        GameState? state = JsonSerializer.Deserialize<GameState>(json);
+
+        Assert.NotNull(state);
+        Assert.NotNull(state!.ChestStealerState);
+        Assert.True(state.ChestStealerState!.Ready);
+        Assert.True(state.ChestStealerState.Physical);
+        Assert.Equal(2, state.ChestStealerState.WindowId);
+        Assert.Single(state.ChestStealerState.Slots);
+        Assert.Equal(381, state.ChestStealerState.Slots[0].X);
+    }
+
+    [Fact]
+    public void ChestStealerCoordinateMapper_ScalesToClientRect()
+    {
+        var state = new ChestStealerState { ScreenWidth = 854, ScreenHeight = 480 };
+        var slot = new ChestStealerSlot { X = 427, Y = 240 };
+        var clientRect = new WindowDetection.RECT { Left = 100, Top = 50, Right = 1808, Bottom = 1010 };
+
+        bool mapped = ChestStealerCoordinateMapper.TryMapScaledPoint(state, slot, clientRect, out int x, out int y);
+
+        Assert.True(mapped);
+        Assert.Equal(954, x);
+        Assert.Equal(530, y);
+    }
+
+    [Fact]
     public void Profile_DefaultValuesRemainStable()
     {
         var profile = new Profile();
@@ -45,8 +92,11 @@ public class GameStateAndProfileTests
         Assert.Equal(12.0f, profile.MaxCPS);
         Assert.True(profile.LeftClickEnabled);
         Assert.False(profile.TriggerbotEnabled);
+        Assert.False(profile.ChestStealerEnabled);
+        Assert.Equal(120, profile.ChestStealerDelayMs);
         Assert.Equal(100, profile.ReachChance);
         Assert.True(profile.ModuleKeys.ContainsKey("autoclicker"));
+        Assert.True(profile.ModuleKeys.ContainsKey("cheststealer"));
     }
 
     [Fact]

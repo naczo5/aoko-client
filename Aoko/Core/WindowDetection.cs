@@ -20,6 +20,12 @@ public static class WindowDetection
     
     [DllImport("user32.dll")]
     private static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+    [DllImport("user32.dll")]
+    private static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
+
+    [DllImport("user32.dll")]
+    private static extern bool ClientToScreen(IntPtr hWnd, ref POINT lpPoint);
     
     private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
     
@@ -107,6 +113,29 @@ public static class WindowDetection
         
         return null;
     }
+
+    public static RECT? GetMinecraftClientRectOnScreen()
+    {
+        IntPtr hwnd = FindMinecraftWindow();
+        if (hwnd == IntPtr.Zero) return null;
+
+        if (!GetClientRect(hwnd, out RECT client))
+            return null;
+
+        POINT topLeft = new() { x = client.Left, y = client.Top };
+        POINT bottomRight = new() { x = client.Right, y = client.Bottom };
+        if (!ClientToScreen(hwnd, ref topLeft) || !ClientToScreen(hwnd, ref bottomRight))
+            return null;
+
+        return new RECT
+        {
+            Left = topLeft.x,
+            Top = topLeft.y,
+            Right = bottomRight.x,
+            Bottom = bottomRight.y
+        };
+    }
+
     [DllImport("user32.dll")]
     private static extern bool GetCursorInfo(ref CURSORINFO pci);
 

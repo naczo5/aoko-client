@@ -367,6 +367,7 @@ public sealed class DiscordRichPresenceService
         if (clicker.NametagsEnabled) count++;
         if (clicker.ClosestPlayerInfoEnabled) count++;
         if (clicker.ChestEspEnabled) count++;
+        if (clicker.ChestStealerEnabled) count++;
         if (clicker.ReachEnabled) count++;
         if (clicker.VelocityEnabled) count++;
         if (clicker.AutoTotemEnabled) count++;

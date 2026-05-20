@@ -53,6 +53,8 @@ public class Profile
 
     public bool ChestEspEnabled { get; set; } = false;
     public int ChestEspMaxCount { get; set; } = 5;
+    public bool ChestStealerEnabled { get; set; } = false;
+    public int ChestStealerDelayMs { get; set; } = 120;
 
     public bool ReachEnabled { get; set; } = false;
     public float ReachMin { get; set; } = 3.0f;
@@ -85,6 +87,7 @@ public class Profile
         ["nametags"]      = 0,
         ["closestplayer"] = 0,
         ["chestesp"]      = 0,
+        ["cheststealer"]  = 0,
         ["reach"]         = 0,
         ["velocity"]      = 0,
         ["autototem"]     = 0,
@@ -262,6 +265,8 @@ public static class ProfileManager
             NametagMaxCount = clicker.NametagMaxCount,
             ChestEspEnabled = clicker.ChestEspEnabled,
             ChestEspMaxCount = clicker.ChestEspMaxCount,
+            ChestStealerEnabled = clicker.ChestStealerEnabled,
+            ChestStealerDelayMs = clicker.ChestStealerDelayMs,
 
             ReachEnabled = clicker.ReachEnabled,
             ReachMin = clicker.ReachMin,
@@ -340,6 +345,8 @@ public static class ProfileManager
         clicker.NametagMaxCount = profile.NametagMaxCount;
         clicker.ChestEspEnabled = profile.ChestEspEnabled;
         clicker.ChestEspMaxCount = profile.ChestEspMaxCount;
+        clicker.ChestStealerEnabled = profile.ChestStealerEnabled;
+        clicker.ChestStealerDelayMs = profile.ChestStealerDelayMs;
 
         clicker.ReachEnabled = profile.ReachEnabled;
         clicker.ReachMin = profile.ReachMin;
