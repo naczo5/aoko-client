@@ -188,29 +188,6 @@ static Config g_config;
 static Mutex  g_configMutex;
 static volatile LONG g_forceGlobalJniRemap_121 = 0;
 
-// ===================== PENDING COMMANDS (bridge -> C#) =====================
-static std::vector<std::string> g_pendingCmds;
-static Mutex g_cmdMutex;
-
-static void SendCmd(const char* action) {
-    char buf[128];
-    snprintf(buf, sizeof(buf), "{\"type\":\"cmd\",\"action\":\"%s\"}\n", action);
-    LockGuard lk(g_cmdMutex);
-    g_pendingCmds.push_back(buf);
-}
-static void SendCmdFloat(const char* action, float val) {
-    char buf[128];
-    snprintf(buf, sizeof(buf), "{\"type\":\"cmd\",\"action\":\"%s\",\"value\":%.2f}\n", action, val);
-    LockGuard lk(g_cmdMutex);
-    g_pendingCmds.push_back(buf);
-}
-static void SendCmdInt(const char* action, int val) {
-    char buf[128];
-    snprintf(buf, sizeof(buf), "{\"type\":\"cmd\",\"action\":\"%s\",\"value\":%d}\n", action, val);
-    LockGuard lk(g_cmdMutex);
-    g_pendingCmds.push_back(buf);
-}
-
 // ===================== CONFIG PARSER =====================
 static void ParseConfig(const std::string& line) {
     TRACE261_PATH("enter");
@@ -419,7 +396,6 @@ static OverlayTheme ResolveOverlayTheme(const std::string& guiTheme)
 // ===================== GLOBALS =====================
 static bool g_running          = true;
 static bool g_imguiInitialized = false;
-static bool g_ShowMenu         = false;
 static bool g_realGuiOpen      = false;
 static int  g_imguiWarmupFrames = 0;
 static bool g_imguiPhase1Done = false;
@@ -439,19 +415,7 @@ static bool  g_imguiGlBackendReady = false;
 static bool  g_imguiPendingBackendReset = false;
 static HGLRC g_imguiPendingGlrc = nullptr;
 
-// Render-thread scheduled actions (WndProc just flips these flags).
-static volatile LONG g_reqOpenMenu  = 0;
-static volatile LONG g_reqCloseMenu = 0;
-
-// When > 0, the block expiry time (ms). WM_INPUT absorbed until GetTickCount() > this.
-// Set when closing GUI; expires after 250ms so even fast mouse movements
-// caused by accumulated raw deltas are swallowed before Minecraft processes them.
-static volatile DWORD g_blockUntilMs = 0;
-// When non-zero, time when we should re-enable GLFW raw mouse motion after closing GUI.
-static volatile DWORD g_enableRawMouseAtMs = 0;
-
 static HWND   g_hwnd     = nullptr;
-static WNDPROC o_WndProc = nullptr;
 static JavaVM* g_jvm     = nullptr;
 
 typedef void* (*PFN_glfwGetCurrentContext)();
@@ -2715,7 +2679,7 @@ static void UpdateSpeedBridge(JNIEnv* env, const Config& cfg, bool inWorldNow) {
         holdingBlock = g_jniHoldingBlock;
     }
 
-    bool shouldRun = cfg.speedBridge && inWorldNow && !g_ShowMenu && !guiOpen;
+    bool shouldRun = cfg.speedBridge && inWorldNow && !guiOpen;
     if (shouldRun && cfg.speedBridgeBlockOnly && !holdingBlock) shouldRun = false;
     if (shouldRun && cfg.speedBridgeHoldingShiftOnly && !IsConfiguredSneakPhysicallyDown121(env)) shouldRun = false;
 
@@ -6514,10 +6478,6 @@ static void ResetModernJniRuntimeCaches121(JNIEnv* env, const char* reason) {
 }
 
 static void CleanupImGuiAndHooks() {
-    if (g_hwnd && o_WndProc) {
-        SetWindowLongPtr(g_hwnd, GWLP_WNDPROC, (LONG_PTR)o_WndProc);
-        o_WndProc = nullptr;
-    }
 
     if (g_imguiPhase1Done) {
         ImGui_ImplWin32_Shutdown();
@@ -6538,13 +6498,7 @@ static void CleanupImGuiAndHooks() {
     g_imguiPendingGlrc = nullptr;
     g_imguiGlrc = nullptr;
     g_hwnd = nullptr;
-
-    g_ShowMenu = false;
     g_realGuiOpen = false;
-    g_reqOpenMenu = 0;
-    g_reqCloseMenu = 0;
-    g_blockUntilMs = 0;
-    g_enableRawMouseAtMs = 0;
 
     MH_DisableHook(MH_ALL_HOOKS);
     o_wglSwapBuffers = nullptr;
@@ -7484,87 +7438,6 @@ static bool DiscoverJniMappings(JNIEnv* env) {
     return true;
 }
 
-// ===================== CHAT SCREEN HELPERS (cursor) =====================
-// Like 1.8.9: open a real MC screen so MC releases mouse natively.
-// Falls back to direct GLFW call if JNI not ready.
-static void OpenChatScreen() {
-    TRACE261_PATH("enter");
-    bool canUseJni = TRACE261_IF("jniChatReady", (g_chatJniReady && g_jvm));
-    if (canUseJni) {
-        JNIEnv* env = nullptr;
-        bool envReady = TRACE261_IF("jniEnvReady", (g_jvm->GetEnv((void**)&env, JNI_VERSION_1_8) == JNI_OK && env));
-        if (envReady) {
-            jobject chatInst = nullptr;
-            if (g_chatCtorKind == 0) {
-                TRACE261_PATH("chat-ctor-kind-0");
-                chatInst = env->NewObject(g_chatScreenClass, g_chatScreenCtor);
-            } else if (g_chatCtorKind == 1) {
-                TRACE261_PATH("chat-ctor-kind-1");
-                jstring empty = env->NewStringUTF("");
-                chatInst = env->NewObject(g_chatScreenClass, g_chatScreenCtor, empty);
-                env->DeleteLocalRef(empty);
-            } else if (g_chatCtorKind == 2) {
-                TRACE261_PATH("chat-ctor-kind-2");
-                jstring empty = env->NewStringUTF("");
-                chatInst = env->NewObject(g_chatScreenClass, g_chatScreenCtor, empty, (jboolean)JNI_FALSE);
-                env->DeleteLocalRef(empty);
-            }
-            
-            bool chatCreated = TRACE261_IF("chatScreenCreated", (!env->ExceptionCheck() && chatInst));
-            if (chatCreated) {
-                env->CallVoidMethod(g_mcInstance, g_setScreenMethod, chatInst);
-                env->ExceptionClear();
-                env->DeleteLocalRef(chatInst);
-                TRACE261_PATH("jni-chat-open-success");
-                return; // MC handles cursor natively
-            }
-            TRACE261_PATH("jni-chat-open-failed");
-            env->ExceptionClear();
-        }
-    }
-    // GLFW fallback (when JNI not ready or failed)
-    TRACE261_PATH("glfw-chat-open-fallback");
-    if (glfwGetCurrentContext_fn && glfwSetInputMode_fn) {
-        void* win = glfwGetCurrentContext_fn();
-        TRACE261_BRANCH("glfwWindowAvailable", win != nullptr);
-        if (win) {
-            glfwSetInputMode_fn(win, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
-            // Disable raw mouse motion while our GUI is open to prevent camera drift.
-            if (glfwSetInputMode_fn) glfwSetInputMode_fn(win, GLFW_RAW_MOUSE_MOTION, 0);
-        }
-    }
-}
-static void CloseChatScreen() {
-    TRACE261_PATH("enter");
-    bool canUseJni = TRACE261_IF("jniChatReady", (g_chatJniReady && g_jvm));
-    if (canUseJni) {
-        JNIEnv* env = nullptr;
-        bool envReady = TRACE261_IF("jniEnvReady", (g_jvm->GetEnv((void**)&env, JNI_VERSION_1_8) == JNI_OK && env));
-        if (envReady) {
-            env->CallVoidMethod(g_mcInstance, g_setScreenMethod, nullptr);
-            env->ExceptionClear();
-            TRACE261_PATH("jni-chat-close-issued");
-        }
-    }
-    // GLFW safety: ensure Minecraft is put back into mouse-captured mode.
-    TRACE261_PATH("glfw-chat-close-path");
-    if (glfwGetCurrentContext_fn && glfwSetInputMode_fn) {
-        void* win = glfwGetCurrentContext_fn();
-        TRACE261_BRANCH("glfwWindowAvailable", win != nullptr);
-        if (win) {
-            // Order matters: disable cursor first, then (later) re-enable raw mouse.
-            // Keeping raw mouse OFF briefly reduces post-close flick.
-            glfwSetInputMode_fn(win, GLFW_RAW_MOUSE_MOTION, 0);
-            glfwSetInputMode_fn(win, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-        }
-    }
-    // Always block WM_INPUT briefly after closing (swallow any buffered deltas).
-    DWORD now = GetTickCount();
-    // Keep this short: long WM_INPUT blocking feels like cursor/control is stuck.
-    g_blockUntilMs = now + 180;
-    g_enableRawMouseAtMs = now + 80;
-}
-
 // ===================== JNI GAME STATE READING =====================
 // Called from ChestScanThreadProc (background thread) every 50ms — NOT from the render thread.
 // Moving this here eliminates CallObjectMethod (getSuperclass, getMainHandStack, etc.) from the
@@ -8179,372 +8052,12 @@ static void UpdateJniState() {
     }
 }
 
-// ===================== WNDPROC HOOK =====================
-extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
-
-LRESULT CALLBACK hkWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
-    // Absorb WM_INPUT while GUI is open OR while timer is active.
-    // This prevents raw mouse deltas from moving the camera while controlling ImGui.
-    if (uMsg == WM_INPUT && (g_ShowMenu || GetTickCount() < g_blockUntilMs)) {
-        return DefWindowProcA(hWnd, uMsg, wParam, lParam);
-    }
-
-    if (g_imguiInitialized && g_ShowMenu) {
-        ImGui_ImplWin32_WndProcHandler(hWnd, uMsg, wParam, lParam);
-        if (uMsg >= WM_MOUSEFIRST && uMsg <= WM_MOUSELAST) return TRUE;
-        if (uMsg >= WM_KEYFIRST   && uMsg <= WM_KEYLAST)   return TRUE;
-    }
-
-    return CallWindowProc(o_WndProc, hWnd, uMsg, wParam, lParam);
-}
-
-// ===================== IMGUI STYLE =====================
-static void ApplyStyle() {
-    ImGuiStyle& s = ImGui::GetStyle();
-    s.WindowRounding    = 0.0f;
-    s.ChildRounding     = 0.0f;
-    s.FrameRounding     = 2.0f;
-    s.GrabRounding      = 2.0f;
-    s.ScrollbarRounding = 0.0f;
-    s.WindowBorderSize  = 1.0f;
-    s.ChildBorderSize   = 1.0f;
-    s.FrameBorderSize   = 0.0f;
-    s.WindowPadding     = ImVec2(0, 0);
-    s.FramePadding      = ImVec2(4, 3);
-    s.ItemSpacing       = ImVec2(6, 5);
-    s.GrabMinSize       = 8.0f;
-
-    s.Colors[ImGuiCol_WindowBg]         = ImVec4(0.039f, 0.043f, 0.058f, 0.98f);
-    s.Colors[ImGuiCol_ChildBg]          = ImVec4(0.054f, 0.062f, 0.082f, 0.98f);
-    s.Colors[ImGuiCol_Border]           = ImVec4(0.121f, 0.133f, 0.160f, 1.0f);
-    s.Colors[ImGuiCol_Text]             = ImVec4(0.909f, 0.917f, 0.933f, 1.0f);
-    s.Colors[ImGuiCol_TextDisabled]     = ImVec4(0.478f, 0.509f, 0.564f, 1.0f);
-    s.Colors[ImGuiCol_Header]           = ImVec4(0.781f, 0.384f, 0.353f, 0.30f);
-    s.Colors[ImGuiCol_HeaderHovered]    = ImVec4(0.781f, 0.384f, 0.353f, 0.45f);
-    s.Colors[ImGuiCol_HeaderActive]     = ImVec4(0.781f, 0.384f, 0.353f, 0.65f);
-    s.Colors[ImGuiCol_FrameBg]          = ImVec4(0.094f, 0.105f, 0.133f, 1.0f);
-    s.Colors[ImGuiCol_FrameBgHovered]   = ImVec4(0.121f, 0.133f, 0.160f, 1.0f);
-    s.Colors[ImGuiCol_FrameBgActive]    = ImVec4(0.165f, 0.184f, 0.219f, 1.0f);
-    s.Colors[ImGuiCol_SliderGrab]       = ImVec4(0.781f, 0.384f, 0.353f, 1.0f);
-    s.Colors[ImGuiCol_SliderGrabActive] = ImVec4(0.847f, 0.522f, 0.490f, 1.0f);
-    s.Colors[ImGuiCol_CheckMark]        = ImVec4(0.781f, 0.384f, 0.353f, 1.0f);
-    s.Colors[ImGuiCol_Button]           = ImVec4(0.094f, 0.105f, 0.133f, 0.92f);
-    s.Colors[ImGuiCol_ButtonHovered]    = ImVec4(0.165f, 0.184f, 0.219f, 1.0f);
-    s.Colors[ImGuiCol_ButtonActive]     = ImVec4(0.781f, 0.384f, 0.353f, 0.85f);
-    s.Colors[ImGuiCol_Separator]        = ImVec4(0.121f, 0.133f, 0.160f, 1.0f);
-    s.Colors[ImGuiCol_ScrollbarBg]      = ImVec4(0.039f, 0.043f, 0.058f, 1.0f);
-    s.Colors[ImGuiCol_ScrollbarGrab]    = ImVec4(0.165f, 0.184f, 0.219f, 1.0f);
-    s.Colors[ImGuiCol_PopupBg]          = ImVec4(0.054f, 0.062f, 0.082f, 0.98f);
-}
-
-// ===================== RENDER CLICKGUI =====================
-static void RenderClickGUI() {
-    ImGuiIO& io = ImGui::GetIO();
-    ApplyStyle();
-
-    // Semi-transparent dark overlay over the entire screen (like 1.8.9)
-    ImDrawList* bgDl = ImGui::GetBackgroundDrawList();
-    bgDl->AddRectFilled(ImVec2(0,0), io.DisplaySize, IM_COL32(0, 0, 0, 140));
-
-    // Window size fixed at 640x460, centered on first show
-    const float WIN_W = 640.0f, WIN_H = 460.0f;
-    ImGui::SetNextWindowSize(ImVec2(WIN_W, WIN_H), ImGuiCond_Always);
-    ImGui::SetNextWindowPos(
-        ImVec2((io.DisplaySize.x - WIN_W) * 0.5f,
-               (io.DisplaySize.y - WIN_H) * 0.5f),
-        ImGuiCond_FirstUseEver);
-
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-    bool open = true;
-    ImGui::Begin("##lc_gui", &open,
-        ImGuiWindowFlags_NoTitleBar    |
-        ImGuiWindowFlags_NoCollapse    |
-        ImGuiWindowFlags_NoResize      |
-        ImGuiWindowFlags_NoScrollbar);
-    ImGui::PopStyleVar();
-
-    if (!open) {
-        // X button — close GUI
-        g_ShowMenu = false;
-        CloseChatScreen();
-        ImGui::End();
-        return;
-    }
-
-    ImVec2 wPos = ImGui::GetWindowPos();
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-
-    // ---- Header background (slightly different shade from window bg) ----
-    const float HEADER_H = 34.0f;
-    dl->AddRectFilled(wPos,
-                      ImVec2(wPos.x + WIN_W, wPos.y + HEADER_H),
-                      IM_COL32(22, 22, 24, 252));
-    dl->AddLine(ImVec2(wPos.x, wPos.y + HEADER_H),
-                ImVec2(wPos.x + WIN_W, wPos.y + HEADER_H),
-                IM_COL32(43, 43, 47, 255));
-    // Left accent bar (2px teal)
-    dl->AddRectFilled(wPos, ImVec2(wPos.x + 2, wPos.y + WIN_H),
-                      IM_COL32(199, 98, 90, 255));
-
-    // Title
-    ImGui::SetCursorPos(ImVec2(12, 8));
-    ImGui::Text("aoko client");
-    ImGui::SameLine();
-    ImGui::SetCursorPosX(130);
-    ImGui::TextColored(ImVec4(0.45f, 0.45f, 0.50f, 1.0f), "- Internal ClickGUI");
-
-    // X close button
-    ImGui::SetCursorPos(ImVec2(WIN_W - 27, 9));
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2, 2));
-    if (ImGui::Button("X##close", ImVec2(18, 16))) {
-        g_ShowMenu = false;
-        CloseChatScreen();
-        ImGui::PopStyleVar();
-        ImGui::End();
-        return;
-    }
-    ImGui::PopStyleVar();
-
-    // ---- Three-column layout ----
-    // accent(2) | sidebar(120) | gap(2) | modules(220) | gap(2) | settings(294)
-    // Total: 2+120+2+220+2+294 = 640 ✓
-    static int selCategory = 0;
-    static int selModule   = 0;
-
-    const float PANEL_Y  = HEADER_H;
-    const float PANEL_H  = WIN_H - HEADER_H;
-    const float ACCENT_W = 2.0f;
-    const float GAP      = 2.0f;
-    const float SIDE_W   = 120.0f;
-    const float MOD_W    = 220.0f;
-    const float SET_W    = WIN_W - ACCENT_W - SIDE_W - GAP*2 - MOD_W - GAP; // 294
-
-    // Get config snapshot
-    Config cfg;
-    { LockGuard lk(g_configMutex); cfg = g_config; }
-
-    // --- Sidebar (Categories) ---
-    ImGui::SetCursorPos(ImVec2(ACCENT_W, PANEL_Y));
-    ImGui::BeginChild("##sidebar", ImVec2(SIDE_W, PANEL_H), false);
-    ImGui::SetCursorPosY(8);
-    auto catStyle = [](bool sel) {
-        if (sel) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.781f, 0.384f, 0.353f, 1.0f));
-        else     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.80f, 0.82f, 0.85f, 1.0f));
-    };
-    catStyle(selCategory == 0);
-    if (ImGui::Selectable("  Combat", selCategory == 0, 0, ImVec2(SIDE_W-4, 28))) {
-        if (selCategory != 0) { selCategory = 0; selModule = 0; }
-    }
-    ImGui::PopStyleColor();
-    catStyle(selCategory == 1);
-    if (ImGui::Selectable("  Render", selCategory == 1, 0, ImVec2(SIDE_W-4, 28))) {
-        if (selCategory != 1) { selCategory = 1; selModule = 0; }
-    }
-    ImGui::PopStyleColor();
-    catStyle(selCategory == 2);
-    if (ImGui::Selectable("  Utility", selCategory == 2, 0, ImVec2(SIDE_W-4, 28))) {
-        if (selCategory != 2) { selCategory = 2; selModule = 0; }
-    }
-    ImGui::PopStyleColor();
-    ImGui::EndChild();
-
-    // --- Modules ---
-    float modX = ACCENT_W + SIDE_W + GAP;
-    ImGui::SetCursorPos(ImVec2(modX, PANEL_Y));
-    ImGui::BeginChild("##modules", ImVec2(MOD_W, PANEL_H), false);
-
-    // Helper: draw a module row with a checkbox toggle and selectable label.
-    // enabled=true -> label is teal/active, false -> dim
-    auto ModuleRow = [&](const char* id, const char* label, bool enabled,
-                         int modIdx, const char* toggleCmd) -> bool {
-        bool en = enabled;
-        ImGui::PushID(id);
-        if (ImGui::Checkbox("##tog", &en)) SendCmd(toggleCmd);
-        ImGui::PopID();
-        ImGui::SameLine(0, 6);
-        bool sel = (selModule == modIdx);
-        if (enabled)
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.90f, 0.70f, 1.0f));
-        else
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.80f, 0.82f, 0.85f, 1.0f));
-        if (ImGui::Selectable(label, &sel, 0, ImVec2(MOD_W - 50, 22)))
-            selModule = modIdx;
-        ImGui::PopStyleColor();
-        return false;
-    };
-
-    if (selCategory == 0) {
-        // Combat
-        ModuleRow("ac",   "AutoClicker",   cfg.armed,      0, "toggleArmed");
-        ModuleRow("aa",   "Aim Assist",    cfg.aimAssist,  1, "toggleAimAssist");
-        ModuleRow("tb",   "Triggerbot",    cfg.triggerbot, 2, "toggleTriggerbot");
-    } else if (selCategory == 1) {
-        // Render
-        ModuleRow("ce",  "Chest ESP",      cfg.chestEsp,   0, "toggleChestEsp");
-        ModuleRow("nt",  "Nametags",       cfg.nametags,   1, "toggleNametags");
-        ModuleRow("cp",  "Closest Player", cfg.closestPlayer, 2, "toggleClosestPlayerInfo");
-        ModuleRow("gtb", "GTB Helper",     cfg.gtbHelper,  3, "toggleGtbHelper");
-    } else {
-        // Utility
-        ModuleRow("sb",  "SpeedBridge",    cfg.speedBridge, 0, "toggleSpeedBridge");
-        ModuleRow("cs",  "Chest Stealer",  cfg.chestStealer, 1, "toggleChestStealer");
-        ModuleRow("rh",  "Reach",          cfg.reachEnabled, 2, "toggleReach");
-        ModuleRow("vl",  "Velocity",       cfg.velocityEnabled, 3, "toggleVelocity");
-    }
-    ImGui::EndChild();
-
-    // --- Settings ---
-    float setX = modX + MOD_W + GAP;
-    ImGui::SetCursorPos(ImVec2(setX, PANEL_Y));
-    ImGui::BeginChild("##settings", ImVec2(SET_W, PANEL_H), false);
-    ImGui::SetCursorPos(ImVec2(8, 6));
-    ImGui::TextColored(ImVec4(0.781f, 0.384f, 0.353f, 1.0f), "Settings");
-    ImGui::Separator();
-    ImGui::Spacing();
-
-    if (selCategory == 0 && selModule == 0) {
-        // ---- AutoClicker settings ----
-        ImGui::TextColored(ImVec4(0.55f, 0.90f, 0.70f, 1.0f),
-                           cfg.armed ? (cfg.clicking ? "CLICKING" : "ARMED") : "DISABLED");
-        ImGui::Spacing();
-
-        int minCps = (int)cfg.minCPS;
-        if (ImGui::SliderInt("Min CPS", &minCps, 1, 20))
-            SendCmdFloat("setMinCPS", (float)minCps);
-
-        int maxCps = (int)cfg.maxCPS;
-        if (ImGui::SliderInt("Max CPS", &maxCps, 1, 20))
-            SendCmdFloat("setMaxCPS", (float)maxCps);
-
-        ImGui::Spacing();
-
-        bool jitter = cfg.jitter;
-        if (ImGui::Checkbox("Jitter", &jitter)) SendCmd("toggleJitter");
-
-        bool cic = cfg.clickInChests;
-        if (ImGui::Checkbox("Click in Chests", &cic)) SendCmd("toggleClickInChests");
-
-        bool brk = cfg.breakBlocks;
-        if (ImGui::Checkbox("Pause when breaking", &brk)) SendCmd("toggleBreakBlocks");
-
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::TextColored(ImVec4(0.781f, 0.384f, 0.353f, 1.0f), "Right Click");
-
-        bool rc = cfg.rightClick;
-        if (ImGui::Checkbox("Enable Right Click", &rc)) SendCmd("toggleRight");
-
-        if (cfg.rightClick) {
-            int rMin = (int)cfg.rightMinCPS;
-            if (ImGui::SliderInt("R.Min CPS", &rMin, 1, 20))
-                SendCmdFloat("setRightMinCPS", (float)rMin);
-
-            int rMax = (int)cfg.rightMaxCPS;
-            if (ImGui::SliderInt("R.Max CPS", &rMax, 1, 20))
-                SendCmdFloat("setRightMaxCPS", (float)rMax);
-
-            bool rbo = cfg.rightBlockOnly;
-            if (ImGui::Checkbox("Block Only", &rbo)) SendCmd("toggleRightBlockOnly");
-        }
-
-    } else if (selCategory == 0 && selModule == 1) {
-        bool aa = cfg.aimAssist;
-        if (ImGui::Checkbox("Enable Aim Assist", &aa)) SendCmd("toggleAimAssist");
-        ImGui::TextDisabled("Adjust FOV/range/strength in external gui.");
-
-    } else if (selCategory == 0 && selModule == 2) {
-        bool tb = cfg.triggerbot;
-        if (ImGui::Checkbox("Enable Triggerbot", &tb)) SendCmd("toggleTriggerbot");
-        ImGui::TextDisabled("Cooldown-based timing (1.9+ combat). Tune in external gui.");
-
-    } else if (selCategory == 2 && selModule == 0) {
-        bool sb = cfg.speedBridge;
-        if (ImGui::Checkbox("Enable SpeedBridge", &sb)) SendCmd("toggleSpeedBridge");
-
-        int delayMs = cfg.speedBridgeDelayMs;
-        if (ImGui::SliderInt("Safety", &delayMs, 20, 250))
-            SendCmdInt("setSpeedBridgeDelayMs", delayMs);
-
-        bool blockOnly = cfg.speedBridgeBlockOnly;
-        if (ImGui::Checkbox("Block Only", &blockOnly)) SendCmd("toggleSpeedBridgeBlockOnly");
-
-        bool holdSneak = cfg.speedBridgeHoldingShiftOnly;
-        if (ImGui::Checkbox("Hold Sneak Gate", &holdSneak)) SendCmd("toggleSpeedBridgeHoldingShiftOnly");
-
-        bool lookDown = cfg.speedBridgeLookingDownOnly;
-        if (ImGui::Checkbox("Looking Down", &lookDown)) SendCmd("toggleSpeedBridgeLookingDownOnly");
-
-    } else if (selCategory == 2 && selModule == 1) {
-        bool cs = cfg.chestStealer;
-        if (ImGui::Checkbox("Enable Chest Stealer", &cs)) SendCmd("toggleChestStealer");
-
-        int delayMs = cfg.chestStealerDelayMs;
-        if (ImGui::SliderInt("Delay (ms)", &delayMs, 50, 500))
-            SendCmdInt("setChestStealerDelayMs", delayMs);
-
-    } else if (selCategory == 1 && selModule == 0) {
-        ImGui::TextDisabled("No extra settings.");
-
-    } else if (selCategory == 1 && selModule == 1) {
-        bool health = cfg.nametagHealth;
-        if (ImGui::Checkbox("Show Health", &health)) SendCmd("toggleNametagHealth");
-        bool armor = cfg.nametagArmor;
-        if (ImGui::Checkbox("Show Armor", &armor)) SendCmd("toggleNametagArmor");
-        bool hideVanilla = cfg.nametagHideVanilla;
-        if (ImGui::Checkbox("Hide Vanilla Tags", &hideVanilla)) SendCmd("toggleNametagHideVanilla");
-
-    } else if (selCategory == 1 && selModule == 2) {
-        ImGui::TextDisabled("No extra settings.");
-    } else if (selCategory == 1 && selModule == 3) {
-        ImGui::TextDisabled("In-game hint panel only.");
-    } else if (selCategory == 2 && selModule == 2) {
-        bool reach = cfg.reachEnabled;
-        if (ImGui::Checkbox("Enable Reach", &reach)) SendCmd("toggleReach");
-
-        float rMin = cfg.reachMin;
-        if (ImGui::SliderFloat("Min Range", &rMin, 3.0f, 6.0f, "%.1f"))
-            SendCmdFloat("setReachMin", rMin);
-
-        float rMax = cfg.reachMax;
-        if (ImGui::SliderFloat("Max Range", &rMax, 3.0f, 6.0f, "%.1f"))
-            SendCmdFloat("setReachMax", rMax);
-
-        int rChance = cfg.reachChance;
-        if (ImGui::SliderInt("Chance %", &rChance, 0, 100))
-            { char buf[128]; snprintf(buf, sizeof(buf), "{\"type\":\"cmd\",\"action\":\"setReachChance\",\"value\":%d}\n", rChance); LockGuard lk(g_cmdMutex); g_pendingCmds.push_back(buf); }
-            
-        ImGui::Spacing();
-        ImGui::TextDisabled("Attribute modification for 1.21.");
-    } else if (selCategory == 2 && selModule == 3) {
-        bool velocity = cfg.velocityEnabled;
-        if (ImGui::Checkbox("Enable Velocity", &velocity)) SendCmd("toggleVelocity");
-
-        int vHorizontal = cfg.velocityHorizontal;
-        if (ImGui::SliderInt("Horizontal %", &vHorizontal, 1, 100))
-            { char buf[128]; snprintf(buf, sizeof(buf), "{\"type\":\"cmd\",\"action\":\"setVelocityHorizontal\",\"value\":%d}\n", vHorizontal); LockGuard lk(g_cmdMutex); g_pendingCmds.push_back(buf); }
-
-        int vVertical = cfg.velocityVertical;
-        if (ImGui::SliderInt("Vertical %", &vVertical, 1, 100))
-            { char buf[128]; snprintf(buf, sizeof(buf), "{\"type\":\"cmd\",\"action\":\"setVelocityVertical\",\"value\":%d}\n", vVertical); LockGuard lk(g_cmdMutex); g_pendingCmds.push_back(buf); }
-
-        int vChance = cfg.velocityChance;
-        if (ImGui::SliderInt("Chance %", &vChance, 1, 100))
-            { char buf[128]; snprintf(buf, sizeof(buf), "{\"type\":\"cmd\",\"action\":\"setVelocityChance\",\"value\":%d}\n", vChance); LockGuard lk(g_cmdMutex); g_pendingCmds.push_back(buf); }
-
-        ImGui::Spacing();
-        ImGui::TextDisabled("Scales incoming knockback vectors.");
-    }
-
-    ImGui::EndChild();
-    ImGui::End();
-}
-
 // ===================== SCREEN DETECTION =====================
 // Combine GLFW cursor polling (fast) with JNI screen name (accurate).
 static void UpdateRealGuiState() {
     TRACE261_PATH("enter");
     // JNI state (screen name) is already updated in UpdateJniState() each frame.
-    // g_realGuiOpen = GLFW cursor visible AND not our own GUI.
+    // g_realGuiOpen = GLFW cursor visible while Minecraft has a non-chat screen open.
     if (!glfwGetCurrentContext_fn || !glfwGetInputMode_fn) {
         TRACE261_PATH("glfw-unavailable");
         g_realGuiOpen = false;
@@ -8555,9 +8068,8 @@ static void UpdateRealGuiState() {
     if (!win) { g_realGuiOpen = false; return; }
     int mode = glfwGetInputMode_fn(win, GLFW_CURSOR);
     TRACE261_VALUE("cursorMode", std::to_string(mode));
-    // Only report realGuiOpen when cursor is NORMAL and it's NOT our own GUI
-    // and the JNI screen is NOT the ChatScreen we opened for cursor unlock
-    if (mode == GLFW_CURSOR_NORMAL && !g_ShowMenu) {
+    // Only report realGuiOpen when cursor is NORMAL and JNI reports a non-chat screen.
+    if (mode == GLFW_CURSOR_NORMAL) {
         TRACE261_PATH("cursor-normal-path");
         std::string sn;
         { LockGuard lk(g_jniStateMtx); sn = g_jniScreenName; }
@@ -8998,7 +8510,6 @@ BOOL WINAPI hwglSwapBuffers(HDC hDc) {
         st.ScaleAllSizes(dpiScale);
 
         ImGui_ImplWin32_InitForOpenGL(g_hwnd);
-        o_WndProc = (WNDPROC)SetWindowLongPtr(g_hwnd, GWLP_WNDPROC, (LONG_PTR)hkWndProc);
 
         g_imguiPhase1Done = true;
         g_imguiWarmupFrames = 3; // let 3 clean frames pass before touching GL
@@ -9130,7 +8641,7 @@ BOOL WINAPI hwglSwapBuffers(HDC hDc) {
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
 
-    // 1.21: no in-game clickgui (external WPF window is used instead)
+    // 1.21 uses the external WPF window for module controls.
 
     // Render overlay text for closest player (when enabled and menu closed)
     {
@@ -9144,12 +8655,11 @@ BOOL WINAPI hwglSwapBuffers(HDC hDc) {
         static bool s_overlayDiagLogged = false;
         if (!s_overlayDiagLogged) {
             s_overlayDiagLogged = true;
-            Log(std::string("Overlay render check: inWorld=") + (inWorld ? "true" : "false") + 
-                " showMenu=" + (g_ShowMenu ? "true" : "false") + 
+            Log(std::string("Overlay render check: inWorld=") + (inWorld ? "true" : "false") +
                 " showModuleList=" + (cfg.showModuleList ? "true" : "false"));
         }
         
-        if (!g_ShowMenu && inWorld) {
+        if (inWorld) {
             TRACE261_PATH("overlay-render-active");
             ImDrawList* fg = ImGui::GetForegroundDrawList();
             ImGuiIO& io = ImGui::GetIO();
@@ -9946,7 +9456,7 @@ glfw_done:;
 
                 // guiOpen = our menu OR JNI reports a Minecraft screen is open
                 // (but ChatScreen opened by US for cursor unlock is not a "real" gui)
-                bool anyGui = g_ShowMenu || (jniGui && sn != "ChatScreen");
+                bool anyGui = (jniGui && sn != "ChatScreen");
                 TRACE261_BRANCH("stateAnyGui", anyGui);
 
                 // JSON-escape the screen name
@@ -10090,14 +9600,6 @@ glfw_done:;
                 }
                 state += "]}\n";
                 send(cli, state.c_str(), (int)state.size(), 0);
-            }
-
-            // Send pending GUI commands
-            {
-                std::vector<std::string> cmds;
-                { LockGuard lk(g_cmdMutex); cmds.swap(g_pendingCmds); }
-                for (const auto& c : cmds)
-                    send(cli, c.c_str(), (int)c.size(), 0);
             }
 
             // Receive config from C#

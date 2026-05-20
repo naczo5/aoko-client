@@ -113,11 +113,9 @@ static bool g_imguiPendingBackendReset = false;
 static HGLRC g_imguiPendingGlrc = nullptr;
 static bool g_minhookInitialized = false;
 static HWND g_imguiHwnd = nullptr;
-static bool g_guiOpen = false;
 static WNDPROC g_origWndProc = nullptr;
 static HWND g_gameHwnd = nullptr;
 static HWND g_wndProcHookedHwnd = nullptr;
-static int g_mouseX = 0, g_mouseY = 0;
 
 struct Config {
     bool leftClick = true, rightClick = false;
@@ -197,13 +195,6 @@ static Mutex g_stateMutex;
 static Mutex g_socketMutex; // Protects socket writes
 static Mutex g_jsonMutex;   // Protects shared JSON buffer
 static std::string g_pendingJson; // Data from Render Thread
-static bool g_mouseClicked = false;
-static bool g_mouseDown = false;
-static bool g_mouseRightClicked = false;
-static bool g_mouseRightDown = false;
-static int g_scrollDelta = 0;
-static float g_guiScrollY = 0;
-static bool g_nativeChatOpenedByClickGui = false;
 static unsigned long long g_lastEntitySeenMs = 0;
 
 // 1.8.9 GTB/action-bar extraction mappings
@@ -426,9 +417,6 @@ struct TagSmoothingState {
 static std::unordered_map<int, TagSmoothingState> g_tagSmoothing;
 static int g_tagFrameCounter = 0;
 
-// Commands to send to C#
-static std::vector<std::string> g_pendingCommands;
-static Mutex g_cmdMutex;
 
 static std::string g_logPath = "bridge_debug.log";
 static bool g_privateMinecraftiaLoaded = false;
@@ -5605,7 +5593,6 @@ static bool ShouldHideWorldRenderModules(const GameState& state) {
 
 // ===================== HUD RENDERING =====================
 void RenderHUD(int winW, int winH) {
-    if (g_guiOpen) return; // hide HUD when config is open
 
     Config cfg; { LockGuard lk(g_configMutex); cfg = g_config; }
 
@@ -6146,7 +6133,7 @@ void RenderNametags(int w, int h) {
     
     int count = 0;
 
-    bool guiOpen = g_guiOpen;
+    bool guiOpen = false;
     std::string screenName = "none";
     if (g_currentScreenField) {
         jobject currentScreen = env->GetObjectField(g_mcInstance, g_currentScreenField);
@@ -7042,577 +7029,8 @@ void RenderChestESP(int w, int h) {
     env->PopLocalFrame(nullptr);
 }
 
-// ===================== CLICKGUI =====================
-
-// Key capture state for keybind rebinding
-static int  g_capturingBindForModule = -1; // index into g_modules, or -1
-static bool g_prevKeyState[256];
-
-// Convert a VK code to a human-readable name
-static std::string VkToName(int vk) {
-    if (vk <= 0) return "None";
-    char buf[64] = {};
-    UINT scan = MapVirtualKeyA((UINT)vk, MAPVK_VK_TO_VSC);
-    LONG lparam = (LONG)(scan << 16);
-    // Extended-key flag for navigation/numpad keys
-    if (vk == VK_INSERT || vk == VK_DELETE || vk == VK_HOME || vk == VK_END ||
-        vk == VK_PRIOR  || vk == VK_NEXT   || vk == VK_UP   || vk == VK_DOWN ||
-        vk == VK_LEFT   || vk == VK_RIGHT  || vk == VK_DIVIDE || vk == VK_NUMLOCK)
-        lparam |= (1L << 24);
-    if (!GetKeyNameTextA(lparam, buf, sizeof(buf)) || buf[0] == '\0')
-        snprintf(buf, sizeof(buf), "VK %02X", (unsigned)vk);
-    return buf;
-}
-
-// Retrieve the keybind VK for a given module id from cfg
-static int GetModuleKeybind(const Config& cfg, const char* id) {
-    if (strcmp(id, "autoclicker")  == 0) return cfg.keybindAutoclicker;
-    if (strcmp(id, "speedbridge")  == 0) return cfg.keybindSpeedBridge;
-    if (strcmp(id, "nametags")     == 0) return cfg.keybindNametags;
-    if (strcmp(id, "closestplayer")== 0) return cfg.keybindClosestPlayer;
-    if (strcmp(id, "chestesp")     == 0) return cfg.keybindChestEsp;
-    if (strcmp(id, "cheststealer") == 0) return cfg.keybindChestStealer;
-    return 0;
-}
-
-enum ClickCategory {
-    CAT_COMBAT = 0,
-    CAT_RENDER = 1,
-    CAT_UTILITY = 2
-};
-
-struct ModuleSpec {
-    const char* id;
-    const char* name;
-    const char* action;
-    ClickCategory category;
-};
-
-static const ModuleSpec g_modules[] = {
-    { "autoclicker", "AutoClicker", "toggleArmed", CAT_COMBAT },
-    { "speedbridge", "SpeedBridge", "toggleSpeedBridge", CAT_UTILITY },
-    { "nametags", "Nametags", "toggleNametags", CAT_RENDER },
-    { "closestplayer", "Closest Player", "toggleClosestPlayerInfo", CAT_RENDER },
-    { "chestesp", "Chest ESP", "toggleChestEsp", CAT_RENDER },
-    { "cheststealer", "Chest Stealer", "toggleChestStealer", CAT_UTILITY },
-};
-
-static bool g_guiWindowInit = false;
-static float g_guiWindowX = 0.0f;
-static float g_guiWindowY = 0.0f;
-static bool g_guiDragging = false;
-static float g_guiDragOffsetX = 0.0f;
-static float g_guiDragOffsetY = 0.0f;
-static ClickCategory g_selectedCategory = CAT_COMBAT;
-static int g_selectedModuleIdx = 0;
-static bool g_wasMouseDown = false;
-static bool g_wasMouseRightDown = false;
-
-bool IsPointInRect(float x, float y, float w, float h) {
-    return g_mouseX >= x && g_mouseX <= x + w && g_mouseY >= y && g_mouseY <= y + h;
-}
-
-// Returns 1 = left-click (start capture), 2 = right-click (unbind), 0 = nothing
-int GuiKeybindButton(float x, float y, float w, int keyVk, int moduleIdx, float scale) {
-    float h = CHAR_H * scale + 6.0f;
-    bool hovered = IsPointInRect(x, y, w, h);
-    Color3 accent = AccentColor(0.0f);
-    bool capturing = (g_capturingBindForModule == moduleIdx);
-
-    DrawRect(x, y, w, h, hovered ? 0.14f : 0.11f, hovered ? 0.14f : 0.11f, hovered ? 0.17f : 0.14f, 0.94f);
-    DrawText2D(x + 7.0f, y + 3.0f, "Keybind", 0.72f, 0.74f, 0.80f, 1.0f, scale);
-
-    std::string keyName = capturing ? "[Press key...]" : VkToName(keyVk);
-    float kw = TextWidth(keyName.c_str(), scale * 0.85f);
-    float bx = x + w - kw - 14.0f;
-    float by = y + 2.0f;
-    float bw = kw + 8.0f;
-    float bh = h - 4.0f;
-    DrawRect(bx, by, bw, bh,
-             capturing ? accent.r * 0.25f + 0.06f : 0.17f,
-             capturing ? accent.g * 0.25f + 0.06f : 0.17f,
-             capturing ? accent.b * 0.25f + 0.08f : 0.21f, 0.97f);
-    if (capturing)
-        DrawRect(bx, by, bw, bh, accent.r, accent.g, accent.b, 0.22f);
-    DrawText2D(bx + 4.0f, y + 3.0f, keyName.c_str(),
-               capturing ? accent.r : 0.82f,
-               capturing ? accent.g : 0.85f,
-               capturing ? accent.b : 0.90f, 1.0f, scale * 0.85f);
-
-    if (hovered && g_mouseClicked)      return 1;
-    if (hovered && g_mouseRightClicked) return 2;
-    return 0;
-}
-
-bool GuiSettingToggle(float x, float y, float w, const char* label, bool value, float scale) {
-    float h = CHAR_H * scale + 6.0f;
-    bool hovered = IsPointInRect(x, y, w, h);
-    Color3 accent = AccentColor(0.0f);
-
-    DrawRect(x, y, w, h, hovered ? 0.13f : 0.10f, hovered ? 0.13f : 0.10f, hovered ? 0.14f : 0.12f, 0.94f);
-    DrawText2D(x + 7.0f, y + 3.0f, label, 0.90f, 0.90f, 0.93f, 1.0f, scale);
-
-    float tw = 24.0f, th = 11.0f;
-    float tx = x + w - tw - 8.0f;
-    float ty = y + (h - th) * 0.5f;
-    if (value) {
-        DrawRect(tx, ty, tw, th, accent.r, accent.g, accent.b, 1.0f);
-        DrawRect(tx + tw - th, ty, th, th, 0.96f, 0.97f, 0.98f, 1.0f);
-    } else {
-        DrawRect(tx, ty, tw, th, 0.27f, 0.27f, 0.30f, 1.0f);
-        DrawRect(tx, ty, th, th, 0.62f, 0.62f, 0.67f, 1.0f);
-    }
-    return hovered && g_mouseClicked;
-}
-
-float GuiSettingSlider(float x, float y, float w, const char* id, const char* label, float value, float mn, float mx, float scale, bool integerText) {
-    float h = CHAR_H * scale + 19.0f;
-    bool hovered = IsPointInRect(x, y, w, h);
-    Color3 accent = AccentColor(0.0f);
-
-    DrawRect(x, y, w, h, hovered ? 0.13f : 0.10f, hovered ? 0.13f : 0.10f, hovered ? 0.14f : 0.12f, 0.94f);
-
-    char buf[80];
-    if (integerText) snprintf(buf, sizeof(buf), "%s: %.0f", label, value);
-    else snprintf(buf, sizeof(buf), "%s: %.2f", label, value);
-    DrawText2D(x + 7.0f, y + 2.0f, buf, 0.90f, 0.90f, 0.93f, 1.0f, scale);
-
-    float sx = x + 7.0f;
-    float sy = y + CHAR_H * scale + 7.0f;
-    float sw = w - 14.0f;
-    float sh = 4.0f;
-    DrawRect(sx, sy, sw, sh, 0.20f, 0.20f, 0.23f, 1.0f);
-
-    static std::string g_activeSliderId;
-    bool hoverTrack = IsPointInRect(sx - 4.0f, sy - 6.0f, sw + 8.0f, sh + 12.0f);
-    if (g_mouseClicked && hoverTrack) g_activeSliderId = id;
-    if (!g_mouseDown && g_activeSliderId == id) g_activeSliderId.clear();
-
-    if (g_mouseDown && g_activeSliderId == id) {
-        float pct = (g_mouseX - sx) / sw;
-        if (pct < 0.0f) pct = 0.0f;
-        if (pct > 1.0f) pct = 1.0f;
-        value = mn + pct * (mx - mn);
-    }
-
-    float pct = (value - mn) / (mx - mn);
-    if (pct < 0.0f) pct = 0.0f;
-    if (pct > 1.0f) pct = 1.0f;
-    DrawRect(sx, sy, sw * pct, sh, accent.r, accent.g, accent.b, 1.0f);
-    float knobX = sx + sw * pct;
-    DrawRect(knobX - 2.0f, sy - 2.0f, 4.0f, sh + 4.0f, 0.93f, 0.95f, 0.97f, 1.0f);
-    return value;
-}
-
-void DrawModuleButton(float x, float y, float w, const ModuleSpec& m, bool enabled, bool selected, float scale, bool* leftPressed, bool* rightPressed) {
-    float h = CHAR_H * scale + 10.0f;
-    bool hovered = IsPointInRect(x, y, w, h);
-    Color3 accent = AccentColor(0.0f);
-
-    float bg = selected ? 0.15f : (hovered ? 0.13f : 0.10f);
-    DrawRect(x, y, w, h, bg, bg, bg + 0.02f, 0.95f);
-
-    if (enabled) {
-        DrawRect(x, y, 2.0f, h, accent.r, accent.g, accent.b, 1.0f);
-        DrawText2D(x + 8.0f, y + 5.0f, m.name, 0.93f, 0.94f, 0.96f, 1.0f, scale);
-    } else {
-        DrawRect(x, y, 2.0f, h, 0.33f, 0.33f, 0.37f, 0.9f);
-        DrawText2D(x + 8.0f, y + 5.0f, m.name, 0.67f, 0.67f, 0.71f, 1.0f, scale);
-    }
-
-    DrawText2D(x + w - TextWidth("[RMB]", scale * 0.72f) - 8.0f, y + 7.0f, "[RMB]", 0.45f, 0.45f, 0.50f, 1.0f, scale * 0.72f);
-
-    *leftPressed = hovered && g_mouseClicked;
-    *rightPressed = hovered && g_mouseRightClicked;
-}
-
-bool IsModuleEnabled(const ModuleSpec& m, const Config& cfg) {
-    if (strcmp(m.id, "autoclicker") == 0) return cfg.armed;
-    if (strcmp(m.id, "leftclick") == 0) return cfg.leftClick;
-    if (strcmp(m.id, "rightclick") == 0) return cfg.rightClick;
-    if (strcmp(m.id, "jitter") == 0) return cfg.jitter;
-    if (strcmp(m.id, "speedbridge") == 0) return cfg.speedBridge;
-
-    if (strcmp(m.id, "nametags") == 0) return cfg.nametags;
-    if (strcmp(m.id, "closestplayer") == 0) return cfg.closestPlayerInfo;
-    if (strcmp(m.id, "chestesp") == 0) return cfg.chestEsp;
-    if (strcmp(m.id, "cheststealer") == 0) return cfg.chestStealer;
-    if (strcmp(m.id, "clickinchests") == 0) return cfg.clickInChests;
-    return false;
-}
-
-void CloseInternalGui();
-void OpenInternalGui();
-
-void RenderClickGUI(int winW, int winH) {
-    if (!g_guiOpen) return;
-
-    // Native GUI handling: Open GuiChat to handle cursor/camera
-    if (g_guiChatClass && g_displayGuiScreenMethod && g_mcInstance) {
-        JNIEnv* env = nullptr;
-        g_jvm->GetEnv((void**)&env, JNI_VERSION_1_8);
-        if (!env) g_jvm->AttachCurrentThread((void**)&env, nullptr);
-        if (env) {
-            jobject currentScreen = nullptr;
-            if (g_currentScreenField) {
-                currentScreen = env->GetObjectField(g_mcInstance, g_currentScreenField);
-            }
-            
-            // Open GuiChat once to unlock cursor while ClickGUI is open.
-            if (!currentScreen && !g_nativeChatOpenedByClickGui) {
-                // Construct GuiChat with empty string
-                jobject chatGui = nullptr;
-                if (g_guiChatConstructor) {
-                     jstring empty = env->NewStringUTF("");
-                     if (empty) {
-                        chatGui = env->NewObject(g_guiChatClass, g_guiChatConstructor, empty);
-                        env->DeleteLocalRef(empty);
-                     }
-                }
-                
-                if (chatGui) {
-                    env->CallVoidMethod(g_mcInstance, g_displayGuiScreenMethod, chatGui);
-                    env->DeleteLocalRef(chatGui);
-                    g_nativeChatOpenedByClickGui = true;
-                }
-            }
-            // CRITICAL: Must delete local refs created in loop!
-            if (currentScreen) env->DeleteLocalRef(currentScreen);
-            
-            if (env->ExceptionCheck()) env->ExceptionClear();
-        }
-    }
-
-    // Poll mouse position (still useful for our internal UI logic)
-    POINT pt;
-    if (GetCursorPos(&pt) && ScreenToClient(g_gameHwnd, &pt)) {
-        g_mouseX = pt.x;
-        g_mouseY = pt.y;
-    }
-    
-    // Poll mouse states
-    bool leftDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
-    bool rightDown = (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
-    g_mouseClicked = leftDown && !g_wasMouseDown;
-    g_mouseRightClicked = rightDown && !g_wasMouseRightDown;
-    g_mouseDown = leftDown;
-    g_mouseRightDown = rightDown;
-    g_wasMouseDown = leftDown;
-    g_wasMouseRightDown = rightDown;
-
-    // Update keyboard state and handle keybind capture
-    {
-        int captured = -1;
-        for (int vk = 1; vk < 255; vk++) {
-            bool down = (GetAsyncKeyState(vk) & 0x8000) != 0;
-            bool justPressed = down && !g_prevKeyState[vk];
-            g_prevKeyState[vk] = down;
-            if (justPressed && g_capturingBindForModule >= 0 && captured < 0)
-                captured = vk;
-        }
-        if (captured > 0 && g_capturingBindForModule >= 0) {
-            if (captured == VK_ESCAPE) {
-                g_capturingBindForModule = -1;
-            } else if (captured != VK_LBUTTON && captured != VK_RBUTTON && captured != VK_MBUTTON &&
-                       captured != VK_SHIFT   && captured != VK_CONTROL  && captured != VK_MENU   &&
-                       captured != VK_LSHIFT  && captured != VK_RSHIFT   &&
-                       captured != VK_LCONTROL&& captured != VK_RCONTROL &&
-                       captured != VK_LMENU   && captured != VK_RMENU) {
-                char buf[128];
-                snprintf(buf, sizeof(buf),
-                    "{\"type\":\"cmd\",\"action\":\"setKeybind\",\"module\":\"%s\",\"key\":%d}\n",
-                    g_modules[g_capturingBindForModule].id, captured);
-                LockGuard lk(g_cmdMutex);
-                g_pendingCommands.push_back(buf);
-                g_capturingBindForModule = -1;
-            }
-        }
-    }
-
-    // Dim background
-    DrawRect(0, 0, (float)winW, (float)winH, 0, 0, 0, 0.82f);
-
-    float scale = 0.66f;
-    float panelW = 640.0f, panelH = 460.0f;
-    if (!g_guiWindowInit) {
-        g_guiWindowX = (winW - panelW) * 0.5f;
-        g_guiWindowY = (winH - panelH) * 0.5f;
-        g_guiWindowInit = true;
-    }
-
-    if (g_guiWindowX < 8.0f) g_guiWindowX = 8.0f;
-    if (g_guiWindowY < 8.0f) g_guiWindowY = 8.0f;
-    if (g_guiWindowX + panelW > winW - 8.0f) g_guiWindowX = winW - panelW - 8.0f;
-    if (g_guiWindowY + panelH > winH - 8.0f) g_guiWindowY = winH - panelH - 8.0f;
-
-    float px = g_guiWindowX;
-    float py = g_guiWindowY;
-    float headerH = 34.0f;
-    float closeW = 16.0f;
-    Color3 accent = AccentColor(0.0f);
-
-    float closeX = px + panelW - closeW - 10.0f;
-    float closeY = py + 9.0f;
-    bool closeHovered = IsPointInRect(closeX, closeY, closeW, closeW);
-
-    if (g_mouseClicked && IsPointInRect(px, py, panelW, headerH) && !closeHovered) {
-        g_guiDragging = true;
-        g_guiDragOffsetX = g_mouseX - px;
-        g_guiDragOffsetY = g_mouseY - py;
-    }
-    if (!g_mouseDown) g_guiDragging = false;
-    if (g_guiDragging) {
-        px = g_mouseX - g_guiDragOffsetX;
-        py = g_mouseY - g_guiDragOffsetY;
-        g_guiWindowX = px;
-        g_guiWindowY = py;
-        if (g_guiWindowX < 8.0f) g_guiWindowX = 8.0f;
-        if (g_guiWindowY < 8.0f) g_guiWindowY = 8.0f;
-        if (g_guiWindowX + panelW > winW - 8.0f) g_guiWindowX = winW - panelW - 8.0f;
-        if (g_guiWindowY + panelH > winH - 8.0f) g_guiWindowY = winH - panelH - 8.0f;
-        px = g_guiWindowX;
-        py = g_guiWindowY;
-        closeX = px + panelW - closeW - 10.0f;
-        closeY = py + 9.0f;
-    }
-
-    // Main panel
-    DrawRect(px, py, panelW, panelH, 0.10f, 0.10f, 0.11f, 0.98f);
-    DrawRect(px, py, panelW, headerH, 0.08f, 0.08f, 0.09f, 0.98f);
-    DrawRect(px, py, 2.0f, panelH, accent.r, accent.g, accent.b, 1.0f);
-    DrawRect(px, py + headerH - 1.0f, panelW, 1.0f, 0.17f, 0.17f, 0.18f, 1.0f);
-
-    DrawText2D(px + 12.0f, py + 8.0f, "aoko client", 0.788f, 0.819f, 0.772f, 1.0f, scale * 1.05f);
-    DrawText2D(px + 130.0f, py + 9.0f, "Internal ClickGUI", 0.45f, 0.45f, 0.50f, 1.0f, scale * 0.78f);
-
-    DrawRect(closeX, closeY, closeW, closeW, closeHovered ? 0.62f : 0.22f, 0.12f, 0.15f, 0.92f);
-    DrawText2D(closeX + 4.5f, closeY + 1.0f, "X", 0.98f, 0.93f, 0.95f, 1.0f, scale * 0.8f);
-    if (closeHovered && g_mouseClicked) {
-        CloseInternalGui();
-        return;
-    }
-
-    // Layout columns
-    float sidebarW = 118.0f;
-    float modulesW = 238.0f;
-    float gap = 8.0f;
-    float contentY = py + headerH + 8.0f;
-    float contentH = panelH - headerH - 16.0f;
-    float sideX = px + 8.0f;
-    float listX = sideX + sidebarW + gap;
-    float settingsX = listX + modulesW + gap;
-    float settingsW = panelW - (settingsX - px) - 8.0f;
-
-    DrawRect(sideX, contentY, sidebarW, contentH, 0.08f, 0.08f, 0.09f, 0.95f);
-    DrawRect(listX, contentY, modulesW, contentH, 0.08f, 0.08f, 0.09f, 0.95f);
-    DrawRect(settingsX, contentY, settingsW, contentH, 0.08f, 0.08f, 0.09f, 0.95f);
-
-    // Sidebar categories
-    static const char* categoryNames[] = { "Combat", "Render", "Utility" };
-    float catY = contentY + 8.0f;
-    for (int i = 0; i < 3; i++) {
-        float btnH = 28.0f;
-        bool hovered = IsPointInRect(sideX + 6.0f, catY, sidebarW - 12.0f, btnH);
-        bool active = (int)g_selectedCategory == i;
-        float bg = active ? 0.15f : (hovered ? 0.12f : 0.10f);
-        DrawRect(sideX + 6.0f, catY, sidebarW - 12.0f, btnH, bg, bg, bg + 0.01f, 0.97f);
-        if (active) DrawRect(sideX + 6.0f, catY, 2.0f, btnH, accent.r, accent.g, accent.b, 1.0f);
-        DrawText2D(sideX + 15.0f, catY + 7.0f, categoryNames[i], active ? 0.93f : 0.70f, active ? 0.94f : 0.70f, active ? 0.96f : 0.74f, 1.0f, scale * 0.86f);
-        if (hovered && g_mouseClicked) g_selectedCategory = (ClickCategory)i;
-        catY += btnH + 6.0f;
-    }
-
-    float hudBaseY = contentY + contentH - 120.0f;
-    DrawText2D(sideX + 9.0f, hudBaseY - 16.0f, "HUD Style", 0.60f, 0.62f, 0.68f, 1.0f, scale * 0.74f);
-    if (GuiSettingToggle(sideX + 6.0f, hudBaseY, sidebarW - 12.0f, "Chroma", g_uiState.chromaText, scale * 0.7f)) {
-        g_uiState.chromaText = !g_uiState.chromaText;
-    }
-    g_uiState.accentHue = GuiSettingSlider(sideX + 6.0f, hudBaseY + 26.0f, sidebarW - 12.0f, "accent_hue", "Accent", g_uiState.accentHue, 0.0f, 1.0f, scale * 0.7f, false);
-    g_uiState.chromaSpeed = GuiSettingSlider(sideX + 6.0f, hudBaseY + 58.0f, sidebarW - 12.0f, "chroma_speed", "Speed", g_uiState.chromaSpeed, 0.01f, 0.20f, scale * 0.7f, false);
-
-    Config cfg; { LockGuard lk(g_configMutex); cfg = g_config; }
-    std::vector<std::string> frameCmds;
-    auto queueCmd = [&](const std::string& c) {
-        frameCmds.push_back(c);
-    };
-    auto queueToggle = [&](const char* action) {
-        char buf[128];
-        snprintf(buf, sizeof(buf), "{\"type\":\"cmd\",\"action\":\"%s\"}\n", action);
-        queueCmd(buf);
-    };
-
-    // Module list for selected category
-    DrawText2D(listX + 9.0f, contentY + 6.0f, "Modules", 0.60f, 0.62f, 0.68f, 1.0f, scale * 0.74f);
-    float rowY = contentY + 24.0f;
-    for (int i = 0; i < (int)(sizeof(g_modules) / sizeof(g_modules[0])); i++) {
-        const ModuleSpec& m = g_modules[i];
-        if (m.category != g_selectedCategory) continue;
-
-        bool leftPressed = false;
-        bool rightPressed = false;
-        bool enabled = IsModuleEnabled(m, cfg);
-        DrawModuleButton(listX + 8.0f, rowY, modulesW - 16.0f, m, enabled, g_selectedModuleIdx == i, scale * 0.9f, &leftPressed, &rightPressed);
-
-        if (leftPressed) queueToggle(m.action);
-        if (rightPressed) g_selectedModuleIdx = i;
-        rowY += CHAR_H * scale * 0.9f + 14.0f;
-    }
-
-    // Settings panel for selected module
-    DrawText2D(settingsX + 9.0f, contentY + 6.0f, "Settings", 0.60f, 0.62f, 0.68f, 1.0f, scale * 0.74f);
-    int moduleCount = (int)(sizeof(g_modules) / sizeof(g_modules[0]));
-    if (g_selectedModuleIdx < 0 || g_selectedModuleIdx >= moduleCount) g_selectedModuleIdx = 0;
-    const ModuleSpec& selected = g_modules[g_selectedModuleIdx];
-    DrawText2D(settingsX + 9.0f, contentY + 24.0f, selected.name, 0.90f, 0.92f, 0.95f, 1.0f, scale * 0.93f);
-
-    // Keybind row — fixed at the bottom of the settings column
-    int selectedModuleGlobalIdx = g_selectedModuleIdx;
-    {
-        float bindY = contentY + contentH - 52.0f;
-        // Separator line
-        DrawRect(settingsX + 8.0f, bindY - 6.0f, settingsW - 16.0f, 1.0f, 0.20f, 0.20f, 0.23f, 0.75f);
-        int bindResult = GuiKeybindButton(settingsX + 8.0f, bindY, settingsW - 16.0f,
-                                         GetModuleKeybind(cfg, selected.id),
-                                         selectedModuleGlobalIdx, scale * 0.88f);
-        if (bindResult == 1) {
-            // Start capture
-            g_capturingBindForModule = selectedModuleGlobalIdx;
-        } else if (bindResult == 2) {
-            // Unbind (right-click)
-            char buf[128];
-            snprintf(buf, sizeof(buf),
-                "{\"type\":\"cmd\",\"action\":\"setKeybind\",\"module\":\"%s\",\"key\":0}\n",
-                selected.id);
-            queueCmd(buf);
-        }
-    }
-
-    float sy = contentY + 44.0f;
-    if (strcmp(selected.id, "autoclicker") == 0) {
-        float minVal = GuiSettingSlider(settingsX + 8.0f, sy, settingsW - 16.0f, "min_cps", "Min CPS", cfg.minCPS, 1.0f, 20.0f, scale * 0.88f, true);
-        sy += 32.0f;
-        float maxVal = GuiSettingSlider(settingsX + 8.0f, sy, settingsW - 16.0f, "max_cps", "Max CPS", cfg.maxCPS, 1.0f, 20.0f, scale * 0.88f, true);
-        sy += 32.0f;
-
-        int minInt = (int)(minVal + 0.5f);
-        int maxInt = (int)(maxVal + 0.5f);
-        if (minInt > maxInt) {
-            maxInt = minInt;
-        }
-        int curMinInt = (int)(cfg.minCPS + 0.5f);
-        int curMaxInt = (int)(cfg.maxCPS + 0.5f);
-
-        if (minInt != curMinInt) {
-            char b[128];
-            snprintf(b, sizeof(b), "{\"type\":\"cmd\",\"action\":\"setMinCPS\",\"value\":%d}\n", minInt);
-            queueCmd(b);
-        }
-        if (maxInt != curMaxInt) {
-            char b[128];
-            snprintf(b, sizeof(b), "{\"type\":\"cmd\",\"action\":\"setMaxCPS\",\"value\":%d}\n", maxInt);
-            queueCmd(b);
-        }
-
-        if (GuiSettingToggle(settingsX + 8.0f, sy, settingsW - 16.0f, "Left Click", cfg.leftClick, scale * 0.88f)) queueToggle("toggleLeft");
-        sy += 25.0f;
-        
-        float rMinVal = GuiSettingSlider(settingsX + 8.0f, sy, settingsW - 16.0f, "rmin_cps", "R Min CPS", cfg.rightMinCPS, 1.0f, 20.0f, scale * 0.88f, true);
-        sy += 32.0f;
-        float rMaxVal = GuiSettingSlider(settingsX + 8.0f, sy, settingsW - 16.0f, "rmax_cps", "R Max CPS", cfg.rightMaxCPS, 1.0f, 20.0f, scale * 0.88f, true);
-        sy += 32.0f;
-
-        int rMinInt = (int)(rMinVal + 0.5f);
-        int rMaxInt = (int)(rMaxVal + 0.5f);
-        if (rMinInt > rMaxInt) rMaxInt = rMinInt;
-        int curRMinInt = (int)(cfg.rightMinCPS + 0.5f);
-        int curRMaxInt = (int)(cfg.rightMaxCPS + 0.5f);
-
-        if (rMinInt != curRMinInt) {
-            char b[128];
-            snprintf(b, sizeof(b), "{\"type\":\"cmd\",\"action\":\"setRightMinCPS\",\"value\":%d}\n", rMinInt);
-            queueCmd(b);
-        }
-        if (rMaxInt != curRMaxInt) {
-            char b[128];
-            snprintf(b, sizeof(b), "{\"type\":\"cmd\",\"action\":\"setRightMaxCPS\",\"value\":%d}\n", rMaxInt);
-            queueCmd(b);
-        }
-
-        if (GuiSettingToggle(settingsX + 8.0f, sy, settingsW - 16.0f, "Right Click", cfg.rightClick, scale * 0.88f)) queueToggle("toggleRight");
-        sy += 25.0f;
-        if (GuiSettingToggle(settingsX + 8.0f, sy, settingsW - 16.0f, "Block Only", cfg.rightBlockOnly, scale * 0.88f)) queueToggle("toggleRightBlockOnly");
-        sy += 25.0f;
-        if (GuiSettingToggle(settingsX + 8.0f, sy, settingsW - 16.0f, "Break Blocks", cfg.breakBlocks, scale * 0.88f)) queueToggle("toggleBreakBlocks");
-        sy += 25.0f;
-        if (GuiSettingToggle(settingsX + 8.0f, sy, settingsW - 16.0f, "Jitter", cfg.jitter, scale * 0.88f)) queueToggle("toggleJitter");
-        sy += 25.0f;
-        if (GuiSettingToggle(settingsX + 8.0f, sy, settingsW - 16.0f, "Click In Chests", cfg.clickInChests, scale * 0.88f)) queueToggle("toggleClickInChests");
-    } else if (strcmp(selected.id, "speedbridge") == 0) {
-        if (GuiSettingToggle(settingsX + 8.0f, sy, settingsW - 16.0f, "Enabled", cfg.speedBridge, scale * 0.88f)) queueToggle("toggleSpeedBridge");
-        sy += 28.0f;
-
-        float delayVal = GuiSettingSlider(settingsX + 8.0f, sy, settingsW - 16.0f, "speedbridge_delay", "Safety", (float)cfg.speedBridgeDelayMs, 20.0f, 250.0f, scale * 0.88f, true);
-        sy += 32.0f;
-        int delayInt = (int)(delayVal + 0.5f);
-        if (delayInt != cfg.speedBridgeDelayMs) {
-            char b[128];
-            snprintf(b, sizeof(b), "{\"type\":\"cmd\",\"action\":\"setSpeedBridgeDelayMs\",\"value\":%d}\n", delayInt);
-            queueCmd(b);
-        }
-
-        if (GuiSettingToggle(settingsX + 8.0f, sy, settingsW - 16.0f, "Block Only", cfg.speedBridgeBlockOnly, scale * 0.88f)) queueToggle("toggleSpeedBridgeBlockOnly");
-        sy += 25.0f;
-        if (GuiSettingToggle(settingsX + 8.0f, sy, settingsW - 16.0f, "Hold Sneak Gate", cfg.speedBridgeHoldingShiftOnly, scale * 0.88f)) queueToggle("toggleSpeedBridgeHoldingShiftOnly");
-        sy += 25.0f;
-        if (GuiSettingToggle(settingsX + 8.0f, sy, settingsW - 16.0f, "Looking Down", cfg.speedBridgeLookingDownOnly, scale * 0.88f)) queueToggle("toggleSpeedBridgeLookingDownOnly");
-    } else if (strcmp(selected.id, "cheststealer") == 0) {
-        if (GuiSettingToggle(settingsX + 8.0f, sy, settingsW - 16.0f, "Enabled", cfg.chestStealer, scale * 0.88f)) queueToggle("toggleChestStealer");
-        sy += 28.0f;
-
-        float delayVal = GuiSettingSlider(settingsX + 8.0f, sy, settingsW - 16.0f, "cheststealer_delay", "Delay", (float)cfg.chestStealerDelayMs, 50.0f, 500.0f, scale * 0.88f, true);
-        sy += 32.0f;
-        int delayInt = (int)(delayVal + 0.5f);
-        if (delayInt != cfg.chestStealerDelayMs) {
-            char b[128];
-            snprintf(b, sizeof(b), "{\"type\":\"cmd\",\"action\":\"setChestStealerDelayMs\",\"value\":%d}\n", delayInt);
-            queueCmd(b);
-        }
-    } else if (strcmp(selected.id, "nametags") == 0) {
-        if (GuiSettingToggle(settingsX + 8.0f, sy, settingsW - 16.0f, "Show Health", cfg.nametagShowHealth, scale * 0.88f)) queueToggle("toggleNametagHealth");
-        sy += 30.0f;
-        if (GuiSettingToggle(settingsX + 8.0f, sy, settingsW - 16.0f, "Show Armor", cfg.nametagShowArmor, scale * 0.88f)) queueToggle("toggleNametagArmor");
-        sy += 30.0f;
-        if (GuiSettingToggle(settingsX + 8.0f, sy, settingsW - 16.0f, "Hide Vanilla Tags", cfg.nametagHideVanilla, scale * 0.88f)) queueToggle("toggleNametagHideVanilla");
-        sy += 34.0f;
-        DrawText2D(settingsX + 9.0f, sy, "Armor is displayed as points.", 0.54f, 0.56f, 0.61f, 1.0f, scale * 0.72f);
-        sy += 18.0f;
-        DrawText2D(settingsX + 9.0f, sy, "Shown alongside player names.", 0.54f, 0.56f, 0.61f, 1.0f, scale * 0.72f);
-    } else if (strcmp(selected.id, "closestplayer") == 0) {
-        DrawText2D(settingsX + 9.0f, sy, "Player HUD above the hotbar.", 0.60f, 0.62f, 0.68f, 1.0f, scale * 0.74f);
-        sy += 20.0f;
-        DrawText2D(settingsX + 9.0f, sy, "Distance and direction:", 0.54f, 0.56f, 0.61f, 1.0f, scale * 0.72f);
-        sy += 16.0f;
-        DrawText2D(settingsX + 9.0f, sy, "Front / Left / Right / Back", 0.54f, 0.56f, 0.61f, 1.0f, scale * 0.72f);
-        sy += 18.0f;
-        DrawText2D(settingsX + 9.0f, sy, "Follows Nametag health/armor.", 0.54f, 0.56f, 0.61f, 1.0f, scale * 0.72f);
-    } else {
-        DrawText2D(settingsX + 9.0f, sy, "RMB a module for its settings.", 0.62f, 0.62f, 0.67f, 1.0f, scale * 0.72f);
-        sy += 20.0f;
-        DrawText2D(settingsX + 9.0f, sy, "No extra settings.", 0.50f, 0.50f, 0.55f, 1.0f, scale * 0.72f);
-    }
-
-    DrawText2D(px + 10.0f, py + panelH - 22.0f, "Drag header to move  |  [RMB] keybind = unbind", 0.44f, 0.44f, 0.49f, 1.0f, scale * 0.73f);
-
-    if (!frameCmds.empty()) {
-        LockGuard lk(g_cmdMutex);
-        for (const std::string& c : frameCmds) g_pendingCommands.push_back(c);
-    }
-}
-
 // ===================== INPUT HOOK =====================
-// WndProc only handles mouse for ClickGUI. Keyboard uses GetAsyncKeyState.
-extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
-
+// WndProc is kept for reach's left-click edge detection.
 LRESULT CALLBACK HookedWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     bool leftNowDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
     bool rawInputClickEdge = (msg == WM_INPUT) && leftNowDown && !g_reachRawInputPrevDown;
@@ -7620,7 +7038,7 @@ LRESULT CALLBACK HookedWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
         g_reachRawInputPrevDown = leftNowDown;
     }
 
-    if ((msg == WM_LBUTTONDOWN || rawInputClickEdge) && !g_guiOpen) {
+    if (msg == WM_LBUTTONDOWN || rawInputClickEdge) {
         Config cfgSnapshot;
         {
             LockGuard lk(g_configMutex);
@@ -7644,75 +7062,8 @@ LRESULT CALLBACK HookedWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
         }
     }
 
-    if (msg == WM_INPUT && g_guiOpen) {
-        return DefWindowProcA(hwnd, msg, wParam, lParam);
-    }
-
-    if (g_imguiInitialized && g_guiOpen) {
-        ImGui_ImplWin32_WndProcHandler(hwnd, msg, wParam, lParam);
-        if (msg >= WM_MOUSEFIRST && msg <= WM_MOUSELAST) return TRUE;
-        if (msg >= WM_KEYFIRST && msg <= WM_KEYLAST) return TRUE;
-    }
-
-    switch (msg) {
-    case WM_MOUSEMOVE:
-        g_mouseX = LOWORD(lParam); g_mouseY = HIWORD(lParam); 
-        if (g_guiOpen) return 0; // BLOCK input to game
-        break;
-    case WM_LBUTTONDOWN:
-        g_mouseClicked = true; g_mouseDown = true;
-        if (g_guiOpen) return 0;
-        break;
-    case WM_LBUTTONUP:
-        g_mouseDown = false;
-        if (g_guiOpen) return 0;
-        break;
-    case WM_RBUTTONDOWN:
-        g_mouseRightClicked = true;
-        g_mouseRightDown = true;
-        if (g_guiOpen) return 0;
-        break;
-    case WM_RBUTTONUP:
-        g_mouseRightDown = false;
-        if (g_guiOpen) return 0;
-        break;
-    case WM_MOUSEWHEEL:
-        g_scrollDelta = GET_WHEEL_DELTA_WPARAM(wParam);
-        if (g_guiOpen) return 0;
-        break;
-    }
     return CallWindowProcA(g_origWndProc, hwnd, msg, wParam, lParam);
 }
-
-void CloseInternalGui() {
-    if (!g_guiOpen) return;
-    g_guiOpen = false;
-    g_guiDragging = false;
-    g_capturingBindForModule = -1; // cancel any in-progress keybind capture
-    Log("ClickGUI closed");
-
-    if (!g_nativeChatOpenedByClickGui) return;
-    JNIEnv* env = nullptr;
-    if (g_jvm->GetEnv((void**)&env, JNI_VERSION_1_8) == JNI_OK || g_jvm->AttachCurrentThread((void**)&env, nullptr) == JNI_OK) {
-        if (g_mcInstance && g_displayGuiScreenMethod) {
-            env->CallVoidMethod(g_mcInstance, g_displayGuiScreenMethod, nullptr);
-        }
-    }
-    g_nativeChatOpenedByClickGui = false;
-}
-
-void OpenInternalGui() {
-    if (g_guiOpen) return;
-    g_guiOpen = true;
-    g_nativeChatOpenedByClickGui = false;
-    g_wasMouseDown = false;
-    g_wasMouseRightDown = false;
-    g_mouseClicked = false;
-    g_mouseRightClicked = false;
-    Log("ClickGUI opened");
-}
-
-void PollKeyboardToggle() {}
 
 void EnsureWndProcHook(HWND targetHwnd) {
     if (!targetHwnd) return;
@@ -7951,7 +7302,6 @@ BOOL WINAPI HookedSwapBuffers(HDC hdc) {
             }
         }
     }
-    RenderClickGUI(w, h);
 
     ImGui::Render();
     ImGuiIO& io = ImGui::GetIO();
@@ -8360,25 +7710,6 @@ void ServerLoop() {
             // 14ms (~71 Hz) avoids JNI mutex contention with the render thread
             // while staying well within the 220ms aim-assist freshness window.
             Sleep(14);
-
-
-
-            // Send pending commands from ClickGUI
-            // FIX: Copy commands inside lock, send OUTSIDE lock to avoid DEADLOCK
-            std::vector<std::string> cmds;
-            { LockGuard lk(g_cmdMutex);
-              cmds = g_pendingCommands;
-              g_pendingCommands.clear();
-            }
-
-
-            for (const auto& c : cmds) {
-                 int s = send(g_clientSocket, c.c_str(), (int)c.length(), 0);
-                 if (s == SOCKET_ERROR && WSAGetLastError() != WSAEWOULDBLOCK) {
-                     break;
-                 }
-            }
-
             // Read config from C# (non-blocking)
             char buf[2048];
             int r = recv(g_clientSocket, buf, sizeof(buf) - 1, 0);
