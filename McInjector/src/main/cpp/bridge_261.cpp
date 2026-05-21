@@ -4,25 +4,12 @@
  *
  * Architecture:
  *  - Hooks wglSwapBuffers -> renders ImGui overlay every frame.
- *  - Hooks WndProc -> blocks game input when GUI is open.
  *  - Hooks glfwSetInputMode -> detects when Minecraft naturally re-grabs cursor.
- *  - Maintains TCP server (port 25590) for bidirectional comms with C# Loader.
+ *  - Maintains TCP server (port 25590) for state/config sync with C# Loader.
  *
- * Cursor management (zero-flick):
- *  - Open GUI: call glfwSetInputMode(CURSOR_NORMAL), block WM_INPUT.
- *  - Close GUI: block WM_INPUT indefinitely, do NOT call CURSOR_DISABLED.
- *  - When Minecraft's own game tick calls glfwSetInputMode(CURSOR_DISABLED):
- *    our hooked function clears the WM_INPUT block and forwards to real GLFW.
- *  - This means Minecraft handles its own re-grab at its own timing, zero delta,
- *    zero camera flick.
- *
- * Inventory detection: glfwGetInputMode polling.
- *  - If cursor mode is NORMAL and our GUI is NOT open, a Minecraft screen is open.
- *
- * Command API (bridge -> C#): action names match GameStateClient.HandleBridgeCommand
- *  toggleArmed, setMinCPS, setMaxCPS, toggleJitter, toggleClickInChests,
- *  toggleNametags, toggleChestEsp, toggleClosestPlayerInfo,
- *  toggleNametagHealth, toggleNametagArmor, toggleNametagHideVanilla, toggleRight, toggleBreakBlocks
+ * Screen detection: glfwGetInputMode polling plus JNI screen state.
+ *  - If cursor mode is NORMAL and JNI reports a non-chat screen, Minecraft has a GUI open.
+ *  - Module controls live in the external WPF window; this bridge does not render an internal ClickGUI.
  */
 #include <winsock2.h>
 #include <windows.h>
@@ -4478,14 +4465,93 @@ static bool ReadBlockPosCoords(JNIEnv* env, jobject bp, double& outX, double& ou
 
 static jfieldID TryGetFieldAny121(JNIEnv* env, jclass cls, const char* const* names, const char* const* sigs) {
     if (!env || !cls) return nullptr;
-    for (int ni = 0; names[ni]; ni++) {
-        for (int si = 0; sigs[si]; si++) {
-            jfieldID fid = env->GetFieldID(cls, names[ni], sigs[si]);
-            if (env->ExceptionCheck()) { env->ExceptionClear(); fid = nullptr; }
-            if (fid) return fid;
+
+    jclass classCls = env->FindClass("java/lang/Class");
+    jmethodID getSuperclass = classCls ? env->GetMethodID(classCls, "getSuperclass", "()Ljava/lang/Class;") : nullptr;
+    if (env->ExceptionCheck()) { env->ExceptionClear(); getSuperclass = nullptr; }
+
+    jclass cur = (jclass)env->NewLocalRef(cls);
+    for (int depth = 0; cur && depth < 8; depth++) {
+        for (int ni = 0; names[ni]; ni++) {
+            for (int si = 0; sigs[si]; si++) {
+                jfieldID fid = env->GetFieldID(cur, names[ni], sigs[si]);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); fid = nullptr; }
+                if (fid) {
+                    env->DeleteLocalRef(cur);
+                    if (classCls) env->DeleteLocalRef(classCls);
+                    return fid;
+                }
+            }
         }
+
+        if (!getSuperclass) break;
+        jclass superCls = (jclass)env->CallObjectMethod(cur, getSuperclass);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); superCls = nullptr; }
+        env->DeleteLocalRef(cur);
+        cur = superCls;
     }
+
+    if (cur) env->DeleteLocalRef(cur);
+    if (classCls) env->DeleteLocalRef(classCls);
     return nullptr;
+}
+
+static const char* MissingChestStealerMappingDetail121() {
+    if (!g_chestStealerScreenHandlerField_121) return "screen handler field";
+    if (!g_chestStealerScreenXField_121) return "screen left/x field";
+    if (!g_chestStealerScreenYField_121) return "screen top/y field";
+    if (!g_chestStealerScreenWidthField_121) return "screen width field";
+    if (!g_chestStealerScreenHeightField_121) return "screen height field";
+    if (!g_chestStealerHandlerSyncIdField_121) return "handler sync/container id field";
+    if (!g_chestStealerHandlerSlotsField_121) return "handler slots field";
+    return "screen handler/layout fields";
+}
+
+static const char* MissingChestStealerSlotMappingDetail121() {
+    if (!g_chestStealerSlotIdField_121) return "slot id/index field";
+    if (!g_chestStealerSlotXField_121) return "slot x field";
+    if (!g_chestStealerSlotYField_121) return "slot y field";
+    if (!g_chestStealerSlotHasStackMethod_121) return "slot has item method";
+    return "slot fields";
+}
+
+static bool IsJavaListLike121(JNIEnv* env, jobject obj) {
+    if (!env || !obj) return false;
+    jclass listCls = env->FindClass("java/util/List");
+    if (!listCls || env->ExceptionCheck()) {
+        env->ExceptionClear();
+        if (listCls) env->DeleteLocalRef(listCls);
+        return false;
+    }
+    bool ok = env->IsInstanceOf(obj, listCls) == JNI_TRUE;
+    env->DeleteLocalRef(listCls);
+    return ok;
+}
+
+static bool ResolveListAccess121(JNIEnv* env, jobject listObj, jmethodID& sizeMid, jmethodID& getMid, jclass& accessCls) {
+    sizeMid = nullptr;
+    getMid = nullptr;
+    accessCls = nullptr;
+    if (!env || !listObj) return false;
+
+    if (IsJavaListLike121(env, listObj)) {
+        accessCls = env->FindClass("java/util/List");
+        if (env->ExceptionCheck()) { env->ExceptionClear(); accessCls = nullptr; }
+    }
+
+    if (!accessCls) {
+        accessCls = env->GetObjectClass(listObj);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); accessCls = nullptr; }
+    }
+
+    if (!accessCls) return false;
+
+    sizeMid = env->GetMethodID(accessCls, "size", "()I");
+    if (env->ExceptionCheck()) { env->ExceptionClear(); sizeMid = nullptr; }
+    getMid = env->GetMethodID(accessCls, "get", "(I)Ljava/lang/Object;");
+    if (env->ExceptionCheck()) { env->ExceptionClear(); getMid = nullptr; }
+
+    return sizeMid && getMid;
 }
 
 static void LogChestStealerMappingMissing121(const char* detail) {
@@ -4550,7 +4616,13 @@ static bool ResolveModernChestStealerMappings(JNIEnv* env, jobject screenObj) {
         }
         if (!g_chestStealerHandlerSlotsField_121) {
             const char* names[] = { "slots", "field_7761", "f_38839_", nullptr };
-            const char* sigs[] = { "Ljava/util/List;", "Lnet/minecraft/class_2371;", nullptr };
+            const char* sigs[] = {
+                "Ljava/util/List;",
+                "Lnet/minecraft/class_2371;",
+                "Lnet/minecraft/util/collection/DefaultedList;",
+                "Lnet/minecraft/core/NonNullList;",
+                nullptr
+            };
             g_chestStealerHandlerSlotsField_121 = TryGetFieldAny121(env, handlerCls, names, sigs);
         }
         env->DeleteLocalRef(handlerCls);
@@ -4602,19 +4674,41 @@ static bool IsModernChestStealerPhysicalContainer() {
     return false;
 }
 
+static bool ScreenChainContainsClass121(const std::string& screenName, const char* simpleName) {
+    if (!simpleName || !*simpleName) return false;
+    size_t start = 0;
+    while (start <= screenName.size()) {
+        size_t end = screenName.find('|', start);
+        if (end == std::string::npos) end = screenName.size();
+        std::string part = screenName.substr(start, end - start);
+        if (part == simpleName) return true;
+        if (part.size() > strlen(simpleName) &&
+            part.compare(part.size() - strlen(simpleName), strlen(simpleName), simpleName) == 0 &&
+            part[part.size() - strlen(simpleName) - 1] == '.') {
+            return true;
+        }
+        if (end == screenName.size()) break;
+        start = end + 1;
+    }
+    return false;
+}
+
 static bool IsModernContainerScreenName(const std::string& screenName) {
-    return screenName.find("ContainerScreen") != std::string::npos ||
-        screenName.find("AbstractContainerScreen") != std::string::npos ||
-        screenName.find("HandledScreen") != std::string::npos ||
-        screenName.find("GenericContainerScreen") != std::string::npos ||
-        screenName.find("class_465") != std::string::npos ||
-        screenName.find("class_476") != std::string::npos;
+    if (ScreenChainContainsClass121(screenName, "InventoryScreen") ||
+        ScreenChainContainsClass121(screenName, "CreativeModeInventoryScreen") ||
+        ScreenChainContainsClass121(screenName, "CreativeInventoryScreen")) {
+        return false;
+    }
+
+    return ScreenChainContainsClass121(screenName, "ContainerScreen") ||
+        ScreenChainContainsClass121(screenName, "GenericContainerScreen") ||
+        ScreenChainContainsClass121(screenName, "class_476");
 }
 
 static std::string BuildModernChestStealerStateJson(JNIEnv* env, jobject screenObj, const std::string& screenName, bool enabled) {
     if (!enabled || !env || !screenObj || !IsModernContainerScreenName(screenName)) return "null";
     if (!ResolveModernChestStealerMappings(env, screenObj)) {
-        LogChestStealerMappingMissing121("screen handler/layout fields");
+        LogChestStealerMappingMissing121(MissingChestStealerMappingDetail121());
         return "null";
     }
 
@@ -4650,12 +4744,11 @@ static std::string BuildModernChestStealerStateJson(JNIEnv* env, jobject screenO
     env->DeleteLocalRef(handlerObj);
     if (!slotsObj) return "null";
 
-    jclass listCls = env->FindClass("java/util/List");
-    jmethodID sizeMid = listCls ? env->GetMethodID(listCls, "size", "()I") : nullptr;
-    jmethodID getMid = listCls ? env->GetMethodID(listCls, "get", "(I)Ljava/lang/Object;") : nullptr;
-    if (env->ExceptionCheck()) { env->ExceptionClear(); sizeMid = nullptr; getMid = nullptr; }
-    if (!sizeMid || !getMid) {
-        if (listCls) env->DeleteLocalRef(listCls);
+    jclass listAccessCls = nullptr;
+    jmethodID sizeMid = nullptr;
+    jmethodID getMid = nullptr;
+    if (!ResolveListAccess121(env, slotsObj, sizeMid, getMid, listAccessCls)) {
+        if (listAccessCls) env->DeleteLocalRef(listAccessCls);
         env->DeleteLocalRef(slotsObj);
         return "null";
     }
@@ -4664,7 +4757,7 @@ static std::string BuildModernChestStealerStateJson(JNIEnv* env, jobject screenO
     if (env->ExceptionCheck()) { env->ExceptionClear(); size = 0; }
     int chestSlotCount = size - 36;
     if (chestSlotCount <= 0 || screenWidth <= 0 || screenHeight <= 0) {
-        env->DeleteLocalRef(listCls);
+        env->DeleteLocalRef(listAccessCls);
         env->DeleteLocalRef(slotsObj);
         return "null";
     }
@@ -4676,6 +4769,7 @@ static std::string BuildModernChestStealerStateJson(JNIEnv* env, jobject screenO
         if (env->ExceptionCheck()) { env->ExceptionClear(); slotObj = nullptr; }
         if (!slotObj) continue;
         if (!ResolveModernChestStealerSlotMappings(env, slotObj)) {
+            LogChestStealerMappingMissing121(MissingChestStealerSlotMappingDetail121());
             env->DeleteLocalRef(slotObj);
             continue;
         }
@@ -4700,7 +4794,7 @@ static std::string BuildModernChestStealerStateJson(JNIEnv* env, jobject screenO
         env->DeleteLocalRef(slotObj);
     }
 
-    env->DeleteLocalRef(listCls);
+    env->DeleteLocalRef(listAccessCls);
     env->DeleteLocalRef(slotsObj);
 
     std::ostringstream out;
@@ -8057,7 +8151,7 @@ static void UpdateJniState() {
 static void UpdateRealGuiState() {
     TRACE261_PATH("enter");
     // JNI state (screen name) is already updated in UpdateJniState() each frame.
-    // g_realGuiOpen = GLFW cursor visible while Minecraft has a non-chat screen open.
+    // g_realGuiOpen tracks cursor-visible Minecraft screens, excluding chat.
     if (!glfwGetCurrentContext_fn || !glfwGetInputMode_fn) {
         TRACE261_PATH("glfw-unavailable");
         g_realGuiOpen = false;
@@ -9181,6 +9275,7 @@ BOOL WINAPI hwglSwapBuffers(HDC hDc) {
 
                 auto pushMod = [&](const char* text, ImU32 accent) {
                     if (!text || !*text) return;
+                    if (modCount >= (int)(sizeof(mods) / sizeof(mods[0]))) return;
                     ModLine m{ text, accent, ImGui::CalcTextSize(text).x };
                     mods[modCount++] = m;
                 };
@@ -9199,6 +9294,7 @@ BOOL WINAPI hwglSwapBuffers(HDC hDc) {
                 if (cfg.aimAssist)     pushMod("Aim Assist", overlayTheme.accentPrimary);
                 if (cfg.triggerbot)    pushMod("Triggerbot", overlayTheme.accentSecondary);
                 if (cfg.speedBridge)   pushMod("SpeedBridge", overlayTheme.accentPrimary);
+                if (cfg.chestStealer)  pushMod("Chest Stealer", overlayTheme.accentTertiary);
                 if (cfg.chestEsp)      pushMod("Chest ESP", overlayTheme.accentSecondary);
                 if (cfg.nametags)      pushMod("Nametags", overlayTheme.accentPrimary);
                 if (cfg.gtbHelper)     pushMod("GTB Helper", overlayTheme.accentTertiary);
@@ -9454,8 +9550,7 @@ glfw_done:;
                     stateMs = g_jniStateMs;
                 }
 
-                // guiOpen = our menu OR JNI reports a Minecraft screen is open
-                // (but ChatScreen opened by US for cursor unlock is not a "real" gui)
+                // guiOpen follows real Minecraft screens; ChatScreen is treated as non-blocking for gameplay modules.
                 bool anyGui = (jniGui && sn != "ChatScreen");
                 TRACE261_BRANCH("stateAnyGui", anyGui);
 

@@ -14,6 +14,7 @@ echo Copied bridge_261.dll to ..\Aoko\bridge_261.dll
 set "DBG=..\Aoko\bin\Debug\net8.0-windows"
 set "REL=..\Aoko\bin\Release\net8.0-windows"
 set "PUB=..\Aoko\bin\Release\net8.0-windows\win-x64\publish"
+set "DESKTOP_REL=..\Aoko_Release"
 if exist "%DBG%\" (
 	copy /Y bridge_261.dll "%DBG%\bridge_261.dll" >nul
 	echo Copied bridge_261.dll to %DBG%
@@ -25,5 +26,9 @@ if exist "%REL%\" (
 if exist "%PUB%\" (
 	copy /Y bridge_261.dll "%PUB%\bridge_261.dll" >nul
 	echo Copied bridge_261.dll to %PUB%
+)
+if exist "%DESKTOP_REL%\" (
+	copy /Y bridge_261.dll "%DESKTOP_REL%\bridge_261.dll" >nul
+	echo Copied bridge_261.dll to %DESKTOP_REL%
 )
 popd

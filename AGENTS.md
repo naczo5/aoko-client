@@ -83,7 +83,7 @@ C# tests use **xUnit** (`Aoko.Tests\`). Native harness tests are a standalone C+
 ## Architecture Notes
 
 - Loader and bridge communicate over TCP on port `25590`.
-- Input simulation happens in C# via Win32 `SendInput`; bridge code must NOT send packets or call gameplay methods.
+- Input simulation normally happens in C# via Win32 `SendInput`; bridge-side game interaction is allowed only when it is explicitly owned by a module, version-gated, validated, and kept out of raw packet spam or combat-only calls.
 - `bridge_261.cpp` uses Yarn-first, Mojmap-fallback class name arrays to support both 1.21 (obfuscated, Yarn mappings) and 26.1 (unobfuscated, Mojang mappings) from a single DLL.
 - `bridge.cpp` (1.8.9) now links the shared ImGui/OpenGL backend and MinHook sources. Do not assume legacy rendering is raw GL-only.
 - **Menu-injection compatibility (1.8.9):** mappings and features must recover correctly when injected while in menus/lobby, not only when already in a world.
@@ -114,10 +114,10 @@ C# tests use **xUnit** (`Aoko.Tests\`). Native harness tests are a standalone C+
 
 ## Domain Safety Rules
 
-- Do NOT add packet-sending or gameplay-mutating calls in bridge code.
-- Do NOT call in-game combat methods (`attackEntity`, packet APIs, etc.).
-- Prefer read-only JNI state access. Use Win32 `SendInput` from C# for simulated input.
-- Limited JNI writes allowed when ghost-safe (reach via entity attributes, velocity scaling, nametag visibility suppression). Keep overlays draw-only; mutate state only when justified and stealthy.
+- Do NOT add raw packet spam or unrelated gameplay mutation in bridge code.
+- Do NOT call in-game combat methods (`attackEntity`, combat packet APIs, etc.) unless a feature explicitly owns that behavior and documents the risk.
+- Prefer observing state first. Use Win32 `SendInput` from C# for simulated input when it is reliable, but controlled bridge-side JNI/game interaction is allowed for modules that require it.
+- JNI writes and gameplay interactions must be narrow, validated, version-gated, and logged when mappings are unavailable. Keep overlays draw-only unless the selected module explicitly needs state interaction.
 
 ## Configuration Sync
 

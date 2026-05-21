@@ -143,6 +143,17 @@ public static class InputHooks
             case "autototem":     c.AutoTotemEnabled            = !c.AutoTotemEnabled;            break;
         }
     }
+
+    private static bool ShouldBlockModuleKeybinds()
+    {
+        if (!WindowDetection.IsMinecraftForeground())
+            return true;
+
+        if (GameStateClient.Instance.IsConnected)
+            return GameStateClient.Instance.CurrentState.GuiOpen;
+
+        return WindowDetection.IsCursorVisible();
+    }
     
     public static void Install()
     {
@@ -190,6 +201,9 @@ public static class InputHooks
             }
             
             // Per-module keybinds
+            if (ShouldBlockModuleKeybinds())
+                return CallNextHookEx(_keyboardHook, nCode, wParam, lParam);
+
             foreach (var kvp in ModuleKeys)
             {
                 if (kvp.Value > 0 && kb.VkCode == (uint)kvp.Value)

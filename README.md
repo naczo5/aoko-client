@@ -15,29 +15,16 @@ aoko client is a Windows utility client for Lunar Client.
 - Autoclicker (left/right, CPS range, jitter, block-only options)
 - Aim Assist
 - Triggerbot
-- SpeedBridge (edge sneak assist with safety gates)
+- SpeedBridge 
 - Reach and Velocity controls
-- AutoTotem (fall/explosion detection, Ghost and Anarchy modes)
+- AutoTotem (inventory only and anarchy mode)
+- Chest Stealer (external cursor-based)
 - GTB Helper
 - Discord Rich Presence
 - Nametags, Closest Player panel, Chest ESP
 - Per-module keybinds (all unbound by default)
 - Profiles saved in `%AppData%\Aoko\profiles\`
 - GUI customization (slate palettes, module list style, show logo)
-
-## Look & feel
-
-aoko client ships with a near-monochrome aesthetic across the website,
-external GUI, and in-game overlay:
-
-- One default theme (`Slate`, near-black with a coral accent) plus three
-  monochrome variants (`Ink`, `Graphite`, `Steel`).
-- Flat surfaces, hairline borders, no gradient backgrounds, no drop shadows.
-- A single coral accent (`#C7625A`) is used very sparingly — only on the logo
-  dot, sliders, the in-game module accent, and small interactive highlights.
-
-Existing profiles are copied into `%AppData%\Aoko\profiles\` on first run when
-the new profile folder is empty. The legacy profile folder is left untouched.
 
 ## Screenshots
 
@@ -57,9 +44,9 @@ the new profile folder is empty. The legacy profile folder is left untouched.
 1. Start Lunar Client.
 2. Run `Aoko.exe`.
 3. Click **Inject**.
-4. Use the external GUI (bind keys under the Keybinds tab).
+4. Use the external GUI.
 
-1.8.9 supports menu/lobby injection. Some JNI mappings are completed lazily after a world is joined, so modules may become available once the bridge sees in-world state.
+_It is generally recommended to inject while in a server/world, to ensure are modules initialize correctly_
 
 ## Build
 
@@ -92,7 +79,6 @@ Run from repository root unless noted.
 - `bridge_261.dll` is the modern bridge used for both 26.1 and 1.21 injection.
 - `bridge.dll` (1.8.9) is supported and now builds with the shared ImGui/OpenGL backend.
 - Supported runtime bridges are configured through the external GUI.
-- Discord Rich Presence is configured from the external GUI under the Utility tab.
 
 ## Project structure
 
@@ -116,13 +102,13 @@ aoko/
 - The C# loader injects the bridge DLL into Lunar and manages settings/UI.
 - Bridge and loader communicate over TCP (`25590`).
 - Bridge renders overlays through OpenGL/ImGui and reads game state via JNI.
-- Input actions are sent through Win32 `SendInput`.
+- Input actions are usually sent through Win32 `SendInput`.
 - Bridge capabilities gate version-specific modules and controls.
 
 ## Safety constraint used by this project
 
-- Bridge-side logic is read-first. Limited ghost-safe JNI writes exist for modules such as Reach, Velocity, and nametag suppression.
-- Do not add direct packet sending or in-game combat method calls.
+- Bridge-side logic reads game state and may perform controlled, module-scoped JNI/game interactions for features that require them.
+- Do not add raw packet spam or unrelated in-game combat method calls.
 
 ## TODO
 

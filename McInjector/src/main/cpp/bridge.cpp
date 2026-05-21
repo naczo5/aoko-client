@@ -6133,7 +6133,7 @@ void RenderNametags(int w, int h) {
     
     int count = 0;
 
-    bool guiOpen = false;
+    bool guiOpen = false; // Internal ClickGUI was removed; only Minecraft screens suppress tags.
     std::string screenName = "none";
     if (g_currentScreenField) {
         jobject currentScreen = env->GetObjectField(g_mcInstance, g_currentScreenField);
@@ -7030,7 +7030,7 @@ void RenderChestESP(int w, int h) {
 }
 
 // ===================== INPUT HOOK =====================
-// WndProc is kept for reach's left-click edge detection.
+// WndProc stays installed for reach's left-click edge detection.
 LRESULT CALLBACK HookedWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     bool leftNowDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
     bool rawInputClickEdge = (msg == WM_INPUT) && leftNowDown && !g_reachRawInputPrevDown;

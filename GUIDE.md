@@ -51,7 +51,7 @@ For legacy 1.8.9, menu injection is supported: you can inject while in menus/lob
 **Where:** `Aoko/Core/Clicker.cs`
 1.  Add configuration properties (e.g., `MyNewCheatEnabled`).
 2.  Add a new Loop method (e.g., `MyNewCheatLoop`) and manage its lifecycle via `CancellationTokenSource`, similar to `AimAssistLoop` or `TriggerbotLoop`.
-3.  Simulate input using Win32 `SendInput` (`_leftClickInputs`, `_aimAssistMoveInput`, etc.). Do not send packets directly.
+3.  Prefer Win32 `SendInput` (`_leftClickInputs`, `_aimAssistMoveInput`, etc.) for input simulation when it is reliable. Do not send raw packets directly.
 4.  Update the TCP config payload in `GameStateClient.cs` (`ConfigSenderLoop`) to send the toggle state to the bridge (so the in-game GUI knows about it).
 5.  Update `BridgeCapabilities.cs`, `bridge_capabilities.h`, profile persistence, keybind maps, and tests when the feature is gated by bridge/version support.
 
@@ -72,10 +72,10 @@ For legacy 1.8.9, menu injection is supported: you can inject while in menus/lob
 ## 4. The Golden Rules: What to Do and Not to Do
 
 *   **DO NOT** modify the game state recklessly via JNI (e.g., do not set health, do not force rotations via Java fields). 
-*   **DO NOT** call in-game combat methods (like `clickMouse()` or `attackEntity()`) or send network packets from the C++ bridge. 
-*   **DO** treat the bridge-side logic as **read-first**; write operations must be thoughtful, minimal, and ghost-safe.
-*   **DO** use `SendInput` from the external C# loader to simulate human input.
-*   **DO** prefer read-only observation where possible, but limited, safe JNI state writes are permitted when they provide clear value and remain undetectable (e.g., reach via entity attributes, velocity scaling, nametag visibility suppression).
+*   **DO NOT** add raw packet spam or unrelated combat/gameplay calls from the C++ bridge. 
+*   **DO** observe state first, then mutate only through scoped module logic with explicit validation, version gating, and failure logging.
+*   **DO** use `SendInput` from the external C# loader to simulate human input when that path is reliable.
+*   **DO** keep JNI writes and gameplay interactions narrow, intentional, and feature-owned (e.g., reach via entity attributes, velocity scaling, nametag visibility suppression, or other module-specific interactions that cannot be implemented reliably through OS input).
 *   **DO** respect the cross-thread limitations of JNI. Only use JNI calls from threads properly attached to the JVM. Avoid heavy JNI reflection inside the high-frequency `wglSwapBuffers` render thread; cache method and field IDs beforehand!
 *   **DO** preserve **menu-injection compatibility** in all code changes (especially 1.8.9): mappings and feature behavior must recover correctly when injected in menus/lobby, not only when injected in-world.
 *   **DO** prefer a single deterministic path when runtime evidence shows fallback branches are unnecessary. Keep fallback/recovery logic only where logs prove it is needed.
