@@ -38,6 +38,7 @@ public class GameStateClient : INotifyPropertyChanged
     private bool _isInjectionInProgress;
     private long _lastUiActionBarDispatchTicks;
     private int _reloadMappingsNonce;
+    private IntPtr _customTargetHwnd;
 
     public event PropertyChangedEventHandler? PropertyChanged;
     public event Action? StateUpdated;
@@ -170,7 +171,7 @@ public class GameStateClient : INotifyPropertyChanged
     /// Uses the same method name to keep compatibility with existing UI calls,
     /// but functionally it's now a "Connect" operation.
     /// </summary>
-    public async Task<bool> InjectAsync(string version = "auto")
+    public async Task<bool> InjectAsync(string version = "auto", int? targetPid = null, IntPtr? targetHwnd = null)
     {
         if (IsInjected || IsConnected)
         {
@@ -180,9 +181,11 @@ public class GameStateClient : INotifyPropertyChanged
             return true;
         }
 
-        var mcProcess = FindMinecraftProcess();
+        var mcProcess = targetPid.HasValue
+            ? ResolveInjectionTarget(targetPid)
+            : FindMinecraftProcess();
         string resolvedVersion = ResolveInjectionVersion(version, mcProcess);
-        Log($"Resolved injection version: requested={version}, resolved={resolvedVersion}, title='{mcProcess?.MainWindowTitle ?? "<none>"}'");
+        Log($"Resolved injection version: requested={version}, resolved={resolvedVersion}, title='{mcProcess?.MainWindowTitle ?? "<none>"}', pid={mcProcess?.Id.ToString() ?? "<none>"}");
         Capabilities = BridgeCapabilities.ForVersionFallback(resolvedVersion);
 
         SetInjectionStage(5, "Checking existing bridge");
@@ -201,6 +204,7 @@ public class GameStateClient : INotifyPropertyChanged
         {
             IsInjected = true;
             InjectedVersion = resolvedVersion;
+            ApplyCustomInjectionTarget(targetHwnd);
             IsInjectionInProgress = false;
             InjectionProgress = 100;
             return true;
@@ -210,7 +214,9 @@ public class GameStateClient : INotifyPropertyChanged
         SetInjectionStage(20, "Injecting bridge");
         if (mcProcess == null)
         {
-            StatusMessage = "ERROR: Minecraft/Lunar not running.";
+            StatusMessage = targetPid.HasValue
+                ? $"ERROR: Process PID {targetPid.Value} not found."
+                : "ERROR: Minecraft/Lunar not running.";
             IsInjectionInProgress = false;
             return false;
         }
@@ -266,6 +272,7 @@ public class GameStateClient : INotifyPropertyChanged
         {
             IsInjected = true;
             InjectedVersion = resolvedVersion;
+            ApplyCustomInjectionTarget(targetHwnd);
             Log("Connected successfully!");
             IsInjectionInProgress = false;
             InjectionProgress = 100;
@@ -278,6 +285,30 @@ public class GameStateClient : INotifyPropertyChanged
              IsInjectionInProgress = false;
              return false;
         }
+    }
+
+    internal static Process? ResolveInjectionTarget(int? targetPid)
+    {
+        if (!targetPid.HasValue)
+            return null;
+
+        try
+        {
+            return Process.GetProcessById(targetPid.Value);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private void ApplyCustomInjectionTarget(IntPtr? targetHwnd)
+    {
+        if (!targetHwnd.HasValue || targetHwnd.Value == IntPtr.Zero)
+            return;
+
+        _customTargetHwnd = targetHwnd.Value;
+        WindowDetection.SetCustomTarget(_customTargetHwnd);
     }
 
     private void Log(string message)
@@ -492,6 +523,8 @@ public class GameStateClient : INotifyPropertyChanged
         IsInjectionInProgress = false;
         InjectionProgress = 0;
         StatusMessage = "Not injected";
+        _customTargetHwnd = IntPtr.Zero;
+        WindowDetection.ClearCustomTarget();
         Capabilities = BridgeCapabilities.ForVersionFallback(InjectedVersion);
     }
 
@@ -771,6 +804,10 @@ public class GameStateClient : INotifyPropertyChanged
                     speedBridgeHoldingShiftOnly = clicker.SpeedBridgeHoldingShiftOnly,
                     speedBridgeLookingDownOnly = clicker.SpeedBridgeLookingDownOnly,
                     gtbHelper = clicker.GtbHelperEnabled,
+                    pixelPartyAssist = clicker.PixelPartyAssistEnabled,
+                    pixelPartyScanRadius = clicker.PixelPartyScanRadius,
+                    pixelPartyAutoLook = clicker.PixelPartyAutoLookEnabled,
+                    pixelPartyAutoWalk = clicker.PixelPartyAutoWalkEnabled,
                     gtbHint = clicker.GtbCurrentHint,
                     gtbCount = clicker.GtbMatchCount,
                     gtbPreview = clicker.GtbMatchesPreview,
@@ -817,7 +854,8 @@ public class GameStateClient : INotifyPropertyChanged
                     keybindNametags      = InputHooks.GetModuleKey("nametags"),
                     keybindClosestPlayer = InputHooks.GetModuleKey("closestplayer"),
                     keybindChestEsp      = InputHooks.GetModuleKey("chestesp"),
-                    keybindChestStealer  = InputHooks.GetModuleKey("cheststealer")
+                    keybindChestStealer  = InputHooks.GetModuleKey("cheststealer"),
+                    keybindPixelPartyAssist = InputHooks.GetModuleKey("pixelpartyassist")
                 };
 
                 string json = JsonSerializer.Serialize(config) + "\n";
@@ -892,6 +930,9 @@ public class GameStateClient : INotifyPropertyChanged
                     break;
                 case "toggleGtbHelper":
                     clicker.GtbHelperEnabled = !clicker.GtbHelperEnabled;
+                    break;
+                case "togglePixelPartyAssist":
+                    clicker.PixelPartyAssistEnabled = !clicker.PixelPartyAssistEnabled;
                     break;
                 case "toggleNametags":
                     clicker.NametagsEnabled = !clicker.NametagsEnabled;

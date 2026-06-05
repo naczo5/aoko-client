@@ -11,11 +11,24 @@ public class BridgeCapabilitiesTests
         BridgeCapabilities caps = BridgeCapabilities.ForVersionFallback("26.1");
 
         Assert.True(caps.SupportsModule("triggerbot"));
+        Assert.True(caps.SupportsModule("pixelpartyassist"));
         Assert.True(caps.SupportsModule("cheststealer"));
+        Assert.True(caps.SupportsSetting("pixelpartyassist"));
+        Assert.True(caps.SupportsStateField("pixelpartyyawdelta"));
         Assert.True(caps.SupportsSetting("cheststealerenabled"));
         Assert.True(caps.SupportsStateField("cheststealerstate"));
         Assert.True(caps.SupportsSetting("nametagshowhelditem"));
         Assert.True(caps.SupportsStateField("attackcooldown"));
+    }
+
+    [Fact]
+    public void LegacyFallback_ExposesPixelPartyAssist()
+    {
+        BridgeCapabilities caps = BridgeCapabilities.ForVersionFallback("1.8.9");
+
+        Assert.True(caps.SupportsModule("pixelpartyassist"));
+        Assert.True(caps.SupportsSetting("pixelpartyautowalk"));
+        Assert.True(caps.SupportsStateField("pixelpartyyawdelta"));
     }
 
     [Fact]

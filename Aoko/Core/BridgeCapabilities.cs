@@ -47,7 +47,8 @@ public sealed class BridgeCapabilities
                     "cheststealer",
                     "reach",
                     "velocity",
-                    "autototem"
+                    "autototem",
+                    "pixelpartyassist"
                 ),
                 BuildSet(
                     "mincps",
@@ -101,7 +102,11 @@ public sealed class BridgeCapabilities
                     "autototemhealth",
                     "autototemelytra",
                     "autototemdelay",
-                    "autototembehaviormode"
+                    "autototembehaviormode",
+                    "pixelpartyassist",
+                    "pixelpartyscanradius",
+                    "pixelpartyautolook",
+                    "pixelpartyautowalk"
                 ),
                 BuildSet(
                     "actionbar",
@@ -111,7 +116,11 @@ public sealed class BridgeCapabilities
                     "attackcooldown",
                     "attackcooldownpertick",
                     "statems",
-                    "cheststealerstate"
+                    "cheststealerstate",
+                    "pixelpartytargetfound",
+                    "pixelpartytargetyaw",
+                    "pixelpartytargetdist",
+                    "pixelpartyyawdelta"
                 )
             );
         }
@@ -131,7 +140,8 @@ public sealed class BridgeCapabilities
                 "chestesp",
                 "cheststealer",
                 "reach",
-                "velocity"
+                "velocity",
+                "pixelpartyassist"
             ),
             BuildSet(
                 "mincps",
@@ -177,7 +187,11 @@ public sealed class BridgeCapabilities
                 "keybindnametags",
                 "keybindclosestplayer",
                 "keybindchestesp",
-                "keybindcheststealer"
+                "keybindcheststealer",
+                "pixelpartyassist",
+                "pixelpartyscanradius",
+                "pixelpartyautolook",
+                "pixelpartyautowalk"
             ),
             BuildSet(
                 "actionbar",
@@ -190,7 +204,11 @@ public sealed class BridgeCapabilities
                 "attackcooldownpertick",
                 "statems",
                 "cheststealerstate",
-                "pitch"
+                "pitch",
+                "pixelpartytargetfound",
+                "pixelpartytargetyaw",
+                "pixelpartytargetdist",
+                "pixelpartyyawdelta"
             )
         );
     }

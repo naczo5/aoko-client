@@ -167,6 +167,10 @@ struct Config {
     int keybindClosestPlayer = 0;
     int keybindChestEsp = 0;
     int keybindChestStealer = 0;
+    bool pixelPartyAssist = false;
+    int pixelPartyScanRadius = 28;
+    bool pixelPartyAutoLook = false;
+    bool pixelPartyAutoWalk = false;
 };
 static Config g_config;
 static Mutex g_configMutex;
@@ -180,6 +184,7 @@ struct GameState {
     float health = 20.0f;
     double posX = 0, posY = 0, posZ = 0;
     float pitch = 0.0f;
+    float rotationYaw = 0.0f;
     bool holdingBlock = false;
     bool lookingAtBlock = false;
     bool lookingAtEntity = false;
@@ -196,6 +201,23 @@ static Mutex g_socketMutex; // Protects socket writes
 static Mutex g_jsonMutex;   // Protects shared JSON buffer
 static std::string g_pendingJson; // Data from Render Thread
 static unsigned long long g_lastEntitySeenMs = 0;
+
+struct PixelPartySnap {
+    bool active = false;
+    bool holdingValid = false;
+    bool targetFound = false;
+    double tx = 0, ty = 0, tz = 0;
+    double dist = -1.0;
+    float targetYaw = 0.0f;
+    std::string colorLabel;
+    std::string status;
+};
+static PixelPartySnap g_pixelPartySnap;
+static Mutex g_pixelPartyMutex;
+static DWORD g_lastPixelPartyUpdateMs = 0;
+static jmethodID g_blockItemGetBlockMethod = nullptr;
+static jmethodID g_blockGetUnlocalizedNameMethod = nullptr;
+static bool g_loggedPixelPartyResolveFail = false;
 
 // 1.8.9 GTB/action-bar extraction mappings
 enum ActionBarFieldKind {
@@ -3727,6 +3749,294 @@ static bool IsSolidBlockAt(JNIEnv* env, double x, double y, double z) {
     return solid;
 }
 
+static std::string LegacyGetBlockUnlocalizedName(JNIEnv* env, jobject block) {
+    if (!env || !block) return "";
+    jclass blockCls = env->GetObjectClass(block);
+    if (!blockCls) return "";
+    if (!g_blockGetUnlocalizedNameMethod) {
+        g_blockGetUnlocalizedNameMethod = env->GetMethodID(blockCls, "getUnlocalizedName", "()Ljava/lang/String;");
+        if (!g_blockGetUnlocalizedNameMethod) {
+            env->ExceptionClear();
+            g_blockGetUnlocalizedNameMethod = env->GetMethodID(blockCls, "func_149732_F", "()Ljava/lang/String;");
+        }
+        if (!g_blockGetUnlocalizedNameMethod) env->ExceptionClear();
+    }
+    env->DeleteLocalRef(blockCls);
+    if (!g_blockGetUnlocalizedNameMethod) return "";
+    jstring js = (jstring)env->CallObjectMethod(block, g_blockGetUnlocalizedNameMethod);
+    if (env->ExceptionCheck() || !js) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return "";
+    }
+    const char* utf = env->GetStringUTFChars(js, nullptr);
+    std::string out = utf ? utf : "";
+    if (utf) env->ReleaseStringUTFChars(js, utf);
+    env->DeleteLocalRef(js);
+    return out;
+}
+
+static std::string LegacyPixelPartyFormatColorLabel(const std::string& unloc) {
+    if (unloc.empty()) return "clay";
+    std::string lower = unloc;
+    for (char& c : lower) c = (char)tolower((unsigned char)c);
+    size_t dot = lower.rfind('.');
+    std::string name = (dot != std::string::npos) ? lower.substr(dot + 1) : lower;
+    if (name == "name" && dot != std::string::npos) {
+        size_t prev = lower.rfind('.', dot - 1);
+        if (prev != std::string::npos) name = lower.substr(prev + 1, dot - prev - 1);
+    }
+    if (name.find("clayhardenedstained") != std::string::npos) return "clay";
+    if (name == "clayhardened" || name == "hardenedclay") return "white";
+    return name;
+}
+
+static bool LegacyPixelPartyIsClayDesc(const std::string& unloc) {
+    std::string lower = unloc;
+    for (char& c : lower) c = (char)tolower((unsigned char)c);
+    return lower.find("terracotta") != std::string::npos
+        || lower.find("clayhardenedstained") != std::string::npos
+        || lower.find("hardenedclay") != std::string::npos
+        || lower.find("stained_hardened_clay") != std::string::npos;
+}
+
+static bool LegacyGetBlockAtIsNonAir(JNIEnv* env, int bx, int by, int bz, jobject* outBlock, std::string* outUnloc) {
+    if (outBlock) *outBlock = nullptr;
+    if (outUnloc) outUnloc->clear();
+    if (!IsSolidBlockAt(env, (double)bx + 0.5, (double)by + 0.5, (double)bz + 0.5)) return false;
+
+    if (!env || !g_mcInstance || !g_theWorldField || !g_blockPosClass || !g_blockPosIntCtor) return false;
+    jobject world = env->GetObjectField(g_mcInstance, g_theWorldField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return false; }
+    if (!world) return false;
+
+    if (!g_worldGetBlockStateMethod) {
+        jclass worldCls = env->GetObjectClass(world);
+        if (worldCls) {
+            g_worldGetBlockStateMethod = env->GetMethodID(worldCls, "getBlockState", "(Lnet/minecraft/util/BlockPos;)Lnet/minecraft/block/state/IBlockState;");
+            if (!g_worldGetBlockStateMethod) {
+                env->ExceptionClear();
+                g_worldGetBlockStateMethod = env->GetMethodID(worldCls, "func_180495_p", "(Lnet/minecraft/util/BlockPos;)Lnet/minecraft/block/state/IBlockState;");
+            }
+            if (!g_worldGetBlockStateMethod) env->ExceptionClear();
+            env->DeleteLocalRef(worldCls);
+        }
+    }
+    if (!g_worldGetBlockStateMethod) { env->DeleteLocalRef(world); return false; }
+
+    jobject pos = env->NewObject(g_blockPosClass, g_blockPosIntCtor, (jint)bx, (jint)by, (jint)bz);
+    if (env->ExceptionCheck() || !pos) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        env->DeleteLocalRef(world);
+        return false;
+    }
+    jobject state = env->CallObjectMethod(world, g_worldGetBlockStateMethod, pos);
+    env->DeleteLocalRef(pos);
+    env->DeleteLocalRef(world);
+    if (env->ExceptionCheck() || !state) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return false;
+    }
+
+    if (!g_blockStateGetBlockMethod) {
+        jclass stateCls = env->GetObjectClass(state);
+        if (stateCls) {
+            g_blockStateGetBlockMethod = env->GetMethodID(stateCls, "getBlock", "()Lnet/minecraft/block/Block;");
+            if (!g_blockStateGetBlockMethod) {
+                env->ExceptionClear();
+                g_blockStateGetBlockMethod = env->GetMethodID(stateCls, "func_177230_c", "()Lnet/minecraft/block/Block;");
+            }
+            if (!g_blockStateGetBlockMethod) env->ExceptionClear();
+            env->DeleteLocalRef(stateCls);
+        }
+    }
+    if (!g_blockStateGetBlockMethod) { env->DeleteLocalRef(state); return false; }
+
+    jobject block = env->CallObjectMethod(state, g_blockStateGetBlockMethod);
+    env->DeleteLocalRef(state);
+    if (env->ExceptionCheck() || !block) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return false;
+    }
+    if (outUnloc) *outUnloc = LegacyGetBlockUnlocalizedName(env, block);
+    if (outBlock) *outBlock = block;
+    else env->DeleteLocalRef(block);
+    return true;
+}
+
+static bool LegacyResolveHeldClayBlock(JNIEnv* env, jobject player,
+    jobject* outBlock, std::string* outUnloc, std::string* outLabel) {
+    if (outBlock) *outBlock = nullptr;
+    if (outUnloc) outUnloc->clear();
+    if (outLabel) outLabel->clear();
+    if (!env || !player || !g_getHeldItemMethod) return false;
+
+    if (!g_itemBlockClass) return false;
+    if (!g_blockItemGetBlockMethod) {
+        jclass biCls = g_itemBlockClass;
+        g_blockItemGetBlockMethod = env->GetMethodID(biCls, "getBlock", "()Lnet/minecraft/block/Block;");
+        if (!g_blockItemGetBlockMethod) {
+            env->ExceptionClear();
+            g_blockItemGetBlockMethod = env->GetMethodID(biCls, "func_179223_d", "()Lnet/minecraft/block/Block;");
+        }
+        if (!g_blockItemGetBlockMethod) {
+            if (!g_loggedPixelPartyResolveFail) {
+                g_loggedPixelPartyResolveFail = true;
+                Log("PixelParty legacy: BlockItem.getBlock unresolved");
+            }
+            env->ExceptionClear();
+            return false;
+        }
+    }
+
+    jobject stack = env->CallObjectMethod(player, g_getHeldItemMethod);
+    if (env->ExceptionCheck() || !stack) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return false;
+    }
+    jclass stCls = env->GetObjectClass(stack);
+    jmethodID getItem = stCls ? env->GetMethodID(stCls, "getItem", "()Lnet/minecraft/item/Item;") : nullptr;
+    if (!getItem && stCls) {
+        env->ExceptionClear();
+        getItem = env->GetMethodID(stCls, "func_77973_b", "()Lnet/minecraft/item/Item;");
+    }
+    if (stCls) env->DeleteLocalRef(stCls);
+    if (!getItem) { env->DeleteLocalRef(stack); return false; }
+
+    jobject item = env->CallObjectMethod(stack, getItem);
+    env->DeleteLocalRef(stack);
+    if (env->ExceptionCheck() || !item) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return false;
+    }
+    if (env->IsInstanceOf(item, g_itemBlockClass) != JNI_TRUE) {
+        env->DeleteLocalRef(item);
+        return false;
+    }
+    jobject block = env->CallObjectMethod(item, g_blockItemGetBlockMethod);
+    env->DeleteLocalRef(item);
+    if (env->ExceptionCheck() || !block) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return false;
+    }
+    std::string unloc = LegacyGetBlockUnlocalizedName(env, block);
+    if (!LegacyPixelPartyIsClayDesc(unloc)) {
+        env->DeleteLocalRef(block);
+        return false;
+    }
+    if (outUnloc) *outUnloc = unloc;
+    if (outLabel) *outLabel = LegacyPixelPartyFormatColorLabel(unloc);
+    if (outBlock) *outBlock = block;
+    else env->DeleteLocalRef(block);
+    return true;
+}
+
+static bool LegacyBlocksMatch(JNIEnv* env, jobject heldBlock, const std::string& heldUnloc,
+    jobject worldBlock, const std::string& worldUnloc) {
+    if (!env || !heldBlock || !worldBlock) return false;
+    if (env->IsSameObject(heldBlock, worldBlock) == JNI_TRUE) return true;
+    if (!heldUnloc.empty() && heldUnloc == worldUnloc) return true;
+    return false;
+}
+
+static void UpdatePixelPartyAssistLegacy(JNIEnv* env, const Config& cfg, const GameState& state) {
+    DWORD now = GetTickCount();
+    if (now - g_lastPixelPartyUpdateMs < 100) return;
+    g_lastPixelPartyUpdateMs = now;
+
+    PixelPartySnap snap;
+    snap.active = true;
+
+    if (!env || !g_mapped || !g_mcInstance || state.guiOpen) {
+        snap.status = state.guiOpen ? "Close menu" : "Waiting for world...";
+        LockGuard lk(g_pixelPartyMutex);
+        g_pixelPartySnap = snap;
+        return;
+    }
+
+    jobject player = env->GetObjectField(g_mcInstance, g_thePlayerField);
+    if (!player) {
+        snap.status = "No player";
+        LockGuard lk(g_pixelPartyMutex);
+        g_pixelPartySnap = snap;
+        return;
+    }
+
+    double px = state.posX, py = state.posY, pz = state.posZ;
+    jobject heldBlock = nullptr;
+    std::string heldUnloc;
+    snap.holdingValid = LegacyResolveHeldClayBlock(env, player, &heldBlock, &heldUnloc, &snap.colorLabel);
+    env->DeleteLocalRef(player);
+
+    if (!snap.holdingValid || !heldBlock) {
+        if (heldBlock) env->DeleteLocalRef(heldBlock);
+        snap.status = "Hold matching terracotta";
+        LockGuard lk(g_pixelPartyMutex);
+        g_pixelPartySnap = snap;
+        return;
+    }
+
+    int radius = cfg.pixelPartyScanRadius;
+    if (radius < 8) radius = 8;
+    if (radius > 48) radius = 48;
+    int floorY1 = (int)std::floor(py) - 1;
+    int floorY2 = (int)std::floor(py);
+    int floorYs[2] = { floorY1, floorY2 };
+    int pxBlock = (int)std::floor(px);
+    int pzBlock = (int)std::floor(pz);
+
+    double bestDist = -1.0;
+    int bestBx = 0, bestBy = floorY1, bestBz = 0;
+
+    for (int yi = 0; yi < 2; yi++) {
+        int scanY = floorYs[yi];
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dz = -radius; dz <= radius; dz++) {
+                int bx = pxBlock + dx;
+                int bz = pzBlock + dz;
+                jobject worldBlock = nullptr;
+                std::string worldUnloc;
+                if (!LegacyGetBlockAtIsNonAir(env, bx, scanY, bz, &worldBlock, &worldUnloc)) continue;
+                if (!LegacyBlocksMatch(env, heldBlock, heldUnloc, worldBlock, worldUnloc)) {
+                    env->DeleteLocalRef(worldBlock);
+                    continue;
+                }
+                double cx = bx + 0.5 - px;
+                double cz = bz + 0.5 - pz;
+                double hDist = std::sqrt(cx * cx + cz * cz);
+                env->DeleteLocalRef(worldBlock);
+                if (bestDist < 0.0 || hDist < bestDist) {
+                    bestDist = hDist;
+                    bestBx = bx;
+                    bestBy = scanY;
+                    bestBz = bz;
+                }
+            }
+        }
+    }
+
+    env->DeleteLocalRef(heldBlock);
+
+    if (bestDist < 0.0) {
+        snap.status = "No match in range";
+        LockGuard lk(g_pixelPartyMutex);
+        g_pixelPartySnap = snap;
+        return;
+    }
+
+    snap.targetFound = true;
+    snap.tx = bestBx + 0.5;
+    snap.ty = bestBy + 0.5;
+    snap.tz = bestBz + 0.5;
+    snap.dist = bestDist;
+    double toX = snap.tx - px;
+    double toZ = snap.tz - pz;
+    snap.targetYaw = (float)(std::atan2(-toX, toZ) * 57.29577951308232);
+    snap.status = "";
+
+    LockGuard lk(g_pixelPartyMutex);
+    g_pixelPartySnap = snap;
+}
+
 static bool IsSpeedBridgeEdgeUnsupported(JNIEnv* env, const Config& cfg, const GameState& state) {
     if (g_speedBridgeDirX == 0 && g_speedBridgeDirZ == 0) return false;
     double probe = SpeedBridgeSupportProbeDistance(cfg);
@@ -4483,6 +4793,7 @@ GameState ReadGameState(JNIEnv* env) {
             if (g_posYField) s.posY = env->GetDoubleField(player, g_posYField);
             if (g_posZField) s.posZ = env->GetDoubleField(player, g_posZField);
             if (g_rotationPitchField) s.pitch = env->GetFloatField(player, g_rotationPitchField);
+            if (g_rotationYawField) s.rotationYaw = env->GetFloatField(player, g_rotationYawField);
 
             // Check current item
             s.holdingBlock = false;
@@ -4761,6 +5072,102 @@ static void ResetImGuiBackendsForReinit(const char* reason) {
     g_imguiHwnd = nullptr;
     g_imguiWarmupFrames = 0;
     g_glInitialized = false;
+}
+
+static std::string FormatGlError(GLenum err) {
+    std::ostringstream oss;
+    oss << "0x" << std::hex << (unsigned int)err;
+    return oss.str();
+}
+
+static unsigned DrainGlErrors() {
+    unsigned count = 0;
+    for (; count < 32; count++) {
+        GLenum err = glGetError();
+        if (err == GL_NO_ERROR) break;
+    }
+    return count;
+}
+
+static GLenum TakeGlError(const char* label) {
+    GLenum err = glGetError();
+    if (err != GL_NO_ERROR) {
+        Log(std::string("ImGui legacy GL error after ") + (label ? label : "operation") + ": " + FormatGlError(err));
+        DrainGlErrors();
+    }
+    return err;
+}
+
+struct ScopedImGuiGlState {
+    GLint program = 0;
+    GLint activeTexture = 0;
+    GLint texture2d = 0;
+    GLint arrayBuffer = 0;
+    GLint elementArrayBuffer = 0;
+    GLint vertexArray = 0;
+    GLint pixelUnpackBuffer = 0;
+    bool haveVertexArray = false;
+    bool havePixelUnpackBuffer = false;
+
+    ScopedImGuiGlState() {
+        glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+        glGetIntegerv(GL_ACTIVE_TEXTURE, &activeTexture);
+        glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture2d);
+        glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &arrayBuffer);
+        glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &elementArrayBuffer);
+        if (glBindVertexArray_) {
+            glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &vertexArray);
+            haveVertexArray = true;
+        }
+        if (glBindBuffer_) {
+            glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &pixelUnpackBuffer);
+            havePixelUnpackBuffer = true;
+        }
+    }
+
+    void Restore() const {
+        if (glUseProgram_) glUseProgram_((GLuint)program);
+        if (glActiveTexture_) glActiveTexture_((GLenum)activeTexture);
+        glBindTexture(GL_TEXTURE_2D, (GLuint)texture2d);
+        if (glBindBuffer_) {
+            glBindBuffer_(GL_ARRAY_BUFFER, (GLuint)arrayBuffer);
+            glBindBuffer_(GL_ELEMENT_ARRAY_BUFFER, (GLuint)elementArrayBuffer);
+            if (havePixelUnpackBuffer)
+                glBindBuffer_(GL_PIXEL_UNPACK_BUFFER, (GLuint)pixelUnpackBuffer);
+        }
+        if (glBindVertexArray_ && haveVertexArray)
+            glBindVertexArray_((GLuint)vertexArray);
+    }
+};
+
+static void ScheduleLegacyImGuiBackendReset(const char* reason, HGLRC nextRc, bool rateLimit = false) {
+    static DWORD s_nextLogAt = 0;
+    DWORD now = GetTickCount();
+    if (!rateLimit || now >= s_nextLogAt) {
+        s_nextLogAt = now + 5000;
+        Log(std::string("ImGui legacy: scheduling OpenGL backend reset")
+            + (reason && *reason ? std::string(" (") + reason + ")" : std::string()));
+    }
+    g_imguiPendingBackendReset = true;
+    g_imguiPendingGlrc = nextRc;
+    g_imguiWarmupFrames = 3;
+}
+
+static bool PrimeLegacyImGuiBackendFrame() {
+    ImGui_ImplOpenGL3_NewFrame();
+    if (TakeGlError("OpenGL NewFrame during backend prime") != GL_NO_ERROR)
+        return false;
+
+    ImGui_ImplWin32_NewFrame();
+    ImGui::NewFrame();
+    ImGui::Render();
+
+    ImGuiIO& io = ImGui::GetIO();
+    if (io.DisplaySize.x <= 1.0f || io.DisplaySize.y <= 1.0f)
+        return true;
+
+    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+    return TakeGlError("OpenGL RenderDrawData during backend prime") == GL_NO_ERROR;
 }
 
 extern "C" __declspec(dllexport) void Detach() {
@@ -5637,6 +6044,7 @@ void RenderHUD(int winW, int winH) {
     if (cfg.chestStealer)      pushMod("Chest Stealer", ToImU32(theme.accentTertiary));
     if (cfg.nametags)          pushMod("Nametags", ToImU32(theme.accentPrimary));
     if (cfg.gtbHelper)         pushMod("GTB Helper", ToImU32(theme.accentTertiary));
+    if (cfg.pixelPartyAssist)  pushMod("Pixel Party", ToImU32(theme.accentSecondary));
     if (cfg.jitter)            pushMod("Jitter", ToImU32(theme.accentSecondary));
     if (cfg.breakBlocks)       pushMod("Break Blocks", ToImU32(theme.accentTertiary));
     if (cfg.reachEnabled)      pushMod("Reach", ToImU32(theme.accentPrimary));
@@ -6599,6 +7007,91 @@ exit_frame:
     env->PopLocalFrame(nullptr);
 }
 
+void RenderPixelPartyAssist(int w, int h) {
+    bool enabled = false;
+    bool closestAlso = false;
+    {
+        LockGuard lk(g_configMutex);
+        enabled = g_config.pixelPartyAssist;
+        closestAlso = g_config.closestPlayerInfo;
+    }
+    if (!enabled) return;
+
+    PixelPartySnap ppSnap;
+    { LockGuard lk(g_pixelPartyMutex); ppSnap = g_pixelPartySnap; }
+
+    GameState state;
+    { LockGuard lk(g_stateMutex); state = g_gameState; }
+
+    char dirArrow = '^';
+    if (ppSnap.targetFound) {
+        double toX = ppSnap.tx - state.posX;
+        double toZ = ppSnap.tz - state.posZ;
+        std::string dirText = RelativeDirectionText(state.rotationYaw, toX, toZ);
+        if (dirText == "Back") dirArrow = 'v';
+        else if (dirText == "Left") dirArrow = '<';
+        else if (dirText == "Right") dirArrow = '>';
+    }
+
+    char mainRow[128];
+    const char* colorName = ppSnap.colorLabel.empty() ? "?" : ppSnap.colorLabel.c_str();
+    if (ppSnap.targetFound) {
+        snprintf(mainRow, sizeof(mainRow), "%c %s  %.0fm", dirArrow, colorName, (float)ppSnap.dist);
+    } else if (!ppSnap.holdingValid) {
+        snprintf(mainRow, sizeof(mainRow), "Hold terracotta");
+    } else {
+        snprintf(mainRow, sizeof(mainRow), "%s", ppSnap.status.empty() ? "No match" : ppSnap.status.c_str());
+    }
+
+    std::string titleRow = "Pixel Party";
+    std::string subRow;
+    if (!ppSnap.status.empty() && !ppSnap.targetFound)
+        subRow = ppSnap.status;
+
+    ImDrawList* fg = ImGui::GetForegroundDrawList();
+    const float fontSz = ImGui::GetFontSize();
+    const float smallSz = std::floor(fontSz * 0.82f);
+    const float padX = 10.0f;
+    const float padY = 6.0f;
+    const float gapRow = 3.0f;
+    const float boxW = 240.0f;
+
+    ImVec2 titleSz = ImGui::CalcTextSize(titleRow.c_str());
+    ImVec2 mainSz = ImGui::CalcTextSize(mainRow);
+    ImVec2 subSz = subRow.empty() ? ImVec2(0, 0) : ImGui::CalcTextSize(subRow.c_str());
+
+    float contentW = (std::max)(boxW, (std::max)(titleSz.x + padX * 2.0f, (std::max)(mainSz.x + padX * 2.0f, subSz.x + padX * 2.0f)));
+    float contentH = padY + smallSz + gapRow + fontSz + gapRow;
+    if (!subRow.empty()) contentH += smallSz + gapRow;
+    contentH += padY;
+
+    float cx = (float)w * 0.5f;
+    float bottomOffset = closestAlso ? 200.0f : 120.0f;
+    float by = (float)h - bottomOffset;
+    float rx = std::floor(cx - contentW * 0.5f);
+    float ry = std::floor(by - contentH);
+
+    fg->AddRectFilled(ImVec2(rx, ry), ImVec2(rx + contentW, ry + contentH), IM_COL32(10, 10, 18, 210), 6.0f);
+    fg->AddRect(ImVec2(rx, ry), ImVec2(rx + contentW, ry + contentH), IM_COL32(255, 180, 80, 120), 6.0f, 0, 1.0f);
+
+    float curY = ry + padY;
+    float ttx = std::floor(cx - titleSz.x * 0.5f);
+    fg->AddText(ImGui::GetFont(), smallSz, ImVec2(ttx + 1, curY + 1), IM_COL32(0, 0, 0, 160), titleRow.c_str());
+    fg->AddText(ImGui::GetFont(), smallSz, ImVec2(ttx, curY), IM_COL32(255, 200, 120, 245), titleRow.c_str());
+    curY += smallSz + gapRow;
+
+    float mtx = std::floor(cx - mainSz.x * 0.5f);
+    fg->AddText(ImVec2(mtx + 1, curY + 1), IM_COL32(0, 0, 0, 160), mainRow);
+    fg->AddText(ImVec2(mtx, curY), IM_COL32(255, 220, 140, 245), mainRow);
+    curY += fontSz + gapRow;
+
+    if (!subRow.empty()) {
+        float stx = std::floor(cx - subSz.x * 0.5f);
+        fg->AddText(ImGui::GetFont(), smallSz, ImVec2(stx + 1, curY + 1), IM_COL32(0, 0, 0, 160), subRow.c_str());
+        fg->AddText(ImGui::GetFont(), smallSz, ImVec2(stx, curY), IM_COL32(180, 200, 220, 220), subRow.c_str());
+    }
+}
+
 void RenderClosestPlayerInfo(int w, int h) {
     bool enabled = false;
     bool showHealth = true;
@@ -7186,10 +7679,7 @@ BOOL WINAPI HookedSwapBuffers(HDC hdc) {
     }
 
     if (g_imguiInitialized && g_imguiGlBackendReady && g_imguiGlrc && currentRc != g_imguiGlrc) {
-        Log("OpenGL context changed; scheduling legacy ImGui backend reset.");
-        g_imguiPendingBackendReset = true;
-        g_imguiPendingGlrc = currentRc;
-        g_imguiWarmupFrames = 3;
+        ScheduleLegacyImGuiBackendReset("OpenGL context changed", currentRc);
         return CallOriginalSwapBuffers(hdc);
     }
 
@@ -7220,41 +7710,52 @@ BOOL WINAPI HookedSwapBuffers(HDC hdc) {
             glModernLoadedLogged = true;
         }
 
-        GLint last_program = 0;
-        GLint last_active_texture = 0;
-        GLint last_texture_2d = 0;
-        GLint last_array_buffer = 0;
-        GLint last_element_array_buffer = 0;
-        GLint last_vertex_array = 0;
-        GLint last_pixel_unpack_buffer = 0;
-
-        glGetIntegerv(GL_CURRENT_PROGRAM, &last_program);
-        glGetIntegerv(GL_ACTIVE_TEXTURE, &last_active_texture);
-        glGetIntegerv(GL_TEXTURE_BINDING_2D, &last_texture_2d);
-        glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &last_array_buffer);
-        glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &last_element_array_buffer);
-        if (glBindVertexArray_) glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &last_vertex_array);
-        if (glBindBuffer_) glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &last_pixel_unpack_buffer);
+        ScopedImGuiGlState glState;
+        unsigned staleErrors = DrainGlErrors();
+        if (staleErrors > 0)
+            Log("ImGui legacy phase-2: drained " + std::to_string(staleErrors) + " stale GL error(s) before backend init.");
 
         // Let the backend choose the GLSL version for 1.8.9's older GL context.
-        ImGui_ImplOpenGL3_Init(nullptr);
+        bool backendInitOk = ImGui_ImplOpenGL3_Init(nullptr);
+        GLenum initErr = TakeGlError("OpenGL backend init");
+        bool deviceObjectsOk = backendInitOk && ImGui_ImplOpenGL3_CreateDeviceObjects();
+        GLenum deviceErr = TakeGlError("OpenGL device object creation");
+        bool primeOk = deviceObjectsOk && PrimeLegacyImGuiBackendFrame();
 
-        if (glUseProgram_) glUseProgram_((GLuint)last_program);
-        if (glActiveTexture_) glActiveTexture_((GLenum)last_active_texture);
-        glBindTexture(GL_TEXTURE_2D, (GLuint)last_texture_2d);
-        if (glBindBuffer_) {
-            glBindBuffer_(GL_ARRAY_BUFFER, (GLuint)last_array_buffer);
-            glBindBuffer_(GL_ELEMENT_ARRAY_BUFFER, (GLuint)last_element_array_buffer);
-            glBindBuffer_(GL_PIXEL_UNPACK_BUFFER, (GLuint)last_pixel_unpack_buffer);
+        glState.Restore();
+        GLenum restoreErr = TakeGlError("GL state restore after backend init");
+
+        if (!backendInitOk || initErr != GL_NO_ERROR || !deviceObjectsOk || deviceErr != GL_NO_ERROR || !primeOk) {
+            Log(std::string("ImGui legacy phase-2 failed: initOk=") + (backendInitOk ? "true" : "false")
+                + " initErr=" + FormatGlError(initErr)
+                + " deviceObjectsOk=" + (deviceObjectsOk ? "true" : "false")
+                + " deviceErr=" + FormatGlError(deviceErr)
+                + " primeOk=" + (primeOk ? "true" : "false")
+                + " restoreErr=" + FormatGlError(restoreErr));
+
+            if (backendInitOk) {
+                ImGui_ImplOpenGL3_SetSkipGLDeletes(true);
+                ImGui_ImplOpenGL3_Shutdown();
+                ImGui_ImplOpenGL3_SetSkipGLDeletes(false);
+            }
+            g_imguiGlBackendReady = false;
+            g_imguiInitialized = false;
+            g_glInitialized = false;
+            g_imguiWarmupFrames = 3;
+            return CallOriginalSwapBuffers(hdc);
         }
-        if (glBindVertexArray_) glBindVertexArray_((GLuint)last_vertex_array);
 
         g_imguiGlBackendReady = true;
         g_imguiInitialized = true;
         g_glInitialized = true;
         g_imguiGlrc = currentRc;
         g_imguiWarmupFrames = 3;
-        Log("ImGui phase-2 done for legacy bridge (OpenGL backend).");
+        Log("ImGui phase-2 done for legacy bridge (OpenGL backend + device objects primed).");
+        return CallOriginalSwapBuffers(hdc);
+    }
+
+    if (!g_imguiGlBackendReady) {
+        ScheduleLegacyImGuiBackendReset("backend not ready before render", currentRc, true);
         return CallOriginalSwapBuffers(hdc);
     }
 
@@ -7280,7 +7781,12 @@ BOOL WINAPI HookedSwapBuffers(HDC hdc) {
     // Capture game-space matrices before ImGui renders and restores GL state.
     CaptureCurrentRenderMatrices();
 
+    DrainGlErrors();
     ImGui_ImplOpenGL3_NewFrame();
+    if (TakeGlError("OpenGL NewFrame before render") != GL_NO_ERROR) {
+        ScheduleLegacyImGuiBackendReset("OpenGL NewFrame failed before render", currentRc, true);
+        return CallOriginalSwapBuffers(hdc);
+    }
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
 
@@ -7290,6 +7796,7 @@ BOOL WINAPI HookedSwapBuffers(HDC hdc) {
         if (jniTry.owns_lock()) {
             RenderNametags(w, h);
             RenderClosestPlayerInfo(w, h);
+            RenderPixelPartyAssist(w, h);
             RenderChestESP(w, h);
         } else {
             static DWORD nextJniBusyLogAt = 0;
@@ -7307,6 +7814,8 @@ BOOL WINAPI HookedSwapBuffers(HDC hdc) {
     ImGuiIO& io = ImGui::GetIO();
     if (io.DisplaySize.x > 1.0f && io.DisplaySize.y > 1.0f) {
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        if (TakeGlError("OpenGL RenderDrawData") != GL_NO_ERROR)
+            ScheduleLegacyImGuiBackendReset("OpenGL RenderDrawData failed", currentRc, true);
     }
     glFlush();
 
@@ -7568,6 +8077,14 @@ void ParseConfig(const std::string& line) {
         { int v = reader.GetInt("keybindClosestPlayer", -1); if (v >= 0) g_config.keybindClosestPlayer = v; }
         { int v = reader.GetInt("keybindChestEsp", -1);      if (v >= 0) g_config.keybindChestEsp      = v; }
         { int v = reader.GetInt("keybindChestStealer", -1);  if (v >= 0) g_config.keybindChestStealer  = v; }
+
+        g_config.pixelPartyAssist = reader.GetBool("pixelPartyAssist");
+        int ppRadius = reader.GetInt("pixelPartyScanRadius", g_config.pixelPartyScanRadius);
+        if (ppRadius < 8) ppRadius = 8;
+        if (ppRadius > 48) ppRadius = 48;
+        g_config.pixelPartyScanRadius = ppRadius;
+        g_config.pixelPartyAutoLook = reader.GetBool("pixelPartyAutoLook");
+        g_config.pixelPartyAutoWalk = reader.GetBool("pixelPartyAutoWalk");
     }
 }
 
@@ -7639,6 +8156,8 @@ void ServerLoop() {
             {
                 LockGuard jniLk(g_stateJniMutex);
                 state = ReadGameState(env);
+                if (cfgSnapshot.pixelPartyAssist)
+                    UpdatePixelPartyAssistLegacy(env, cfgSnapshot, state);
                 UpdateSpeedBridge(env, cfgSnapshot, state);
                 if (cfgSnapshot.reachEnabled || g_reachAllowCurrentClick || g_reachClickPrevDown) {
                     UpdateReach(env, cfgSnapshot, state);
@@ -7682,8 +8201,25 @@ void ServerLoop() {
             jsonToSend += "\"stateMs\":" + std::to_string(state.stateMs) + ",";
             jsonToSend += "\"chestStealerState\":";
             jsonToSend += state.chestStealerStateJson.empty() ? "null" : state.chestStealerStateJson;
-            jsonToSend += ",";
-            jsonToSend += "\"entities\":";
+
+            PixelPartySnap ppSnap;
+            { LockGuard lk(g_pixelPartyMutex); ppSnap = g_pixelPartySnap; }
+            float ppYawDelta = 0.0f;
+            if (ppSnap.targetFound) {
+                ppYawDelta = ppSnap.targetYaw - state.rotationYaw;
+                while (ppYawDelta > 180.0f) ppYawDelta -= 360.0f;
+                while (ppYawDelta < -180.0f) ppYawDelta += 360.0f;
+            }
+            jsonToSend += ",\"pixelPartyTargetFound\":";
+            jsonToSend += ppSnap.targetFound ? "true" : "false";
+            jsonToSend += ",\"pixelPartyTargetYaw\":";
+            jsonToSend += std::to_string(ppSnap.targetYaw);
+            jsonToSend += ",\"pixelPartyTargetDist\":";
+            jsonToSend += std::to_string((float)ppSnap.dist);
+            jsonToSend += ",\"pixelPartyYawDelta\":";
+            jsonToSend += std::to_string(ppYawDelta);
+
+            jsonToSend += ",\"entities\":";
 
             std::string entitiesJson = "[]";
 

@@ -3,6 +3,7 @@ using System.ComponentModel;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -50,6 +51,7 @@ public partial class MainWindow : Window
         ["triggerbot"] = "Triggerbot",
         ["speedbridge"] = "SpeedBridge",
         ["gtbhelper"] = "GTB Helper",
+        ["pixelpartyassist"] = "Pixel Party Assist",
         ["nametags"] = "Nametags",
         ["chestesp"] = "Chest ESP",
         ["cheststealer"] = "Chest Stealer",
@@ -271,6 +273,7 @@ public partial class MainWindow : Window
         bool triggerbotSupported = IsModuleSupported("triggerbot");
         bool speedBridgeSupported = IsModuleSupported("speedbridge");
         bool gtbSupported = IsModuleSupported("gtbhelper");
+        bool pixelPartySupported = IsModuleSupported("pixelpartyassist");
         bool chestStealerSupported = IsModuleSupported("cheststealer");
         bool reachSupported = IsModuleSupported("reach");
         bool velocitySupported = IsModuleSupported("velocity");
@@ -281,6 +284,7 @@ public partial class MainWindow : Window
         TriggerbotCard.IsEnabled = triggerbotSupported;
         SpeedBridgeCard.IsEnabled = speedBridgeSupported;
         GtbHelperCard.IsEnabled = gtbSupported;
+        PixelPartyAssistCard.IsEnabled = pixelPartySupported;
         ChestStealerCard.IsEnabled = chestStealerSupported;
         ReachCard.IsEnabled = reachSupported;
         VelocityCard.IsEnabled = velocitySupported;
@@ -291,6 +295,7 @@ public partial class MainWindow : Window
         if (!triggerbotSupported && clicker.TriggerbotEnabled) clicker.TriggerbotEnabled = false;
         if (!speedBridgeSupported && clicker.SpeedBridgeEnabled) clicker.SpeedBridgeEnabled = false;
         if (!gtbSupported && clicker.GtbHelperEnabled) clicker.GtbHelperEnabled = false;
+        if (!pixelPartySupported && clicker.PixelPartyAssistEnabled) clicker.PixelPartyAssistEnabled = false;
         if (!chestStealerSupported && clicker.ChestStealerEnabled) clicker.ChestStealerEnabled = false;
         if (!reachSupported && clicker.ReachEnabled) clicker.ReachEnabled = false;
         if (!velocitySupported && clicker.VelocityEnabled) clicker.VelocityEnabled = false;
@@ -307,11 +312,15 @@ public partial class MainWindow : Window
         GtbHelperAvailabilityText.Text = gtbSupported
             ? "Hypixel Guess The Build helper using action-bar hints."
             : "Unavailable on current bridge";
+        PixelPartyAssistAvailabilityText.Text = pixelPartySupported
+            ? "Hypixel Pixel Party: finds the closest matching terracotta on the floor."
+            : "Unavailable on current bridge";
 
         KeybindAimAssistButton.IsEnabled = aimAssistSupported;
         KeybindTriggerbotButton.IsEnabled = triggerbotSupported;
         KeybindSpeedBridgeButton.IsEnabled = speedBridgeSupported;
         KeybindGtbHelperButton.IsEnabled = gtbSupported;
+        KeybindPixelPartyAssistButton.IsEnabled = pixelPartySupported;
         KeybindChestStealerButton.IsEnabled = chestStealerSupported;
         KeybindReachButton.IsEnabled = reachSupported;
         KeybindVelocityButton.IsEnabled = velocitySupported;
@@ -483,23 +492,49 @@ public partial class MainWindow : Window
     
     private async void InjectButton_Click(object sender, RoutedEventArgs e)
     {
-        InjectButton.IsEnabled = false;
+        await RunInjectionAsync();
+    }
+
+    private async void CustomInjectButton_Click(object sender, RoutedEventArgs e)
+    {
+        var picker = new WindowPickerDialog
+        {
+            Owner = this
+        };
+
+        if (picker.ShowDialog() != true || picker.SelectedTarget == null)
+            return;
+
+        await RunInjectionAsync(
+            picker.SelectedVersion,
+            picker.SelectedTarget.ProcessId,
+            picker.SelectedTarget.Hwnd);
+    }
+
+    private async Task RunInjectionAsync(string version = "auto", int? targetPid = null, IntPtr? targetHwnd = null)
+    {
+        SetInjectionButtonsEnabled(false);
         InjectButton.Content = "...";
         InjectionStatusText.Text = "Status: Connecting...";
-        
-        LogUi("InjectButton_Click: version=auto");
-        bool success = await GameStateClient.Instance.InjectAsync();
+
+        LogUi($"RunInjectionAsync: version={version} pid={targetPid?.ToString() ?? "auto"}");
+        bool success = await GameStateClient.Instance.InjectAsync(version, targetPid, targetHwnd);
 
         LogUi($"InjectAsync returned: success={success} IsConnected={GameStateClient.Instance.IsConnected} InjectedVersion={GameStateClient.Instance.InjectedVersion}");
 
         if (success)
             EnterControlMode();
-        
-        InjectButton.Content = success ? "Connected" : "Inject";
-        InjectButton.IsEnabled = !success;
-        
-        // Force UI update immediately
+
+        InjectButton.Content = success ? "Connected" : "Inject into Lunar Client";
+        SetInjectionButtonsEnabled(!success);
+
         UpdateGameStateUI();
+    }
+
+    private void SetInjectionButtonsEnabled(bool enabled)
+    {
+        InjectButton.IsEnabled = enabled;
+        CustomInjectButton.IsEnabled = enabled;
     }
 
     private void UpdateGameStateUI()
@@ -522,7 +557,7 @@ public partial class MainWindow : Window
                         InjectionProgressBar.Visibility = Visibility.Collapsed;
                         InjectionProgressBar.Value = 100;
                         InjectButton.Content = "Connected";
-                        InjectButton.IsEnabled = false;
+                        SetInjectionButtonsEnabled(false);
 
                         EnsureControlModeIfNeeded(gs);
                         UpdateVersionAvailabilityUi();
@@ -536,8 +571,8 @@ public partial class MainWindow : Window
 
                         if (!InjectButton.IsEnabled && !gs.IsInjected)
                         {
-                            InjectButton.IsEnabled = true;
-                            InjectButton.Content = "Inject";
+                            SetInjectionButtonsEnabled(true);
+                            InjectButton.Content = "Inject into Lunar Client";
                         }
                     }
 
@@ -629,6 +664,7 @@ public partial class MainWindow : Window
         SetKeybindButtonContent(KeybindTriggerbotButton, "triggerbot");
         SetKeybindButtonContent(KeybindSpeedBridgeButton, "speedbridge");
         SetKeybindButtonContent(KeybindGtbHelperButton, "gtbhelper");
+        SetKeybindButtonContent(KeybindPixelPartyAssistButton, "pixelpartyassist");
         SetKeybindButtonContent(KeybindNametagsButton, "nametags");
         SetKeybindButtonContent(KeybindChestEspButton, "chestesp");
         SetKeybindButtonContent(KeybindChestStealerButton, "cheststealer");

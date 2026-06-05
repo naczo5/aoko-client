@@ -42,6 +42,10 @@ public class Profile
     public bool SpeedBridgeHoldingShiftOnly { get; set; } = true;
     public bool SpeedBridgeLookingDownOnly { get; set; } = true;
     public bool GtbHelperEnabled { get; set; } = false;
+    public bool PixelPartyAssistEnabled { get; set; } = false;
+    public int PixelPartyScanRadius { get; set; } = 28;
+    public bool PixelPartyAutoLookEnabled { get; set; } = false;
+    public bool PixelPartyAutoWalkEnabled { get; set; } = false;
     public bool NametagsEnabled { get; set; } = false;
     public bool ShowModuleList { get; set; } = true;
     public bool ClosestPlayerInfoEnabled { get; set; } = false;
@@ -84,6 +88,7 @@ public class Profile
         ["triggerbot"]    = 0,
         ["speedbridge"]   = 0,
         ["gtbhelper"]     = 0,
+        ["pixelpartyassist"] = 0,
         ["nametags"]      = 0,
         ["closestplayer"] = 0,
         ["chestesp"]      = 0,
@@ -255,6 +260,10 @@ public static class ProfileManager
             SpeedBridgeHoldingShiftOnly = clicker.SpeedBridgeHoldingShiftOnly,
             SpeedBridgeLookingDownOnly = clicker.SpeedBridgeLookingDownOnly,
             GtbHelperEnabled = clicker.GtbHelperEnabled,
+            PixelPartyAssistEnabled = clicker.PixelPartyAssistEnabled,
+            PixelPartyScanRadius = clicker.PixelPartyScanRadius,
+            PixelPartyAutoLookEnabled = clicker.PixelPartyAutoLookEnabled,
+            PixelPartyAutoWalkEnabled = clicker.PixelPartyAutoWalkEnabled,
             NametagsEnabled = clicker.NametagsEnabled,
             ShowModuleList = clicker.ShowModuleList,
             ClosestPlayerInfoEnabled = clicker.ClosestPlayerInfoEnabled,
@@ -335,6 +344,10 @@ public static class ProfileManager
         clicker.SpeedBridgeHoldingShiftOnly = profile.SpeedBridgeHoldingShiftOnly;
         clicker.SpeedBridgeLookingDownOnly = profile.SpeedBridgeLookingDownOnly;
         clicker.GtbHelperEnabled = profile.GtbHelperEnabled;
+        clicker.PixelPartyAssistEnabled = profile.PixelPartyAssistEnabled;
+        clicker.PixelPartyScanRadius = profile.PixelPartyScanRadius;
+        clicker.PixelPartyAutoLookEnabled = profile.PixelPartyAutoLookEnabled;
+        clicker.PixelPartyAutoWalkEnabled = profile.PixelPartyAutoWalkEnabled;
         clicker.NametagsEnabled = profile.NametagsEnabled;
         clicker.ShowModuleList = profile.ShowModuleList;
         clicker.ClosestPlayerInfoEnabled = profile.ClosestPlayerInfoEnabled;

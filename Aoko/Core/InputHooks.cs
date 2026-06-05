@@ -134,6 +134,7 @@ public static class InputHooks
             case "triggerbot":    c.TriggerbotEnabled = !c.TriggerbotEnabled; break;
             case "speedbridge":   c.SpeedBridgeEnabled = !c.SpeedBridgeEnabled; break;
             case "gtbhelper":     c.GtbHelperEnabled = !c.GtbHelperEnabled; break;
+            case "pixelpartyassist": c.PixelPartyAssistEnabled = !c.PixelPartyAssistEnabled; break;
             case "nametags":      c.NametagsEnabled             = !c.NametagsEnabled;             break;
             case "closestplayer": c.ClosestPlayerInfoEnabled    = !c.ClosestPlayerInfoEnabled;    break;
             case "chestesp":      c.ChestEspEnabled             = !c.ChestEspEnabled;             break;

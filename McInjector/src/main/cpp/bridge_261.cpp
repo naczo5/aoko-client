@@ -170,6 +170,10 @@ struct Config {
     bool  autoTotemElytra = true;
     int   autoTotemDelay = 0;
     int   autoTotemBehaviorMode = 0; // 0=Ghost (inventory only), 1=Anarchy
+    bool  pixelPartyAssist = false;
+    int   pixelPartyScanRadius = 28;
+    bool  pixelPartyAutoLook = false;
+    bool  pixelPartyAutoWalk = false;
 };
 static Config g_config;
 static Mutex  g_configMutex;
@@ -238,6 +242,10 @@ static void ParseConfig(const std::string& line) {
     g_config.autoTotemElytra = reader.GetBool("autoTotemElytra");
     g_config.autoTotemDelay = lc::ClampInt(reader.GetInt("autoTotemDelay", 0), 0, 20);
     g_config.autoTotemBehaviorMode = lc::ClampInt(reader.GetInt("autoTotemBehaviorMode", 0), 0, 1);
+    g_config.pixelPartyAssist = reader.GetBool("pixelPartyAssist");
+    g_config.pixelPartyScanRadius = lc::ClampInt(reader.GetInt("pixelPartyScanRadius", g_config.pixelPartyScanRadius), 8, 48);
+    g_config.pixelPartyAutoLook = reader.GetBool("pixelPartyAutoLook");
+    g_config.pixelPartyAutoWalk = reader.GetBool("pixelPartyAutoWalk");
     g_config.reloadMappingsNonce = reader.GetInt("reloadMappingsNonce", g_config.reloadMappingsNonce);
     bool reloadPulse = (g_config.reloadMappingsNonce != prevReloadNonce);
     TRACE261_BRANCH("reloadMappingsPulse", reloadPulse);
@@ -769,6 +777,24 @@ struct ChestData121 { double x, y, z; double dist; };
 static std::vector<ChestData121> g_chestList;
 static Mutex g_chestListMutex;
 static DWORD g_lastChestScanMs = 0;
+
+struct PixelPartySnap121 {
+    bool active = false;
+    bool holdingValid = false;
+    bool targetFound = false;
+    double tx = 0, ty = 0, tz = 0;
+    double dist = -1.0;
+    float targetYaw = 0.0f;
+    std::string colorLabel;
+    std::string status;
+};
+static PixelPartySnap121 g_pixelPartySnap;
+static Mutex g_pixelPartyMutex;
+static DWORD g_lastPixelPartyUpdateMs = 0;
+
+static jmethodID g_blockItemGetBlock_121 = nullptr;
+static jclass    g_blockItemClass_121 = nullptr;
+static bool      g_loggedPixelPartyResolveFail_121 = false;
 // Chunk-based block entity access (1.21: no flat list on world, BEs live in WorldChunk.blockEntities Map)
 static jmethodID g_worldGetChunkMethod_121       = nullptr; // World.getChunk(II) -> WorldChunk
 static jfieldID  g_chunkBlockEntitiesMapField_121 = nullptr; // WorldChunk.blockEntities: Map<BlockPos,BE>
@@ -2646,6 +2672,340 @@ static bool IsSolidBlockAt121(JNIEnv* env, double x, double y, double z) {
     }
     env->DeleteLocalRef(state);
     return solid;
+}
+
+static std::string PixelPartyGetBlockDescriptionId(JNIEnv* env, jobject block) {
+    if (!env || !block) return "";
+    EnsureChestStateDetectionCaches(env, nullptr);
+    if (!g_blockGetTranslationKey_121) return "";
+    jstring js = (jstring)env->CallObjectMethod(block, g_blockGetTranslationKey_121);
+    if (env->ExceptionCheck() || !js) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return "";
+    }
+    const char* utf = env->GetStringUTFChars(js, nullptr);
+    std::string out = utf ? utf : "";
+    if (utf) env->ReleaseStringUTFChars(js, utf);
+    env->DeleteLocalRef(js);
+    return out;
+}
+
+static std::string PixelPartyFormatColorLabel(const std::string& descId) {
+    if (descId.empty()) return "terracotta";
+    size_t dot = descId.rfind('.');
+    std::string name = (dot != std::string::npos) ? descId.substr(dot + 1) : descId;
+    const std::string suffix = "_terracotta";
+    if (name.size() > suffix.size() && name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0)
+        name = name.substr(0, name.size() - suffix.size());
+    if (name == "terracotta") return "white";
+    return name;
+}
+
+static bool PixelPartyIsTerracottaDesc(const std::string& descId) {
+    return descId.find("terracotta") != std::string::npos;
+}
+
+static bool GetBlockAt121IsNonAir(JNIEnv* env, int bx, int by, int bz, jobject* outBlock, std::string* outDescId) {
+    if (outBlock) *outBlock = nullptr;
+    if (outDescId) outDescId->clear();
+
+    if (!env || !g_mcInstance || !g_worldField_121) return false;
+
+    jobject world = env->GetObjectField(g_mcInstance, g_worldField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return false; }
+    if (!world) return false;
+
+    EnsureSpeedBridgeBlockProbeJni(env, world, nullptr);
+    if (!g_blockPosClass_121 || !g_speedBridgeBlockPosCtor_121 || !g_speedBridgeWorldGetBlockState_121) {
+        env->DeleteLocalRef(world);
+        return false;
+    }
+
+    jobject pos = env->NewObject(g_blockPosClass_121, g_speedBridgeBlockPosCtor_121, (jint)bx, (jint)by, (jint)bz);
+    if (env->ExceptionCheck() || !pos) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        env->DeleteLocalRef(world);
+        return false;
+    }
+
+    jobject state = env->CallObjectMethod(world, g_speedBridgeWorldGetBlockState_121, pos);
+    env->DeleteLocalRef(pos);
+    env->DeleteLocalRef(world);
+    if (env->ExceptionCheck() || !state) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return false;
+    }
+
+    if (g_speedBridgeBlockStateIsAir_121) {
+        jboolean isAir = env->CallBooleanMethod(state, g_speedBridgeBlockStateIsAir_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); env->DeleteLocalRef(state); return false; }
+        if (isAir == JNI_TRUE) { env->DeleteLocalRef(state); return false; }
+    }
+
+    EnsureChestStateDetectionCaches(env, nullptr);
+    jobject block = nullptr;
+    if (g_stateGetBlock_121) {
+        block = env->CallObjectMethod(state, g_stateGetBlock_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); block = nullptr; }
+    }
+    env->DeleteLocalRef(state);
+    if (!block) return false;
+
+    if (outDescId) *outDescId = PixelPartyGetBlockDescriptionId(env, block);
+    if (outBlock) *outBlock = block;
+    else env->DeleteLocalRef(block);
+    return true;
+}
+
+static void EnsurePixelPartyJni(JNIEnv* env) {
+    if (!env) return;
+    if (!g_blockItemClass_121) {
+        const char* names[] = {
+            "net.minecraft.world.item.BlockItem",
+            "net.minecraft.item.BlockItem",
+            "net.minecraft.class_1747",
+            nullptr
+        };
+        for (int i = 0; names[i] && !g_blockItemClass_121; i++) {
+            jclass c = LoadClassWithLoader(env, g_gameClassLoader, names[i]);
+            if (!c) {
+                std::string alt = names[i];
+                std::replace(alt.begin(), alt.end(), '.', '/');
+                c = env->FindClass(alt.c_str());
+                if (env->ExceptionCheck()) { env->ExceptionClear(); c = nullptr; }
+            }
+            if (c) { g_blockItemClass_121 = (jclass)env->NewGlobalRef(c); env->DeleteLocalRef(c); }
+        }
+    }
+    if (g_blockItemClass_121 && !g_blockItemGetBlock_121) {
+        const char* names[] = { "getBlock", "method_7711", nullptr };
+        const char* sigs[] = {
+            "()Lnet/minecraft/world/level/block/Block;",
+            "()Lnet/minecraft/class_2248;",
+            "()Lnet/minecraft/block/Block;",
+            nullptr
+        };
+        for (int ni = 0; names[ni] && !g_blockItemGetBlock_121; ni++) {
+            for (int si = 0; sigs[si] && !g_blockItemGetBlock_121; si++) {
+                g_blockItemGetBlock_121 = env->GetMethodID(g_blockItemClass_121, names[ni], sigs[si]);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_blockItemGetBlock_121 = nullptr; }
+            }
+        }
+        if (!g_blockItemGetBlock_121 && g_blockClass_121) {
+            g_blockItemGetBlock_121 = FindZeroArgMethodReturningClass(env, g_blockItemClass_121, g_blockClass_121, nullptr, nullptr, "()Ljava/lang/Object;");
+        }
+    }
+    EnsureChestStateDetectionCaches(env, nullptr);
+}
+
+static bool ResolveHeldTerracottaBlock(JNIEnv* env, jobject player,
+    jobject* outBlock, std::string* outDescId, std::string* outLabel) {
+    if (outBlock) *outBlock = nullptr;
+    if (outDescId) outDescId->clear();
+    if (outLabel) outLabel->clear();
+    if (!env || !player) return false;
+
+    EnsurePixelPartyJni(env);
+    if (!g_blockItemClass_121 || !g_blockItemGetBlock_121) {
+        if (!g_loggedPixelPartyResolveFail_121) {
+            g_loggedPixelPartyResolveFail_121 = true;
+            Log("PixelParty JNI unresolved: BlockItem=" + std::to_string(g_blockItemClass_121 ? 1 : 0) +
+                " getBlock=" + std::to_string(g_blockItemGetBlock_121 ? 1 : 0));
+        }
+        return false;
+    }
+
+    static jmethodID s_getMainHand = nullptr;
+    jclass plCls = env->GetObjectClass(player);
+    if (!plCls) return false;
+    if (!s_getMainHand) {
+        const char* names[] = { "getMainHandItem", "getMainHandStack", "method_6047", nullptr };
+        const char* sigs[] = { "()Lnet/minecraft/world/item/ItemStack;", "()Lnet/minecraft/class_1799;", nullptr };
+        for (int ni = 0; names[ni] && !s_getMainHand; ni++) {
+            for (int si = 0; sigs[si] && !s_getMainHand; si++) {
+                s_getMainHand = env->GetMethodID(plCls, names[ni], sigs[si]);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); s_getMainHand = nullptr; }
+            }
+        }
+    }
+    env->DeleteLocalRef(plCls);
+    if (!s_getMainHand) return false;
+
+    jobject stackObj = env->CallObjectMethod(player, s_getMainHand);
+    if (env->ExceptionCheck() || !stackObj) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return false;
+    }
+
+    static jmethodID s_getItem = nullptr;
+    jclass stCls = env->GetObjectClass(stackObj);
+    if (stCls) {
+        if (!s_getItem) {
+            const char* names[] = { "getItem", "method_7909", nullptr };
+            const char* sigs[] = {
+                "()Lnet/minecraft/world/item/Item;",
+                "()Lnet/minecraft/class_1792;",
+                nullptr
+            };
+            for (int ni = 0; names[ni] && !s_getItem; ni++) {
+                for (int si = 0; sigs[si] && !s_getItem; si++) {
+                    s_getItem = env->GetMethodID(stCls, names[ni], sigs[si]);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); s_getItem = nullptr; }
+                }
+            }
+        }
+        env->DeleteLocalRef(stCls);
+    }
+    if (!s_getItem) { env->DeleteLocalRef(stackObj); return false; }
+
+    jobject itemObj = env->CallObjectMethod(stackObj, s_getItem);
+    env->DeleteLocalRef(stackObj);
+    if (env->ExceptionCheck() || !itemObj) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return false;
+    }
+
+    if (env->IsInstanceOf(itemObj, g_blockItemClass_121) != JNI_TRUE) {
+        env->DeleteLocalRef(itemObj);
+        return false;
+    }
+
+    jobject block = env->CallObjectMethod(itemObj, g_blockItemGetBlock_121);
+    env->DeleteLocalRef(itemObj);
+    if (env->ExceptionCheck() || !block) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return false;
+    }
+
+    std::string descId = PixelPartyGetBlockDescriptionId(env, block);
+    if (!PixelPartyIsTerracottaDesc(descId)) {
+        env->DeleteLocalRef(block);
+        return false;
+    }
+
+    if (outDescId) *outDescId = descId;
+    if (outLabel) *outLabel = PixelPartyFormatColorLabel(descId);
+    if (outBlock) *outBlock = block;
+    else env->DeleteLocalRef(block);
+    return true;
+}
+
+static bool BlocksMatch121(JNIEnv* env, jobject heldBlock, const std::string& heldDescId, jobject worldBlock, const std::string& worldDescId) {
+    if (!env || !heldBlock || !worldBlock) return false;
+    if (env->IsSameObject(heldBlock, worldBlock) == JNI_TRUE) return true;
+    if (!heldDescId.empty() && heldDescId == worldDescId) return true;
+    return false;
+}
+
+static void UpdatePixelPartyAssist(JNIEnv* env, const Config& cfg) {
+    DWORD now = GetTickCount();
+    if (now - g_lastPixelPartyUpdateMs < 100) return;
+    g_lastPixelPartyUpdateMs = now;
+
+    PixelPartySnap121 snap;
+    snap.active = true;
+
+    if (!env || !g_mcInstance || !g_playerField_121 || !g_worldField_121) {
+        snap.status = "Waiting for world...";
+        LockGuard lk(g_pixelPartyMutex);
+        g_pixelPartySnap = snap;
+        return;
+    }
+
+    jobject selfObj = env->GetObjectField(g_mcInstance, g_playerField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); selfObj = nullptr; }
+    if (!selfObj) {
+        snap.status = "No player";
+        LockGuard lk(g_pixelPartyMutex);
+        g_pixelPartySnap = snap;
+        return;
+    }
+
+    EnsureEntityMethods(env, selfObj);
+    if (!g_getX_121 || !g_getY_121 || !g_getZ_121) {
+        env->DeleteLocalRef(selfObj);
+        snap.status = "Position unavailable";
+        LockGuard lk(g_pixelPartyMutex);
+        g_pixelPartySnap = snap;
+        return;
+    }
+
+    double px = CallDoubleNoArgs(env, selfObj, g_getX_121);
+    double py = CallDoubleNoArgs(env, selfObj, g_getY_121);
+    double pz = CallDoubleNoArgs(env, selfObj, g_getZ_121);
+
+    jobject heldBlock = nullptr;
+    std::string heldDescId;
+    snap.holdingValid = ResolveHeldTerracottaBlock(env, selfObj, &heldBlock, &heldDescId, &snap.colorLabel);
+    env->DeleteLocalRef(selfObj);
+
+    if (!snap.holdingValid || !heldBlock) {
+        if (heldBlock) env->DeleteLocalRef(heldBlock);
+        snap.status = "Hold matching terracotta";
+        LockGuard lk(g_pixelPartyMutex);
+        g_pixelPartySnap = snap;
+        return;
+    }
+
+    int radius = cfg.pixelPartyScanRadius;
+    int floorY1 = (int)std::floor(py) - 1;
+    int floorY2 = (int)std::floor(py);
+    int floorYs[2] = { floorY1, floorY2 };
+
+    double bestDist = -1.0;
+    int bestBx = 0, bestBy = floorY1, bestBz = 0;
+
+    int pxBlock = (int)std::floor(px);
+    int pzBlock = (int)std::floor(pz);
+
+    for (int yi = 0; yi < 2; yi++) {
+        int scanY = floorYs[yi];
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dz = -radius; dz <= radius; dz++) {
+                int bx = pxBlock + dx;
+                int bz = pzBlock + dz;
+                jobject worldBlock = nullptr;
+                std::string worldDescId;
+                if (!GetBlockAt121IsNonAir(env, bx, scanY, bz, &worldBlock, &worldDescId)) continue;
+                if (!BlocksMatch121(env, heldBlock, heldDescId, worldBlock, worldDescId)) {
+                    env->DeleteLocalRef(worldBlock);
+                    continue;
+                }
+                double cx = bx + 0.5 - px;
+                double cz = bz + 0.5 - pz;
+                double hDist = std::sqrt(cx * cx + cz * cz);
+                env->DeleteLocalRef(worldBlock);
+                if (bestDist < 0.0 || hDist < bestDist) {
+                    bestDist = hDist;
+                    bestBx = bx;
+                    bestBy = scanY;
+                    bestBz = bz;
+                }
+            }
+        }
+    }
+
+    env->DeleteLocalRef(heldBlock);
+
+    if (bestDist < 0.0) {
+        snap.status = "No match in range";
+        LockGuard lk(g_pixelPartyMutex);
+        g_pixelPartySnap = snap;
+        return;
+    }
+
+    snap.targetFound = true;
+    snap.tx = bestBx + 0.5;
+    snap.ty = bestBy + 0.5;
+    snap.tz = bestBz + 0.5;
+    snap.dist = bestDist;
+    double toX = snap.tx - px;
+    double toZ = snap.tz - pz;
+    snap.targetYaw = (float)(std::atan2(-toX, toZ) * 57.29577951308232);
+    snap.status = "";
+
+    LockGuard lk(g_pixelPartyMutex);
+    g_pixelPartySnap = snap;
 }
 
 static bool IsSpeedBridgeEdgeUnsupported121(JNIEnv* env, const Config& cfg, double posX, double posY, double posZ) {
@@ -6599,6 +6959,129 @@ static void CleanupImGuiAndHooks() {
     MH_Uninitialize();
 }
 
+static std::string FormatGlError(GLenum err) {
+    std::ostringstream oss;
+    oss << "0x" << std::hex << (unsigned int)err;
+    return oss.str();
+}
+
+static unsigned DrainGlErrors() {
+    unsigned count = 0;
+    for (; count < 32; count++) {
+        GLenum err = glGetError();
+        if (err == GL_NO_ERROR) break;
+    }
+    return count;
+}
+
+static GLenum TakeGlError(const char* label) {
+    GLenum err = glGetError();
+    if (err != GL_NO_ERROR) {
+        Log(std::string("ImGui GL error after ") + (label ? label : "operation") + ": " + FormatGlError(err));
+        DrainGlErrors();
+    }
+    return err;
+}
+
+struct ScopedImGuiGlState {
+    GLint program = 0;
+    GLint activeTexture = 0;
+    GLint texture2d = 0;
+    GLint arrayBuffer = 0;
+    GLint elementArrayBuffer = 0;
+    GLint vertexArray = 0;
+    GLint pixelUnpackBuffer = 0;
+    bool haveVertexArray = false;
+    bool havePixelUnpackBuffer = false;
+
+    ScopedImGuiGlState() {
+        glGetIntegerv(GL_CURRENT_PROGRAM, &program);
+        glGetIntegerv(GL_ACTIVE_TEXTURE, &activeTexture);
+        glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture2d);
+        glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &arrayBuffer);
+        glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &elementArrayBuffer);
+        if (glBindVertexArray_) {
+            glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &vertexArray);
+            haveVertexArray = true;
+        }
+        if (glBindBuffer_) {
+            glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &pixelUnpackBuffer);
+            havePixelUnpackBuffer = true;
+        }
+    }
+
+    void Restore() const {
+        if (glUseProgram_) glUseProgram_((GLuint)program);
+        if (glActiveTexture_) glActiveTexture_((GLenum)activeTexture);
+        glBindTexture(GL_TEXTURE_2D, (GLuint)texture2d);
+        if (glBindBuffer_) {
+            glBindBuffer_(GL_ARRAY_BUFFER, (GLuint)arrayBuffer);
+            glBindBuffer_(GL_ELEMENT_ARRAY_BUFFER, (GLuint)elementArrayBuffer);
+            if (havePixelUnpackBuffer)
+                glBindBuffer_(GL_PIXEL_UNPACK_BUFFER, (GLuint)pixelUnpackBuffer);
+        }
+        if (glBindVertexArray_ && haveVertexArray)
+            glBindVertexArray_((GLuint)vertexArray);
+    }
+};
+
+static void ResetModernImGuiBackendsForReinit(const char* reason) {
+    if (reason && *reason)
+        Log(std::string("ImGui: resetting backends for reinit (") + reason + ").");
+
+    if (g_imguiPhase1Done) {
+        ImGui_ImplWin32_Shutdown();
+    }
+    if (g_imguiGlBackendReady || g_imguiInitialized) {
+        ImGui_ImplOpenGL3_SetSkipGLDeletes(true);
+        ImGui_ImplOpenGL3_Shutdown();
+        ImGui_ImplOpenGL3_SetSkipGLDeletes(false);
+    }
+    if (ImGui::GetCurrentContext()) {
+        ImGui::DestroyContext();
+    }
+
+    g_imguiPhase1Done = false;
+    g_imguiInitialized = false;
+    g_imguiGlBackendReady = false;
+    g_imguiPendingBackendReset = false;
+    g_imguiPendingGlrc = nullptr;
+    g_imguiGlrc = nullptr;
+    g_hwnd = nullptr;
+    g_imguiWarmupFrames = 0;
+    g_realGuiOpen = false;
+}
+
+static void ScheduleModernImGuiBackendReset(const char* reason, HGLRC nextRc, bool rateLimit = false) {
+    static DWORD s_nextLogAt = 0;
+    DWORD now = GetTickCount();
+    if (!rateLimit || now >= s_nextLogAt) {
+        s_nextLogAt = now + 5000;
+        Log(std::string("ImGui: scheduling OpenGL backend reset")
+            + (reason && *reason ? std::string(" (") + reason + ")" : std::string()));
+    }
+    g_imguiPendingBackendReset = true;
+    g_imguiPendingGlrc = nextRc;
+    g_imguiWarmupFrames = 3;
+}
+
+static bool PrimeModernImGuiBackendFrame() {
+    ImGui_ImplOpenGL3_NewFrame();
+    if (TakeGlError("OpenGL NewFrame during backend prime") != GL_NO_ERROR)
+        return false;
+
+    ImGui_ImplWin32_NewFrame();
+    ImGui::NewFrame();
+    ImGui::Render();
+
+    ImGuiIO& io = ImGui::GetIO();
+    if (io.DisplaySize.x <= 1.0f || io.DisplaySize.y <= 1.0f)
+        return true;
+
+    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+    return TakeGlError("OpenGL RenderDrawData during backend prime") == GL_NO_ERROR;
+}
+
 extern "C" __declspec(dllexport) void Detach() {
     Log("Detach requested (26.1)");
     g_running = false;
@@ -8475,6 +8958,8 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
 
                 if (cfg.closestPlayer)
                     UpdateClosestPlayerOverlay(env);
+                if (cfg.pixelPartyAssist)
+                    UpdatePixelPartyAssist(env, cfg);
                 if (cfg.nametags || cfg.closestPlayer || cfg.aimAssist || cfg.nametagHideVanilla || g_nametagSuppressionActive_121)
                     UpdatePlayerListOverlay(env);
                 if (cfg.chestEsp || cfg.chestStealer)
@@ -8491,6 +8976,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                 { LockGuard lk(g_playerListMutex); g_playerList.clear(); }
                 { LockGuard lk2(g_chestListMutex); g_chestList.clear(); }
                 { LockGuard lk3(g_bgCamMutex); g_bgCamState = BgCamState(); }
+                { LockGuard lk4(g_pixelPartyMutex); g_pixelPartySnap = PixelPartySnap121(); }
             }
         } else {
             if (g_nametagSuppressionActive_121 || !g_modifiedTeamVisibility_121.empty() || !g_lcHideTagsMembers_121.empty()) {
@@ -8536,6 +9022,12 @@ BOOL WINAPI hwglSwapBuffers(HDC hDc) {
     bool isGlfwGameWindow = TRACE261_IF("isGlfwGameWindow", strcmp(cls, "GLFW30") == 0);
     if (!isGlfwGameWindow)
         return o_wglSwapBuffers(hDc);
+
+    if (g_imguiPhase1Done && g_hwnd && window != g_hwnd) {
+        TRACE261_PATH("imgui-window-changed-reset");
+        ResetModernImGuiBackendsForReinit("window changed");
+        return o_wglSwapBuffers(hDc);
+    }
 
     // ── Phase 1: ImGui context + Win32 backend (NO OpenGL calls at all) ──
     // Runs on the very first GLFW swap call.  We must not touch GL here so the
@@ -8623,10 +9115,7 @@ BOOL WINAPI hwglSwapBuffers(HDC hDc) {
     // context can corrupt Minecraft/Lunar rendering and may trigger nvoglv64.dll crashes.
     if (g_imguiInitialized && g_imguiGlBackendReady && g_imguiGlrc && currentRc != g_imguiGlrc) {
         TRACE261_PATH("imgui-glrc-changed-schedule-reset");
-        Log("OpenGL context changed; scheduling ImGui OpenGL backend reset.");
-        g_imguiPendingBackendReset = true;
-        g_imguiPendingGlrc = currentRc;
-        g_imguiWarmupFrames = 3;
+        ScheduleModernImGuiBackendReset("OpenGL context changed", currentRc);
         return o_wglSwapBuffers(hDc);
     }
 
@@ -8646,6 +9135,12 @@ BOOL WINAPI hwglSwapBuffers(HDC hDc) {
         return o_wglSwapBuffers(hDc);
     }
 
+    if (g_imguiInitialized && !ImGui::GetCurrentContext()) {
+        TRACE261_PATH("imgui-missing-context-reset");
+        ResetModernImGuiBackendsForReinit("missing ImGui context");
+        return o_wglSwapBuffers(hDc);
+    }
+
     // ── Phase 2: OpenGL 3.3 backend init (compiles shaders, uploads font atlas) ──
     // Runs on a SEPARATE frame well after phase 1.  We return immediately after
     // so the driver only sees our GL init work, with no rendering or ImGui draw
@@ -8661,53 +9156,51 @@ BOOL WINAPI hwglSwapBuffers(HDC hDc) {
 
         // ImGui init can touch GL bindings. Backup/restore the critical state so we don't
         // leave Minecraft/Lunar in a weird state for the next frame.
-        GLint last_program = 0;
-        GLint last_active_texture = 0;
-        GLint last_texture_2d = 0;
-        GLint last_array_buffer = 0;
-        GLint last_element_array_buffer = 0;
-        GLint last_vertex_array = 0;
-    #ifdef GL_PIXEL_UNPACK_BUFFER_BINDING
-        GLint last_pixel_unpack_buffer = 0;
-    #endif
+        ScopedImGuiGlState glState;
 
-        glGetIntegerv(GL_CURRENT_PROGRAM, &last_program);
-        glGetIntegerv(GL_ACTIVE_TEXTURE, &last_active_texture);
-        glGetIntegerv(GL_TEXTURE_BINDING_2D, &last_texture_2d);
-        glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &last_array_buffer);
-        glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &last_element_array_buffer);
-    #ifdef GL_VERTEX_ARRAY_BINDING
-        glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &last_vertex_array);
-    #endif
-    #ifdef GL_PIXEL_UNPACK_BUFFER_BINDING
-        glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &last_pixel_unpack_buffer);
-    #endif
+        unsigned staleErrors = DrainGlErrors();
+        if (staleErrors > 0)
+            Log("ImGui phase-2: drained " + std::to_string(staleErrors) + " stale GL error(s) before backend init.");
 
-        ImGui_ImplOpenGL3_Init("#version 330 core");
+        bool backendInitOk = ImGui_ImplOpenGL3_Init("#version 330 core");
+        GLenum initErr = TakeGlError("OpenGL backend init");
+        bool deviceObjectsOk = backendInitOk && ImGui_ImplOpenGL3_CreateDeviceObjects();
+        GLenum deviceErr = TakeGlError("OpenGL device object creation");
+        bool primeOk = deviceObjectsOk && PrimeModernImGuiBackendFrame();
 
-        if (glUseProgram_)
-            glUseProgram_((GLuint)last_program);
-        if (glActiveTexture_)
-            glActiveTexture_((GLenum)last_active_texture);
-        glBindTexture(GL_TEXTURE_2D, (GLuint)last_texture_2d);
-        if (glBindBuffer_) {
-            glBindBuffer_(GL_ARRAY_BUFFER, (GLuint)last_array_buffer);
-            glBindBuffer_(GL_ELEMENT_ARRAY_BUFFER, (GLuint)last_element_array_buffer);
+        glState.Restore();
+        GLenum restoreErr = TakeGlError("GL state restore after backend init");
+
+        if (!backendInitOk || initErr != GL_NO_ERROR || !deviceObjectsOk || deviceErr != GL_NO_ERROR || !primeOk) {
+            Log(std::string("ImGui phase-2 failed: initOk=") + (backendInitOk ? "true" : "false")
+                + " initErr=" + FormatGlError(initErr)
+                + " deviceObjectsOk=" + (deviceObjectsOk ? "true" : "false")
+                + " deviceErr=" + FormatGlError(deviceErr)
+                + " primeOk=" + (primeOk ? "true" : "false")
+                + " restoreErr=" + FormatGlError(restoreErr));
+
+            if (backendInitOk) {
+                ImGui_ImplOpenGL3_SetSkipGLDeletes(true);
+                ImGui_ImplOpenGL3_Shutdown();
+                ImGui_ImplOpenGL3_SetSkipGLDeletes(false);
+            }
+            g_imguiGlBackendReady = false;
+            g_imguiInitialized = false;
+            g_imguiWarmupFrames = 3;
+            return o_wglSwapBuffers(hDc);
         }
-    #ifdef GL_VERTEX_ARRAY_BINDING
-        if (glBindVertexArray_)
-            glBindVertexArray_((GLuint)last_vertex_array);
-    #endif
-    #ifdef GL_PIXEL_UNPACK_BUFFER_BINDING
-        if (glBindBuffer_)
-            glBindBuffer_(GL_PIXEL_UNPACK_BUFFER, (GLuint)last_pixel_unpack_buffer);
-    #endif
 
         g_imguiGlBackendReady = true;
         g_imguiInitialized = true;
         g_imguiGlrc = currentRc;
         g_imguiWarmupFrames = 3; // 3 more clean frames before rendering
-        Log("ImGui phase-2 done (OpenGL 3.3 core GL backend). Ready to render.");
+        Log("ImGui phase-2 done (OpenGL 3.3 core GL backend + device objects primed). Ready to render.");
+        return o_wglSwapBuffers(hDc);
+    }
+
+    if (!g_imguiGlBackendReady) {
+        TRACE261_PATH("imgui-backend-not-ready-reset");
+        ScheduleModernImGuiBackendReset("backend not ready before render", currentRc, true);
         return o_wglSwapBuffers(hDc);
     }
 
@@ -8731,7 +9224,12 @@ BOOL WINAPI hwglSwapBuffers(HDC hDc) {
     UpdateRealGuiState();
 
     // Render ImGui
+    DrainGlErrors();
     ImGui_ImplOpenGL3_NewFrame();
+    if (TakeGlError("OpenGL NewFrame before render") != GL_NO_ERROR) {
+        ScheduleModernImGuiBackendReset("OpenGL NewFrame failed before render", currentRc, true);
+        return o_wglSwapBuffers(hDc);
+    }
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
 
@@ -8880,6 +9378,112 @@ BOOL WINAPI hwglSwapBuffers(HDC hDc) {
                     fg->AddText(ImGui::GetFont(), smallSz, ImVec2(stx + 1, curY + 1), IM_COL32(0,0,0,160), statsRow.c_str());
                     ImU32 sCol = cp.hp <= 6.0f ? IM_COL32(255, 100, 100, 240) : IM_COL32(160, 200, 255, 230);
                     fg->AddText(ImGui::GetFont(), smallSz, ImVec2(stx, curY), sCol, statsRow.c_str());
+                }
+            }
+
+            // ── Pixel Party Assist HUD ─────────────────────────────
+            bool renderPixelParty = TRACE261_IF("renderPixelParty", cfg.pixelPartyAssist);
+            if (renderPixelParty) {
+                PixelPartySnap121 ppSnap;
+                { LockGuard lk(g_pixelPartyMutex); ppSnap = g_pixelPartySnap; }
+
+                const float fontSz = ImGui::GetFontSize();
+                const float smallSz = std::floor(fontSz * 0.82f);
+                const float padX = 10.0f;
+                const float padY = 6.0f;
+                const float gapRow = 3.0f;
+                const float boxW = 240.0f;
+
+                char mainRow[128];
+                char dirArrow = '^';
+                bool dirResolved = false;
+
+                if (ppSnap.targetFound && cpCamState.camFound) {
+                    LegoVec3 camPos = { cpCamState.camX, cpCamState.camY, cpCamState.camZ };
+                    LegoVec3 targetPos = { ppSnap.tx, ppSnap.ty + 0.5, ppSnap.tz };
+                    float sx = 0.0f, sy = 0.0f;
+                    bool projected = cpCamState.matsOk
+                        ? WorldToScreen(targetPos, camPos, cpCamState.view, cpCamState.proj,
+                                        (int)io.DisplaySize.x, (int)io.DisplaySize.y, &sx, &sy)
+                        : WorldToScreen_Angles(targetPos, camPos, cpCamState.yaw, cpCamState.pitch, cpCamState.fov,
+                                               (int)io.DisplaySize.x, (int)io.DisplaySize.y, &sx, &sy);
+                    if (projected) {
+                        float dxScreen = sx - (io.DisplaySize.x * 0.5f);
+                        float dyScreen = sy - (io.DisplaySize.y * 0.5f);
+                        if (std::fabs(dxScreen) > std::fabs(dyScreen))
+                            dirArrow = (dxScreen >= 0.0f) ? '>' : '<';
+                        else
+                            dirArrow = (dyScreen >= 0.0f) ? 'v' : '^';
+                        dirResolved = true;
+
+                        fg->AddLine(
+                            ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f),
+                            ImVec2(sx, sy),
+                            IM_COL32(255, 180, 80, 90), 1.5f);
+                    }
+                }
+
+                if (!dirResolved && ppSnap.targetFound) {
+                    float delta = ppSnap.targetYaw - cpCamState.yaw;
+                    while (delta > 180.0f) delta -= 360.0f;
+                    while (delta < -180.0f) delta += 360.0f;
+                    float ad = std::fabs(delta);
+                    if (ad <= 32.0f) dirArrow = '^';
+                    else if (ad >= 148.0f) dirArrow = 'v';
+                    else dirArrow = (delta < 0.0f) ? '<' : '>';
+                }
+
+                const char* colorName = ppSnap.colorLabel.empty() ? "?" : ppSnap.colorLabel.c_str();
+                if (ppSnap.targetFound) {
+                    snprintf(mainRow, sizeof(mainRow), "%c %s  %.0fm", dirArrow, colorName, ppSnap.dist);
+                } else if (!ppSnap.holdingValid) {
+                    snprintf(mainRow, sizeof(mainRow), "Hold terracotta");
+                } else {
+                    snprintf(mainRow, sizeof(mainRow), "%s", ppSnap.status.empty() ? "No match" : ppSnap.status.c_str());
+                }
+
+                std::string titleRow = "Pixel Party";
+                std::string subRow;
+                if (!ppSnap.status.empty() && ppSnap.targetFound)
+                    subRow = ppSnap.status;
+                else if (ppSnap.holdingValid && !ppSnap.targetFound && !ppSnap.status.empty())
+                    subRow = ppSnap.status;
+
+                ImVec2 titleSz = ImGui::CalcTextSize(titleRow.c_str());
+                ImVec2 mainSz = ImGui::CalcTextSize(mainRow);
+                ImVec2 subSz = subRow.empty() ? ImVec2{0,0} : ImGui::CalcTextSize(subRow.c_str());
+
+                float contentW = std::max({boxW, titleSz.x + padX * 2, mainSz.x + padX * 2, subSz.x + padX * 2});
+                float contentH = padY + smallSz + gapRow + fontSz + gapRow;
+                if (!subRow.empty()) contentH += smallSz + gapRow;
+                contentH += padY;
+
+                float cx = io.DisplaySize.x * 0.5f;
+                float bottomOffset = renderClosestPlayer ? 200.0f : 120.0f;
+                float by = io.DisplaySize.y - bottomOffset;
+                float rx = std::floor(cx - contentW * 0.5f);
+                float ry = std::floor(by - contentH);
+                ImVec2 pMin(rx, ry);
+                ImVec2 pMax(rx + contentW, ry + contentH);
+
+                fg->AddRectFilled(pMin, pMax, overlayTheme.moduleBg, 6.0f);
+                fg->AddRect(pMin, pMax, overlayTheme.gtbBorder, 6.0f, 0, 1.0f);
+
+                float curY = ry + padY;
+                float ttx = std::floor(cx - titleSz.x * 0.5f);
+                fg->AddText(ImGui::GetFont(), smallSz, ImVec2(ttx + 1, curY + 1), IM_COL32(0, 0, 0, 160), titleRow.c_str());
+                fg->AddText(ImGui::GetFont(), smallSz, ImVec2(ttx, curY), overlayTheme.gtbTitle, titleRow.c_str());
+                curY += smallSz + gapRow;
+
+                float mtx = std::floor(cx - mainSz.x * 0.5f);
+                fg->AddText(ImVec2(mtx + 1, curY + 1), IM_COL32(0, 0, 0, 160), mainRow);
+                fg->AddText(ImVec2(mtx, curY), IM_COL32(255, 220, 140, 245), mainRow);
+                curY += fontSz + gapRow;
+
+                if (!subRow.empty()) {
+                    float stx = std::floor(cx - subSz.x * 0.5f);
+                    fg->AddText(ImGui::GetFont(), smallSz, ImVec2(stx + 1, curY + 1), IM_COL32(0, 0, 0, 160), subRow.c_str());
+                    fg->AddText(ImGui::GetFont(), smallSz, ImVec2(stx, curY), IM_COL32(180, 200, 220, 220), subRow.c_str());
                 }
             }
 
@@ -9298,6 +9902,7 @@ BOOL WINAPI hwglSwapBuffers(HDC hDc) {
                 if (cfg.chestEsp)      pushMod("Chest ESP", overlayTheme.accentSecondary);
                 if (cfg.nametags)      pushMod("Nametags", overlayTheme.accentPrimary);
                 if (cfg.gtbHelper)     pushMod("GTB Helper", overlayTheme.accentTertiary);
+                if (cfg.pixelPartyAssist) pushMod("Pixel Party", overlayTheme.accentSecondary);
                 if (cfg.jitter)        pushMod("Jitter", overlayTheme.accentSecondary);
                 if (cfg.breakBlocks)   pushMod("Break Blocks", overlayTheme.accentTertiary);
                 if (cfg.reachEnabled)  pushMod("Reach", overlayTheme.accentPrimary);
@@ -9390,6 +9995,8 @@ BOOL WINAPI hwglSwapBuffers(HDC hDc) {
     ImGuiIO& io = ImGui::GetIO();
     if (io.DisplaySize.x > 1.0f && io.DisplaySize.y > 1.0f) {
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        if (TakeGlError("OpenGL RenderDrawData") != GL_NO_ERROR)
+            ScheduleModernImGuiBackendReset("OpenGL RenderDrawData failed", currentRc, true);
     }
 
     // Flush all ImGui GL commands before handing control back to the NVIDIA driver's
@@ -9612,6 +10219,36 @@ glfw_done:;
                 state += attackCooldownPerTickBuf;
                 state += ",\"chestStealerState\":";
                 state += chestStealerStateJson.empty() ? "null" : chestStealerStateJson;
+
+                bool ppFound = false;
+                float ppYaw = 0.0f;
+                float ppDist = -1.0f;
+                { LockGuard lk(g_pixelPartyMutex);
+                    ppFound = g_pixelPartySnap.targetFound;
+                    ppYaw = g_pixelPartySnap.targetYaw;
+                    ppDist = (float)g_pixelPartySnap.dist;
+                }
+                float ppYawDelta = 0.0f;
+                if (ppFound && camState.camFound) {
+                    ppYawDelta = ppYaw - camState.yaw;
+                    while (ppYawDelta > 180.0f) ppYawDelta -= 360.0f;
+                    while (ppYawDelta < -180.0f) ppYawDelta += 360.0f;
+                }
+                state += ",\"pixelPartyTargetFound\":";
+                state += ppFound ? "true" : "false";
+                char ppYawBuf[32];
+                snprintf(ppYawBuf, sizeof(ppYawBuf), "%.2f", ppYaw);
+                state += ",\"pixelPartyTargetYaw\":";
+                state += ppYawBuf;
+                char ppDistBuf[32];
+                snprintf(ppDistBuf, sizeof(ppDistBuf), "%.2f", ppDist);
+                state += ",\"pixelPartyTargetDist\":";
+                state += ppDistBuf;
+                char ppDeltaBuf[32];
+                snprintf(ppDeltaBuf, sizeof(ppDeltaBuf), "%.2f", ppYawDelta);
+                state += ",\"pixelPartyYawDelta\":";
+                state += ppDeltaBuf;
+
                 state += ",\"entities\":[";
 
                 bool first = true;

@@ -18,6 +18,8 @@ public class Clicker : INotifyPropertyChanged
     // P/Invoke declarations
     [DllImport("user32.dll", SetLastError = true)]
     private static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
+    [DllImport("user32.dll", SetLastError = true, EntryPoint = "SendInput")]
+    private static extern uint SendInputKeyboard(uint nInputs, INPUT_KEY[] pInputs, int cbSize);
     [DllImport("user32.dll")]
     private static extern short GetAsyncKeyState(int vKey);
 
@@ -39,6 +41,30 @@ public class Clicker : INotifyPropertyChanged
         public IntPtr DwExtraInfo;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct KEYBDINPUT
+    {
+        public ushort WVk;
+        public ushort WScan;
+        public uint DwFlags;
+        public uint Time;
+        public IntPtr DwExtraInfo;
+    }
+
+    [StructLayout(LayoutKind.Explicit)]
+    private struct INPUTUNION
+    {
+        [FieldOffset(0)] public MOUSEINPUT Mi;
+        [FieldOffset(0)] public KEYBDINPUT Ki;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct INPUT_KEY
+    {
+        public uint Type;
+        public INPUTUNION U;
+    }
+
     private const uint INPUT_MOUSE = 0;
     private const uint MOUSEEVENTF_MOVE = 0x0001;
     private const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
@@ -46,6 +72,13 @@ public class Clicker : INotifyPropertyChanged
     private const uint MOUSEEVENTF_RIGHTDOWN = 0x0008;
     private const uint MOUSEEVENTF_RIGHTUP = 0x0010;
     private const int VK_LBUTTON = 0x01;
+    private const int VK_W = 0x57;
+    private const int VK_A = 0x41;
+    private const int VK_D = 0x44;
+    private const int VK_SPACE = 0x20;
+    private const int PixelPartyJumpPulseHalfMs = 55;
+    private const uint INPUT_KEYBOARD = 1;
+    private const uint KEYEVENTF_KEYUP = 0x0002;
     
     // State
     private bool _isArmed;
@@ -368,6 +401,7 @@ public class Clicker : INotifyPropertyChanged
         Disarm();
         StopAimAssistLoop();
         StopTriggerbotLoop();
+        StopPixelPartyAssistInputLoop();
         _chestStealerController.Stop();
     }
 
@@ -401,6 +435,9 @@ public class Clicker : INotifyPropertyChanged
             TriggerbotEnabled = false;
             SpeedBridgeEnabled = false;
             GtbHelperEnabled = false;
+            PixelPartyAssistEnabled = false;
+            PixelPartyAutoLookEnabled = false;
+            PixelPartyAutoWalkEnabled = false;
             NametagsEnabled = false;
             NametagHideVanilla = false;
             ClosestPlayerInfoEnabled = false;
@@ -442,6 +479,73 @@ public class Clicker : INotifyPropertyChanged
         var cts = new CancellationTokenSource();
         _aimAssistCts = cts;
         _aimAssistTask = Task.Run(() => AimAssistLoop(cts.Token));
+    }
+
+    private CancellationTokenSource? _pixelPartyAssistInputCts;
+    private Task? _pixelPartyAssistInputTask;
+    private double _pixelPartyFilteredYawDelta;
+    private bool _pixelPartyKeyW;
+    private bool _pixelPartyKeyA;
+    private bool _pixelPartyKeyD;
+    private bool _pixelPartyKeySpace;
+    private const int PixelPartyAssistInputStateFreshMs = 120;
+    private const float PixelPartyAutoLookStrength = 0.35f;
+
+    private bool ShouldRunPixelPartyAssistInputLoop()
+        => PixelPartyAssistEnabled && (PixelPartyAutoLookEnabled || PixelPartyAutoWalkEnabled);
+
+    private void SyncPixelPartyAssistInputLoop()
+    {
+        if (ShouldRunPixelPartyAssistInputLoop())
+            StartPixelPartyAssistInputLoop();
+        else
+            StopPixelPartyAssistInputLoop();
+    }
+
+    private void StartPixelPartyAssistInputLoop()
+    {
+        if (_pixelPartyAssistInputCts != null) return;
+        var cts = new CancellationTokenSource();
+        _pixelPartyAssistInputCts = cts;
+        _pixelPartyAssistInputTask = Task.Run(() => PixelPartyAssistInputLoop(cts.Token));
+    }
+
+    private void StopPixelPartyAssistInputLoop()
+    {
+        var cts = _pixelPartyAssistInputCts;
+        _pixelPartyAssistInputCts = null;
+        if (cts == null) return;
+        cts.Cancel();
+        cts.Dispose();
+        _pixelPartyFilteredYawDelta = 0.0;
+        ReleasePixelPartyWalkKeys();
+    }
+
+    private void SendPixelPartyKey(int vk, bool down)
+    {
+        var input = new INPUT_KEY[1];
+        input[0].Type = INPUT_KEYBOARD;
+        input[0].U.Ki.WVk = (ushort)vk;
+        input[0].U.Ki.DwFlags = down ? 0u : KEYEVENTF_KEYUP;
+        lock (_sendInputLock)
+        {
+            SendInputKeyboard(1, input, Marshal.SizeOf<INPUT_KEY>());
+        }
+    }
+
+    private void SetPixelPartyWalkKey(int vk, bool down, ref bool tracked)
+    {
+        if (down == tracked) return;
+        SendPixelPartyKey(vk, down);
+        tracked = down;
+    }
+
+    private void ReleasePixelPartyWalkKeys()
+    {
+        SetPixelPartyWalkKey(VK_W, false, ref _pixelPartyKeyW);
+        SetPixelPartyWalkKey(VK_A, false, ref _pixelPartyKeyA);
+        SetPixelPartyWalkKey(VK_D, false, ref _pixelPartyKeyD);
+        SetPixelPartyWalkKey(VK_SPACE, false, ref _pixelPartyKeySpace);
     }
 
     private void StopAimAssistLoop()
@@ -588,6 +692,62 @@ public class Clicker : INotifyPropertyChanged
             {
                 SetGtbState("", 0, "");
             }
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _pixelPartyAssistEnabled = false;
+    public bool PixelPartyAssistEnabled
+    {
+        get => _pixelPartyAssistEnabled;
+        set
+        {
+            if (_pixelPartyAssistEnabled == value) return;
+            _pixelPartyAssistEnabled = value;
+            OnPropertyChanged(nameof(PixelPartyAssistEnabled));
+            SyncPixelPartyAssistInputLoop();
+            StateChanged?.Invoke();
+        }
+    }
+
+    private int _pixelPartyScanRadius = 28;
+    public int PixelPartyScanRadius
+    {
+        get => _pixelPartyScanRadius;
+        set
+        {
+            int clamped = Math.Clamp(value, 8, 48);
+            if (_pixelPartyScanRadius == clamped) return;
+            _pixelPartyScanRadius = clamped;
+            OnPropertyChanged(nameof(PixelPartyScanRadius));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _pixelPartyAutoLookEnabled = false;
+    public bool PixelPartyAutoLookEnabled
+    {
+        get => _pixelPartyAutoLookEnabled;
+        set
+        {
+            if (_pixelPartyAutoLookEnabled == value) return;
+            _pixelPartyAutoLookEnabled = value;
+            OnPropertyChanged(nameof(PixelPartyAutoLookEnabled));
+            SyncPixelPartyAssistInputLoop();
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _pixelPartyAutoWalkEnabled = false;
+    public bool PixelPartyAutoWalkEnabled
+    {
+        get => _pixelPartyAutoWalkEnabled;
+        set
+        {
+            if (_pixelPartyAutoWalkEnabled == value) return;
+            _pixelPartyAutoWalkEnabled = value;
+            OnPropertyChanged(nameof(PixelPartyAutoWalkEnabled));
+            SyncPixelPartyAssistInputLoop();
             StateChanged?.Invoke();
         }
     }
@@ -1230,6 +1390,120 @@ public class Clicker : INotifyPropertyChanged
             }
         }
         catch (TaskCanceledException) { }
+    }
+
+    private async Task PixelPartyAssistInputLoop(CancellationToken token)
+    {
+        try
+        {
+            while (!token.IsCancellationRequested)
+            {
+                bool moduleOk = PixelPartyAssistEnabled
+                    && GameStateClient.Instance.SupportsModule("pixelpartyassist")
+                    && GameStateClient.Instance.SupportsStateField("pixelpartyyawdelta")
+                    && GameStateClient.Instance.IsConnected
+                    && WindowDetection.IsMinecraftActive();
+
+                bool lookEnabled = moduleOk && PixelPartyAutoLookEnabled;
+                bool walkEnabled = moduleOk && PixelPartyAutoWalkEnabled;
+
+                if (!lookEnabled && !walkEnabled)
+                {
+                    _pixelPartyFilteredYawDelta = 0.0;
+                    ReleasePixelPartyWalkKeys();
+                    await Task.Delay(16, token).ConfigureAwait(false);
+                    continue;
+                }
+
+                var state = GameStateClient.Instance.CurrentState;
+                if (state.GuiOpen && WindowDetection.IsCursorVisible())
+                {
+                    _pixelPartyFilteredYawDelta = 0.0;
+                    ReleasePixelPartyWalkKeys();
+                    await Task.Delay(16, token).ConfigureAwait(false);
+                    continue;
+                }
+
+                long nowMs = Environment.TickCount64;
+                long stateAgeMs;
+                if (state.StateMs > 0)
+                {
+                    long bridgeMs = unchecked((long)state.StateMs);
+                    stateAgeMs = nowMs - bridgeMs;
+                }
+                else
+                {
+                    stateAgeMs = (long)(DateTime.Now - state.LastUpdate).TotalMilliseconds;
+                }
+                if (stateAgeMs < 0) stateAgeMs = 0;
+                if (stateAgeMs > PixelPartyAssistInputStateFreshMs)
+                {
+                    ReleasePixelPartyWalkKeys();
+                    await Task.Delay(8, token).ConfigureAwait(false);
+                    continue;
+                }
+
+                bool hasTarget = state.PixelPartyTargetFound && state.PixelPartyTargetDist >= 2f;
+
+                if (lookEnabled && hasTarget)
+                {
+                    float delta = state.PixelPartyYawDelta;
+                    _pixelPartyFilteredYawDelta += (delta - _pixelPartyFilteredYawDelta) * 0.4;
+
+                    if (Math.Abs(_pixelPartyFilteredYawDelta) >= 1.5f)
+                    {
+                        int moveX = (int)Math.Round(_pixelPartyFilteredYawDelta * 3.5 * PixelPartyAutoLookStrength);
+                        moveX = Math.Clamp(moveX, -12, 12);
+                        if (moveX == 0)
+                            moveX = Math.Sign(_pixelPartyFilteredYawDelta);
+
+                        _aimAssistMoveInput[0].Mi.Dx = moveX;
+                        _aimAssistMoveInput[0].Mi.Dy = 0;
+                        lock (_sendInputLock)
+                        {
+                            SendInput(1, _aimAssistMoveInput, Marshal.SizeOf<INPUT>());
+                        }
+                    }
+                }
+                else if (lookEnabled)
+                {
+                    _pixelPartyFilteredYawDelta = 0.0;
+                }
+
+                if (walkEnabled)
+                {
+                    if (!hasTarget)
+                    {
+                        ReleasePixelPartyWalkKeys();
+                    }
+                    else
+                    {
+                        float yawDelta = state.PixelPartyYawDelta;
+                        bool wantW = Math.Abs(yawDelta) < 38f;
+                        bool wantA = yawDelta < -10f;
+                        bool wantD = yawDelta > 10f;
+                        bool wantMove = wantW || wantA || wantD;
+                        SetPixelPartyWalkKey(VK_W, wantW, ref _pixelPartyKeyW);
+                        SetPixelPartyWalkKey(VK_A, wantA && !wantD, ref _pixelPartyKeyA);
+                        SetPixelPartyWalkKey(VK_D, wantD && !wantA, ref _pixelPartyKeyD);
+
+                        // Pulse jump — holding space only registers once per landing in vanilla.
+                        bool jumpDown = wantMove && ((Environment.TickCount64 / PixelPartyJumpPulseHalfMs) % 2) == 0;
+                        SetPixelPartyWalkKey(VK_SPACE, jumpDown, ref _pixelPartyKeySpace);
+                    }
+                }
+                else
+                {
+                    ReleasePixelPartyWalkKeys();
+                }
+
+                await Task.Delay(8, token).ConfigureAwait(false);
+            }
+        }
+        catch (TaskCanceledException)
+        {
+            ReleasePixelPartyWalkKeys();
+        }
     }
 
     private async Task TriggerbotLoop(CancellationToken token)

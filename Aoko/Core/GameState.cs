@@ -70,6 +70,18 @@ public class GameState
     [JsonPropertyName("chestStealerState")]
     public ChestStealerState? ChestStealerState { get; set; }
 
+    [JsonPropertyName("pixelPartyTargetFound")]
+    public bool PixelPartyTargetFound { get; set; }
+
+    [JsonPropertyName("pixelPartyTargetYaw")]
+    public float PixelPartyTargetYaw { get; set; }
+
+    [JsonPropertyName("pixelPartyTargetDist")]
+    public float PixelPartyTargetDist { get; set; }
+
+    [JsonPropertyName("pixelPartyYawDelta")]
+    public float PixelPartyYawDelta { get; set; }
+
     /// <summary>
     /// Whether the agent is connected and sending data.
     /// </summary>
