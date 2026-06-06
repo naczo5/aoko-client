@@ -77,6 +77,11 @@ public class Clicker : INotifyPropertyChanged
     private const int VK_D = 0x44;
     private const int VK_SPACE = 0x20;
     private const int PixelPartyJumpPulseHalfMs = 55;
+    private const float PixelPartyWalkAlignMaxDeg = 18f;
+    private const float PixelPartyPrecisionAlignMaxDeg = 55f;
+    private const float PixelPartyPrecisionDist = 4f;
+    private const float PixelPartyJumpMinDist = 5f;
+    private const float PixelPartyMinWalkDist = 0.45f;
     private const uint INPUT_KEYBOARD = 1;
     private const uint KEYEVENTF_KEYUP = 0x0002;
     
@@ -483,13 +488,11 @@ public class Clicker : INotifyPropertyChanged
 
     private CancellationTokenSource? _pixelPartyAssistInputCts;
     private Task? _pixelPartyAssistInputTask;
-    private double _pixelPartyFilteredYawDelta;
     private bool _pixelPartyKeyW;
     private bool _pixelPartyKeyA;
     private bool _pixelPartyKeyD;
     private bool _pixelPartyKeySpace;
     private const int PixelPartyAssistInputStateFreshMs = 120;
-    private const float PixelPartyAutoLookStrength = 0.35f;
 
     private bool ShouldRunPixelPartyAssistInputLoop()
         => PixelPartyAssistEnabled && (PixelPartyAutoLookEnabled || PixelPartyAutoWalkEnabled);
@@ -517,7 +520,6 @@ public class Clicker : INotifyPropertyChanged
         if (cts == null) return;
         cts.Cancel();
         cts.Dispose();
-        _pixelPartyFilteredYawDelta = 0.0;
         ReleasePixelPartyWalkKeys();
     }
 
@@ -546,6 +548,35 @@ public class Clicker : INotifyPropertyChanged
         SetPixelPartyWalkKey(VK_A, false, ref _pixelPartyKeyA);
         SetPixelPartyWalkKey(VK_D, false, ref _pixelPartyKeyD);
         SetPixelPartyWalkKey(VK_SPACE, false, ref _pixelPartyKeySpace);
+    }
+
+    /// <summary>Yaw snap via mouse — multiple SendInput passes per tick for large deltas.</summary>
+    private void ApplyPixelPartySteer(float yawDeltaDeg, bool aggressive)
+    {
+        float remaining = yawDeltaDeg;
+        if (Math.Abs(remaining) < 0.35f)
+            return;
+
+        float gain = aggressive ? 6.5f : 5.0f;
+        int maxStep = aggressive ? 120 : 80;
+        int maxPasses = aggressive ? 10 : 7;
+
+        for (int pass = 0; pass < maxPasses && Math.Abs(remaining) > 0.4f; pass++)
+        {
+            int moveX = (int)Math.Round(remaining * gain);
+            if (moveX == 0)
+                moveX = Math.Sign(remaining);
+
+            moveX = Math.Clamp(moveX, -maxStep, maxStep);
+            _aimAssistMoveInput[0].Mi.Dx = moveX;
+            _aimAssistMoveInput[0].Mi.Dy = 0;
+            lock (_sendInputLock)
+            {
+                SendInput(1, _aimAssistMoveInput, Marshal.SizeOf<INPUT>());
+            }
+
+            remaining -= moveX / gain;
+        }
     }
 
     private void StopAimAssistLoop()
@@ -1404,12 +1435,12 @@ public class Clicker : INotifyPropertyChanged
                     && GameStateClient.Instance.IsConnected
                     && WindowDetection.IsMinecraftActive();
 
-                bool lookEnabled = moduleOk && PixelPartyAutoLookEnabled;
                 bool walkEnabled = moduleOk && PixelPartyAutoWalkEnabled;
+                // Auto-walk steers with mouse only (no A/D); enable look when walk or look is on.
+                bool steerEnabled = moduleOk && (PixelPartyAutoLookEnabled || walkEnabled);
 
-                if (!lookEnabled && !walkEnabled)
+                if (!steerEnabled && !walkEnabled)
                 {
-                    _pixelPartyFilteredYawDelta = 0.0;
                     ReleasePixelPartyWalkKeys();
                     await Task.Delay(16, token).ConfigureAwait(false);
                     continue;
@@ -1418,7 +1449,6 @@ public class Clicker : INotifyPropertyChanged
                 var state = GameStateClient.Instance.CurrentState;
                 if (state.GuiOpen && WindowDetection.IsCursorVisible())
                 {
-                    _pixelPartyFilteredYawDelta = 0.0;
                     ReleasePixelPartyWalkKeys();
                     await Task.Delay(16, token).ConfigureAwait(false);
                     continue;
@@ -1443,52 +1473,37 @@ public class Clicker : INotifyPropertyChanged
                     continue;
                 }
 
-                bool hasTarget = state.PixelPartyTargetFound && state.PixelPartyTargetDist >= 2f;
+                bool targetFound = state.PixelPartyTargetFound;
+                float dist = state.PixelPartyTargetDist;
+                bool precisionRange = targetFound && dist < PixelPartyPrecisionDist;
+                bool canWalk = targetFound && dist > PixelPartyMinWalkDist;
 
-                if (lookEnabled && hasTarget)
-                {
-                    float delta = state.PixelPartyYawDelta;
-                    _pixelPartyFilteredYawDelta += (delta - _pixelPartyFilteredYawDelta) * 0.4;
-
-                    if (Math.Abs(_pixelPartyFilteredYawDelta) >= 1.5f)
-                    {
-                        int moveX = (int)Math.Round(_pixelPartyFilteredYawDelta * 3.5 * PixelPartyAutoLookStrength);
-                        moveX = Math.Clamp(moveX, -12, 12);
-                        if (moveX == 0)
-                            moveX = Math.Sign(_pixelPartyFilteredYawDelta);
-
-                        _aimAssistMoveInput[0].Mi.Dx = moveX;
-                        _aimAssistMoveInput[0].Mi.Dy = 0;
-                        lock (_sendInputLock)
-                        {
-                            SendInput(1, _aimAssistMoveInput, Marshal.SizeOf<INPUT>());
-                        }
-                    }
-                }
-                else if (lookEnabled)
-                {
-                    _pixelPartyFilteredYawDelta = 0.0;
-                }
+                if (steerEnabled && targetFound)
+                    ApplyPixelPartySteer(state.PixelPartyYawDelta, walkEnabled);
 
                 if (walkEnabled)
                 {
-                    if (!hasTarget)
+                    if (!canWalk)
                     {
                         ReleasePixelPartyWalkKeys();
                     }
                     else
                     {
-                        float yawDelta = state.PixelPartyYawDelta;
-                        bool wantW = Math.Abs(yawDelta) < 38f;
-                        bool wantA = yawDelta < -10f;
-                        bool wantD = yawDelta > 10f;
-                        bool wantMove = wantW || wantA || wantD;
-                        SetPixelPartyWalkKey(VK_W, wantW, ref _pixelPartyKeyW);
-                        SetPixelPartyWalkKey(VK_A, wantA && !wantD, ref _pixelPartyKeyA);
-                        SetPixelPartyWalkKey(VK_D, wantD && !wantA, ref _pixelPartyKeyD);
+                        SetPixelPartyWalkKey(VK_A, false, ref _pixelPartyKeyA);
+                        SetPixelPartyWalkKey(VK_D, false, ref _pixelPartyKeyD);
 
-                        // Pulse jump — holding space only registers once per landing in vanilla.
-                        bool jumpDown = wantMove && ((Environment.TickCount64 / PixelPartyJumpPulseHalfMs) % 2) == 0;
+                        float yawAbs = Math.Abs(state.PixelPartyYawDelta);
+                        float alignMax = precisionRange ? PixelPartyPrecisionAlignMaxDeg : PixelPartyWalkAlignMaxDeg;
+                        bool alignedForward = yawAbs < alignMax;
+                        // Close range: walk onto the block even when not perfectly aligned.
+                        bool walkForward = alignedForward
+                            || (precisionRange && dist < 2.2f && yawAbs < 75f);
+                        SetPixelPartyWalkKey(VK_W, walkForward, ref _pixelPartyKeyW);
+
+                        bool jumpDown = walkForward
+                            && !precisionRange
+                            && dist >= PixelPartyJumpMinDist
+                            && ((Environment.TickCount64 / PixelPartyJumpPulseHalfMs) % 2) == 0;
                         SetPixelPartyWalkKey(VK_SPACE, jumpDown, ref _pixelPartyKeySpace);
                     }
                 }
@@ -1497,7 +1512,8 @@ public class Clicker : INotifyPropertyChanged
                     ReleasePixelPartyWalkKeys();
                 }
 
-                await Task.Delay(8, token).ConfigureAwait(false);
+                int loopDelayMs = (steerEnabled || walkEnabled) && targetFound ? 4 : 8;
+                await Task.Delay(loopDelayMs, token).ConfigureAwait(false);
             }
         }
         catch (TaskCanceledException)

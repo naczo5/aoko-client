@@ -70,6 +70,17 @@ public static class WindowDetection
         _customTargetHwnd = IntPtr.Zero;
     }
 
+    public static IntPtr GetForegroundWindowHandle() => GetForegroundWindow();
+
+    public static int GetWindowProcessId(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero)
+            return 0;
+
+        GetWindowThreadProcessId(hwnd, out uint pid);
+        return (int)pid;
+    }
+
     public static IReadOnlyList<WindowTarget> ListSelectableWindows()
     {
         _selectableWindows.Clear();

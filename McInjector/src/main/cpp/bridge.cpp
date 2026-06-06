@@ -5074,102 +5074,6 @@ static void ResetImGuiBackendsForReinit(const char* reason) {
     g_glInitialized = false;
 }
 
-static std::string FormatGlError(GLenum err) {
-    std::ostringstream oss;
-    oss << "0x" << std::hex << (unsigned int)err;
-    return oss.str();
-}
-
-static unsigned DrainGlErrors() {
-    unsigned count = 0;
-    for (; count < 32; count++) {
-        GLenum err = glGetError();
-        if (err == GL_NO_ERROR) break;
-    }
-    return count;
-}
-
-static GLenum TakeGlError(const char* label) {
-    GLenum err = glGetError();
-    if (err != GL_NO_ERROR) {
-        Log(std::string("ImGui legacy GL error after ") + (label ? label : "operation") + ": " + FormatGlError(err));
-        DrainGlErrors();
-    }
-    return err;
-}
-
-struct ScopedImGuiGlState {
-    GLint program = 0;
-    GLint activeTexture = 0;
-    GLint texture2d = 0;
-    GLint arrayBuffer = 0;
-    GLint elementArrayBuffer = 0;
-    GLint vertexArray = 0;
-    GLint pixelUnpackBuffer = 0;
-    bool haveVertexArray = false;
-    bool havePixelUnpackBuffer = false;
-
-    ScopedImGuiGlState() {
-        glGetIntegerv(GL_CURRENT_PROGRAM, &program);
-        glGetIntegerv(GL_ACTIVE_TEXTURE, &activeTexture);
-        glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture2d);
-        glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &arrayBuffer);
-        glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &elementArrayBuffer);
-        if (glBindVertexArray_) {
-            glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &vertexArray);
-            haveVertexArray = true;
-        }
-        if (glBindBuffer_) {
-            glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &pixelUnpackBuffer);
-            havePixelUnpackBuffer = true;
-        }
-    }
-
-    void Restore() const {
-        if (glUseProgram_) glUseProgram_((GLuint)program);
-        if (glActiveTexture_) glActiveTexture_((GLenum)activeTexture);
-        glBindTexture(GL_TEXTURE_2D, (GLuint)texture2d);
-        if (glBindBuffer_) {
-            glBindBuffer_(GL_ARRAY_BUFFER, (GLuint)arrayBuffer);
-            glBindBuffer_(GL_ELEMENT_ARRAY_BUFFER, (GLuint)elementArrayBuffer);
-            if (havePixelUnpackBuffer)
-                glBindBuffer_(GL_PIXEL_UNPACK_BUFFER, (GLuint)pixelUnpackBuffer);
-        }
-        if (glBindVertexArray_ && haveVertexArray)
-            glBindVertexArray_((GLuint)vertexArray);
-    }
-};
-
-static void ScheduleLegacyImGuiBackendReset(const char* reason, HGLRC nextRc, bool rateLimit = false) {
-    static DWORD s_nextLogAt = 0;
-    DWORD now = GetTickCount();
-    if (!rateLimit || now >= s_nextLogAt) {
-        s_nextLogAt = now + 5000;
-        Log(std::string("ImGui legacy: scheduling OpenGL backend reset")
-            + (reason && *reason ? std::string(" (") + reason + ")" : std::string()));
-    }
-    g_imguiPendingBackendReset = true;
-    g_imguiPendingGlrc = nextRc;
-    g_imguiWarmupFrames = 3;
-}
-
-static bool PrimeLegacyImGuiBackendFrame() {
-    ImGui_ImplOpenGL3_NewFrame();
-    if (TakeGlError("OpenGL NewFrame during backend prime") != GL_NO_ERROR)
-        return false;
-
-    ImGui_ImplWin32_NewFrame();
-    ImGui::NewFrame();
-    ImGui::Render();
-
-    ImGuiIO& io = ImGui::GetIO();
-    if (io.DisplaySize.x <= 1.0f || io.DisplaySize.y <= 1.0f)
-        return true;
-
-    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-    return TakeGlError("OpenGL RenderDrawData during backend prime") == GL_NO_ERROR;
-}
-
 extern "C" __declspec(dllexport) void Detach() {
     Log("Detach requested");
     g_running = false;
@@ -7679,7 +7583,10 @@ BOOL WINAPI HookedSwapBuffers(HDC hdc) {
     }
 
     if (g_imguiInitialized && g_imguiGlBackendReady && g_imguiGlrc && currentRc != g_imguiGlrc) {
-        ScheduleLegacyImGuiBackendReset("OpenGL context changed", currentRc);
+        Log("OpenGL context changed; scheduling legacy ImGui backend reset.");
+        g_imguiPendingBackendReset = true;
+        g_imguiPendingGlrc = currentRc;
+        g_imguiWarmupFrames = 3;
         return CallOriginalSwapBuffers(hdc);
     }
 
@@ -7710,52 +7617,41 @@ BOOL WINAPI HookedSwapBuffers(HDC hdc) {
             glModernLoadedLogged = true;
         }
 
-        ScopedImGuiGlState glState;
-        unsigned staleErrors = DrainGlErrors();
-        if (staleErrors > 0)
-            Log("ImGui legacy phase-2: drained " + std::to_string(staleErrors) + " stale GL error(s) before backend init.");
+        GLint last_program = 0;
+        GLint last_active_texture = 0;
+        GLint last_texture_2d = 0;
+        GLint last_array_buffer = 0;
+        GLint last_element_array_buffer = 0;
+        GLint last_vertex_array = 0;
+        GLint last_pixel_unpack_buffer = 0;
+
+        glGetIntegerv(GL_CURRENT_PROGRAM, &last_program);
+        glGetIntegerv(GL_ACTIVE_TEXTURE, &last_active_texture);
+        glGetIntegerv(GL_TEXTURE_BINDING_2D, &last_texture_2d);
+        glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &last_array_buffer);
+        glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &last_element_array_buffer);
+        if (glBindVertexArray_) glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &last_vertex_array);
+        if (glBindBuffer_) glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &last_pixel_unpack_buffer);
 
         // Let the backend choose the GLSL version for 1.8.9's older GL context.
-        bool backendInitOk = ImGui_ImplOpenGL3_Init(nullptr);
-        GLenum initErr = TakeGlError("OpenGL backend init");
-        bool deviceObjectsOk = backendInitOk && ImGui_ImplOpenGL3_CreateDeviceObjects();
-        GLenum deviceErr = TakeGlError("OpenGL device object creation");
-        bool primeOk = deviceObjectsOk && PrimeLegacyImGuiBackendFrame();
+        ImGui_ImplOpenGL3_Init(nullptr);
 
-        glState.Restore();
-        GLenum restoreErr = TakeGlError("GL state restore after backend init");
-
-        if (!backendInitOk || initErr != GL_NO_ERROR || !deviceObjectsOk || deviceErr != GL_NO_ERROR || !primeOk) {
-            Log(std::string("ImGui legacy phase-2 failed: initOk=") + (backendInitOk ? "true" : "false")
-                + " initErr=" + FormatGlError(initErr)
-                + " deviceObjectsOk=" + (deviceObjectsOk ? "true" : "false")
-                + " deviceErr=" + FormatGlError(deviceErr)
-                + " primeOk=" + (primeOk ? "true" : "false")
-                + " restoreErr=" + FormatGlError(restoreErr));
-
-            if (backendInitOk) {
-                ImGui_ImplOpenGL3_SetSkipGLDeletes(true);
-                ImGui_ImplOpenGL3_Shutdown();
-                ImGui_ImplOpenGL3_SetSkipGLDeletes(false);
-            }
-            g_imguiGlBackendReady = false;
-            g_imguiInitialized = false;
-            g_glInitialized = false;
-            g_imguiWarmupFrames = 3;
-            return CallOriginalSwapBuffers(hdc);
+        if (glUseProgram_) glUseProgram_((GLuint)last_program);
+        if (glActiveTexture_) glActiveTexture_((GLenum)last_active_texture);
+        glBindTexture(GL_TEXTURE_2D, (GLuint)last_texture_2d);
+        if (glBindBuffer_) {
+            glBindBuffer_(GL_ARRAY_BUFFER, (GLuint)last_array_buffer);
+            glBindBuffer_(GL_ELEMENT_ARRAY_BUFFER, (GLuint)last_element_array_buffer);
+            glBindBuffer_(GL_PIXEL_UNPACK_BUFFER, (GLuint)last_pixel_unpack_buffer);
         }
+        if (glBindVertexArray_) glBindVertexArray_((GLuint)last_vertex_array);
 
         g_imguiGlBackendReady = true;
         g_imguiInitialized = true;
         g_glInitialized = true;
         g_imguiGlrc = currentRc;
         g_imguiWarmupFrames = 3;
-        Log("ImGui phase-2 done for legacy bridge (OpenGL backend + device objects primed).");
-        return CallOriginalSwapBuffers(hdc);
-    }
-
-    if (!g_imguiGlBackendReady) {
-        ScheduleLegacyImGuiBackendReset("backend not ready before render", currentRc, true);
+        Log("ImGui phase-2 done for legacy bridge (OpenGL backend).");
         return CallOriginalSwapBuffers(hdc);
     }
 
@@ -7781,12 +7677,7 @@ BOOL WINAPI HookedSwapBuffers(HDC hdc) {
     // Capture game-space matrices before ImGui renders and restores GL state.
     CaptureCurrentRenderMatrices();
 
-    DrainGlErrors();
     ImGui_ImplOpenGL3_NewFrame();
-    if (TakeGlError("OpenGL NewFrame before render") != GL_NO_ERROR) {
-        ScheduleLegacyImGuiBackendReset("OpenGL NewFrame failed before render", currentRc, true);
-        return CallOriginalSwapBuffers(hdc);
-    }
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
 
@@ -7814,8 +7705,6 @@ BOOL WINAPI HookedSwapBuffers(HDC hdc) {
     ImGuiIO& io = ImGui::GetIO();
     if (io.DisplaySize.x > 1.0f && io.DisplaySize.y > 1.0f) {
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-        if (TakeGlError("OpenGL RenderDrawData") != GL_NO_ERROR)
-            ScheduleLegacyImGuiBackendReset("OpenGL RenderDrawData failed", currentRc, true);
     }
     glFlush();
 

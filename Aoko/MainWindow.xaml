@@ -442,7 +442,7 @@
                                           Style="{StaticResource DarkCheckBox}"
                                           Margin="0,10,0,0"
                                           IsEnabled="{Binding PixelPartyAssistEnabled}"/>
-                                <CheckBox Content="Auto-walk toward target"
+                                <CheckBox Content="Auto-walk toward target (W + jump far, walk close)"
                                           IsChecked="{Binding PixelPartyAutoWalkEnabled, Mode=TwoWay}"
                                           Style="{StaticResource DarkCheckBox}"
                                           Margin="0,6,0,0"

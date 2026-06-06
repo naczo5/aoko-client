@@ -188,29 +188,65 @@ public class GameStateClient : INotifyPropertyChanged
         Log($"Resolved injection version: requested={version}, resolved={resolvedVersion}, title='{mcProcess?.MainWindowTitle ?? "<none>"}', pid={mcProcess?.Id.ToString() ?? "<none>"}");
         Capabilities = BridgeCapabilities.ForVersionFallback(resolvedVersion);
 
-        SetInjectionStage(5, "Checking existing bridge");
+        int? bridgeListenerPid = TcpPortHelper.TryGetListeningProcessId(_port);
 
-        // 1. Try to connect directly (assuming already injected)
-        await ConnectAsync(
-            maxAttempts: 8,
-            onAttempt: (attempt, total) =>
-            {
-                int mapped = 5 + (attempt * 15 / total);
-                SetInjectionStage(mapped, $"Checking existing bridge ({attempt}/{total})");
-            },
-            reportFailure: false);
-
-        if (IsConnected)
+        if (targetPid.HasValue)
         {
-            IsInjected = true;
-            InjectedVersion = resolvedVersion;
-            ApplyCustomInjectionTarget(targetHwnd);
-            IsInjectionInProgress = false;
-            InjectionProgress = 100;
-            return true;
+            if (bridgeListenerPid == targetPid.Value)
+            {
+                SetInjectionStage(5, "Reconnecting to selected bridge");
+                await ConnectAsync(
+                    maxAttempts: 8,
+                    onAttempt: (attempt, total) =>
+                    {
+                        int mapped = 5 + (attempt * 15 / total);
+                        SetInjectionStage(mapped, $"Reconnecting to selected bridge ({attempt}/{total})");
+                    },
+                    reportFailure: false);
+
+                if (IsConnected)
+                {
+                    IsInjected = true;
+                    InjectedVersion = resolvedVersion;
+                    ApplyCustomInjectionTarget(targetHwnd);
+                    IsInjectionInProgress = false;
+                    InjectionProgress = 100;
+                    return true;
+                }
+            }
+            else if (bridgeListenerPid.HasValue)
+            {
+                StatusMessage = $"ERROR: Bridge port {_port} is already in use by PID {bridgeListenerPid.Value}. Close the other Java/Minecraft window first.";
+                Log(StatusMessage);
+                IsInjectionInProgress = false;
+                return false;
+            }
+        }
+        else
+        {
+            SetInjectionStage(5, "Checking existing bridge");
+
+            // Auto inject: connect to any existing bridge before injecting.
+            await ConnectAsync(
+                maxAttempts: 8,
+                onAttempt: (attempt, total) =>
+                {
+                    int mapped = 5 + (attempt * 15 / total);
+                    SetInjectionStage(mapped, $"Checking existing bridge ({attempt}/{total})");
+                },
+                reportFailure: false);
+
+            if (IsConnected)
+            {
+                IsInjected = true;
+                InjectedVersion = resolvedVersion;
+                IsInjectionInProgress = false;
+                InjectionProgress = 100;
+                return true;
+            }
         }
 
-        // 2. Inject Native Bridge
+        // Inject Native Bridge
         SetInjectionStage(20, "Injecting bridge");
         if (mcProcess == null)
         {
@@ -257,8 +293,7 @@ public class GameStateClient : INotifyPropertyChanged
         
         Log("Injection successful (ostensibly). Waiting for bridge...");
         SetInjectionStage(85, "Bridge injected, waiting for connection");
-        
-        // 4. Connect
+
         Log("Attempting to connect to bridge...");
         await ConnectAsync(
             maxAttempts: 30,
@@ -267,9 +302,22 @@ public class GameStateClient : INotifyPropertyChanged
                 int mapped = 85 + (attempt * 14 / total);
                 SetInjectionStage(mapped, $"Waiting for bridge startup ({attempt}/{total})");
             });
-        
+
         if (IsConnected)
         {
+            if (targetPid.HasValue)
+            {
+                int? listenerPid = TcpPortHelper.TryGetListeningProcessId(_port);
+                if (listenerPid.HasValue && listenerPid.Value != targetPid.Value)
+                {
+                    Disconnect();
+                    StatusMessage = $"ERROR: Connected to PID {listenerPid.Value}, not the selected PID {targetPid.Value}. Close the other Java/Minecraft window.";
+                    Log(StatusMessage);
+                    IsInjectionInProgress = false;
+                    return false;
+                }
+            }
+
             IsInjected = true;
             InjectedVersion = resolvedVersion;
             ApplyCustomInjectionTarget(targetHwnd);
@@ -278,13 +326,11 @@ public class GameStateClient : INotifyPropertyChanged
             InjectionProgress = 100;
             return true;
         }
-        else
-        {
-             StatusMessage = "ERROR: Connectivity failed after injection.";
-             Log("Failed to connect to bridge TCP server.");
-             IsInjectionInProgress = false;
-             return false;
-        }
+
+        StatusMessage = "ERROR: Connectivity failed after injection.";
+        Log("Failed to connect to bridge TCP server.");
+        IsInjectionInProgress = false;
+        return false;
     }
 
     internal static Process? ResolveInjectionTarget(int? targetPid)
@@ -537,12 +583,53 @@ public class GameStateClient : INotifyPropertyChanged
     private Process? FindMinecraftProcess()
     {
         string[] keywords = { ".lunarclient", "lunar", "minecraft" };
+        string[] titleKeywords = { "minecraft", "lunar client", "badlion" };
 
         try
         {
             var javaProcesses = Process.GetProcesses()
                 .Where(p => p.ProcessName.Equals("javaw", StringComparison.OrdinalIgnoreCase)
-                         || p.ProcessName.Equals("java", StringComparison.OrdinalIgnoreCase));
+                         || p.ProcessName.Equals("java", StringComparison.OrdinalIgnoreCase))
+                .Where(p => p.Id != Environment.ProcessId)
+                .ToList();
+
+            int? bridgeListenerPid = TcpPortHelper.TryGetListeningProcessId(_port);
+            if (bridgeListenerPid.HasValue)
+            {
+                Process? bridged = javaProcesses.FirstOrDefault(p => p.Id == bridgeListenerPid.Value);
+                if (bridged != null)
+                {
+                    Debug.WriteLine($"[FindMinecraftProcess] Using bridge listener PID={bridged.Id}");
+                    return bridged;
+                }
+            }
+
+            IntPtr foregroundHwnd = WindowDetection.GetForegroundWindowHandle();
+            if (foregroundHwnd != IntPtr.Zero)
+            {
+                int foregroundPid = WindowDetection.GetWindowProcessId(foregroundHwnd);
+                Process? foregroundJava = javaProcesses.FirstOrDefault(p => p.Id == foregroundPid);
+                if (foregroundJava != null)
+                {
+                    Debug.WriteLine($"[FindMinecraftProcess] Using foreground Java PID={foregroundJava.Id}");
+                    return foregroundJava;
+                }
+            }
+
+            foreach (var proc in javaProcesses)
+            {
+                try
+                {
+                    string title = proc.MainWindowTitle;
+                    if (!string.IsNullOrWhiteSpace(title)
+                        && titleKeywords.Any(kw => title.Contains(kw, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        Debug.WriteLine($"[FindMinecraftProcess] Found by title: PID={proc.Id} Title='{title}'");
+                        return proc;
+                    }
+                }
+                catch { }
+            }
 
             foreach (var proc in javaProcesses)
             {
@@ -555,7 +642,7 @@ public class GameStateClient : INotifyPropertyChanged
                         {
                             if (path.Contains(kw))
                             {
-                                Debug.WriteLine($"[FindMinecraftProcess] Found: PID={proc.Id} Path={proc.MainModule?.FileName}");
+                                Debug.WriteLine($"[FindMinecraftProcess] Found by path: PID={proc.Id} Path={proc.MainModule?.FileName}");
                                 return proc;
                             }
                         }
@@ -567,19 +654,11 @@ public class GameStateClient : INotifyPropertyChanged
                 }
             }
 
-            // Fallback: any javaw that isn't us
-            foreach (var proc in javaProcesses)
-            {
-                try
-                {
-                    if (proc.Id != Environment.ProcessId)
-                    {
-                        Debug.WriteLine($"[FindMinecraftProcess] Fallback: PID={proc.Id} Name={proc.ProcessName}");
-                        return proc;
-                    }
-                }
-                catch { }
-            }
+            Process? fallback = javaProcesses.FirstOrDefault();
+            if (fallback != null)
+                Debug.WriteLine($"[FindMinecraftProcess] Fallback: PID={fallback.Id} Name={fallback.ProcessName}");
+
+            return fallback;
         }
         catch (Exception ex)
         {
