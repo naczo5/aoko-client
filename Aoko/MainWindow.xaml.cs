@@ -475,6 +475,17 @@ public partial class MainWindow : Window
         GameStateClient.Instance.RequestBridgeMappingReload();
     }
 
+    private void EditHudButton_Click(object sender, RoutedEventArgs e)
+    {
+        Clicker.Instance.HudEditorActive = !Clicker.Instance.HudEditorActive;
+    }
+
+    private void ResetHudLayoutButton_Click(object sender, RoutedEventArgs e)
+    {
+        Clicker.Instance.HudLayout.ResetAll();
+        ProfileManager.SaveProfile(ProfileManager.CreateFromClicker());
+    }
+
     internal void EnterPanicStealthMode()
     {
         if (!Dispatcher.CheckAccess())

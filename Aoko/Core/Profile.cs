@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 
 namespace Aoko.Core;
@@ -77,6 +78,10 @@ public class Profile
     public int AutoTotemDelay { get; set; } = 0;
     public int AutoTotemBehaviorMode { get; set; } = 0;
 
+    // Nullable so older JSON (without hudLayout) deserializes without error;
+    // a null value is treated as canonical defaults in ApplyToClicker.
+    public Dictionary<string, HudElementLayout>? HudLayout { get; set; }
+
     public Dictionary<string, int> ModuleKeys { get; set; } = new()
     {
         ["autoclicker"]   = 0xC0,
@@ -97,6 +102,7 @@ public class Profile
         ["velocity"]      = 0,
         ["autototem"]     = 0,
         ["panic"]         = 0,
+        ["hudeditor"]     = 0,
     };
     public string Theme { get; set; } = "Slate";
 }
@@ -294,6 +300,8 @@ public static class ProfileManager
             AutoTotemDelay = clicker.AutoTotemDelay,
             AutoTotemBehaviorMode = clicker.AutoTotemBehaviorMode,
 
+            HudLayout = BuildHudLayoutDict(clicker.HudLayout),
+
             ModuleKeys = new Dictionary<string, int>(InputHooks.ModuleKeys),
             Theme = ThemeManager.CurrentTheme
         };
@@ -378,8 +386,53 @@ public static class ProfileManager
         clicker.AutoTotemDelay = profile.AutoTotemDelay;
         clicker.AutoTotemBehaviorMode = profile.AutoTotemBehaviorMode;
 
+        clicker.HudLayout = BuildHudLayout(profile.HudLayout);
+
         foreach (var kvp in profile.ModuleKeys)
             InputHooks.SetModuleKey(kvp.Key, kvp.Value);
         ThemeManager.ApplyTheme(profile.Theme);
+    }
+
+    /// <summary>
+    /// Converts a <see cref="HudLayout"/> to a plain dictionary suitable for JSON
+    /// serialization inside <see cref="Profile"/>.
+    /// </summary>
+    private static Dictionary<string, HudElementLayout> BuildHudLayoutDict(HudLayout hudLayout)
+    {
+        var dict = new Dictionary<string, HudElementLayout>();
+        foreach (string id in new[]
+        {
+            HudElementId.ModuleList, HudElementId.ClosestPlayer, HudElementId.PixelParty,
+            HudElementId.ChestEspList, HudElementId.GtbHint, HudElementId.Nametags,
+        })
+        {
+            dict[id] = hudLayout.Get(id);
+        }
+        return dict;
+    }
+
+    /// <summary>
+    /// Builds a <see cref="HudLayout"/> from the nullable dictionary stored in a
+    /// <see cref="Profile"/>. Returns canonical defaults when the dictionary is null
+    /// (covers older profiles that predate the hudLayout field).
+    /// </summary>
+    private static HudLayout BuildHudLayout(Dictionary<string, HudElementLayout>? dict)
+    {
+        if (dict == null)
+            return new HudLayout();
+
+        // Reconstruct via ToJson/FromJson so that clamping and defaults are applied
+        // consistently, tolerating any invalid values that may have been stored on disk.
+        var jsonObj = new JsonObject();
+        foreach (var kv in dict)
+        {
+            jsonObj[kv.Key] = new JsonObject
+            {
+                ["x"]     = kv.Value.X,
+                ["y"]     = kv.Value.Y,
+                ["scale"] = kv.Value.Scale,
+            };
+        }
+        return HudLayout.FromJson(jsonObj);
     }
 }

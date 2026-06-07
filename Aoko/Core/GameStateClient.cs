@@ -39,6 +39,7 @@ public class GameStateClient : INotifyPropertyChanged
     private long _lastUiActionBarDispatchTicks;
     private int _reloadMappingsNonce;
     private IntPtr _customTargetHwnd;
+    private volatile bool _suppressConfigPush = false;
 
     public event PropertyChangedEventHandler? PropertyChanged;
     public event Action? StateUpdated;
@@ -466,6 +467,16 @@ public class GameStateClient : INotifyPropertyChanged
                     var state = JsonSerializer.Deserialize<GameState>(line);
                     if (state != null)
                     {
+                        // Check raw JSON for hudLayout before handing off to GameState.
+                        try
+                        {
+                            JsonNode? rawNode = JsonNode.Parse(line);
+                            JsonNode? hudLayoutNode = rawNode?["hudLayout"];
+                            if (hudLayoutNode != null)
+                                ApplyInboundHudLayout(hudLayoutNode);
+                        }
+                        catch { /* ignore JSON parse failures for hudLayout */ }
+
                         state.IsConnected = true;
                         state.LastUpdate = DateTime.Now;
                         CurrentState = state;
@@ -856,6 +867,12 @@ public class GameStateClient : INotifyPropertyChanged
         {
             try
             {
+                if (_suppressConfigPush)
+                {
+                    await Task.Delay(200, token);
+                    continue;
+                }
+
                 var clicker = Clicker.Instance;
                 var config = new
                 {
@@ -934,7 +951,9 @@ public class GameStateClient : INotifyPropertyChanged
                     keybindClosestPlayer = InputHooks.GetModuleKey("closestplayer"),
                     keybindChestEsp      = InputHooks.GetModuleKey("chestesp"),
                     keybindChestStealer  = InputHooks.GetModuleKey("cheststealer"),
-                    keybindPixelPartyAssist = InputHooks.GetModuleKey("pixelpartyassist")
+                    keybindPixelPartyAssist = InputHooks.GetModuleKey("pixelpartyassist"),
+                    hudEditor = clicker.HudEditorActive,
+                    hudLayout = clicker.HudLayout.ToJson()
                 };
 
                 string json = JsonSerializer.Serialize(config) + "\n";
@@ -956,6 +975,32 @@ public class GameStateClient : INotifyPropertyChanged
     }
 
     // === ClickGUI Command Handler ===
+
+    private void ApplyInboundHudLayout(JsonNode node)
+    {
+        HudLayout inbound = HudLayout.FromJson(node);
+
+        // Echo guard: if the inbound layout matches what we already have, do nothing.
+        if (inbound.EqualsLayout(Clicker.Instance.HudLayout))
+            return;
+
+        // Suppress the config sender loop while we update the layout to avoid
+        // an immediate echo back to the bridge.
+        _suppressConfigPush = true;
+        try
+        {
+            System.Windows.Application.Current?.Dispatcher.Invoke(() =>
+            {
+                Clicker.Instance.HudLayout = inbound;
+            });
+
+            ProfileManager.SaveProfile(ProfileManager.CreateFromClicker());
+        }
+        finally
+        {
+            _suppressConfigPush = false;
+        }
+    }
 
     private void HandleBridgeCommand(string json)
     {

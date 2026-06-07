@@ -362,6 +362,14 @@
                                 <TextBlock Text="Shows/hides the active modules overlay list in-game." Foreground="{DynamicResource DimTextBrush}" FontSize="12" Margin="0,8,0,0"/>
                             </StackPanel>
                         </Border>
+
+                        <Border Style="{StaticResource ControlCardStyle}" Margin="0,12,0,0">
+                            <StackPanel>
+                                <CheckBox Content="Edit HUD" IsChecked="{Binding HudEditorActive, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                <TextBlock Text="Drag HUD elements in-game to reposition them. Open chat to move things around." Foreground="{DynamicResource DimTextBrush}" FontSize="12" Margin="0,8,0,0"/>
+                                <Button Content="Reset layout" Style="{StaticResource DarkButton}" Margin="0,8,0,0" Click="ResetHudLayoutButton_Click" HorizontalAlignment="Left" Padding="10,4" Cursor="Hand"/>
+                            </StackPanel>
+                        </Border>
                     </StackPanel>
                 </ScrollViewer>
             </TabItem>
