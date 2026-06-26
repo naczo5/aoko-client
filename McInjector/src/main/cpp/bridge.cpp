@@ -6088,72 +6088,103 @@ void RenderHUD(int winW, int winH) {
         return a.text < b.text;
     });
 
+    // Honor the HUD layout anchor + scale so the module list can be moved AND
+    // resized in the HUD editor. The block is anchored via the shared
+    // HudElementPixelPos helper (same as the editor box and the other panels),
+    // and all metrics are multiplied by the element scale. Previously scale was
+    // ignored, so resizing the module list in the editor had no visible effect.
     lc::HudElementLayout modLayout;
     { LockGuard lk2(g_configMutex); modLayout = g_hudLayout.Resolve(lc::ELEM_MODULELIST); }
-    const float marginX = (1.0f - modLayout.x) * (float)winW;  // right margin from anchor
-    float y = modLayout.y * (float)winH;
+    const float scale = modLayout.scale;
 
+    const float padX       = 8.0f * scale;
+    const float padY       = 3.0f * scale;
+    const float barW       = 3.0f * scale;
+    const float gapY       = 2.0f * scale;
+    const float fontH      = ImGui::GetFontSize() * scale;
+    const float shadowOff  = (std::max)(1.0f, scale);
+    const float rightInset = 6.0f * scale; // keeps a small gap when flush-right
+    const int style = (std::max)(0, (std::min)(4, cfg.moduleListStyle));
+    ImFont* font = ImGui::GetFont();
+
+    const char* logoText = "aoko client";
+    const float boxH = padY + fontH + padY;
+
+    // ── Measuring pass: compute the block bounds (right-aligned bars). ──
+    float blockW = 0.0f;
+    float blockH = 0.0f;
+    float logoW = 0.0f, logoH = 0.0f, logoGap = 0.0f;
     if (cfg.showLogo) {
-        const char* logoText = "aoko client";
-        ImVec2 logoSz = ImGui::CalcTextSize(logoText);
-        float logoX = io.DisplaySize.x - marginX - logoSz.x;
-        fg->AddText(ImVec2(logoX + 1, y + 1), ToImU32(theme.logoShadow), logoText);
-        fg->AddText(ImVec2(logoX, y), ToImU32(theme.logoColor), logoText);
-        y += logoSz.y + 8.0f;
+        logoW   = ImGui::CalcTextSize(logoText).x * scale;
+        logoH   = fontH;
+        logoGap = 8.0f * scale;
+        blockW  = (std::max)(blockW, logoW + rightInset);
+        blockH += logoH + logoGap;
+    }
+    for (size_t i = 0; i < mods.size(); i++) {
+        float textW = mods[i].width * scale;
+        float boxW  = barW + padX + textW + padX;
+        blockW = (std::max)(blockW, boxW + rightInset);
+        blockH += boxH;
+        if (i + 1 < mods.size()) blockH += gapY;
     }
 
-    const float padX = 8.0f;
-    const float padY = 3.0f;
-    const float barW = 3.0f;
-    const float gapY = 2.0f;
-    const float fontH = ImGui::GetFontSize();
-    const int style = (std::max)(0, (std::min)(4, cfg.moduleListStyle));
+    if (!mods.empty() || cfg.showLogo) {
+        ImVec2 tl = lc::HudElementPixelPos(modLayout, blockW, blockH, winW, winH);
+        const float x1 = tl.x + blockW - rightInset; // right edge of bars
+        float y = tl.y;
 
-    for (size_t i = 0; i < mods.size(); i++) {
-        const ModLine& m = mods[i];
-        ImVec2 textSz = ImGui::CalcTextSize(m.text.c_str());
-        float boxW = barW + padX + textSz.x + padX;
-        float boxH = padY + fontH + padY;
-        float x0 = io.DisplaySize.x - marginX - boxW;
-        float x1 = io.DisplaySize.x - marginX;
-        float y0 = y;
-        float y1 = y + boxH;
-
-        if (style == 0) {
-            fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleBg));
-            fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + barW, y1), m.accent);
-            fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleBorder));
-            ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
-            fg->AddText(ImVec2(tx.x + 1, tx.y + 1), ToImU32(theme.moduleTextShadow), m.text.c_str());
-            fg->AddText(tx, ToImU32(theme.moduleText), m.text.c_str());
-        } else if (style == 1) {
-            fg->AddRectFilled(ImVec2(x1 - textSz.x - 4, y0), ImVec2(x1, y1), ToImU32(theme.moduleMinimalBg));
-            fg->AddRectFilled(ImVec2(x1 - 2, y0), ImVec2(x1, y1), m.accent);
-            ImVec2 tx = ImVec2(x1 - textSz.x - 2, y0 + padY);
-            fg->AddText(ImVec2(tx.x + 1, tx.y + 1), ToImU32(theme.moduleTextShadow), m.text.c_str());
-            fg->AddText(tx, m.accent, m.text.c_str());
-        } else if (style == 2) {
-            fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleOutlinedBg));
-            fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), m.accent, 4.0f, 0, 1.5f);
-            ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
-            fg->AddText(ImVec2(tx.x + 1, tx.y + 1), ToImU32(theme.moduleTextShadow), m.text.c_str());
-            fg->AddText(tx, m.accent, m.text.c_str());
-        } else if (style == 3) {
-            fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleMinimalBg), 4.0f);
-            fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleGlassBorder), 4.0f, 0, 1.0f);
-            fg->AddRectFilled(ImVec2(x0 + 1.0f, y0 + 1.0f), ImVec2(x0 + barW + 1.0f, y1 - 1.0f), m.accent);
-            ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
-            fg->AddText(ImVec2(tx.x + 1, tx.y + 1), ToImU32(theme.moduleTextShadow), m.text.c_str());
-            fg->AddText(tx, ToImU32(theme.moduleText), m.text.c_str());
-        } else {
-            fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), m.accent, 4.0f);
-            fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleBorder), 4.0f, 0, 1.0f);
-            ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
-            fg->AddText(ImVec2(tx.x + 1, tx.y + 1), ToImU32(theme.moduleTextShadow), m.text.c_str());
-            fg->AddText(tx, ToImU32(theme.moduleBoldText), m.text.c_str());
+        if (cfg.showLogo) {
+            float logoX = x1 - logoW;
+            fg->AddText(font, fontH, ImVec2(logoX + shadowOff, y + shadowOff), ToImU32(theme.logoShadow), logoText);
+            fg->AddText(font, fontH, ImVec2(logoX, y), ToImU32(theme.logoColor), logoText);
+            y += logoH + logoGap;
         }
 
-        y += boxH + gapY;
+        for (size_t i = 0; i < mods.size(); i++) {
+            const ModLine& m = mods[i];
+            float textW = m.width * scale;
+            float boxW  = barW + padX + textW + padX;
+            float x0 = x1 - boxW;
+            float y0 = y;
+            float y1 = y + boxH;
+
+            if (style == 0) {
+                fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleBg));
+                fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + barW, y1), m.accent);
+                fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleBorder));
+                ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
+                fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), ToImU32(theme.moduleTextShadow), m.text.c_str());
+                fg->AddText(font, fontH, tx, ToImU32(theme.moduleText), m.text.c_str());
+            } else if (style == 1) {
+                fg->AddRectFilled(ImVec2(x1 - textW - 4.0f * scale, y0), ImVec2(x1, y1), ToImU32(theme.moduleMinimalBg));
+                fg->AddRectFilled(ImVec2(x1 - 2.0f * scale, y0), ImVec2(x1, y1), m.accent);
+                ImVec2 tx = ImVec2(x1 - textW - 2.0f * scale, y0 + padY);
+                fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), ToImU32(theme.moduleTextShadow), m.text.c_str());
+                fg->AddText(font, fontH, tx, m.accent, m.text.c_str());
+            } else if (style == 2) {
+                fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleOutlinedBg));
+                fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), m.accent, 4.0f, 0, 1.5f);
+                ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
+                fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), ToImU32(theme.moduleTextShadow), m.text.c_str());
+                fg->AddText(font, fontH, tx, m.accent, m.text.c_str());
+            } else if (style == 3) {
+                fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleMinimalBg), 4.0f);
+                fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleGlassBorder), 4.0f, 0, 1.0f);
+                fg->AddRectFilled(ImVec2(x0 + 1.0f * scale, y0 + 1.0f * scale), ImVec2(x0 + barW + 1.0f * scale, y1 - 1.0f * scale), m.accent);
+                ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
+                fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), ToImU32(theme.moduleTextShadow), m.text.c_str());
+                fg->AddText(font, fontH, tx, ToImU32(theme.moduleText), m.text.c_str());
+            } else {
+                fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), m.accent, 4.0f);
+                fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleBorder), 4.0f, 0, 1.0f);
+                ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
+                fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), ToImU32(theme.moduleTextShadow), m.text.c_str());
+                fg->AddText(font, fontH, tx, ToImU32(theme.moduleBoldText), m.text.c_str());
+            }
+
+            y += boxH + gapY;
+        }
     }
 
     if (cfg.gtbHelper) {

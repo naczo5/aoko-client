@@ -665,6 +665,46 @@
                     <StackPanel Margin="12">
                         <Border Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
                             <StackPanel>
+                                <TextBlock Text="Configs" Foreground="{DynamicResource TextBrush}" FontSize="16" FontWeight="Bold" Margin="0,0,0,8" />
+                                <TextBlock Text="Save the current settings as a named config, then switch between configs at any time. Configs are stored as .json files."
+                                           Foreground="{DynamicResource DimTextBrush}" FontSize="12" TextWrapping="Wrap" Margin="0,0,0,10"/>
+
+                                <TextBlock Text="Select config" Foreground="{DynamicResource DimTextBrush}" FontSize="12" Margin="0,0,0,4"/>
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <ComboBox x:Name="ConfigComboBox" Grid.Column="0" Style="{StaticResource DarkComboBox}" MinWidth="160" Margin="0,0,8,0"/>
+                                    <Button Grid.Column="1" Content="Load" Click="LoadConfigButton_Click" Style="{StaticResource DarkButton}" Padding="14,4" Margin="0,0,8,0" Cursor="Hand"/>
+                                    <Button Grid.Column="2" Content="Save" Click="SaveConfigButton_Click" Style="{StaticResource DarkButton}" Padding="14,4" Margin="0,0,8,0" Cursor="Hand"/>
+                                    <Button Grid.Column="3" Content="Delete" Click="DeleteConfigButton_Click" Style="{StaticResource DarkButton}" Padding="14,4" Cursor="Hand"/>
+                                </Grid>
+
+                                <TextBlock Text="Create new config" Foreground="{DynamicResource DimTextBrush}" FontSize="12" Margin="0,12,0,4"/>
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBox x:Name="NewConfigNameBox" Grid.Column="0" MinWidth="160" Margin="0,0,8,0"
+                                             VerticalContentAlignment="Center" Padding="8,5" FontSize="12"
+                                             Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"
+                                             CaretBrush="{DynamicResource AccentBrush}" BorderBrush="{DynamicResource SliderBgBrush}" BorderThickness="1"
+                                             KeyDown="NewConfigNameBox_KeyDown"/>
+                                    <Button Grid.Column="1" Content="Create" Click="CreateConfigButton_Click" Style="{StaticResource DarkButton}" Padding="14,4" Cursor="Hand"/>
+                                </Grid>
+
+                                <Button Content="Open Configs Folder" Click="OpenConfigsFolderButton_Click" Style="{StaticResource DarkButton}"
+                                        HorizontalAlignment="Left" Padding="14,4" Margin="0,12,0,0" Cursor="Hand"/>
+
+                                <TextBlock x:Name="ConfigStatusText" Text="" Foreground="{DynamicResource DimTextBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,10,0,0"/>
+                            </StackPanel>
+                        </Border>
+                        <Border Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
+                            <StackPanel>
                                 <TextBlock Text="Reload Mappings" Foreground="{DynamicResource TextBrush}" FontSize="16" FontWeight="Bold" Margin="0,0,0,8" />
                                 <TextBlock x:Name="ReloadMappingsAvailabilityText"
                                            Text="Available"
@@ -738,6 +778,108 @@
                                     <Run Text="Current palette: "/>
                                     <Run Text="{Binding GuiTheme}" Foreground="{DynamicResource AccentBrush}"/>
                                 </TextBlock>
+
+                                <TextBlock Text="Custom Palettes" Foreground="{DynamicResource DimTextBrush}" FontSize="12" Margin="0,14,0,4"/>
+                                <ItemsControl x:Name="CustomPalettesItems">
+                                    <ItemsControl.ItemsPanel>
+                                        <ItemsPanelTemplate>
+                                            <WrapPanel/>
+                                        </ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Border Width="180" Margin="0,0,8,8" Background="#22000000" CornerRadius="6" Padding="8,6">
+                                                <StackPanel>
+                                                    <DockPanel>
+                                                        <Button DockPanel.Dock="Right" Content="✕" Width="20" Height="20" Padding="0"
+                                                                Tag="{Binding Name}" Click="DeleteCustomPaletteButton_Click"
+                                                                Style="{StaticResource DarkButton}" Cursor="Hand" ToolTip="Delete palette"/>
+                                                        <TextBlock Text="{Binding Name}" Foreground="{DynamicResource TextBrush}" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+                                                    </DockPanel>
+                                                    <Button Margin="0,6,0,0" Style="{StaticResource PreviewCardButtonStyle}"
+                                                            Tag="{Binding Name}" Click="GuiPaletteButton_Click" Cursor="Hand" ToolTip="Apply palette">
+                                                        <StackPanel Orientation="Horizontal">
+                                                            <Border Width="34" Height="12" CornerRadius="3" Background="{Binding BackgroundSwatch}" Margin="0,0,4,0"/>
+                                                            <Border Width="34" Height="12" CornerRadius="3" Background="{Binding PanelSwatch}" Margin="0,0,4,0"/>
+                                                            <Border Width="34" Height="12" CornerRadius="3" Background="{Binding SliderSwatch}" Margin="0,0,4,0"/>
+                                                            <Border Width="34" Height="12" CornerRadius="3" Background="{Binding AccentSwatch}"/>
+                                                        </StackPanel>
+                                                    </Button>
+                                                </StackPanel>
+                                            </Border>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+
+                                <Border Background="#1AFFFFFF" CornerRadius="6" Padding="10" Margin="0,4,0,0">
+                                    <StackPanel>
+                                        <TextBlock Text="Create custom palette" Foreground="{DynamicResource TextBrush}" FontSize="12" FontWeight="SemiBold" Margin="0,0,0,8"/>
+                                        <TextBlock Text="Pick four base colors as hex (e.g. #1A2B3C). The remaining shades are derived automatically."
+                                                   Foreground="{DynamicResource DimTextBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,0,0,8"/>
+
+                                        <Grid Margin="0,0,0,8">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="Auto"/>
+                                                <ColumnDefinition Width="*"/>
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0" Text="Name" Foreground="{DynamicResource DimTextBrush}" FontSize="12" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                            <TextBox x:Name="NewPaletteNameBox" Grid.Column="1" MinWidth="140" VerticalContentAlignment="Center" Padding="8,5" FontSize="12"
+                                                     Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"
+                                                     CaretBrush="{DynamicResource AccentBrush}" BorderBrush="{DynamicResource SliderBgBrush}" BorderThickness="1"/>
+                                        </Grid>
+
+                                        <WrapPanel>
+                                            <StackPanel Width="150" Margin="0,0,10,8">
+                                                <TextBlock Text="Background" Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,0,0,3"/>
+                                                <DockPanel>
+                                                    <Border x:Name="PaletteBgPreview" DockPanel.Dock="Left" Width="22" Height="22" CornerRadius="3" Background="#0A0B0F" Margin="0,0,6,0" BorderBrush="#40FFFFFF" BorderThickness="1"
+                                                            Cursor="Hand" ToolTip="Click to pick a color" Tag="{Binding ElementName=PaletteBgBox}" MouseLeftButtonDown="ColorSwatch_MouseLeftButtonDown"/>
+                                                    <TextBox x:Name="PaletteBgBox" Text="#0A0B0F" VerticalContentAlignment="Center" Padding="6,4" FontSize="12"
+                                                             Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"
+                                                             CaretBrush="{DynamicResource AccentBrush}" BorderBrush="{DynamicResource SliderBgBrush}" BorderThickness="1"
+                                                             TextChanged="PaletteHexBox_TextChanged"/>
+                                                </DockPanel>
+                                            </StackPanel>
+                                            <StackPanel Width="150" Margin="0,0,10,8">
+                                                <TextBlock Text="Panel" Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,0,0,3"/>
+                                                <DockPanel>
+                                                    <Border x:Name="PalettePanelPreview" DockPanel.Dock="Left" Width="22" Height="22" CornerRadius="3" Background="#12141A" Margin="0,0,6,0" BorderBrush="#40FFFFFF" BorderThickness="1"
+                                                            Cursor="Hand" ToolTip="Click to pick a color" Tag="{Binding ElementName=PalettePanelBox}" MouseLeftButtonDown="ColorSwatch_MouseLeftButtonDown"/>
+                                                    <TextBox x:Name="PalettePanelBox" Text="#12141A" VerticalContentAlignment="Center" Padding="6,4" FontSize="12"
+                                                             Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"
+                                                             CaretBrush="{DynamicResource AccentBrush}" BorderBrush="{DynamicResource SliderBgBrush}" BorderThickness="1"
+                                                             TextChanged="PaletteHexBox_TextChanged"/>
+                                                </DockPanel>
+                                            </StackPanel>
+                                            <StackPanel Width="150" Margin="0,0,10,8">
+                                                <TextBlock Text="Accent" Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,0,0,3"/>
+                                                <DockPanel>
+                                                    <Border x:Name="PaletteAccentPreview" DockPanel.Dock="Left" Width="22" Height="22" CornerRadius="3" Background="#C7625A" Margin="0,0,6,0" BorderBrush="#40FFFFFF" BorderThickness="1"
+                                                            Cursor="Hand" ToolTip="Click to pick a color" Tag="{Binding ElementName=PaletteAccentBox}" MouseLeftButtonDown="ColorSwatch_MouseLeftButtonDown"/>
+                                                    <TextBox x:Name="PaletteAccentBox" Text="#C7625A" VerticalContentAlignment="Center" Padding="6,4" FontSize="12"
+                                                             Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"
+                                                             CaretBrush="{DynamicResource AccentBrush}" BorderBrush="{DynamicResource SliderBgBrush}" BorderThickness="1"
+                                                             TextChanged="PaletteHexBox_TextChanged"/>
+                                                </DockPanel>
+                                            </StackPanel>
+                                            <StackPanel Width="150" Margin="0,0,10,8">
+                                                <TextBlock Text="Text" Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,0,0,3"/>
+                                                <DockPanel>
+                                                    <Border x:Name="PaletteTextPreview" DockPanel.Dock="Left" Width="22" Height="22" CornerRadius="3" Background="#E8EAEE" Margin="0,0,6,0" BorderBrush="#40FFFFFF" BorderThickness="1"
+                                                            Cursor="Hand" ToolTip="Click to pick a color" Tag="{Binding ElementName=PaletteTextBox}" MouseLeftButtonDown="ColorSwatch_MouseLeftButtonDown"/>
+                                                    <TextBox x:Name="PaletteTextBox" Text="#E8EAEE" VerticalContentAlignment="Center" Padding="6,4" FontSize="12"
+                                                             Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"
+                                                             CaretBrush="{DynamicResource AccentBrush}" BorderBrush="{DynamicResource SliderBgBrush}" BorderThickness="1"
+                                                             TextChanged="PaletteHexBox_TextChanged"/>
+                                                </DockPanel>
+                                            </StackPanel>
+                                        </WrapPanel>
+
+                                        <Button Content="Add palette" Click="AddCustomPaletteButton_Click" Style="{StaticResource DarkButton}"
+                                                HorizontalAlignment="Left" Padding="14,4" Margin="0,2,0,0" Cursor="Hand"/>
+                                        <TextBlock x:Name="PaletteStatusText" Text="" Foreground="{DynamicResource DimTextBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,8,0,0"/>
+                                    </StackPanel>
+                                </Border>
 
                                 <TextBlock Text="Module List Style" Foreground="{DynamicResource DimTextBrush}" FontSize="12" Margin="0,10,0,4" />
                                 <WrapPanel Margin="0,0,0,6">

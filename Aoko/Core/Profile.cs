@@ -195,6 +195,85 @@ public static class ProfileManager
         
         return names;
     }
+
+    /// <summary>
+    /// Name of the internal auto-save slot used to persist the live working state
+    /// on close / restore it on launch. It is intentionally hidden from the user
+    /// facing config list.
+    /// </summary>
+    public const string AutoSaveConfigName = "config";
+
+    /// <summary>Absolute path of the folder that stores config (.json) files.</summary>
+    public static string ConfigsDirectory => ProfilesDir;
+
+    /// <summary>
+    /// Returns the user-facing config names (every <c>*.json</c> file except the
+    /// internal auto-save slot), sorted case-insensitively. Unlike
+    /// <see cref="GetProfileNames"/> this never injects a synthetic "Default" entry.
+    /// </summary>
+    public static List<string> GetConfigNames()
+    {
+        var names = new List<string>();
+
+        if (Directory.Exists(ProfilesDir))
+        {
+            foreach (var file in Directory.GetFiles(ProfilesDir, "*.json"))
+            {
+                string name = Path.GetFileNameWithoutExtension(file);
+                if (string.Equals(name, AutoSaveConfigName, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                names.Add(name);
+            }
+        }
+
+        names.Sort(StringComparer.OrdinalIgnoreCase);
+        return names;
+    }
+
+    /// <summary>Returns true if a config with the given (raw) name already exists.</summary>
+    public static bool ConfigExists(string name)
+    {
+        string sanitized = SanitizeConfigName(name);
+        if (sanitized.Length == 0)
+            return false;
+        return File.Exists(Path.Combine(ProfilesDir, $"{sanitized}.json"));
+    }
+
+    /// <summary>
+    /// Produces a safe file-name stem from user input: trims whitespace, strips any
+    /// path separators / invalid filename characters, and prevents traversal. Returns
+    /// an empty string when nothing valid remains (caller should reject it).
+    /// </summary>
+    public static string SanitizeConfigName(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+            return string.Empty;
+
+        string trimmed = name.Trim();
+
+        // Drop anything that looks like a path component.
+        trimmed = trimmed.Replace('\\', '_').Replace('/', '_');
+
+        var sb = new System.Text.StringBuilder(trimmed.Length);
+        foreach (char c in trimmed)
+        {
+            if (Array.IndexOf(Path.GetInvalidFileNameChars(), c) >= 0)
+                continue;
+            sb.Append(c);
+        }
+
+        string cleaned = sb.ToString().Trim().TrimEnd('.');
+
+        // Reject reserved traversal stems.
+        if (cleaned == "." || cleaned == "..")
+            return string.Empty;
+
+        // Keep file names reasonable.
+        if (cleaned.Length > 64)
+            cleaned = cleaned.Substring(0, 64);
+
+        return cleaned;
+    }
     
     public static void SaveProfile(Profile profile)
     {

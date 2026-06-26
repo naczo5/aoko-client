@@ -9950,71 +9950,104 @@ BOOL WINAPI hwglSwapBuffers(HDC hDc) {
                     }
                 }
 
-                const float marginX = 10.0f;
-                float y = 10.0f;
-                
+                // Honor the HUD layout anchor + scale so the module list can be
+                // moved/resized in the HUD editor like the other screen-anchored
+                // panels (closestplayer, pixelparty). Previously this was hard-coded
+                // to the top-right corner and ignored g_hudLayout entirely, so the
+                // editor box moved but the list never did.
+                lc::HudElementLayout mlLayout;
+                { LockGuard lkHud(g_configMutex); mlLayout = g_hudLayout.Resolve(lc::ELEM_MODULELIST); }
+                const float scale = mlLayout.scale;
+
+                const float padX      = 8.0f * scale;
+                const float padY      = 3.0f * scale;
+                const float barW      = 3.0f * scale;
+                const float gapY      = 2.0f * scale;
+                const float fontH     = ImGui::GetFontSize() * scale;
+                const float shadowOff = (std::max)(1.0f, scale);
+                const float rightInset = 6.0f * scale; // keeps a small gap when flush-right
+                const int style = (std::max)(0, (std::min)(4, cfg.moduleListStyle));
+                ImFont* font = ImGui::GetFont();
+
+                const char* logoText = "aoko client";
+                const float boxH = padY + fontH + padY;
+
+                // ── Measuring pass: compute the block bounds (right-aligned bars). ──
+                float blockW = 0.0f;
+                float blockH = 0.0f;
+                float logoW = 0.0f, logoH = 0.0f, logoGap = 0.0f;
                 if (cfg.showLogo) {
-                    const char* logoText = "aoko client";
-                    ImVec2 logoSz = ImGui::CalcTextSize(logoText);
-                    float logoX = io.DisplaySize.x - marginX - logoSz.x;
-                    // Logo Shadow
-                    fg->AddText(ImVec2(logoX + 1, y + 1), overlayTheme.logoShadow, logoText);
-                    fg->AddText(ImVec2(logoX, y), overlayTheme.logoColor, logoText);
-                    y += logoSz.y + 8.0f;
+                    logoW   = ImGui::CalcTextSize(logoText).x * scale;
+                    logoH   = fontH;
+                    logoGap = 8.0f * scale;
+                    blockW  = (std::max)(blockW, logoW + rightInset);
+                    blockH += logoH + logoGap;
+                }
+                for (int i = 0; i < modCount; i++) {
+                    float textW = mods[i].width * scale;
+                    float boxW  = barW + padX + textW + padX;
+                    blockW = (std::max)(blockW, boxW + rightInset);
+                    blockH += boxH;
+                    if (i + 1 < modCount) blockH += gapY;
                 }
 
-                const float padX = 8.0f;
-                const float padY = 3.0f;
-                const float barW = 3.0f;
-                const float gapY = 2.0f;
-                const float fontH = ImGui::GetFontSize();
-                const int style = (std::max)(0, (std::min)(4, cfg.moduleListStyle));
-                
-                for (int i = 0; i < modCount; i++) {
-                    const ModLine& m = mods[i];
-                    ImVec2 textSz = ImGui::CalcTextSize(m.text);
-                    float boxW = barW + padX + textSz.x + padX;
-                    float boxH = padY + fontH + padY;
-                    float x0 = io.DisplaySize.x - marginX - boxW;
-                    float x1 = io.DisplaySize.x - marginX;
-                    float y0 = y;
-                    float y1 = y + boxH;
+                if (modCount > 0 || cfg.showLogo) {
+                    // Anchor the whole block via the shared HUD layout helper.
+                    ImVec2 tl = lc::HudElementPixelPos(mlLayout, blockW, blockH, winW, winH);
+                    const float x1 = tl.x + blockW - rightInset; // right edge of bars
+                    float y = tl.y;
 
-                    if (style == 0) {
-                        fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleBg);
-                        fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + barW, y1), m.accent);
-                        fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleBorder);
-                        ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
-                        fg->AddText(ImVec2(tx.x + 1, tx.y + 1), overlayTheme.moduleTextShadow, m.text);
-                        fg->AddText(tx, overlayTheme.moduleText, m.text);
-                    } else if (style == 1) {
-                        fg->AddRectFilled(ImVec2(x1 - textSz.x - 4, y0), ImVec2(x1, y1), overlayTheme.moduleMinimalBg);
-                        fg->AddRectFilled(ImVec2(x1 - 2, y0), ImVec2(x1, y1), m.accent);
-                        ImVec2 tx = ImVec2(x1 - textSz.x - 2, y0 + padY);
-                        fg->AddText(ImVec2(tx.x + 1, tx.y + 1), overlayTheme.moduleTextShadow, m.text);
-                        fg->AddText(tx, m.accent, m.text);
-                    } else if (style == 2) {
-                        fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleOutlinedBg);
-                        fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), m.accent, 4.0f, 0, 1.5f);
-                        ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
-                        fg->AddText(ImVec2(tx.x + 1, tx.y + 1), overlayTheme.moduleTextShadow, m.text);
-                        fg->AddText(tx, m.accent, m.text);
-                    } else if (style == 3) {
-                        fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleMinimalBg, 4.0f);
-                        fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleGlassBorder, 4.0f, 0, 1.0f);
-                        fg->AddRectFilled(ImVec2(x0 + 1.0f, y0 + 1.0f), ImVec2(x0 + barW + 1.0f, y1 - 1.0f), m.accent);
-                        ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
-                        fg->AddText(ImVec2(tx.x + 1, tx.y + 1), overlayTheme.moduleTextShadow, m.text);
-                        fg->AddText(tx, overlayTheme.moduleText, m.text);
-                    } else {
-                        fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), m.accent, 4.0f);
-                        fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleBorder, 4.0f, 0, 1.0f);
-                        ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
-                        fg->AddText(ImVec2(tx.x + 1, tx.y + 1), overlayTheme.moduleTextShadow, m.text);
-                        fg->AddText(tx, overlayTheme.moduleBoldText, m.text);
+                    if (cfg.showLogo) {
+                        float logoX = x1 - logoW;
+                        fg->AddText(font, fontH, ImVec2(logoX + shadowOff, y + shadowOff), overlayTheme.logoShadow, logoText);
+                        fg->AddText(font, fontH, ImVec2(logoX, y), overlayTheme.logoColor, logoText);
+                        y += logoH + logoGap;
                     }
 
-                    y += boxH + gapY;
+                    for (int i = 0; i < modCount; i++) {
+                        const ModLine& m = mods[i];
+                        float textW = m.width * scale;
+                        float boxW  = barW + padX + textW + padX;
+                        float x0 = x1 - boxW;
+                        float y0 = y;
+                        float y1 = y + boxH;
+
+                        if (style == 0) {
+                            fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleBg);
+                            fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + barW, y1), m.accent);
+                            fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleBorder);
+                            ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
+                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.moduleTextShadow, m.text);
+                            fg->AddText(font, fontH, tx, overlayTheme.moduleText, m.text);
+                        } else if (style == 1) {
+                            fg->AddRectFilled(ImVec2(x1 - textW - 4.0f * scale, y0), ImVec2(x1, y1), overlayTheme.moduleMinimalBg);
+                            fg->AddRectFilled(ImVec2(x1 - 2.0f * scale, y0), ImVec2(x1, y1), m.accent);
+                            ImVec2 tx = ImVec2(x1 - textW - 2.0f * scale, y0 + padY);
+                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.moduleTextShadow, m.text);
+                            fg->AddText(font, fontH, tx, m.accent, m.text);
+                        } else if (style == 2) {
+                            fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleOutlinedBg);
+                            fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), m.accent, 4.0f, 0, 1.5f);
+                            ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
+                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.moduleTextShadow, m.text);
+                            fg->AddText(font, fontH, tx, m.accent, m.text);
+                        } else if (style == 3) {
+                            fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleMinimalBg, 4.0f);
+                            fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleGlassBorder, 4.0f, 0, 1.0f);
+                            fg->AddRectFilled(ImVec2(x0 + 1.0f * scale, y0 + 1.0f * scale), ImVec2(x0 + barW + 1.0f * scale, y1 - 1.0f * scale), m.accent);
+                            ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
+                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.moduleTextShadow, m.text);
+                            fg->AddText(font, fontH, tx, overlayTheme.moduleText, m.text);
+                        } else {
+                            fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), m.accent, 4.0f);
+                            fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleBorder, 4.0f, 0, 1.0f);
+                            ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
+                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.moduleTextShadow, m.text);
+                            fg->AddText(font, fontH, tx, overlayTheme.moduleBoldText, m.text);
+                        }
+
+                        y += boxH + gapY;
+                    }
                 }
             }
         } else {

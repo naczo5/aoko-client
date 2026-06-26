@@ -77,9 +77,7 @@ Run from repository root unless noted.
 ## Notes on versions
 
 - `bridge_261.dll` is the modern bridge used for both 26.1 and 1.21 injection.
-- `bridge.dll` (1.8.9) is supported and now builds with the shared ImGui/OpenGL backend.
-- Supported runtime bridges are configured through the external GUI.
-
+- `bridge.dll` is used for 1.8.9 injection, sometimes reffered to as 'legacy'.
 ## Project structure
 
 ```text
@@ -97,7 +95,7 @@ aoko/
 `- README.md
 ```
 
-## Architecture (short)
+## Architecture
 
 - The C# loader injects the bridge DLL into Lunar and manages settings/UI.
 - Bridge and loader communicate over TCP (`25590`).
@@ -110,6 +108,23 @@ aoko/
 - Bridge-side logic reads game state and may perform controlled, module-scoped JNI/game interactions for features that require them.
 - Do not add raw packet spam or unrelated in-game combat method calls.
 
+## Contributions
+
+Pull requests are welcome for bug fixes and new modules.
+
+- When reporting a bug you can use the issues tab, attach the logs if possible, they are located in the client's directory.
+- New modules should be tested on major/actest servers.
+- It should be mentioned if they do not bypass and what is
+therefore their usecase (like private or anarchy servers).
+
 ## TODO
 
-- Add Linux support
+- [ ] Fix block party assist jump behavior
+- [ ] Fix HUD edit - module list not editable
+- [ ] Add different configs handling
+- [ ] Add custom color palettes
+- [ ] Add AntiDebuff module - removes effects like blindness, nausea
+
+## Support
+
+ETH - `0x04166c3bec4e2e28799AdFa0b336b0159d90c699`
