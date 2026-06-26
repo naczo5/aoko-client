@@ -22,6 +22,7 @@
 #include "json_config_reader.h"
 #include "bridge_capabilities.h"
 #include "hud_layout.h"
+#include "block_esp_common.h"
 #include "jni_core/scoped_env.h"
 #include "jni_core/local_frame.h"
 #include "jni_core/matrix_reader.h"
@@ -145,6 +146,12 @@ struct Config {
     int chestEspMaxCount = 5;
     bool chestStealer = false;
     int chestStealerDelayMs = 120;
+    bool blockEsp = false;
+    bool blockEspBoxes = true;
+    bool blockEspTracers = false;
+    bool blockEspHud = true;
+    int blockEspMaxCount = 64;
+    int blockEspRange = 4;
     std::string gtbHint;
     int gtbCount = 0;
     std::string gtbPreview;
@@ -172,6 +179,7 @@ struct Config {
     int keybindClosestPlayer = 0;
     int keybindChestEsp = 0;
     int keybindChestStealer = 0;
+    int keybindBlockEsp = 0;
     bool pixelPartyAssist = false;
     int pixelPartyScanRadius = 28;
     bool pixelPartyAutoLook = false;
@@ -182,6 +190,15 @@ static Config g_config;
 static Mutex g_configMutex;
 static lc::HudLayout g_hudLayout = lc::HudLayout::DefaultLayout();
 static lc::HudEditorState g_hudEditor;
+
+// ── Block ESP / X-ray shared state (legacy 1.8.9) ──
+struct BlockEspData18 { double x, y, z; unsigned int color; double dist; };
+static std::vector<BlockEspData18> g_blockEspList;
+static Mutex g_blockEspListMutex;
+static std::vector<lc::BlockEspTargetDef> g_blockEspTargets;
+static Mutex g_blockEspTargetsMutex;
+static volatile LONG g_blockEspTargetsVersion = 0;
+static DWORD g_lastBlockEspScanMs = 0;
 
 // Game State
 struct GameState {
@@ -6152,6 +6169,7 @@ void RenderHUD(int winW, int winH) {
     if (cfg.triggerbot)        pushMod("Triggerbot", ToImU32(theme.accentSecondary));
     if (cfg.speedBridge)       pushMod("SpeedBridge", ToImU32(theme.accentPrimary));
     if (cfg.chestEsp)          pushMod("Chest ESP", ToImU32(theme.accentSecondary));
+    if (cfg.blockEsp)          pushMod("Block ESP", ToImU32(theme.accentSecondary));
     if (cfg.chestStealer)      pushMod("Chest Stealer", ToImU32(theme.accentTertiary));
     if (cfg.nametags)          pushMod("Nametags", ToImU32(theme.accentPrimary));
     if (cfg.gtbHelper)         pushMod("GTB Helper", ToImU32(theme.accentTertiary));
@@ -7677,6 +7695,391 @@ void RenderChestESP(int w, int h) {
     env->PopLocalFrame(nullptr);
 }
 
+// ===================== BLOCK ESP / X-RAY (legacy 1.8.9) =====================
+static jclass    g_blockClass18           = nullptr; // net/minecraft/block/Block
+static jmethodID g_blockGetFromName18     = nullptr; // static Block.getBlockFromName(String)->Block
+static jmethodID g_worldGetChunk18        = nullptr; // World.getChunkFromChunkCoords(II)->Chunk
+static jmethodID g_chunkGetStorageArray18 = nullptr; // Chunk.getBlockStorageArray()->[ExtendedBlockStorage
+static jclass    g_storageClass18         = nullptr; // ExtendedBlockStorage
+static jmethodID g_storageGet18           = nullptr; // ExtendedBlockStorage.get(III)->IBlockState
+
+struct BlockEspTargetBlock18 { jobject block; unsigned int color; };
+static std::vector<BlockEspTargetBlock18> g_blockEspTargetBlocks18;
+static LONG g_blockEspTargetBlocksVersion18 = -1;
+
+struct BlockEspChunkCache18 { std::vector<BlockEspData18> hits; };
+static std::map<long long, BlockEspChunkCache18> g_blockEspChunkCache18;
+
+static long long BlockEspChunkKey18(int cx, int cz) {
+    return ((long long)(unsigned int)cx << 32) | (unsigned int)cz;
+}
+static int BlockEspAbsI18(int v) { return v < 0 ? -v : v; }
+
+static void EnsureBlockClass18(JNIEnv* env) {
+    if (g_blockClass18) return;
+    jobject gcl = g_gameClassLoader;
+    jclass c = nullptr;
+    if (gcl) c = LoadClassWithLoader(env, gcl, "net/minecraft/block/Block");
+    if (!c) { c = env->FindClass("net/minecraft/block/Block"); if (env->ExceptionCheck()) { env->ExceptionClear(); c = nullptr; } }
+    if (c) { g_blockClass18 = (jclass)env->NewGlobalRef(c); env->DeleteLocalRef(c); }
+    if (g_blockClass18 && !g_blockGetFromName18) {
+        const char* names[] = { "getBlockFromName", "func_149684_b", nullptr };
+        for (int i = 0; names[i] && !g_blockGetFromName18; i++) {
+            g_blockGetFromName18 = env->GetStaticMethodID(g_blockClass18, names[i], "(Ljava/lang/String;)Lnet/minecraft/block/Block;");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_blockGetFromName18 = nullptr; }
+        }
+    }
+}
+
+// Rebuild the resolved target Block singletons whenever the config target set changes.
+static void EnsureBlockEspTargetBlocks18(JNIEnv* env) {
+    LONG ver = g_blockEspTargetsVersion;
+    if (ver == g_blockEspTargetBlocksVersion18) return;
+
+    for (auto& t : g_blockEspTargetBlocks18) if (t.block) env->DeleteGlobalRef(t.block);
+    g_blockEspTargetBlocks18.clear();
+    g_blockEspChunkCache18.clear();
+
+    std::vector<lc::BlockEspTargetDef> targets;
+    { LockGuard tlk(g_blockEspTargetsMutex); targets = g_blockEspTargets; }
+
+    EnsureBlockClass18(env);
+    if (g_blockClass18 && g_blockGetFromName18) {
+        for (const auto& tg : targets) {
+            jobject blk = nullptr;
+            const std::string tryNames[2] = { tg.id, std::string("minecraft:") + tg.id };
+            for (int n = 0; n < 2 && !blk; n++) {
+                jstring js = env->NewStringUTF(tryNames[n].c_str());
+                if (!js) continue;
+                jobject b = env->CallStaticObjectMethod(g_blockClass18, g_blockGetFromName18, js);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); b = nullptr; }
+                env->DeleteLocalRef(js);
+                if (b) { blk = b; }
+            }
+            if (blk) {
+                g_blockEspTargetBlocks18.push_back({ env->NewGlobalRef(blk), tg.color });
+                env->DeleteLocalRef(blk);
+            }
+        }
+    }
+    g_blockEspTargetBlocksVersion18 = ver;
+}
+
+static void UpdateBlockEspListLegacy(JNIEnv* env, const Config& cfg) {
+    DWORD now = GetTickCount();
+    if (now - g_lastBlockEspScanMs < 120) return;
+    g_lastBlockEspScanMs = now;
+
+    if (!g_mcInstance || !g_theWorldField || !g_thePlayerField || !g_posXField || !g_posYField || !g_posZField) return;
+
+    EnsureBlockEspTargetBlocks18(env);
+    if (g_blockEspTargetBlocks18.empty()) {
+        { LockGuard lk(g_blockEspListMutex); g_blockEspList.clear(); }
+        g_blockEspChunkCache18.clear();
+        return;
+    }
+
+    int range = (std::max)(1, (std::min)(8, cfg.blockEspRange));
+    int maxCount = (std::max)(1, (std::min)(512, cfg.blockEspMaxCount));
+
+    jobject world = env->GetObjectField(g_mcInstance, g_theWorldField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); world = nullptr; }
+    if (!world) return;
+    jobject player = env->GetObjectField(g_mcInstance, g_thePlayerField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); player = nullptr; }
+    if (!player) { env->DeleteLocalRef(world); return; }
+
+    double px = env->GetDoubleField(player, g_posXField);
+    double py = env->GetDoubleField(player, g_posYField);
+    double pz = env->GetDoubleField(player, g_posZField);
+    env->DeleteLocalRef(player);
+
+    // Resolve chunk/storage methods lazily.
+    if (!g_worldGetChunk18) {
+        jclass wcls = env->GetObjectClass(world);
+        if (wcls) {
+            const char* names[] = { "getChunkFromChunkCoords", "func_72964_e", "getChunk", nullptr };
+            for (int i = 0; names[i] && !g_worldGetChunk18; i++) {
+                g_worldGetChunk18 = env->GetMethodID(wcls, names[i], "(II)Lnet/minecraft/world/chunk/Chunk;");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_worldGetChunk18 = nullptr; }
+            }
+            env->DeleteLocalRef(wcls);
+        }
+    }
+    if (!g_worldGetChunk18) { env->DeleteLocalRef(world); return; }
+
+    int pcx = (int)std::floor(px) >> 4;
+    int pcz = (int)std::floor(pz) >> 4;
+
+    // Evict out-of-range cache entries.
+    for (auto it = g_blockEspChunkCache18.begin(); it != g_blockEspChunkCache18.end(); ) {
+        int ccx = (int)(it->first >> 32);
+        int ccz = (int)(it->first & 0xffffffff);
+        if (BlockEspAbsI18(ccx - pcx) > range || BlockEspAbsI18(ccz - pcz) > range)
+            it = g_blockEspChunkCache18.erase(it);
+        else ++it;
+    }
+
+    // Round-robin: scan at most one missing chunk per tick.
+    const int CHUNK_BUDGET = 1;
+    int scanned = 0;
+    for (int dx = -range; dx <= range && scanned < CHUNK_BUDGET; dx++) {
+        for (int dz = -range; dz <= range && scanned < CHUNK_BUDGET; dz++) {
+            int cx = pcx + dx, cz = pcz + dz;
+            long long key = BlockEspChunkKey18(cx, cz);
+            if (g_blockEspChunkCache18.find(key) != g_blockEspChunkCache18.end()) continue;
+
+            BlockEspChunkCache18 cache;
+            jobject chunk = env->CallObjectMethod(world, g_worldGetChunk18, cx, cz);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); chunk = nullptr; }
+            if (!chunk) continue;
+
+            if (!g_chunkGetStorageArray18) {
+                jclass ccls = env->GetObjectClass(chunk);
+                if (ccls) {
+                    const char* names[] = { "getBlockStorageArray", "func_76587_i", nullptr };
+                    for (int i = 0; names[i] && !g_chunkGetStorageArray18; i++) {
+                        g_chunkGetStorageArray18 = env->GetMethodID(ccls, names[i], "()[Lnet/minecraft/world/chunk/storage/ExtendedBlockStorage;");
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); g_chunkGetStorageArray18 = nullptr; }
+                    }
+                    env->DeleteLocalRef(ccls);
+                }
+            }
+            if (!g_chunkGetStorageArray18) { env->DeleteLocalRef(chunk); break; }
+
+            jobjectArray storages = (jobjectArray)env->CallObjectMethod(chunk, g_chunkGetStorageArray18);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); storages = nullptr; }
+            if (storages) {
+                jsize nsec = env->GetArrayLength(storages);
+                for (jsize si = 0; si < nsec; si++) {
+                    jobject sec = env->GetObjectArrayElement(storages, si);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); sec = nullptr; }
+                    if (!sec) continue; // null = empty section in 1.8.9
+
+                    if (!g_storageGet18) {
+                        jclass scls = env->GetObjectClass(sec);
+                        if (scls) {
+                            if (!g_storageClass18) g_storageClass18 = (jclass)env->NewGlobalRef(scls);
+                            const char* names[] = { "get", "func_177485_a", nullptr };
+                            for (int i = 0; names[i] && !g_storageGet18; i++) {
+                                g_storageGet18 = env->GetMethodID(scls, names[i], "(III)Lnet/minecraft/block/state/IBlockState;");
+                                if (env->ExceptionCheck()) { env->ExceptionClear(); g_storageGet18 = nullptr; }
+                            }
+                            env->DeleteLocalRef(scls);
+                        }
+                    }
+                    if (g_storageGet18) {
+                        int sectionMinY = (int)si * 16;
+                        for (int ly = 0; ly < 16; ly++) {
+                            for (int lz = 0; lz < 16; lz++) {
+                                for (int lx = 0; lx < 16; lx++) {
+                                    jobject state = env->CallObjectMethod(sec, g_storageGet18, lx, ly, lz);
+                                    if (env->ExceptionCheck()) { env->ExceptionClear(); state = nullptr; }
+                                    if (!state) continue;
+                                    if (!g_blockStateGetBlockMethod) {
+                                        jclass stcls = env->GetObjectClass(state);
+                                        if (stcls) {
+                                            const char* names[] = { "getBlock", "func_177230_c", nullptr };
+                                            for (int i = 0; names[i] && !g_blockStateGetBlockMethod; i++) {
+                                                g_blockStateGetBlockMethod = env->GetMethodID(stcls, names[i], "()Lnet/minecraft/block/Block;");
+                                                if (env->ExceptionCheck()) { env->ExceptionClear(); g_blockStateGetBlockMethod = nullptr; }
+                                            }
+                                            env->DeleteLocalRef(stcls);
+                                        }
+                                    }
+                                    if (g_blockStateGetBlockMethod) {
+                                        jobject block = env->CallObjectMethod(state, g_blockStateGetBlockMethod);
+                                        if (env->ExceptionCheck()) { env->ExceptionClear(); block = nullptr; }
+                                        if (block) {
+                                            for (const auto& tb : g_blockEspTargetBlocks18) {
+                                                if (env->IsSameObject(tb.block, block)) {
+                                                    double wx = (double)cx * 16 + lx + 0.5;
+                                                    double wy = (double)sectionMinY + ly + 0.5;
+                                                    double wz = (double)cz * 16 + lz + 0.5;
+                                                    cache.hits.push_back({ wx, wy, wz, tb.color, 0.0 });
+                                                    break;
+                                                }
+                                            }
+                                            env->DeleteLocalRef(block);
+                                        }
+                                    }
+                                    env->DeleteLocalRef(state);
+                                }
+                            }
+                        }
+                    }
+                    env->DeleteLocalRef(sec);
+                }
+                env->DeleteLocalRef(storages);
+            }
+            env->DeleteLocalRef(chunk);
+            g_blockEspChunkCache18[key] = std::move(cache);
+            scanned++;
+        }
+    }
+
+    env->DeleteLocalRef(world);
+
+    std::vector<BlockEspData18> merged;
+    for (auto& kv : g_blockEspChunkCache18) {
+        for (auto& h : kv.second.hits) {
+            double ddx = h.x - px, ddy = h.y - py, ddz = h.z - pz;
+            BlockEspData18 d = h;
+            d.dist = std::sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
+            merged.push_back(d);
+        }
+    }
+    std::sort(merged.begin(), merged.end(),
+              [](const BlockEspData18& a, const BlockEspData18& b) { return a.dist < b.dist; });
+    if ((int)merged.size() > maxCount) merged.resize(maxCount);
+    { LockGuard lk(g_blockEspListMutex); g_blockEspList.swap(merged); }
+}
+
+void RenderBlockESP(int w, int h) {
+    {
+        LockGuard lk(g_configMutex);
+        if (!g_config.blockEsp) return;
+    }
+    if (!g_mapped || !g_mcInstance) return;
+    ScopedJNIEnv env(g_jvm);
+    if (!env) return;
+
+    TryResolvePlayerCoreMappings(env);
+    TryResolveRenderMappings(env, false);
+    if (!g_thePlayerField || !g_posXField || !g_posYField || !g_posZField) return;
+    if (!g_activeRenderInfoClass || !g_modelViewField || !g_projectionField) return;
+
+    bool boxes, tracers, hud;
+    int maxCount;
+    { LockGuard lk(g_configMutex); boxes = g_config.blockEspBoxes; tracers = g_config.blockEspTracers; hud = g_config.blockEspHud; maxCount = g_config.blockEspMaxCount; }
+
+    std::vector<BlockEspData18> blocks;
+    { LockGuard lk(g_blockEspListMutex); blocks = g_blockEspList; }
+    if (blocks.empty()) return;
+    std::vector<lc::BlockEspTargetDef> targets;
+    { LockGuard tlk(g_blockEspTargetsMutex); targets = g_blockEspTargets; }
+
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return; }
+    if (env->PushLocalFrame(64) < 0) { env->ExceptionClear(); return; }
+
+    Matrix4x4 view = GetMatrix(env, g_modelViewField);
+    Matrix4x4 proj = GetMatrix(env, g_projectionField);
+    bool usable = MatrixProjectionUsable(view, proj);
+    if (!usable) usable = TryUseCapturedRenderMatrices(view, proj);
+    if (!usable || IsLikelyUiOrthoMatrix(view, proj)) { env->PopLocalFrame(nullptr); return; }
+
+    double vX = 0, vY = 0, vZ = 0;
+    if (g_renderManagerField && g_viewerPosXField && g_viewerPosYField && g_viewerPosZField) {
+        jobject rm = env->GetObjectField(g_mcInstance, g_renderManagerField);
+        if (rm) {
+            vX = env->GetDoubleField(rm, g_viewerPosXField);
+            vY = env->GetDoubleField(rm, g_viewerPosYField);
+            vZ = env->GetDoubleField(rm, g_viewerPosZField);
+            env->DeleteLocalRef(rm);
+        }
+    }
+
+    ImDrawList* fg = ImGui::GetForegroundDrawList();
+
+    struct ColorAgg18 { unsigned int color; int count; double nearest; float nsx, nsy; bool hasScreen; };
+    std::vector<ColorAgg18> aggs;
+    auto findAgg = [&](unsigned int col) -> ColorAgg18& {
+        for (auto& a : aggs) if (a.color == col) return a;
+        aggs.push_back({ col, 0, 1e9, 0, 0, false });
+        return aggs.back();
+    };
+
+    for (const auto& b : blocks) {
+        ColorAgg18& agg = findAgg(b.color);
+        agg.count++;
+
+        float csx = 0, csy = 0;
+        bool okc = WorldToScreen(b.x - vX, b.y - vY, b.z - vZ, view, proj, w, h, csx, csy);
+        if (okc && b.dist < agg.nearest) { agg.nearest = b.dist; agg.nsx = csx; agg.nsy = csy; agg.hasScreen = true; }
+
+        if (boxes) {
+            const double minX = b.x - 0.5, minY = b.y - 0.5, minZ = b.z - 0.5;
+            const double maxX = b.x + 0.5, maxY = b.y + 0.5, maxZ = b.z + 0.5;
+            double corners[8][3] = {
+                {minX, minY, minZ}, {maxX, minY, minZ}, {maxX, maxY, minZ}, {minX, maxY, minZ},
+                {minX, minY, maxZ}, {maxX, minY, maxZ}, {maxX, maxY, maxZ}, {minX, maxY, maxZ}
+            };
+            float left = 1e9f, top = 1e9f, right = -1e9f, bottom = -1e9f;
+            bool projected = true;
+            for (int c = 0; c < 8; c++) {
+                float sx = 0, sy = 0;
+                if (!WorldToScreen(corners[c][0] - vX, corners[c][1] - vY, corners[c][2] - vZ, view, proj, w, h, sx, sy)) { projected = false; break; }
+                if (sx < left) left = sx; if (sy < top) top = sy;
+                if (sx > right) right = sx; if (sy > bottom) bottom = sy;
+            }
+            if (projected && right > left && bottom > top) {
+                left = (std::max)(left, 0.0f); top = (std::max)(top, 0.0f);
+                right = (std::min)(right, (float)w); bottom = (std::min)(bottom, (float)h);
+                if (right > left && bottom > top) {
+                    fg->AddRectFilled(ImVec2(left, top), ImVec2(right, bottom), IM_COL32(0, 0, 0, 70));
+                    fg->AddRect(ImVec2(left, top), ImVec2(right, bottom), b.color, 0.0f, 0, 1.5f);
+                }
+            }
+        }
+    }
+
+    if (tracers) {
+        ImVec2 origin((float)w * 0.5f, (float)h);
+        for (const auto& a : aggs) {
+            if (!a.hasScreen) continue;
+            fg->AddLine(origin, ImVec2(a.nsx, a.nsy), a.color, 1.4f);
+        }
+    }
+
+    if (hud && !aggs.empty()) {
+        auto prettyId = [&](unsigned int col) -> std::string {
+            for (const auto& t : targets) if (t.color == col) {
+                std::string s = t.id;
+                for (char& ch : s) if (ch == '_') ch = ' ';
+                if (!s.empty()) s[0] = (char)std::toupper((unsigned char)s[0]);
+                return s;
+            }
+            return "Block";
+        };
+        const float padX = 8.0f, padY = 6.0f, rowH = ImGui::GetFontSize() + 4.0f, sw = 10.0f;
+        std::vector<std::string> rows; std::vector<unsigned int> rowColors;
+        float maxTextW = 0.0f;
+        for (const auto& a : aggs) {
+            char buf[96];
+            snprintf(buf, sizeof(buf), "%s  x%d  %.0fm", prettyId(a.color).c_str(), a.count, a.nearest);
+            std::string row = buf;
+            maxTextW = (std::max)(maxTextW, ImGui::CalcTextSize(row.c_str()).x);
+            rows.push_back(row); rowColors.push_back(a.color);
+        }
+        std::string title = "Block ESP";
+        float titleW = ImGui::CalcTextSize(title.c_str()).x;
+        float contentW = (std::max)(titleW, sw + 6.0f + maxTextW) + padX * 2;
+        float contentH = padY + rowH + rowH * (float)rows.size() + padY;
+
+        lc::HudElementLayout beLayout;
+        { LockGuard lk(g_configMutex); beLayout = g_hudLayout.Resolve(lc::ELEM_BLOCKESPLIST); }
+        contentW *= beLayout.scale; contentH *= beLayout.scale;
+        ImVec2 beTL = lc::HudElementPixelPos(beLayout, contentW, contentH, w, h);
+        ImVec2 pMin(beTL.x, beTL.y), pMax(beTL.x + contentW, beTL.y + contentH);
+        fg->AddRectFilled(pMin, pMax, IM_COL32(12, 14, 20, 210), 6.0f);
+        fg->AddRect(pMin, pMax, IM_COL32(70, 80, 100, 220), 6.0f, 0, 1.0f);
+
+        float curY = beTL.y + padY;
+        fg->AddText(ImVec2(beTL.x + padX + 1, curY + 1), IM_COL32(0, 0, 0, 160), title.c_str());
+        fg->AddText(ImVec2(beTL.x + padX, curY), IM_COL32(220, 230, 245, 255), title.c_str());
+        curY += rowH;
+        for (size_t i = 0; i < rows.size(); i++) {
+            float swY = curY + (rowH - sw) * 0.5f;
+            fg->AddRectFilled(ImVec2(beTL.x + padX, swY), ImVec2(beTL.x + padX + sw, swY + sw), rowColors[i], 2.0f);
+            fg->AddText(ImVec2(beTL.x + padX + sw + 6.0f + 1, curY + 1), IM_COL32(0, 0, 0, 160), rows[i].c_str());
+            fg->AddText(ImVec2(beTL.x + padX + sw + 6.0f, curY), IM_COL32(225, 228, 235, 255), rows[i].c_str());
+            curY += rowH;
+        }
+    }
+
+    env->PopLocalFrame(nullptr);
+}
+
 // ===================== INPUT HOOK =====================
 // WndProc stays installed for reach's left-click edge detection.
 LRESULT CALLBACK HookedWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -7958,6 +8361,7 @@ BOOL WINAPI HookedSwapBuffers(HDC hdc) {
             RenderClosestPlayerInfo(w, h);
             RenderPixelPartyAssist(w, h);
             RenderChestESP(w, h);
+            RenderBlockESP(w, h);
         } else {
             static DWORD nextJniBusyLogAt = 0;
             DWORD now = GetTickCount();
@@ -8142,6 +8546,21 @@ void ParseConfig(const std::string& line) {
         g_config.nametagHideVanilla = reader.GetBool("nametagHideVanilla");
         g_config.chestEsp = reader.GetBool("chestEsp");
         g_config.chestStealer = reader.GetBool("chestStealerEnabled");
+        g_config.blockEsp = reader.GetBool("blockEspEnabled");
+        g_config.blockEspBoxes = reader.GetBool("blockEspBoxes", true);
+        g_config.blockEspTracers = reader.GetBool("blockEspTracers");
+        g_config.blockEspHud = reader.GetBool("blockEspHud", true);
+        {
+            int v = reader.GetInt("blockEspMaxCount", -1);
+            if (v >= 1) g_config.blockEspMaxCount = (v > 512) ? 512 : v;
+            int r = reader.GetInt("blockEspRange", -1);
+            if (r >= 1) g_config.blockEspRange = (r > 8) ? 8 : r;
+            std::string blocksRaw = reader.GetString("blockEspBlocks");
+            std::vector<lc::BlockEspTargetDef> parsed = lc::ParseBlockEspTargets(blocksRaw);
+            LockGuard tlk(g_blockEspTargetsMutex);
+            g_blockEspTargets.swap(parsed);
+            InterlockedIncrement(&g_blockEspTargetsVersion);
+        }
         g_config.reachEnabled = reader.GetBool("reachEnabled");
         g_config.velocityEnabled = reader.GetBool("velocityEnabled");
 
@@ -8237,6 +8656,7 @@ void ParseConfig(const std::string& line) {
         { int v = reader.GetInt("keybindClosestPlayer", -1); if (v >= 0) g_config.keybindClosestPlayer = v; }
         { int v = reader.GetInt("keybindChestEsp", -1);      if (v >= 0) g_config.keybindChestEsp      = v; }
         { int v = reader.GetInt("keybindChestStealer", -1);  if (v >= 0) g_config.keybindChestStealer  = v; }
+        { int v = reader.GetInt("keybindBlockEsp", -1);      if (v >= 0) g_config.keybindBlockEsp      = v; }
 
         g_config.pixelPartyAssist = reader.GetBool("pixelPartyAssist");
         int ppRadius = reader.GetInt("pixelPartyScanRadius", g_config.pixelPartyScanRadius);
@@ -8252,8 +8672,19 @@ void ParseConfig(const std::string& line) {
             g_hudEditor.mode = lc::HudEditorState::Mode::None;
         }
         g_hudEditor.active = g_config.hudEditor;
-        // Parse hudLayout (under same g_configMutex lock since we're already in it)
-        g_hudLayout = lc::ParseHudLayout(line);
+        // Parse hudLayout (under same g_configMutex lock since we're already in it).
+        // Don't stomp an element the user is actively dragging in the HUD editor: keep
+        // its live anchor/scale until the gesture ends (release sends the final layout
+        // back out). Otherwise the loader's periodic config push would reset it mid-drag.
+        {
+            lc::HudLayout incoming = lc::ParseHudLayout(line);
+            if (!g_hudEditor.grabbedId.empty()) {
+                auto it = g_hudLayout.elements.find(g_hudEditor.grabbedId);
+                if (it != g_hudLayout.elements.end())
+                    incoming.elements[g_hudEditor.grabbedId] = it->second;
+            }
+            g_hudLayout = incoming;
+        }
     }
 }
 
@@ -8336,6 +8767,9 @@ void ServerLoop() {
                 }
                 if (cfgSnapshot.antiDebuffEnabled) {
                     UpdateAntiDebuffLegacy(env, cfgSnapshot);
+                }
+                if (cfgSnapshot.blockEsp) {
+                    UpdateBlockEspListLegacy(env, cfgSnapshot);
                 }
             }
             if (!cfgSnapshot.reachEnabled) {

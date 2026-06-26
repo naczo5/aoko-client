@@ -34,6 +34,7 @@
 #include "json_config_reader.h"
 #include "bridge_capabilities.h"
 #include "hud_layout.h"
+#include "block_esp_common.h"
 #include "jni_core/scoped_env.h"
 #include "jni_core/local_frame.h"
 #include "jni_core/resolver.h"
@@ -132,6 +133,12 @@ struct Config {
     bool  chestEsp       = false;
     bool  chestStealer   = false;
     int   chestStealerDelayMs = 120;
+    bool  blockEsp       = false;
+    bool  blockEspBoxes  = true;
+    bool  blockEspTracers = false;
+    bool  blockEspHud    = true;
+    int   blockEspMaxCount = 64;
+    int   blockEspRange  = 4;
     bool  showModuleList = true;
     bool  closestPlayer  = false;
     bool  nametagHealth  = true;
@@ -180,6 +187,10 @@ struct Config {
 };
 static Config g_config;
 static Mutex  g_configMutex;
+// Block ESP parsed targets (populated in ParseConfig, read by scan thread).
+static std::vector<lc::BlockEspTargetDef> g_blockEspTargets;
+static Mutex g_blockEspTargetsMutex;
+static volatile LONG g_blockEspTargetsVersion = 0;
 static lc::HudLayout g_hudLayout = lc::HudLayout::DefaultLayout();
 static lc::HudEditorState g_hudEditor;
 static volatile LONG g_forceGlobalJniRemap_121 = 0;
@@ -214,6 +225,19 @@ static void ParseConfig(const std::string& line) {
     g_config.nametagMaxCount = lc::ClampInt(reader.GetInt("nametagMaxCount", g_config.nametagMaxCount), 1, 20);
     g_config.chestEspMaxCount = lc::ClampInt(reader.GetInt("chestEspMaxCount", g_config.chestEspMaxCount), 1, 20);
     g_config.chestStealerDelayMs = lc::ClampInt(reader.GetInt("chestStealerDelayMs", g_config.chestStealerDelayMs), 50, 500);
+    g_config.blockEsp        = reader.GetBool("blockEspEnabled");
+    g_config.blockEspBoxes   = reader.GetBool("blockEspBoxes", true);
+    g_config.blockEspTracers = reader.GetBool("blockEspTracers");
+    g_config.blockEspHud     = reader.GetBool("blockEspHud", true);
+    g_config.blockEspMaxCount = lc::ClampInt(reader.GetInt("blockEspMaxCount", g_config.blockEspMaxCount), 1, 512);
+    g_config.blockEspRange   = lc::ClampInt(reader.GetInt("blockEspRange", g_config.blockEspRange), 1, 8);
+    {
+        std::string blocksRaw = reader.GetString("blockEspBlocks");
+        std::vector<lc::BlockEspTargetDef> parsed = lc::ParseBlockEspTargets(blocksRaw);
+        LockGuard tlk(g_blockEspTargetsMutex);
+        g_blockEspTargets.swap(parsed);
+        InterlockedIncrement(&g_blockEspTargetsVersion);
+    }
     g_config.rightClick    = reader.GetBool("right");
     g_config.rightMinCPS   = reader.GetFloat("rightMinCPS");
     g_config.rightMaxCPS   = reader.GetFloat("rightMaxCPS");
@@ -266,8 +290,19 @@ static void ParseConfig(const std::string& line) {
         g_hudEditor.mode = lc::HudEditorState::Mode::None;
     }
     g_hudEditor.active = g_config.hudEditor;
-    // Parse hudLayout (under same g_configMutex lock since we're already in it)
-    g_hudLayout = lc::ParseHudLayout(line);
+    // Parse hudLayout (under same g_configMutex lock since we're already in it).
+    // Don't stomp an element the user is actively dragging in the HUD editor: keep
+    // its live anchor/scale until the gesture ends (release sends the final layout
+    // back out). Otherwise the loader's periodic config push would reset it mid-drag.
+    {
+        lc::HudLayout incoming = lc::ParseHudLayout(line);
+        if (!g_hudEditor.grabbedId.empty()) {
+            auto it = g_hudLayout.elements.find(g_hudEditor.grabbedId);
+            if (it != g_hudLayout.elements.end())
+                incoming.elements[g_hudEditor.grabbedId] = it->second;
+        }
+        g_hudLayout = incoming;
+    }
 }
 
 static bool TrySendCapabilities(SOCKET sock) {
@@ -802,6 +837,12 @@ struct ChestData121 { double x, y, z; double dist; };
 static std::vector<ChestData121> g_chestList;
 static Mutex g_chestListMutex;
 static DWORD g_lastChestScanMs = 0;
+
+// ── Block ESP / X-ray shared state ──
+struct BlockEspData121 { double x, y, z; unsigned int color; double dist; };
+static std::vector<BlockEspData121> g_blockEspList;
+static Mutex g_blockEspListMutex;
+static DWORD g_lastBlockEspScanMs = 0;
 
 struct PixelPartySnap121 {
     bool active = false;
@@ -5624,6 +5665,272 @@ static void UpdateChestList(JNIEnv* env) {
     { LockGuard lk(g_chestListMutex); g_chestList.swap(localList); }
 }
 
+// ===================== BLOCK ESP / X-RAY SCAN (modern) =====================
+// Section + block-identity JNI handles (resolved lazily; cached method/field IDs).
+static jclass    g_chunkSectionClass_121     = nullptr;
+static jmethodID g_chunkGetSectionArray_121  = nullptr; // WorldChunk.getSectionArray() -> ChunkSection[]
+static jmethodID g_sectionIsEmpty_121        = nullptr; // ChunkSection.isEmpty()/hasOnlyAir() -> Z
+static jmethodID g_sectionGetBlockState_121  = nullptr; // ChunkSection.getBlockState(III) -> BlockState
+static jmethodID g_worldGetBottomY_121       = nullptr; // World.getBottomY()/getMinY() -> I
+
+// Distinct Block singleton -> normalized path token (global refs, JVM lifetime; bounded small).
+struct BlockIdCacheEntry121 { jobject block; std::string id; };
+static std::vector<BlockIdCacheEntry121> g_blockIdCache_121;
+
+// Per-chunk scan cache, populated round-robin; invalidated on target change / leave-range.
+struct BlockEspChunkCache121 { std::vector<BlockEspData121> hits; };
+static std::map<long long, BlockEspChunkCache121> g_blockEspChunkCache;
+static LONG g_blockEspCacheVersion = -1;
+
+static long long BlockEspChunkKey121(int cx, int cz) {
+    return ((long long)(unsigned int)cx << 32) | (unsigned int)(unsigned int)cz;
+}
+static int BlockEspAbsI(int v) { return v < 0 ? -v : v; }
+
+static void EnsureBlockEspSectionMappings(JNIEnv* env, jobject chunkObj, jobject worldObj) {
+    if (chunkObj && !g_chunkGetSectionArray_121) {
+        jclass cls = env->GetObjectClass(chunkObj);
+        if (cls) {
+            struct { const char* name; const char* sig; } tries[] = {
+                { "getSectionArray", "()[Lnet/minecraft/class_2826;" },
+                { "method_38259",    "()[Lnet/minecraft/class_2826;" },
+                { "getSections",     "()[Lnet/minecraft/world/level/chunk/LevelChunkSection;" },
+                { "getSectionArray", "()[Lnet/minecraft/world/level/chunk/LevelChunkSection;" },
+            };
+            for (auto& t : tries) {
+                g_chunkGetSectionArray_121 = env->GetMethodID(cls, t.name, t.sig);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_chunkGetSectionArray_121 = nullptr; }
+                if (g_chunkGetSectionArray_121) break;
+            }
+            env->DeleteLocalRef(cls);
+        }
+    }
+    if (!g_chunkSectionClass_121) {
+        const char* names[] = {
+            "net.minecraft.class_2826",
+            "net.minecraft.world.level.chunk.LevelChunkSection",
+            "net.minecraft.world.chunk.ChunkSection",
+            nullptr
+        };
+        for (int i = 0; names[i] && !g_chunkSectionClass_121; i++) {
+            jclass c = nullptr;
+            if (g_gameClassLoader) c = LoadClassWithLoader(env, g_gameClassLoader, names[i]);
+            if (!c) {
+                std::string alt = names[i]; std::replace(alt.begin(), alt.end(), '.', '/');
+                c = env->FindClass(alt.c_str());
+                if (env->ExceptionCheck()) { env->ExceptionClear(); c = nullptr; }
+            }
+            if (c) { g_chunkSectionClass_121 = (jclass)env->NewGlobalRef(c); env->DeleteLocalRef(c); }
+        }
+    }
+    if (g_chunkSectionClass_121 && !g_sectionGetBlockState_121) {
+        const char* names[] = { "getBlockState", "method_12254", nullptr };
+        const char* sigs[]  = {
+            "(III)Lnet/minecraft/class_2680;",
+            "(III)Lnet/minecraft/world/level/block/state/BlockState;",
+            "(III)Lnet/minecraft/block/BlockState;",
+            nullptr
+        };
+        for (int ni = 0; names[ni] && !g_sectionGetBlockState_121; ni++)
+            for (int si = 0; sigs[si] && !g_sectionGetBlockState_121; si++) {
+                g_sectionGetBlockState_121 = env->GetMethodID(g_chunkSectionClass_121, names[ni], sigs[si]);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_sectionGetBlockState_121 = nullptr; }
+            }
+    }
+    if (g_chunkSectionClass_121 && !g_sectionIsEmpty_121) {
+        const char* names[] = { "isEmpty", "hasOnlyAir", "method_18077", nullptr };
+        for (int i = 0; names[i] && !g_sectionIsEmpty_121; i++) {
+            g_sectionIsEmpty_121 = env->GetMethodID(g_chunkSectionClass_121, names[i], "()Z");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_sectionIsEmpty_121 = nullptr; }
+        }
+    }
+    if (worldObj && !g_worldGetBottomY_121) {
+        jclass wcls = env->GetObjectClass(worldObj);
+        if (wcls) {
+            const char* names[] = { "getBottomY", "getMinY", "getMinBuildHeight", "method_31607", nullptr };
+            for (int i = 0; names[i] && !g_worldGetBottomY_121; i++) {
+                g_worldGetBottomY_121 = env->GetMethodID(wcls, names[i], "()I");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_worldGetBottomY_121 = nullptr; }
+            }
+            env->DeleteLocalRef(wcls);
+        }
+    }
+}
+
+// Resolve a block object to its normalized path token (cached by singleton identity).
+static const std::string* BlockEspIdForBlock121(JNIEnv* env, jobject block) {
+    for (auto& e : g_blockIdCache_121) {
+        if (env->IsSameObject(e.block, block)) return &e.id;
+    }
+    std::string id;
+    if (g_blockGetTranslationKey_121) {
+        jstring jKey = (jstring)env->CallObjectMethod(block, g_blockGetTranslationKey_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); jKey = nullptr; }
+        if (jKey) {
+            const char* c = env->GetStringUTFChars(jKey, nullptr);
+            std::string key = c ? c : "";
+            if (c) env->ReleaseStringUTFChars(jKey, c);
+            env->DeleteLocalRef(jKey);
+            id = lc::BlockEspNormalizeId(key);
+        }
+    }
+    jobject g = env->NewGlobalRef(block);
+    g_blockIdCache_121.push_back({ g, id });
+    return &g_blockIdCache_121.back().id;
+}
+
+static void UpdateBlockEspList(JNIEnv* env) {
+    DWORD now = GetTickCount();
+    if (now - g_lastBlockEspScanMs < 120) return;
+    if (now < g_worldTransitionEndMs) return;
+    {
+        std::string sn;
+        { LockGuard lk(g_jniStateMtx); sn = g_jniScreenName; }
+        if (sn.find("ContainerScreen") != std::string::npos ||
+            sn.find("AbstractContainerScreen") != std::string::npos) return;
+    }
+    g_lastBlockEspScanMs = now;
+
+    std::vector<lc::BlockEspTargetDef> targets;
+    LONG version;
+    { LockGuard tlk(g_blockEspTargetsMutex); targets = g_blockEspTargets; version = g_blockEspTargetsVersion; }
+    int range, maxCount;
+    { LockGuard lk(g_configMutex); range = g_config.blockEspRange; maxCount = g_config.blockEspMaxCount; }
+
+    if (targets.empty()) {
+        { LockGuard lk(g_blockEspListMutex); g_blockEspList.clear(); }
+        g_blockEspChunkCache.clear();
+        return;
+    }
+    if (version != g_blockEspCacheVersion) {
+        g_blockEspChunkCache.clear();
+        g_blockEspCacheVersion = version;
+    }
+
+    if (!g_mcInstance || !g_worldField_121) return;
+    jobject worldObj = env->GetObjectField(g_mcInstance, g_worldField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); worldObj = nullptr; }
+    if (!worldObj) return;
+
+    double sx = 0, sy = 0, sz = 0;
+    { LockGuard lk(g_bgCamMutex); sx = g_bgCamState.camX; sy = g_bgCamState.camY; sz = g_bgCamState.camZ; }
+
+    if (!EnsureChunkAccess(env, worldObj)) { env->DeleteLocalRef(worldObj); return; }
+    EnsureChestStateDetectionCaches(env, nullptr); // resolves BlockState.getBlock + Block.getTranslationKey
+    EnsureBlockEspSectionMappings(env, nullptr, worldObj);
+
+    int pcx = (int)std::floor(sx) >> 4;
+    int pcz = (int)std::floor(sz) >> 4;
+
+    int bottomY = -64;
+    if (g_worldGetBottomY_121) {
+        int b = env->CallIntMethod(worldObj, g_worldGetBottomY_121);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        else if (b > -512 && b < 512) bottomY = b;
+    }
+
+    // Evict cache entries outside range.
+    for (auto it = g_blockEspChunkCache.begin(); it != g_blockEspChunkCache.end(); ) {
+        int ccx = (int)(it->first >> 32);
+        int ccz = (int)(it->first & 0xffffffff);
+        if (BlockEspAbsI(ccx - pcx) > range || BlockEspAbsI(ccz - pcz) > range)
+            it = g_blockEspChunkCache.erase(it);
+        else ++it;
+    }
+
+    // Round-robin: scan at most one missing chunk per tick to spread the one-time cost.
+    const int CHUNK_BUDGET = 1;
+    int scanned = 0;
+    for (int dx = -range; dx <= range && scanned < CHUNK_BUDGET; dx++) {
+        for (int dz = -range; dz <= range && scanned < CHUNK_BUDGET; dz++) {
+            if (GetTickCount() < g_worldTransitionEndMs) break;
+            int cx = pcx + dx, cz = pcz + dz;
+            long long key = BlockEspChunkKey121(cx, cz);
+            if (g_blockEspChunkCache.find(key) != g_blockEspChunkCache.end()) continue;
+
+            BlockEspChunkCache121 cache;
+            jobject chunkObj = env->CallObjectMethod(worldObj, g_worldGetChunkMethod_121, cx, cz);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); chunkObj = nullptr; }
+            if (!chunkObj) continue;
+
+            if (!g_chunkGetSectionArray_121) EnsureBlockEspSectionMappings(env, chunkObj, worldObj);
+            if (!g_chunkGetSectionArray_121 || !g_sectionGetBlockState_121 || !g_stateGetBlock_121) {
+                env->DeleteLocalRef(chunkObj);
+                break; // mappings unavailable; bail this tick (feature degrades safely)
+            }
+
+            jobjectArray sections = (jobjectArray)env->CallObjectMethod(chunkObj, g_chunkGetSectionArray_121);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); sections = nullptr; }
+            if (sections) {
+                jsize nsec = env->GetArrayLength(sections);
+                for (jsize si = 0; si < nsec; si++) {
+                    jobject sec = env->GetObjectArrayElement(sections, si);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); sec = nullptr; }
+                    if (!sec) continue;
+
+                    bool empty = false;
+                    if (g_sectionIsEmpty_121) {
+                        empty = env->CallBooleanMethod(sec, g_sectionIsEmpty_121) == JNI_TRUE;
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); empty = false; }
+                    }
+                    if (!empty) {
+                        int sectionMinY = bottomY + (int)si * 16;
+                        for (int ly = 0; ly < 16; ly++) {
+                            for (int lz = 0; lz < 16; lz++) {
+                                for (int lx = 0; lx < 16; lx++) {
+                                    jobject state = env->CallObjectMethod(sec, g_sectionGetBlockState_121, lx, ly, lz);
+                                    if (env->ExceptionCheck()) { env->ExceptionClear(); state = nullptr; }
+                                    if (!state) continue;
+                                    jobject block = env->CallObjectMethod(state, g_stateGetBlock_121);
+                                    if (env->ExceptionCheck()) { env->ExceptionClear(); block = nullptr; }
+                                    if (block) {
+                                        const std::string* id = BlockEspIdForBlock121(env, block);
+                                        if (id && !id->empty()) {
+                                            for (const auto& tg : targets) {
+                                                if (tg.id == *id) {
+                                                    double wx = (double)cx * 16 + lx + 0.5;
+                                                    double wy = (double)sectionMinY + ly + 0.5;
+                                                    double wz = (double)cz * 16 + lz + 0.5;
+                                                    cache.hits.push_back({ wx, wy, wz, tg.color, 0.0 });
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        env->DeleteLocalRef(block);
+                                    }
+                                    env->DeleteLocalRef(state);
+                                }
+                            }
+                        }
+                    }
+                    env->DeleteLocalRef(sec);
+                }
+                env->DeleteLocalRef(sections);
+            }
+            env->DeleteLocalRef(chunkObj);
+            g_blockEspChunkCache[key] = std::move(cache);
+            scanned++;
+        }
+    }
+
+    env->DeleteLocalRef(worldObj);
+
+    // Merge cached hits in range, compute distance, sort, cap.
+    std::vector<BlockEspData121> merged;
+    for (auto& kv : g_blockEspChunkCache) {
+        for (auto& h : kv.second.hits) {
+            double ddx = h.x - sx, ddy = h.y - sy, ddz = h.z - sz;
+            BlockEspData121 d = h;
+            d.dist = std::sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
+            merged.push_back(d);
+        }
+    }
+    std::sort(merged.begin(), merged.end(),
+              [](const BlockEspData121& a, const BlockEspData121& b) { return a.dist < b.dist; });
+    if ((int)merged.size() > maxCount) merged.resize(maxCount);
+    { LockGuard lk(g_blockEspListMutex); g_blockEspList.swap(merged); }
+}
+
 static std::string CallTextToString(JNIEnv* env, jobject textObj) {
     if (!textObj) return "";
 
@@ -9033,6 +9340,8 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                     UpdatePlayerListOverlay(env);
                 if (cfg.chestEsp || cfg.chestStealer)
                     UpdateChestList(env);
+                if (cfg.blockEsp)
+                    UpdateBlockEspList(env);
             } else {
                 // Left world — reset caches so next world gets fresh JNI lookups
                 ResetAutoTotemCaches(env);
@@ -9044,6 +9353,8 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                 ResetSpeedBridgeMovementTracking121();
                 { LockGuard lk(g_playerListMutex); g_playerList.clear(); }
                 { LockGuard lk2(g_chestListMutex); g_chestList.clear(); }
+                { LockGuard lkb(g_blockEspListMutex); g_blockEspList.clear(); }
+                g_blockEspChunkCache.clear();
                 { LockGuard lk3(g_bgCamMutex); g_bgCamState = BgCamState(); }
                 { LockGuard lk4(g_pixelPartyMutex); g_pixelPartySnap = PixelPartySnap121(); }
             }
@@ -9055,6 +9366,8 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
             ResetSpeedBridgeMovementTracking121();
             { LockGuard lk(g_playerListMutex); g_playerList.clear(); }
             { LockGuard lk2(g_chestListMutex); g_chestList.clear(); }
+            { LockGuard lkb(g_blockEspListMutex); g_blockEspList.clear(); }
+            g_blockEspChunkCache.clear();
             { LockGuard lk3(g_bgCamMutex); g_bgCamState = BgCamState(); }
         }
         Sleep(cfg.aimAssist ? 5 : 50); // very fast poll for aim assist
@@ -9704,7 +10017,7 @@ BOOL WINAPI hwglSwapBuffers(HDC hDc) {
             Matrix4x4 sharedProj = {}, sharedView = {};
             bool sharedMatsOk = false;
 
-            if (cfg.nametags || cfg.chestEsp) {
+            if (cfg.nametags || cfg.chestEsp || cfg.blockEsp) {
                 BgCamState cs;
                 { LockGuard lk(g_bgCamMutex); cs = g_bgCamState; }
                 sharedCam      = { cs.camX, cs.camY, cs.camZ };
@@ -9998,6 +10311,146 @@ BOOL WINAPI hwglSwapBuffers(HDC hDc) {
                 }
             } // cfg.chestEsp
 
+            // ── Block ESP / X-ray: per-color boxes + tracers + HUD list ──
+            bool renderBlockEsp = TRACE261_IF("renderBlockEsp", (!g_realGuiOpen && cfg.blockEsp && sharedCamFound));
+            if (renderBlockEsp) {
+                std::vector<BlockEspData121> blocks;
+                { LockGuard lk(g_blockEspListMutex); blocks = g_blockEspList; }
+                std::vector<lc::BlockEspTargetDef> targets;
+                { LockGuard tlk(g_blockEspTargetsMutex); targets = g_blockEspTargets; }
+
+                const int     winW = (int)io.DisplaySize.x;
+                const int     winH = (int)io.DisplaySize.y;
+                const float   fov  = cpCamState.fov;
+                const LegoVec3   espCam   = sharedCam;
+                const float      espYaw   = sharedYaw;
+                const float      espPitch = sharedPitch;
+                const bool       espMatsOk = sharedMatsOk;
+                const Matrix4x4  espProj  = sharedProj;
+                const Matrix4x4  espView  = sharedView;
+                const ImU32 espBg = IM_COL32(0, 0, 0, 70);
+
+                // Track nearest projected center per color for tracers + HUD.
+                struct ColorAgg { unsigned int color; int count; double nearest; float nsx, nsy; bool hasScreen; };
+                std::vector<ColorAgg> aggs;
+                auto findAgg = [&](unsigned int col) -> ColorAgg& {
+                    for (auto& a : aggs) if (a.color == col) return a;
+                    aggs.push_back({ col, 0, 1e9, 0, 0, false });
+                    return aggs.back();
+                };
+
+                for (const auto& b : blocks) {
+                    ColorAgg& agg = findAgg(b.color);
+                    agg.count++;
+
+                    // Project center for tracer/nearest bookkeeping.
+                    float csx = 0, csy = 0;
+                    LegoVec3 center = { b.x, b.y, b.z };
+                    bool ok = espMatsOk
+                        ? WorldToScreen(center, espCam, espView, espProj, winW, winH, &csx, &csy)
+                        : WorldToScreen_Angles(center, espCam, espYaw, espPitch, fov, winW, winH, &csx, &csy);
+                    if (ok && b.dist < agg.nearest) {
+                        agg.nearest = b.dist;
+                        agg.nsx = csx; agg.nsy = csy; agg.hasScreen = true;
+                    }
+
+                    if (cfg.blockEspBoxes) {
+                        const double offsets[8][3] = {
+                            {-0.5, -0.5, -0.5}, {0.5, -0.5, -0.5}, {-0.5, -0.5, 0.5}, {0.5, -0.5, 0.5},
+                            {-0.5,  0.5, -0.5}, {0.5,  0.5, -0.5}, {-0.5,  0.5, 0.5}, {0.5,  0.5, 0.5}
+                        };
+                        float minSX = 999999, minSY = 999999, maxSX = -999999, maxSY = -999999;
+                        int projectedCorners = 0;
+                        for (int c = 0; c < 8; c++) {
+                            LegoVec3 corner = { b.x + offsets[c][0], b.y + offsets[c][1], b.z + offsets[c][2] };
+                            float qx = 0, qy = 0;
+                            bool cok = espMatsOk
+                                ? WorldToScreen(corner, espCam, espView, espProj, winW, winH, &qx, &qy)
+                                : WorldToScreen_Angles(corner, espCam, espYaw, espPitch, fov, winW, winH, &qx, &qy);
+                            if (!cok) continue;
+                            if (qx < minSX) minSX = qx;
+                            if (qy < minSY) minSY = qy;
+                            if (qx > maxSX) maxSX = qx;
+                            if (qy > maxSY) maxSY = qy;
+                            projectedCorners++;
+                        }
+                        if (projectedCorners >= 4) {
+                            minSX = std::max(minSX, 0.0f); minSY = std::max(minSY, 0.0f);
+                            maxSX = std::min(maxSX, (float)winW); maxSY = std::min(maxSY, (float)winH);
+                            if (maxSX > minSX && maxSY > minSY) {
+                                fg->AddRectFilled(ImVec2(minSX, minSY), ImVec2(maxSX, maxSY), espBg);
+                                fg->AddRect(ImVec2(minSX, minSY), ImVec2(maxSX, maxSY), b.color, 0.0f, 0, 1.5f);
+                            }
+                        }
+                    }
+                }
+
+                // Tracers: one line from screen-bottom-center to the nearest block of each color.
+                if (cfg.blockEspTracers) {
+                    ImVec2 origin(io.DisplaySize.x * 0.5f, io.DisplaySize.y);
+                    for (const auto& a : aggs) {
+                        if (!a.hasScreen) continue;
+                        fg->AddLine(origin, ImVec2(a.nsx, a.nsy), a.color, 1.4f);
+                    }
+                }
+
+                // HUD list: one row per color group (swatch + label + count + nearest distance).
+                if (cfg.blockEspHud && !aggs.empty()) {
+                    auto prettyId = [&](unsigned int col) -> std::string {
+                        for (const auto& t : targets) if (t.color == col) {
+                            std::string s = t.id;
+                            for (char& ch : s) if (ch == '_') ch = ' ';
+                            if (!s.empty()) s[0] = (char)std::toupper((unsigned char)s[0]);
+                            return s;
+                        }
+                        return "Block";
+                    };
+
+                    const float padX = 8.0f, padY = 6.0f, rowH = ImGui::GetFontSize() + 4.0f, sw = 10.0f;
+                    std::vector<std::string> rows;
+                    std::vector<unsigned int> rowColors;
+                    rows.reserve(aggs.size());
+                    float maxTextW = 0.0f;
+                    for (const auto& a : aggs) {
+                        char buf[96];
+                        snprintf(buf, sizeof(buf), "%s  x%d  %.0fm", prettyId(a.color).c_str(), a.count, a.nearest);
+                        std::string row = buf;
+                        maxTextW = std::max(maxTextW, ImGui::CalcTextSize(row.c_str()).x);
+                        rows.push_back(row);
+                        rowColors.push_back(a.color);
+                    }
+
+                    std::string title = "Block ESP";
+                    float titleW = ImGui::CalcTextSize(title.c_str()).x;
+                    float contentW = std::max(titleW, sw + 6.0f + maxTextW) + padX * 2;
+                    float contentH = padY + rowH /*title*/ + rowH * (float)rows.size() + padY;
+
+                    lc::HudElementLayout beLayout;
+                    { LockGuard lkHud(g_configMutex); beLayout = g_hudLayout.Resolve(lc::ELEM_BLOCKESPLIST); }
+                    contentW *= beLayout.scale;
+                    contentH *= beLayout.scale;
+
+                    ImVec2 beTL = lc::HudElementPixelPos(beLayout, contentW, contentH, winW, winH);
+                    ImVec2 pMin(beTL.x, beTL.y);
+                    ImVec2 pMax(beTL.x + contentW, beTL.y + contentH);
+                    fg->AddRectFilled(pMin, pMax, overlayTheme.moduleBg, 6.0f);
+                    fg->AddRect(pMin, pMax, overlayTheme.gtbBorder, 6.0f, 0, 1.0f);
+
+                    float curY = beTL.y + padY;
+                    fg->AddText(ImVec2(beTL.x + padX + 1, curY + 1), IM_COL32(0, 0, 0, 160), title.c_str());
+                    fg->AddText(ImVec2(beTL.x + padX, curY), overlayTheme.gtbTitle, title.c_str());
+                    curY += rowH;
+
+                    for (size_t i = 0; i < rows.size(); i++) {
+                        float swY = curY + (rowH - sw) * 0.5f;
+                        fg->AddRectFilled(ImVec2(beTL.x + padX, swY), ImVec2(beTL.x + padX + sw, swY + sw), rowColors[i], 2.0f);
+                        fg->AddText(ImVec2(beTL.x + padX + sw + 6.0f + 1, curY + 1), IM_COL32(0, 0, 0, 160), rows[i].c_str());
+                        fg->AddText(ImVec2(beTL.x + padX + sw + 6.0f, curY), overlayTheme.moduleText, rows[i].c_str());
+                        curY += rowH;
+                    }
+                }
+            } // cfg.blockEsp
+
             bool renderGtbHelper = TRACE261_IF("renderGtbHelper", cfg.gtbHelper);
             if (renderGtbHelper) {
                 std::string hint = cfg.gtbHint;
@@ -10111,6 +10564,7 @@ BOOL WINAPI hwglSwapBuffers(HDC hDc) {
                 if (cfg.speedBridge)   pushMod("SpeedBridge", overlayTheme.accentPrimary);
                 if (cfg.chestStealer)  pushMod("Chest Stealer", overlayTheme.accentTertiary);
                 if (cfg.chestEsp)      pushMod("Chest ESP", overlayTheme.accentSecondary);
+                if (cfg.blockEsp)      pushMod("Block ESP", overlayTheme.accentSecondary);
                 if (cfg.nametags)      pushMod("Nametags", overlayTheme.accentPrimary);
                 if (cfg.gtbHelper)     pushMod("GTB Helper", overlayTheme.accentTertiary);
                 if (cfg.pixelPartyAssist) pushMod("Pixel Party", overlayTheme.accentSecondary);

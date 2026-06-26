@@ -923,6 +923,13 @@ public class GameStateClient : INotifyPropertyChanged
                     chestEspMaxCount = clicker.ChestEspMaxCount,
                     chestStealerEnabled = clicker.ChestStealerEnabled,
                     chestStealerDelayMs = clicker.ChestStealerDelayMs,
+                    blockEspEnabled = clicker.BlockEspEnabled,
+                    blockEspBoxes = clicker.BlockEspBoxes,
+                    blockEspTracers = clicker.BlockEspTracers,
+                    blockEspHud = clicker.BlockEspHud,
+                    blockEspMaxCount = clicker.BlockEspMaxCount,
+                    blockEspRange = clicker.BlockEspRange,
+                    blockEspBlocks = clicker.BlockEspBlocksSerialized,
                     reachEnabled = clicker.ReachEnabled,
                     reachMin = clicker.ReachMin,
                     reachMax = clicker.ReachMax,
@@ -952,6 +959,7 @@ public class GameStateClient : INotifyPropertyChanged
                     keybindClosestPlayer = InputHooks.GetModuleKey("closestplayer"),
                     keybindChestEsp      = InputHooks.GetModuleKey("chestesp"),
                     keybindChestStealer  = InputHooks.GetModuleKey("cheststealer"),
+                    keybindBlockEsp      = InputHooks.GetModuleKey("blockesp"),
                     keybindPixelPartyAssist = InputHooks.GetModuleKey("pixelpartyassist"),
                     hudEditor = clicker.HudEditorActive,
                     hudLayout = clicker.HudLayout.ToJson()
@@ -1082,6 +1090,18 @@ public class GameStateClient : INotifyPropertyChanged
                     break;
                 case "toggleChestStealer":
                     clicker.ChestStealerEnabled = !clicker.ChestStealerEnabled;
+                    break;
+                case "toggleBlockEsp":
+                    clicker.BlockEspEnabled = !clicker.BlockEspEnabled;
+                    break;
+                case "toggleBlockEspBoxes":
+                    clicker.BlockEspBoxes = !clicker.BlockEspBoxes;
+                    break;
+                case "toggleBlockEspTracers":
+                    clicker.BlockEspTracers = !clicker.BlockEspTracers;
+                    break;
+                case "toggleBlockEspHud":
+                    clicker.BlockEspHud = !clicker.BlockEspHud;
                     break;
                 case "setChestStealerDelayMs":
                     clicker.ChestStealerDelayMs = (int)(node?["value"]?.GetValue<float>() ?? 120f);

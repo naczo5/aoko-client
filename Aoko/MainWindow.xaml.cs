@@ -75,6 +75,7 @@ public partial class MainWindow : Window
         ["nametags"] = "Nametags",
         ["chestesp"] = "Chest ESP",
         ["cheststealer"] = "Chest Stealer",
+        ["blockesp"] = "Block ESP",
         ["closestplayer"] = "Closest Player",
         ["reach"] = "Reach",
         ["velocity"] = "Velocity",
@@ -1172,6 +1173,65 @@ public partial class MainWindow : Window
         UpdateKeybindButtons();
     }
 
+    // ── Block ESP block-list editing ────────────────────────────────────────────
+
+    private void BlockEspAdd_Click(object sender, RoutedEventArgs e) => AddBlockEspFromBox();
+
+    private void BlockEspAddBox_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Enter)
+        {
+            AddBlockEspFromBox();
+            e.Handled = true;
+        }
+    }
+
+    private void AddBlockEspFromBox()
+    {
+        string raw = BlockEspAddBox?.Text ?? string.Empty;
+        string id = BlockEspConfig.NormalizeId(raw);
+        if (id.Length == 0)
+            return;
+
+        var targets = Clicker.Instance.BlockEspTargets;
+        if (targets.Any(t => BlockEspConfig.NormalizeId(t.RegistryId) == id))
+        {
+            // Already present: just enable it.
+            BlockEspTarget existing = targets.First(t => BlockEspConfig.NormalizeId(t.RegistryId) == id);
+            existing.Enabled = true;
+        }
+        else
+        {
+            targets.Add(new BlockEspTarget($"minecraft:{id}", id.Replace('_', ' '), BlockEspConfig.DefaultColorHex, true));
+        }
+
+        if (BlockEspAddBox != null)
+            BlockEspAddBox.Text = string.Empty;
+    }
+
+    private void BlockEspRemove_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement fe && fe.DataContext is BlockEspTarget target)
+            Clicker.Instance.BlockEspTargets.Remove(target);
+    }
+
+    private void BlockEspColor_Click(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is not FrameworkElement fe || fe.DataContext is not BlockEspTarget target)
+            return;
+
+        Color initial = Colors.Cyan;
+        try
+        {
+            string hex = "#" + BlockEspConfig.NormalizeColor(target.ColorHex);
+            initial = (Color)ColorConverter.ConvertFromString(hex);
+        }
+        catch { /* fall back to cyan */ }
+
+        if (ColorPickerDialog.TryPick(this, initial, out Color picked))
+            target.ColorHex = $"{picked.R:X2}{picked.G:X2}{picked.B:X2}";
+    }
+
     private void InputHooks_OnKeyCaptured(int vkCode)
     {
         string? moduleId = _pendingKeybindModuleId;
@@ -1203,6 +1263,7 @@ public partial class MainWindow : Window
         SetKeybindButtonContent(KeybindNametagsButton, "nametags");
         SetKeybindButtonContent(KeybindChestEspButton, "chestesp");
         SetKeybindButtonContent(KeybindChestStealerButton, "cheststealer");
+        SetKeybindButtonContent(KeybindBlockEspButton, "blockesp");
         SetKeybindButtonContent(KeybindClosestPlayerButton, "closestplayer");
         SetKeybindButtonContent(KeybindReachButton, "reach");
         SetKeybindButtonContent(KeybindVelocityButton, "velocity");
@@ -1235,4 +1296,29 @@ public partial class MainWindow : Window
         if (vk >= 0x41 && vk <= 0x5A) return ((char)vk).ToString();
         return ((Key)KeyInterop.KeyFromVirtualKey(vk)).ToString();
     }
+}
+
+/// <summary>
+/// Converts a 6-digit RRGGBB hex string (with or without '#') to a <see cref="SolidColorBrush"/>
+/// for the Block ESP color swatches. Falls back to cyan on invalid input.
+/// </summary>
+public sealed class HexColorToBrushConverter : System.Windows.Data.IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture)
+    {
+        string hex = value as string ?? "";
+        if (!hex.StartsWith("#", StringComparison.Ordinal))
+            hex = "#" + hex;
+        try
+        {
+            return new SolidColorBrush((Color)ColorConverter.ConvertFromString(hex));
+        }
+        catch
+        {
+            return new SolidColorBrush(Colors.Cyan);
+        }
+    }
+
+    public object ConvertBack(object value, Type targetType, object parameter, System.Globalization.CultureInfo culture)
+        => throw new NotSupportedException();
 }

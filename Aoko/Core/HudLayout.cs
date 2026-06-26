@@ -7,6 +7,9 @@ namespace Aoko.Core;
 /// <summary>
 /// Normalized placement for a single HUD element.
 /// X and Y are screen-fraction anchors in [0, 1]; Scale is a size multiplier in [0.5, 2.0].
+/// This mirrors exactly the synced wire state. Interaction constraints (movable/resizable)
+/// are intentionally owned by the bridge (see <c>hud_layout.h</c>) and are not modeled or
+/// transmitted here, since the HUD editor lives bridge-side.
 /// </summary>
 public sealed class HudElementLayout
 {
@@ -26,6 +29,7 @@ public static class HudElementId
     public const string ChestEspList = "chestesplist";
     public const string GtbHint      = "gtbhint";
     public const string Nametags      = "nametags";
+    public const string BlockEspList = "blockesplist";
 }
 
 /// <summary>
@@ -53,6 +57,7 @@ public sealed class HudLayout
         [HudElementId.ChestEspList]  = new HudElementLayout { X = 0.015, Y = 0.300, Scale = 1.0 },
         [HudElementId.GtbHint]       = new HudElementLayout { X = 0.500, Y = 0.620, Scale = 1.0 },
         [HudElementId.Nametags]      = new HudElementLayout { X = 0.000, Y = 0.000, Scale = 1.0 },
+        [HudElementId.BlockEspList]  = new HudElementLayout { X = 0.015, Y = 0.560, Scale = 1.0 },
     };
 
     // ── Internal state ──────────────────────────────────────────────────────────
@@ -66,6 +71,7 @@ public sealed class HudLayout
         HudElementId.ChestEspList,
         HudElementId.GtbHint,
         HudElementId.Nametags,
+        HudElementId.BlockEspList,
     };
 
     private readonly Dictionary<string, HudElementLayout> _elements;

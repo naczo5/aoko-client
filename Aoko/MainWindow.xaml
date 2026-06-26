@@ -1,6 +1,7 @@
 <Window x:Class="Aoko.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:Aoko"
         Title="aoko client"
         Width="360" Height="310"
         WindowStyle="SingleBorderWindow"
@@ -9,6 +10,7 @@
         WindowStartupLocation="CenterScreen">
 
     <Window.Resources>
+        <local:HexColorToBrushConverter x:Key="HexToBrush"/>
         <SolidColorBrush x:Key="ControlCenterTabSelectedBrush" Color="#1F2229"/>
         <SolidColorBrush x:Key="ControlCenterTabHoverBrush" Color="#181B22"/>
 
@@ -349,6 +351,66 @@
                             </StackPanel>
                         </Border>
 
+                        <Border Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
+                            <StackPanel>
+                                <CheckBox Content="Block ESP (X-ray)" IsChecked="{Binding BlockEspEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                <WrapPanel Margin="0,10,0,0" IsEnabled="{Binding BlockEspEnabled}">
+                                    <CheckBox Content="Boxes" IsChecked="{Binding BlockEspBoxes, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,0,14,0"/>
+                                    <CheckBox Content="Tracers" IsChecked="{Binding BlockEspTracers, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,0,14,0"/>
+                                    <CheckBox Content="HUD List" IsChecked="{Binding BlockEspHud, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}"/>
+                                </WrapPanel>
+                                <DockPanel Margin="0,10,0,0" IsEnabled="{Binding BlockEspEnabled}">
+                                    <TextBlock Text="Max Blocks" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left" />
+                                    <TextBlock Text="{Binding BlockEspMaxCount}" Foreground="{DynamicResource DimTextBrush}" FontSize="12" HorizontalAlignment="Right" DockPanel.Dock="Right" />
+                                </DockPanel>
+                                <Slider Minimum="1" Maximum="512" TickFrequency="1" IsSnapToTickEnabled="True"
+                                        Value="{Binding BlockEspMaxCount, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                        Style="{StaticResource DarkSlider}" IsEnabled="{Binding BlockEspEnabled}"/>
+                                <DockPanel Margin="0,6,0,0" IsEnabled="{Binding BlockEspEnabled}">
+                                    <TextBlock Text="Scan Range (chunks)" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left" />
+                                    <TextBlock Text="{Binding BlockEspRange}" Foreground="{DynamicResource DimTextBrush}" FontSize="12" HorizontalAlignment="Right" DockPanel.Dock="Right" />
+                                </DockPanel>
+                                <Slider Minimum="1" Maximum="8" TickFrequency="1" IsSnapToTickEnabled="True"
+                                        Value="{Binding BlockEspRange, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                        Style="{StaticResource DarkSlider}" IsEnabled="{Binding BlockEspEnabled}"/>
+
+                                <TextBlock Text="Tracked Blocks" Foreground="{DynamicResource TextBrush}" FontSize="12" Margin="0,12,0,4"/>
+                                <Border BorderBrush="{DynamicResource SliderBgBrush}" BorderThickness="1" CornerRadius="4"
+                                        IsEnabled="{Binding BlockEspEnabled}">
+                                    <ScrollViewer VerticalScrollBarVisibility="Auto" MaxHeight="170">
+                                        <ItemsControl ItemsSource="{Binding BlockEspTargets}">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate>
+                                                    <DockPanel Margin="6,3">
+                                                        <CheckBox IsChecked="{Binding Enabled, Mode=TwoWay}" VerticalAlignment="Center"
+                                                                  Style="{StaticResource DarkCheckBox}" DockPanel.Dock="Left" Margin="0,0,8,0"/>
+                                                        <Button Content="✕" DockPanel.Dock="Right" Width="22" Padding="0"
+                                                                Click="BlockEspRemove_Click" Style="{StaticResource DarkButton}"
+                                                                ToolTip="Remove block" Cursor="Hand"/>
+                                                        <Border DockPanel.Dock="Right" Width="22" Height="14" CornerRadius="3" Margin="6,0"
+                                                                Cursor="Hand" BorderBrush="{DynamicResource SliderFgBrush}" BorderThickness="1"
+                                                                Background="{Binding ColorHex, Converter={StaticResource HexToBrush}}"
+                                                                MouseLeftButtonUp="BlockEspColor_Click" ToolTip="Click to change color"/>
+                                                        <TextBlock Text="{Binding DisplayName}" Foreground="{DynamicResource TextBrush}"
+                                                                   FontSize="12" VerticalAlignment="Center"/>
+                                                    </DockPanel>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                    </ScrollViewer>
+                                </Border>
+                                <DockPanel Margin="0,8,0,0" IsEnabled="{Binding BlockEspEnabled}">
+                                    <Button Content="Add" DockPanel.Dock="Right" Click="BlockEspAdd_Click" Style="{StaticResource DarkButton}"
+                                            Padding="14,4" Margin="8,0,0,0" Cursor="Hand"/>
+                                    <TextBox x:Name="BlockEspAddBox" VerticalContentAlignment="Center" Padding="8,5" FontSize="12"
+                                             Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"
+                                             CaretBrush="{DynamicResource AccentBrush}" BorderBrush="{DynamicResource SliderBgBrush}" BorderThickness="1"
+                                             ToolTip="Block id, e.g. minecraft:diamond_ore or diamond_ore"
+                                             KeyDown="BlockEspAddBox_KeyDown"/>
+                                </DockPanel>
+                            </StackPanel>
+                        </Border>
+
                         <Border Style="{StaticResource ControlCardStyle}">
                             <StackPanel>
                                 <CheckBox Content="Closest Player" IsChecked="{Binding ClosestPlayerInfoEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
@@ -512,6 +574,7 @@
                                     <Button x:Name="KeybindNametagsButton" Tag="nametags" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
                                     <Button x:Name="KeybindChestEspButton" Tag="chestesp" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
                                     <Button x:Name="KeybindChestStealerButton" Tag="cheststealer" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
+                                    <Button x:Name="KeybindBlockEspButton" Tag="blockesp" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
                                     <Button x:Name="KeybindClosestPlayerButton" Tag="closestplayer" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
                                     <Button x:Name="KeybindReachButton" Tag="reach" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
                                     <Button x:Name="KeybindVelocityButton" Tag="velocity" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>

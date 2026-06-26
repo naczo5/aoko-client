@@ -61,6 +61,14 @@ public class Profile
     public bool ChestStealerEnabled { get; set; } = false;
     public int ChestStealerDelayMs { get; set; } = 120;
 
+    public bool BlockEspEnabled { get; set; } = false;
+    public bool BlockEspBoxes { get; set; } = true;
+    public bool BlockEspTracers { get; set; } = false;
+    public bool BlockEspHud { get; set; } = true;
+    public int BlockEspMaxCount { get; set; } = 64;
+    public int BlockEspRange { get; set; } = 4;
+    public List<BlockEspTargetData> BlockEspTargets { get; set; } = BlockEspTargetData.BuildDefaults();
+
     public bool ReachEnabled { get; set; } = false;
     public float ReachMin { get; set; } = 3.0f;
     public float ReachMax { get; set; } = 3.0f;
@@ -100,6 +108,7 @@ public class Profile
         ["closestplayer"] = 0,
         ["chestesp"]      = 0,
         ["cheststealer"]  = 0,
+        ["blockesp"]      = 0,
         ["reach"]         = 0,
         ["velocity"]      = 0,
         ["autototem"]     = 0,
@@ -364,6 +373,14 @@ public static class ProfileManager
             ChestStealerEnabled = clicker.ChestStealerEnabled,
             ChestStealerDelayMs = clicker.ChestStealerDelayMs,
 
+            BlockEspEnabled = clicker.BlockEspEnabled,
+            BlockEspBoxes = clicker.BlockEspBoxes,
+            BlockEspTracers = clicker.BlockEspTracers,
+            BlockEspHud = clicker.BlockEspHud,
+            BlockEspMaxCount = clicker.BlockEspMaxCount,
+            BlockEspRange = clicker.BlockEspRange,
+            BlockEspTargets = BuildBlockEspTargetData(clicker.BlockEspTargets),
+
             ReachEnabled = clicker.ReachEnabled,
             ReachMin = clicker.ReachMin,
             ReachMax = clicker.ReachMax,
@@ -452,6 +469,14 @@ public static class ProfileManager
         clicker.ChestStealerEnabled = profile.ChestStealerEnabled;
         clicker.ChestStealerDelayMs = profile.ChestStealerDelayMs;
 
+        clicker.BlockEspEnabled = profile.BlockEspEnabled;
+        clicker.BlockEspBoxes = profile.BlockEspBoxes;
+        clicker.BlockEspTracers = profile.BlockEspTracers;
+        clicker.BlockEspHud = profile.BlockEspHud;
+        clicker.BlockEspMaxCount = profile.BlockEspMaxCount;
+        clicker.BlockEspRange = profile.BlockEspRange;
+        clicker.BlockEspTargets = BuildBlockEspTargets(profile.BlockEspTargets);
+
         clicker.ReachEnabled = profile.ReachEnabled;
         clicker.ReachMin = profile.ReachMin;
         clicker.ReachMax = profile.ReachMax;
@@ -478,17 +503,46 @@ public static class ProfileManager
         ThemeManager.ApplyTheme(profile.Theme);
     }
 
+    private static List<BlockEspTargetData> BuildBlockEspTargetData(
+        System.Collections.ObjectModel.ObservableCollection<BlockEspTarget> targets)
+    {
+        var list = new List<BlockEspTargetData>(targets.Count);
+        foreach (BlockEspTarget t in targets)
+            list.Add(BlockEspTargetData.FromTarget(t));
+        return list;
+    }
+
+    private static System.Collections.ObjectModel.ObservableCollection<BlockEspTarget> BuildBlockEspTargets(
+        List<BlockEspTargetData>? data)
+    {
+        if (data == null || data.Count == 0)
+            return new System.Collections.ObjectModel.ObservableCollection<BlockEspTarget>(
+                BlockEspPresets.BuildDefaultTargets());
+
+        var collection = new System.Collections.ObjectModel.ObservableCollection<BlockEspTarget>();
+        foreach (BlockEspTargetData d in data)
+        {
+            if (d == null || string.IsNullOrWhiteSpace(d.RegistryId))
+                continue;
+            collection.Add(d.ToTarget());
+        }
+        if (collection.Count == 0)
+            foreach (BlockEspTarget t in BlockEspPresets.BuildDefaultTargets())
+                collection.Add(t);
+        return collection;
+    }
+
     /// <summary>
     /// Converts a <see cref="HudLayout"/> to a plain dictionary suitable for JSON
     /// serialization inside <see cref="Profile"/>.
     /// </summary>
-    private static Dictionary<string, HudElementLayout> BuildHudLayoutDict(HudLayout hudLayout)
-    {
+    private static Dictionary<string, HudElementLayout> BuildHudLayoutDict(HudLayout hudLayout)    {
         var dict = new Dictionary<string, HudElementLayout>();
         foreach (string id in new[]
         {
             HudElementId.ModuleList, HudElementId.ClosestPlayer, HudElementId.PixelParty,
             HudElementId.ChestEspList, HudElementId.GtbHint, HudElementId.Nametags,
+            HudElementId.BlockEspList,
         })
         {
             dict[id] = hudLayout.Get(id);

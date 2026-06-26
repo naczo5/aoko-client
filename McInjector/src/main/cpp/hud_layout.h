@@ -15,11 +15,16 @@ static const char* ELEM_PIXELPARTY    = "pixelparty";
 static const char* ELEM_CHESTESPLIST  = "chestesplist";
 static const char* ELEM_GTBHINT       = "gtbhint";
 static const char* ELEM_NAMETAGS      = "nametags";
+static const char* ELEM_BLOCKESPLIST  = "blockesplist";
 
 struct HudElementLayout {
-    float x = 0.0f;     // normalized [0,1]
-    float y = 0.0f;     // normalized [0,1]
-    float scale = 1.0f; // [0.5, 2.0]
+    float x = 0.0f;     // normalized [0,1]  (synced over the wire)
+    float y = 0.0f;     // normalized [0,1]  (synced over the wire)
+    float scale = 1.0f; // [0.5, 2.0]        (synced over the wire)
+    // Interaction constraints are bridge-authoritative and intentionally NOT part of
+    // the wire format: ParseHudLayout/SerializeHudLayout only handle x/y/scale. These
+    // flags come from DefaultLayout() and gate the HUD editor (e.g. nametags is fixed),
+    // so a config can never make a non-movable element draggable.
     bool movable = true;
     bool resizable = true;
 };
@@ -41,12 +46,14 @@ struct HudLayout {
         HudElementLayout ce; ce.x=0.015f; ce.y=0.300f; ce.scale=1.0f; ce.movable=true; ce.resizable=true;
         HudElementLayout gb; gb.x=0.500f; gb.y=0.620f; gb.scale=1.0f; gb.movable=true; gb.resizable=true;
         HudElementLayout nt; nt.x=0.000f; nt.y=0.000f; nt.scale=1.0f; nt.movable=false; nt.resizable=true;
+        HudElementLayout be; be.x=0.015f; be.y=0.560f; be.scale=1.0f; be.movable=true; be.resizable=true;
         L.elements[ELEM_MODULELIST]    = ml;
         L.elements[ELEM_CLOSESTPLAYER] = cp;
         L.elements[ELEM_PIXELPARTY]    = pp;
         L.elements[ELEM_CHESTESPLIST]  = ce;
         L.elements[ELEM_GTBHINT]       = gb;
         L.elements[ELEM_NAMETAGS]      = nt;
+        L.elements[ELEM_BLOCKESPLIST]  = be;
         return L;
     }
 };
@@ -116,7 +123,7 @@ inline HudLayout ParseHudLayout(const std::string& fullLine) {
     // For each known element id, find its sub-object
     static const char* ids[] = {
         ELEM_MODULELIST, ELEM_CLOSESTPLAYER, ELEM_PIXELPARTY,
-        ELEM_CHESTESPLIST, ELEM_GTBHINT, ELEM_NAMETAGS, nullptr
+        ELEM_CHESTESPLIST, ELEM_GTBHINT, ELEM_NAMETAGS, ELEM_BLOCKESPLIST, nullptr
     };
     for (int i = 0; ids[i]; ++i) {
         std::string idMarker = std::string("\"") + ids[i] + "\":{";
@@ -144,7 +151,7 @@ inline std::string SerializeHudLayout(const HudLayout& L) {
     bool first = true;
     static const char* ids[] = {
         ELEM_MODULELIST, ELEM_CLOSESTPLAYER, ELEM_PIXELPARTY,
-        ELEM_CHESTESPLIST, ELEM_GTBHINT, ELEM_NAMETAGS, nullptr
+        ELEM_CHESTESPLIST, ELEM_GTBHINT, ELEM_NAMETAGS, ELEM_BLOCKESPLIST, nullptr
     };
     for (int i = 0; ids[i]; ++i) {
         auto it = L.elements.find(ids[i]);

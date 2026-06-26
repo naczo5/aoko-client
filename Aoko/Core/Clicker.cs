@@ -1,4 +1,6 @@
 using System;
+using System.Collections.ObjectModel;
+using System.Collections.Specialized;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -144,6 +146,8 @@ public class Clicker : INotifyPropertyChanged
         _aimAssistMoveInput = new INPUT[1];
         _aimAssistMoveInput[0].Type = INPUT_MOUSE;
         _aimAssistMoveInput[0].Mi.DwFlags = MOUSEEVENTF_MOVE;
+
+        AttachBlockEspTargets(_blockEspTargets);
     }
     
     
@@ -451,6 +455,7 @@ public class Clicker : INotifyPropertyChanged
             ClosestPlayerInfoEnabled = false;
             ChestEspEnabled = false;
             ChestStealerEnabled = false;
+            BlockEspEnabled = false;
             ReachEnabled = false;
             VelocityEnabled = false;
             AutoTotemEnabled = false;
@@ -965,6 +970,145 @@ public class Clicker : INotifyPropertyChanged
             }
         }
     }
+
+    // === Block ESP / X-ray ===
+
+    private bool _blockEspEnabled = false;
+    public bool BlockEspEnabled
+    {
+        get => _blockEspEnabled;
+        set
+        {
+            if (_blockEspEnabled == value) return;
+            _blockEspEnabled = value;
+            OnPropertyChanged(nameof(BlockEspEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _blockEspBoxes = true;
+    public bool BlockEspBoxes
+    {
+        get => _blockEspBoxes;
+        set
+        {
+            if (_blockEspBoxes == value) return;
+            _blockEspBoxes = value;
+            OnPropertyChanged(nameof(BlockEspBoxes));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _blockEspTracers = false;
+    public bool BlockEspTracers
+    {
+        get => _blockEspTracers;
+        set
+        {
+            if (_blockEspTracers == value) return;
+            _blockEspTracers = value;
+            OnPropertyChanged(nameof(BlockEspTracers));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _blockEspHud = true;
+    public bool BlockEspHud
+    {
+        get => _blockEspHud;
+        set
+        {
+            if (_blockEspHud == value) return;
+            _blockEspHud = value;
+            OnPropertyChanged(nameof(BlockEspHud));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private int _blockEspMaxCount = 64;
+    public int BlockEspMaxCount
+    {
+        get => _blockEspMaxCount;
+        set
+        {
+            int clamped = Math.Clamp(value, 1, 512);
+            if (_blockEspMaxCount != clamped)
+            {
+                _blockEspMaxCount = clamped;
+                OnPropertyChanged(nameof(BlockEspMaxCount));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    private int _blockEspRange = 4;
+    public int BlockEspRange
+    {
+        get => _blockEspRange;
+        set
+        {
+            int clamped = Math.Clamp(value, 1, 8);
+            if (_blockEspRange != clamped)
+            {
+                _blockEspRange = clamped;
+                OnPropertyChanged(nameof(BlockEspRange));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    private ObservableCollection<BlockEspTarget> _blockEspTargets = CreateDefaultBlockEspTargets();
+    public ObservableCollection<BlockEspTarget> BlockEspTargets
+    {
+        get => _blockEspTargets;
+        set
+        {
+            DetachBlockEspTargets(_blockEspTargets);
+            _blockEspTargets = value ?? new ObservableCollection<BlockEspTarget>();
+            AttachBlockEspTargets(_blockEspTargets);
+            OnPropertyChanged(nameof(BlockEspTargets));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private static ObservableCollection<BlockEspTarget> CreateDefaultBlockEspTargets()
+    {
+        var collection = new ObservableCollection<BlockEspTarget>(BlockEspPresets.BuildDefaultTargets());
+        return collection;
+    }
+
+    /// <summary>Subscribes to collection + per-item changes so edits re-push config and persist.</summary>
+    private void AttachBlockEspTargets(ObservableCollection<BlockEspTarget> targets)
+    {
+        targets.CollectionChanged += OnBlockEspTargetsChanged;
+        foreach (BlockEspTarget t in targets)
+            t.PropertyChanged += OnBlockEspTargetItemChanged;
+    }
+
+    private void DetachBlockEspTargets(ObservableCollection<BlockEspTarget> targets)
+    {
+        targets.CollectionChanged -= OnBlockEspTargetsChanged;
+        foreach (BlockEspTarget t in targets)
+            t.PropertyChanged -= OnBlockEspTargetItemChanged;
+    }
+
+    private void OnBlockEspTargetsChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        if (e.OldItems != null)
+            foreach (BlockEspTarget t in e.OldItems)
+                t.PropertyChanged -= OnBlockEspTargetItemChanged;
+        if (e.NewItems != null)
+            foreach (BlockEspTarget t in e.NewItems)
+                t.PropertyChanged += OnBlockEspTargetItemChanged;
+        OnPropertyChanged(nameof(BlockEspTargets));
+        StateChanged?.Invoke();
+    }
+
+    private void OnBlockEspTargetItemChanged(object? sender, PropertyChangedEventArgs e)
+        => StateChanged?.Invoke();
+
+    /// <summary>Encodes the enabled targets as the delimited wire string sent to the bridge.</summary>
+    public string BlockEspBlocksSerialized => BlockEspConfig.Serialize(_blockEspTargets);
 
     private bool _showModuleList = true;
     public bool ShowModuleList

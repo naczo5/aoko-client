@@ -78,6 +78,7 @@ public static class InputHooks
         ["closestplayer"] = 0,
         ["chestesp"]      = 0,
         ["cheststealer"]  = 0,
+        ["blockesp"]      = 0,
         ["reach"]         = 0,
         ["velocity"]      = 0,
         ["antidebuff"]    = 0,
@@ -141,6 +142,7 @@ public static class InputHooks
             case "closestplayer": c.ClosestPlayerInfoEnabled    = !c.ClosestPlayerInfoEnabled;    break;
             case "chestesp":      c.ChestEspEnabled             = !c.ChestEspEnabled;             break;
             case "cheststealer":  c.ChestStealerEnabled         = !c.ChestStealerEnabled;         break;
+            case "blockesp":      c.BlockEspEnabled             = !c.BlockEspEnabled;             break;
             case "reach":         c.ReachEnabled                = !c.ReachEnabled;                break;
             case "velocity":      c.VelocityEnabled             = !c.VelocityEnabled;             break;
             case "autototem":     c.AutoTotemEnabled            = !c.AutoTotemEnabled;            break;
