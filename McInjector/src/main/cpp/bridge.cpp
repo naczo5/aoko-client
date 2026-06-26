@@ -156,6 +156,7 @@ struct Config {
     int velocityHorizontal = 100;
     int velocityVertical = 100;
     int velocityChance = 100;
+    bool antiDebuffEnabled = false;
     bool showModuleList = true;
     int moduleListStyle = 0;
     bool showLogo = true;
@@ -222,6 +223,11 @@ struct PixelPartySnap {
 static PixelPartySnap g_pixelPartySnap;
 static Mutex g_pixelPartyMutex;
 static DWORD g_lastPixelPartyUpdateMs = 0;
+// Cached colored-floor Y so the scan stays locked to the platform while the player
+// jumps (auto-walk pulses jump to gain speed). Without this the target flickers off
+// every jump because the scan band tracked the live player Y.
+static int  g_pixelPartyPlatformY = 0;
+static bool g_pixelPartyPlatformYValid = false;
 static jmethodID g_blockItemGetBlockMethod = nullptr;
 static jmethodID g_blockGetUnlocalizedNameMethod = nullptr;
 static bool g_loggedPixelPartyResolveFail = false;
@@ -387,6 +393,12 @@ static jfieldID g_motionYField = nullptr;
 static jfieldID g_motionZField = nullptr;
 static jfieldID g_hurtTimeField = nullptr;
 static int g_lastHurtTime = 0;
+
+// ---- AntiDebuff (module-owned; removes debuff visuals client-side) ----
+// 1.8.9: EntityLivingBase.removePotionEffect(int id). Potion IDs: blindness=15, nausea/confusion=9.
+static jmethodID g_removePotionEffectMethod = nullptr;
+static bool g_antiDebuffMethodResolved = false;
+static bool g_loggedAntiDebuffResolveFail = false;
 static bool g_reachClickPrevDown = false;
 static bool g_reachClickPrevSynthetic = false;
 static bool g_reachRawInputPrevDown = false;
@@ -3076,6 +3088,47 @@ static void UpdateVelocity(JNIEnv* env, const Config& cfg) {
     env->DeleteLocalRef(selfObj);
 }
 
+static void UpdateAntiDebuffLegacy(JNIEnv* env, const Config& cfg) {
+    if (!env || !g_mcInstance || !g_thePlayerField) return;
+    if (!cfg.antiDebuffEnabled) return;
+
+    jobject selfObj = env->GetObjectField(g_mcInstance, g_thePlayerField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); selfObj = nullptr; }
+    if (!selfObj) return;
+
+    if (!g_removePotionEffectMethod && !g_antiDebuffMethodResolved) {
+        jclass cls = env->GetObjectClass(selfObj);
+        if (cls) {
+            // removePotionEffect(int) lives on EntityLivingBase; resolvable from the player class.
+            g_removePotionEffectMethod = env->GetMethodID(cls, "removePotionEffect", "(I)V");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_removePotionEffectMethod = nullptr; }
+            if (!g_removePotionEffectMethod) {
+                g_removePotionEffectMethod = env->GetMethodID(cls, "func_82170_o", "(I)V");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_removePotionEffectMethod = nullptr; }
+            }
+            env->DeleteLocalRef(cls);
+        }
+        g_antiDebuffMethodResolved = (g_removePotionEffectMethod != nullptr);
+        if (g_antiDebuffMethodResolved) {
+            Log("AntiDebuff: JNI resolved (removePotionEffect).");
+        } else if (!g_loggedAntiDebuffResolveFail) {
+            g_loggedAntiDebuffResolveFail = true;
+            Log("AntiDebuff: removePotionEffect mapping unavailable (module idle until resolved).");
+        }
+    }
+
+    if (g_removePotionEffectMethod) {
+        // Blindness (15) and Nausea/Confusion (9). removePotionEffect is a no-op when absent.
+        static const int kIds[] = { 15, 9 };
+        for (int id : kIds) {
+            env->CallVoidMethod(selfObj, g_removePotionEffectMethod, id);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); }
+        }
+    }
+
+    env->DeleteLocalRef(selfObj);
+}
+
 static bool EnsureReachMappings(JNIEnv* env) {
     if (!env || !g_mcClass || !g_movingObjectPositionClass) return false;
 
@@ -3985,14 +4038,34 @@ static void UpdatePixelPartyAssistLegacy(JNIEnv* env, const Config& cfg, const G
     int radius = cfg.pixelPartyScanRadius;
     if (radius < 8) radius = 8;
     if (radius > 48) radius = 48;
-    int floorY1 = (int)std::floor(py) - 1;
-    int floorY2 = (int)std::floor(py);
-    int floorYs[2] = { floorY1, floorY2 };
+
+    // Anchor the scan to the platform floor instead of the live player Y. While the
+    // player jumps (auto-walk pulses jump to gain speed) py rises a full block, which
+    // previously pushed the colored floor out of the scanned band and made the target
+    // flicker off every jump. Re-lock the platform whenever the player is resting on a
+    // floor (feet ~ integer Y), and keep scanning that locked level while airborne.
+    int feetY = (int)std::floor(py);
+    double pyFrac = py - std::floor(py);
+    if (pyFrac < 0.05) {
+        g_pixelPartyPlatformY = feetY - 1;
+        g_pixelPartyPlatformYValid = true;
+    }
+    int platformY;
+    if (g_pixelPartyPlatformYValid &&
+        (feetY - g_pixelPartyPlatformY) >= 0 &&
+        (feetY - g_pixelPartyPlatformY) <= 4) {
+        platformY = g_pixelPartyPlatformY;
+    } else {
+        platformY = feetY - 1;
+        g_pixelPartyPlatformY = platformY;
+        g_pixelPartyPlatformYValid = true;
+    }
+    int floorYs[2] = { platformY, platformY + 1 };
     int pxBlock = (int)std::floor(px);
     int pzBlock = (int)std::floor(pz);
 
     double bestDist = -1.0;
-    int bestBx = 0, bestBy = floorY1, bestBz = 0;
+    int bestBx = 0, bestBy = platformY, bestBz = 0;
 
     for (int yi = 0; yi < 2; yi++) {
         int scanY = floorYs[yi];
@@ -8113,6 +8186,8 @@ void ParseConfig(const std::string& line) {
         if (velocityChance > 100) velocityChance = 100;
         g_config.velocityChance = velocityChance;
 
+        g_config.antiDebuffEnabled = reader.GetBool("antiDebuffEnabled");
+
         int speedBridgeDelayMs = reader.GetInt("speedBridgeDelayMs", -1);
         if (speedBridgeDelayMs < 20) speedBridgeDelayMs = g_config.speedBridgeDelayMs;
         if (speedBridgeDelayMs > 250) speedBridgeDelayMs = 250;
@@ -8253,6 +8328,9 @@ void ServerLoop() {
                 }
                 if (cfgSnapshot.velocityEnabled || g_lastHurtTime > 0) {
                     UpdateVelocity(env, cfgSnapshot);
+                }
+                if (cfgSnapshot.antiDebuffEnabled) {
+                    UpdateAntiDebuffLegacy(env, cfgSnapshot);
                 }
             }
             if (!cfgSnapshot.reachEnabled) {

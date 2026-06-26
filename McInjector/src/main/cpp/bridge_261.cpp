@@ -171,6 +171,7 @@ struct Config {
     bool  autoTotemElytra = true;
     int   autoTotemDelay = 0;
     int   autoTotemBehaviorMode = 0; // 0=Ghost (inventory only), 1=Anarchy
+    bool  antiDebuffEnabled = false;
     bool  pixelPartyAssist = false;
     int   pixelPartyScanRadius = 28;
     bool  pixelPartyAutoLook = false;
@@ -246,6 +247,7 @@ static void ParseConfig(const std::string& line) {
     g_config.autoTotemElytra = reader.GetBool("autoTotemElytra");
     g_config.autoTotemDelay = lc::ClampInt(reader.GetInt("autoTotemDelay", 0), 0, 20);
     g_config.autoTotemBehaviorMode = lc::ClampInt(reader.GetInt("autoTotemBehaviorMode", 0), 0, 1);
+    g_config.antiDebuffEnabled = reader.GetBool("antiDebuffEnabled");
     g_config.pixelPartyAssist = reader.GetBool("pixelPartyAssist");
     g_config.pixelPartyScanRadius = lc::ClampInt(reader.GetInt("pixelPartyScanRadius", g_config.pixelPartyScanRadius), 8, 48);
     g_config.pixelPartyAutoLook = reader.GetBool("pixelPartyAutoLook");
@@ -565,6 +567,16 @@ static jmethodID g_isEmptyMethod_121 = nullptr;        // ItemStack.isEmpty()
 
 static jobject   g_lastAutoTotemWorld_121 = nullptr;   // Tracks world obj to detect transitions
 
+// ---- AntiDebuff (module-owned, version-gated; removes debuff visuals client-side) ----
+static jmethodID g_removeEffect_121 = nullptr;        // LivingEntity.removeEffect(Holder<MobEffect>)
+static jclass    g_mobEffectsClass_121 = nullptr;     // MobEffects (Mojmap) / StatusEffects (Yarn)
+static jobject   g_effectBlindness_121 = nullptr;     // Holder<MobEffect> BLINDNESS
+static jobject   g_effectNausea_121   = nullptr;      // Holder<MobEffect> CONFUSION / NAUSEA
+static jobject   g_effectDarkness_121 = nullptr;      // Holder<MobEffect> DARKNESS (1.19+)
+static bool      g_antiDebuffMethodsResolved = false;
+static bool      g_loggedAntiDebuffResolveFail_121 = false;
+static DWORD     g_lastAntiDebuffTickMs = 0;          // Throttle to ~20 tps
+
 
 
 #ifndef M_PI
@@ -804,6 +816,11 @@ struct PixelPartySnap121 {
 static PixelPartySnap121 g_pixelPartySnap;
 static Mutex g_pixelPartyMutex;
 static DWORD g_lastPixelPartyUpdateMs = 0;
+// Cached colored-floor Y so the scan stays locked to the platform while the player
+// jumps (auto-walk pulses jump to gain speed). Without this the target flickers off
+// every jump because the scan band tracked the live player Y.
+static int  g_pixelPartyPlatformY_121 = 0;
+static bool g_pixelPartyPlatformYValid_121 = false;
 
 static jmethodID g_blockItemGetBlock_121 = nullptr;
 static jclass    g_blockItemClass_121 = nullptr;
@@ -2961,12 +2978,32 @@ static void UpdatePixelPartyAssist(JNIEnv* env, const Config& cfg) {
     }
 
     int radius = cfg.pixelPartyScanRadius;
-    int floorY1 = (int)std::floor(py) - 1;
-    int floorY2 = (int)std::floor(py);
-    int floorYs[2] = { floorY1, floorY2 };
+
+    // Anchor the scan to the platform floor instead of the live player Y. While the
+    // player jumps (auto-walk pulses jump to gain speed) py rises a full block, which
+    // previously pushed the colored floor out of the scanned band and made the target
+    // flicker off every jump. Re-lock the platform whenever the player is resting on a
+    // floor (feet ~ integer Y), and keep scanning that locked level while airborne.
+    int feetY = (int)std::floor(py);
+    double pyFrac = py - std::floor(py);
+    if (pyFrac < 0.05) {
+        g_pixelPartyPlatformY_121 = feetY - 1;
+        g_pixelPartyPlatformYValid_121 = true;
+    }
+    int platformY;
+    if (g_pixelPartyPlatformYValid_121 &&
+        (feetY - g_pixelPartyPlatformY_121) >= 0 &&
+        (feetY - g_pixelPartyPlatformY_121) <= 4) {
+        platformY = g_pixelPartyPlatformY_121;
+    } else {
+        platformY = feetY - 1;
+        g_pixelPartyPlatformY_121 = platformY;
+        g_pixelPartyPlatformYValid_121 = true;
+    }
+    int floorYs[2] = { platformY, platformY + 1 };
 
     double bestDist = -1.0;
-    int bestBx = 0, bestBy = floorY1, bestBz = 0;
+    int bestBx = 0, bestBy = platformY, bestBz = 0;
 
     int pxBlock = (int)std::floor(px);
     int pzBlock = (int)std::floor(pz);
@@ -3626,6 +3663,134 @@ static jobject ResolvePickupClickType(JNIEnv* env) {
     }
     if (clickTypeCls) env->DeleteLocalRef(clickTypeCls);
     return pickupValue; // caller must DeleteLocalRef
+}
+
+static void EnsureAntiDebuffJni(JNIEnv* env) {
+    if (!env || g_antiDebuffMethodsResolved) return;
+    if (!g_gameClassLoader) return;
+
+    // Resolve LivingEntity.removeEffect(Holder<MobEffect>) -> boolean
+    if (!g_removeEffect_121) {
+        const char* leNames[] = {
+            "net.minecraft.class_1309",
+            "net.minecraft.world.entity.LivingEntity",
+            nullptr
+        };
+        jclass leCls = nullptr;
+        for (int i = 0; leNames[i] && !leCls; i++) {
+            leCls = LoadClassWithLoader(env, g_gameClassLoader, leNames[i]);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); leCls = nullptr; }
+        }
+        if (leCls) {
+            // Yarn intermediary first, then Mojmap.
+            const char* mNames[] = { "method_6016", "removeEffect", nullptr };
+            const char* mSigs[]  = {
+                "(Lnet/minecraft/class_6880;)Z",   // Yarn RegistryEntry<StatusEffect>
+                "(Lnet/minecraft/core/Holder;)Z",  // Mojmap Holder<MobEffect>
+                nullptr
+            };
+            for (int ni = 0; mNames[ni] && !g_removeEffect_121; ni++) {
+                for (int si = 0; mSigs[si] && !g_removeEffect_121; si++) {
+                    g_removeEffect_121 = env->GetMethodID(leCls, mNames[ni], mSigs[si]);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_removeEffect_121 = nullptr; }
+                }
+            }
+            env->DeleteLocalRef(leCls);
+        }
+    }
+
+    // Resolve MobEffects / StatusEffects class and the targeted effect holders.
+    if (!g_mobEffectsClass_121) {
+        const char* clsNames[] = {
+            "net.minecraft.class_1294",                 // Yarn StatusEffects
+            "net.minecraft.world.effect.MobEffects",    // Mojmap
+            nullptr
+        };
+        for (int i = 0; clsNames[i] && !g_mobEffectsClass_121; i++) {
+            jclass c = LoadClassWithLoader(env, g_gameClassLoader, clsNames[i]);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); c = nullptr; }
+            if (c) {
+                g_mobEffectsClass_121 = (jclass)env->NewGlobalRef(c);
+                env->DeleteLocalRef(c);
+            }
+        }
+    }
+
+    if (g_mobEffectsClass_121) {
+        const char* holderSigs[] = {
+            "Lnet/minecraft/class_6880;",   // Yarn RegistryEntry
+            "Lnet/minecraft/core/Holder;",  // Mojmap Holder
+            nullptr
+        };
+        struct EffDesc { jobject* slot; const char* yarn; const char* mojmap; };
+        EffDesc effects[] = {
+            { &g_effectBlindness_121, "field_5919", "BLINDNESS" },
+            { &g_effectNausea_121,    "field_5916", "CONFUSION" }, // Mojmap field name is CONFUSION (registry "nausea")
+            { &g_effectDarkness_121,  "field_38092", "DARKNESS" }, // 1.19+; resolves null on older worlds
+        };
+        for (auto& e : effects) {
+            if (*e.slot) continue;
+            const char* fNames[] = { e.yarn, e.mojmap, nullptr };
+            jfieldID fid = nullptr;
+            for (int ni = 0; fNames[ni] && !fid; ni++) {
+                for (int si = 0; holderSigs[si] && !fid; si++) {
+                    fid = env->GetStaticFieldID(g_mobEffectsClass_121, fNames[ni], holderSigs[si]);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); fid = nullptr; }
+                }
+            }
+            if (fid) {
+                jobject h = env->GetStaticObjectField(g_mobEffectsClass_121, fid);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); h = nullptr; }
+                if (h) {
+                    *e.slot = env->NewGlobalRef(h);
+                    env->DeleteLocalRef(h);
+                }
+            }
+        }
+    }
+
+    // Consider resolved once we can remove at least the always-present effects.
+    if (g_removeEffect_121 && g_effectBlindness_121 && g_effectNausea_121) {
+        g_antiDebuffMethodsResolved = true;
+        Log(std::string("AntiDebuff: JNI resolved (removeEffect, BLINDNESS, NAUSEA")
+            + (g_effectDarkness_121 ? ", DARKNESS" : "") + ").");
+    } else if (!g_loggedAntiDebuffResolveFail_121) {
+        g_loggedAntiDebuffResolveFail_121 = true;
+        Log(std::string("AntiDebuff: JNI mappings unavailable - removeEffect=")
+            + (g_removeEffect_121 ? "1" : "0")
+            + " blindness=" + (g_effectBlindness_121 ? "1" : "0")
+            + " nausea=" + (g_effectNausea_121 ? "1" : "0")
+            + " (module disabled until mappings resolve).");
+    }
+}
+
+static void UpdateAntiDebuff(JNIEnv* env, const Config& cfg) {
+    if (!env || !g_mcInstance || !g_playerField_121) return;
+    if (!cfg.antiDebuffEnabled) return;
+    if (!g_jniInWorld) return;
+
+    DWORD nowMs = GetTickCount();
+    if (nowMs < g_worldTransitionEndMs) return;
+    if (nowMs - g_lastAntiDebuffTickMs < 50) return; // ~20 tps
+    g_lastAntiDebuffTickMs = nowMs;
+
+    EnsureAntiDebuffJni(env);
+    if (!g_antiDebuffMethodsResolved) return;
+
+    jobject selfObj = env->GetObjectField(g_mcInstance, g_playerField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); selfObj = nullptr; }
+    if (!selfObj) return;
+
+    // Re-remove targeted effects each tick. removeEffect is a no-op if absent, so
+    // this only clears the client-side visual/state for the fixed debuff set.
+    jobject targets[] = { g_effectBlindness_121, g_effectNausea_121, g_effectDarkness_121 };
+    for (jobject holder : targets) {
+        if (!holder) continue;
+        env->CallBooleanMethod(selfObj, g_removeEffect_121, holder);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); }
+    }
+
+    env->DeleteLocalRef(selfObj);
 }
 
 static bool IsInventoryScreenOpen() {
@@ -6734,6 +6899,16 @@ static void ResetAutoTotemCaches(JNIEnv* env) {
     g_lastAutoTotemTickMs = 0;
     g_autoTotemPrevHealth = 20.0f;
     g_autoTotemPendingSlot = -1;
+
+    // AntiDebuff (module-owned) caches must remap alongside the player/effect lookups.
+    g_removeEffect_121 = nullptr;
+    DeleteGlobalRefSafe(env, g_mobEffectsClass_121);
+    DeleteGlobalRefSafe(env, g_effectBlindness_121);
+    DeleteGlobalRefSafe(env, g_effectNausea_121);
+    DeleteGlobalRefSafe(env, g_effectDarkness_121);
+    g_antiDebuffMethodsResolved = false;
+    g_loggedAntiDebuffResolveFail_121 = false;
+    g_lastAntiDebuffTickMs = 0;
 }
 
 static void CleanupJniGlobals(JNIEnv* env) {
@@ -8838,6 +9013,10 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                 if (cfg.autoTotemEnabled || s_autoTotemWasEnabled) {
                     UpdateAutoTotem(env, cfg);
                     s_autoTotemWasEnabled = cfg.autoTotemEnabled;
+                }
+
+                if (cfg.antiDebuffEnabled) {
+                    UpdateAntiDebuff(env, cfg);
                 }
 
                 static bool s_speedBridgeWasEnabled = false;

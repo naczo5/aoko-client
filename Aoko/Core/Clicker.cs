@@ -82,6 +82,9 @@ public class Clicker : INotifyPropertyChanged
     private const float PixelPartyPrecisionDist = 4f;
     private const float PixelPartyJumpMinDist = 5f;
     private const float PixelPartyMinWalkDist = 0.45f;
+    // Coast on the last known target for a short window when the target momentarily
+    // disappears (e.g. mid-jump) so we don't release keys/steering and stutter.
+    private const int PixelPartyTargetGraceMs = 160;
     private const uint INPUT_KEYBOARD = 1;
     private const uint KEYEVENTF_KEYUP = 0x0002;
     
@@ -451,6 +454,7 @@ public class Clicker : INotifyPropertyChanged
             ReachEnabled = false;
             VelocityEnabled = false;
             AutoTotemEnabled = false;
+            AntiDebuffEnabled = false;
 
             ShowModuleList = false;
             ShowLogo = false;
@@ -492,6 +496,9 @@ public class Clicker : INotifyPropertyChanged
     private bool _pixelPartyKeyA;
     private bool _pixelPartyKeyD;
     private bool _pixelPartyKeySpace;
+    private long _pixelPartyLastTargetMs;
+    private float _pixelPartyLastYawDelta;
+    private float _pixelPartyLastDist;
     private const int PixelPartyAssistInputStateFreshMs = 120;
 
     private bool ShouldRunPixelPartyAssistInputLoop()
@@ -1179,6 +1186,18 @@ public class Clicker : INotifyPropertyChanged
         }
     }
 
+    private bool _antiDebuffEnabled = false;
+    public bool AntiDebuffEnabled
+    {
+        get => _antiDebuffEnabled;
+        set
+        {
+            _antiDebuffEnabled = value;
+            OnPropertyChanged(nameof(AntiDebuffEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
     private bool _closestPlayerInfoEnabled = false;
     public bool ClosestPlayerInfoEnabled
     {
@@ -1472,6 +1491,7 @@ public class Clicker : INotifyPropertyChanged
                 if (!steerEnabled && !walkEnabled)
                 {
                     ReleasePixelPartyWalkKeys();
+                    _pixelPartyLastTargetMs = 0;
                     await Task.Delay(16, token).ConfigureAwait(false);
                     continue;
                 }
@@ -1480,6 +1500,7 @@ public class Clicker : INotifyPropertyChanged
                 if (state.GuiOpen && WindowDetection.IsCursorVisible())
                 {
                     ReleasePixelPartyWalkKeys();
+                    _pixelPartyLastTargetMs = 0;
                     await Task.Delay(16, token).ConfigureAwait(false);
                     continue;
                 }
@@ -1499,17 +1520,36 @@ public class Clicker : INotifyPropertyChanged
                 if (stateAgeMs > PixelPartyAssistInputStateFreshMs)
                 {
                     ReleasePixelPartyWalkKeys();
+                    _pixelPartyLastTargetMs = 0;
                     await Task.Delay(8, token).ConfigureAwait(false);
                     continue;
                 }
 
                 bool targetFound = state.PixelPartyTargetFound;
                 float dist = state.PixelPartyTargetDist;
+                float yawDelta = state.PixelPartyYawDelta;
+
+                if (targetFound)
+                {
+                    _pixelPartyLastTargetMs = nowMs;
+                    _pixelPartyLastYawDelta = yawDelta;
+                    _pixelPartyLastDist = dist;
+                }
+                else if (_pixelPartyLastTargetMs != 0 &&
+                         (nowMs - _pixelPartyLastTargetMs) <= PixelPartyTargetGraceMs)
+                {
+                    // Target briefly lost (typically mid-jump): coast on last known values
+                    // so keys/steering stay engaged and movement doesn't stutter.
+                    targetFound = true;
+                    yawDelta = _pixelPartyLastYawDelta;
+                    dist = _pixelPartyLastDist;
+                }
+
                 bool precisionRange = targetFound && dist < PixelPartyPrecisionDist;
                 bool canWalk = targetFound && dist > PixelPartyMinWalkDist;
 
                 if (steerEnabled && targetFound)
-                    ApplyPixelPartySteer(state.PixelPartyYawDelta, walkEnabled);
+                    ApplyPixelPartySteer(yawDelta, walkEnabled);
 
                 if (walkEnabled)
                 {
@@ -1522,7 +1562,7 @@ public class Clicker : INotifyPropertyChanged
                         SetPixelPartyWalkKey(VK_A, false, ref _pixelPartyKeyA);
                         SetPixelPartyWalkKey(VK_D, false, ref _pixelPartyKeyD);
 
-                        float yawAbs = Math.Abs(state.PixelPartyYawDelta);
+                        float yawAbs = Math.Abs(yawDelta);
                         float alignMax = precisionRange ? PixelPartyPrecisionAlignMaxDeg : PixelPartyWalkAlignMaxDeg;
                         bool alignedForward = yawAbs < alignMax;
                         // Close range: walk onto the block even when not perfectly aligned.
