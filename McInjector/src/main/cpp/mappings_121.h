@@ -190,7 +190,8 @@ inline MethodDesc METHOD_REMOVE_EFFECT{ CLS_LIVING_ENTITY, kRemoveEffectNames, k
 
 // ── Methods on Minecraft ──────────────────────────────────────────────────────
 
-inline const char* kSetScreenNames[] = { "method_1507", "setScreen", nullptr };inline const char* kSetScreenSigs[]  = {
+inline const char* kSetScreenNames[] = { "method_1507", "setScreen", nullptr };
+inline const char* kSetScreenSigs[]  = {
     "(Lnet/minecraft/class_437;)V",
     "(Lnet/minecraft/client/gui/screens/Screen;)V",
     nullptr

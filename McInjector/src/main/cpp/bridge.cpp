@@ -399,6 +399,7 @@ static int g_lastHurtTime = 0;
 static jmethodID g_removePotionEffectMethod = nullptr;
 static bool g_antiDebuffMethodResolved = false;
 static bool g_loggedAntiDebuffResolveFail = false;
+static DWORD g_lastAntiDebuffTickMs = 0;          // Throttle to ~20 tps (matches bridge_261)
 static bool g_reachClickPrevDown = false;
 static bool g_reachClickPrevSynthetic = false;
 static bool g_reachRawInputPrevDown = false;
@@ -3091,6 +3092,10 @@ static void UpdateVelocity(JNIEnv* env, const Config& cfg) {
 static void UpdateAntiDebuffLegacy(JNIEnv* env, const Config& cfg) {
     if (!env || !g_mcInstance || !g_thePlayerField) return;
     if (!cfg.antiDebuffEnabled) return;
+
+    DWORD nowMs = GetTickCount();
+    if (nowMs - g_lastAntiDebuffTickMs < 50) return; // ~20 tps
+    g_lastAntiDebuffTickMs = nowMs;
 
     jobject selfObj = env->GetObjectField(g_mcInstance, g_thePlayerField);
     if (env->ExceptionCheck()) { env->ExceptionClear(); selfObj = nullptr; }
