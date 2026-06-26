@@ -18,6 +18,7 @@ aoko client is a Windows utility client for Lunar Client.
 - SpeedBridge 
 - Reach and Velocity controls
 - AutoTotem (inventory only and anarchy mode)
+- AntiDebuff (hides Blindness/Nausea client-side, plus Darkness on 1.21/26.1)
 - Chest Stealer (external cursor-based)
 - GTB Helper
 - Discord Rich Presence
@@ -123,7 +124,7 @@ therefore their usecase (like private or anarchy servers).
 - [ ] Fix HUD edit - module list not editable
 - [ ] Add different configs handling
 - [ ] Add custom color palettes
-- [ ] Add AntiDebuff module - removes effects like blindness, nausea
+- [x] Add AntiDebuff module - removes effects like blindness, nausea
 
 ## Support
 

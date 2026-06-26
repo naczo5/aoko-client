@@ -78,6 +78,8 @@ public class Profile
     public int AutoTotemDelay { get; set; } = 0;
     public int AutoTotemBehaviorMode { get; set; } = 0;
 
+    public bool AntiDebuffEnabled { get; set; } = false;
+
     // Nullable so older JSON (without hudLayout) deserializes without error;
     // a null value is treated as canonical defaults in ApplyToClicker.
     public Dictionary<string, HudElementLayout>? HudLayout { get; set; }
@@ -379,6 +381,8 @@ public static class ProfileManager
             AutoTotemDelay = clicker.AutoTotemDelay,
             AutoTotemBehaviorMode = clicker.AutoTotemBehaviorMode,
 
+            AntiDebuffEnabled = clicker.AntiDebuffEnabled,
+
             HudLayout = BuildHudLayoutDict(clicker.HudLayout),
 
             ModuleKeys = new Dictionary<string, int>(InputHooks.ModuleKeys),
@@ -464,6 +468,8 @@ public static class ProfileManager
         clicker.AutoTotemElytra = profile.AutoTotemElytra;
         clicker.AutoTotemDelay = profile.AutoTotemDelay;
         clicker.AutoTotemBehaviorMode = profile.AutoTotemBehaviorMode;
+
+        clicker.AntiDebuffEnabled = profile.AntiDebuffEnabled;
 
         clicker.HudLayout = BuildHudLayout(profile.HudLayout);
 

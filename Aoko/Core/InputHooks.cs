@@ -80,6 +80,7 @@ public static class InputHooks
         ["cheststealer"]  = 0,
         ["reach"]         = 0,
         ["velocity"]      = 0,
+        ["antidebuff"]    = 0,
         ["panic"]         = 0,
         ["hudeditor"]     = 0,
     };
@@ -143,6 +144,7 @@ public static class InputHooks
             case "reach":         c.ReachEnabled                = !c.ReachEnabled;                break;
             case "velocity":      c.VelocityEnabled             = !c.VelocityEnabled;             break;
             case "autototem":     c.AutoTotemEnabled            = !c.AutoTotemEnabled;            break;
+            case "antidebuff":    c.AntiDebuffEnabled           = !c.AntiDebuffEnabled;           break;
             case "hudeditor":     c.HudEditorActive             = !c.HudEditorActive;             break;
         }
     }

@@ -48,6 +48,7 @@ public sealed class BridgeCapabilities
                     "reach",
                     "velocity",
                     "autototem",
+                    "antidebuff",
                     "pixelpartyassist",
                     "hudeditor"
                 ),
@@ -104,6 +105,7 @@ public sealed class BridgeCapabilities
                     "autototemelytra",
                     "autototemdelay",
                     "autototembehaviormode",
+                    "antidebuffenabled",
                     "pixelpartyassist",
                     "pixelpartyscanradius",
                     "pixelpartyautolook",
@@ -144,6 +146,7 @@ public sealed class BridgeCapabilities
                 "cheststealer",
                 "reach",
                 "velocity",
+                "antidebuff",
                 "pixelpartyassist",
                 "hudeditor"
             ),
@@ -182,6 +185,7 @@ public sealed class BridgeCapabilities
                 "velocityhorizontal",
                 "velocityvertical",
                 "velocitychance",
+                "antidebuffenabled",
                 "showmodulelist",
                 "moduleliststyle",
                 "showlogo",

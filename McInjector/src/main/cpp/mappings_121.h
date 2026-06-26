@@ -172,10 +172,25 @@ inline const char* kGetHealthNames[] = { "method_6032", "getHealth", nullptr };
 inline const char* kGetHealthSigs[]  = { "()F", nullptr };
 inline MethodDesc METHOD_GET_HEALTH{ CLS_LIVING_ENTITY, kGetHealthNames, kGetHealthSigs };
 
+// ── AntiDebuff: LivingEntity.removeEffect(Holder<MobEffect>) -> boolean ─────────
+// Yarn:   method_6016(class_6880)            -> removeStatusEffect(RegistryEntry)
+// Mojmap: removeEffect(net.minecraft.core.Holder)
+// Targeted effect holders are static fields on StatusEffects/MobEffects:
+//   BLINDNESS = field_5919 / BLINDNESS
+//   NAUSEA    = field_5916 / CONFUSION   (registry id "nausea")
+//   DARKNESS  = field_38092 / DARKNESS   (1.19+)
+// Resolved inline in bridge_261.cpp (EnsureAntiDebuffJni) using these names.
+inline const char* kRemoveEffectNames[] = { "method_6016", "removeEffect", nullptr };
+inline const char* kRemoveEffectSigs[]  = {
+    "(Lnet/minecraft/class_6880;)Z",
+    "(Lnet/minecraft/core/Holder;)Z",
+    nullptr
+};
+inline MethodDesc METHOD_REMOVE_EFFECT{ CLS_LIVING_ENTITY, kRemoveEffectNames, kRemoveEffectSigs };
+
 // ── Methods on Minecraft ──────────────────────────────────────────────────────
 
-inline const char* kSetScreenNames[] = { "method_1507", "setScreen", nullptr };
-inline const char* kSetScreenSigs[]  = {
+inline const char* kSetScreenNames[] = { "method_1507", "setScreen", nullptr };inline const char* kSetScreenSigs[]  = {
     "(Lnet/minecraft/class_437;)V",
     "(Lnet/minecraft/client/gui/screens/Screen;)V",
     nullptr
@@ -211,6 +226,7 @@ inline void ResetAll(JNIEnv* env) {
 
     ResetDesc(METHOD_GET_X);  ResetDesc(METHOD_GET_Y);  ResetDesc(METHOD_GET_Z);
     ResetDesc(METHOD_GET_HEALTH);
+    ResetDesc(METHOD_REMOVE_EFFECT);
     ResetDesc(METHOD_SET_SCREEN);
     ResetDesc(METHOD_GAME_PROFILE_GET_NAME);
 }

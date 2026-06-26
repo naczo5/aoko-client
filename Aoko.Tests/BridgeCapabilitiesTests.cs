@@ -54,6 +54,18 @@ public class BridgeCapabilitiesTests
     }
 
     [Fact]
+    public void AntiDebuff_AvailableOnAllVersions()
+    {
+        BridgeCapabilities modern = BridgeCapabilities.ForVersionFallback("26.1");
+        BridgeCapabilities legacy = BridgeCapabilities.ForVersionFallback("1.8.9");
+
+        Assert.True(modern.SupportsModule("antidebuff"));
+        Assert.True(modern.SupportsSetting("antidebuffenabled"));
+        Assert.True(legacy.SupportsModule("antidebuff"));
+        Assert.True(legacy.SupportsSetting("antidebuffenabled"));
+    }
+
+    [Fact]
     public void FromPayload_UsesFallbackWhenArraysMissing()
     {
         BridgeCapabilities fallback = BridgeCapabilities.ForVersionFallback("1.8.9");

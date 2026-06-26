@@ -937,6 +937,7 @@ public class GameStateClient : INotifyPropertyChanged
                     autoTotemElytra = clicker.AutoTotemElytra,
                     autoTotemDelay = clicker.AutoTotemDelay,
                     autoTotemBehaviorMode = clicker.AutoTotemBehaviorMode,
+                    antiDebuffEnabled = clicker.AntiDebuffEnabled,
                     // Per-module keybinds
                     keybindAutoclicker   = InputHooks.GetModuleKey("autoclicker"),
                     keybindRightClick    = InputHooks.GetModuleKey("rightclick"),
@@ -1142,6 +1143,9 @@ public class GameStateClient : INotifyPropertyChanged
                     break;
                 case "toggleAutoTotem":
                     clicker.AutoTotemEnabled = !clicker.AutoTotemEnabled;
+                    break;
+                case "toggleAntiDebuff":
+                    clicker.AntiDebuffEnabled = !clicker.AntiDebuffEnabled;
                     break;
                 case "setAutoTotemMode":
                     clicker.AutoTotemMode = (int)(node?["value"]?.GetValue<float>() ?? 0f);

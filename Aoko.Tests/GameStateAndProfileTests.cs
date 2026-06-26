@@ -127,6 +127,29 @@ public class GameStateAndProfileTests
     }
 
     [Fact]
+    public void Profile_AntiDebuff_DefaultsFalse()
+    {
+        var profile = new Profile();
+
+        Assert.False(profile.AntiDebuffEnabled);
+    }
+
+    [Fact]
+    public void Profile_AntiDebuff_SerializesRoundTrip()
+    {
+        var profile = new Profile { AntiDebuffEnabled = true };
+        var options = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+
+        string json = JsonSerializer.Serialize(profile, options);
+        JsonNode? node = JsonNode.Parse(json);
+        Profile? roundTripped = JsonSerializer.Deserialize<Profile>(json, options);
+
+        Assert.True(node!["antiDebuffEnabled"]!.GetValue<bool>());
+        Assert.NotNull(roundTripped);
+        Assert.True(roundTripped!.AntiDebuffEnabled);
+    }
+
+    [Fact]
     public void ProfileManager_UsesAokoProfileDirectory()
     {
         string appData = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));

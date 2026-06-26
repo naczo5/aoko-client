@@ -124,6 +124,12 @@ inline const char* kGetHealthNames[] = { "getHealth",       "func_110143_aJ", nu
 inline const char* kGetHealthSigs[]  = { "()F", nullptr };
 inline MethodDesc METHOD_GET_HEALTH{ CLS_PLAYER, kGetHealthNames, kGetHealthSigs };
 
+// AntiDebuff: EntityLivingBase.removePotionEffect(int id) — resolvable from EntityPlayerSP.
+// Potion IDs (1.8.9): blindness=15, nausea/confusion=9. Resolved inline in bridge.cpp.
+inline const char* kRemovePotionEffectNames[] = { "removePotionEffect", "func_82170_o", nullptr };
+inline const char* kRemovePotionEffectSigs[]  = { "(I)V", nullptr };
+inline MethodDesc METHOD_REMOVE_POTION_EFFECT{ CLS_PLAYER, kRemovePotionEffectNames, kRemovePotionEffectSigs };
+
 // ── Methods on BlockPos ───────────────────────────────────────────────────────
 
 inline const char* kGetXNames[] = { "getX", "func_177958_n", nullptr };
@@ -174,6 +180,7 @@ inline void ResetAll(JNIEnv* env) {
     ResetDesc(FIELD_TE_POS);
 
     ResetDesc(METHOD_GET_HEALTH);
+    ResetDesc(METHOD_REMOVE_POTION_EFFECT);
     ResetDesc(METHOD_BLOCKPOS_X); ResetDesc(METHOD_BLOCKPOS_Y); ResetDesc(METHOD_BLOCKPOS_Z);
     ResetDesc(METHOD_DISPLAY_GUI_SCREEN);
     ResetDesc(METHOD_FLOAT_BUF_GET);
