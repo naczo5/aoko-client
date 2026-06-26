@@ -48,7 +48,8 @@ public sealed class BridgeCapabilities
                     "reach",
                     "velocity",
                     "autototem",
-                    "pixelpartyassist"
+                    "pixelpartyassist",
+                    "hudeditor"
                 ),
                 BuildSet(
                     "mincps",
@@ -106,7 +107,8 @@ public sealed class BridgeCapabilities
                     "pixelpartyassist",
                     "pixelpartyscanradius",
                     "pixelpartyautolook",
-                    "pixelpartyautowalk"
+                    "pixelpartyautowalk",
+                    "hudeditor"
                 ),
                 BuildSet(
                     "actionbar",
@@ -120,7 +122,8 @@ public sealed class BridgeCapabilities
                     "pixelpartytargetfound",
                     "pixelpartytargetyaw",
                     "pixelpartytargetdist",
-                    "pixelpartyyawdelta"
+                    "pixelpartyyawdelta",
+                    "hudlayout"
                 )
             );
         }
@@ -141,7 +144,8 @@ public sealed class BridgeCapabilities
                 "cheststealer",
                 "reach",
                 "velocity",
-                "pixelpartyassist"
+                "pixelpartyassist",
+                "hudeditor"
             ),
             BuildSet(
                 "mincps",
@@ -191,7 +195,8 @@ public sealed class BridgeCapabilities
                 "pixelpartyassist",
                 "pixelpartyscanradius",
                 "pixelpartyautolook",
-                "pixelpartyautowalk"
+                "pixelpartyautowalk",
+                "hudeditor"
             ),
             BuildSet(
                 "actionbar",
@@ -208,7 +213,8 @@ public sealed class BridgeCapabilities
                 "pixelpartytargetfound",
                 "pixelpartytargetyaw",
                 "pixelpartytargetdist",
-                "pixelpartyyawdelta"
+                "pixelpartyyawdelta",
+                "hudlayout"
             )
         );
     }

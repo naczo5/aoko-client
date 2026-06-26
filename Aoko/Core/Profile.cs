@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 
 namespace Aoko.Core;
@@ -77,6 +78,10 @@ public class Profile
     public int AutoTotemDelay { get; set; } = 0;
     public int AutoTotemBehaviorMode { get; set; } = 0;
 
+    // Nullable so older JSON (without hudLayout) deserializes without error;
+    // a null value is treated as canonical defaults in ApplyToClicker.
+    public Dictionary<string, HudElementLayout>? HudLayout { get; set; }
+
     public Dictionary<string, int> ModuleKeys { get; set; } = new()
     {
         ["autoclicker"]   = 0xC0,
@@ -97,6 +102,7 @@ public class Profile
         ["velocity"]      = 0,
         ["autototem"]     = 0,
         ["panic"]         = 0,
+        ["hudeditor"]     = 0,
     };
     public string Theme { get; set; } = "Slate";
 }
@@ -188,6 +194,85 @@ public static class ProfileManager
             names.Add("Default");
         
         return names;
+    }
+
+    /// <summary>
+    /// Name of the internal auto-save slot used to persist the live working state
+    /// on close / restore it on launch. It is intentionally hidden from the user
+    /// facing config list.
+    /// </summary>
+    public const string AutoSaveConfigName = "config";
+
+    /// <summary>Absolute path of the folder that stores config (.json) files.</summary>
+    public static string ConfigsDirectory => ProfilesDir;
+
+    /// <summary>
+    /// Returns the user-facing config names (every <c>*.json</c> file except the
+    /// internal auto-save slot), sorted case-insensitively. Unlike
+    /// <see cref="GetProfileNames"/> this never injects a synthetic "Default" entry.
+    /// </summary>
+    public static List<string> GetConfigNames()
+    {
+        var names = new List<string>();
+
+        if (Directory.Exists(ProfilesDir))
+        {
+            foreach (var file in Directory.GetFiles(ProfilesDir, "*.json"))
+            {
+                string name = Path.GetFileNameWithoutExtension(file);
+                if (string.Equals(name, AutoSaveConfigName, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                names.Add(name);
+            }
+        }
+
+        names.Sort(StringComparer.OrdinalIgnoreCase);
+        return names;
+    }
+
+    /// <summary>Returns true if a config with the given (raw) name already exists.</summary>
+    public static bool ConfigExists(string name)
+    {
+        string sanitized = SanitizeConfigName(name);
+        if (sanitized.Length == 0)
+            return false;
+        return File.Exists(Path.Combine(ProfilesDir, $"{sanitized}.json"));
+    }
+
+    /// <summary>
+    /// Produces a safe file-name stem from user input: trims whitespace, strips any
+    /// path separators / invalid filename characters, and prevents traversal. Returns
+    /// an empty string when nothing valid remains (caller should reject it).
+    /// </summary>
+    public static string SanitizeConfigName(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+            return string.Empty;
+
+        string trimmed = name.Trim();
+
+        // Drop anything that looks like a path component.
+        trimmed = trimmed.Replace('\\', '_').Replace('/', '_');
+
+        var sb = new System.Text.StringBuilder(trimmed.Length);
+        foreach (char c in trimmed)
+        {
+            if (Array.IndexOf(Path.GetInvalidFileNameChars(), c) >= 0)
+                continue;
+            sb.Append(c);
+        }
+
+        string cleaned = sb.ToString().Trim().TrimEnd('.');
+
+        // Reject reserved traversal stems.
+        if (cleaned == "." || cleaned == "..")
+            return string.Empty;
+
+        // Keep file names reasonable.
+        if (cleaned.Length > 64)
+            cleaned = cleaned.Substring(0, 64);
+
+        return cleaned;
     }
     
     public static void SaveProfile(Profile profile)
@@ -294,6 +379,8 @@ public static class ProfileManager
             AutoTotemDelay = clicker.AutoTotemDelay,
             AutoTotemBehaviorMode = clicker.AutoTotemBehaviorMode,
 
+            HudLayout = BuildHudLayoutDict(clicker.HudLayout),
+
             ModuleKeys = new Dictionary<string, int>(InputHooks.ModuleKeys),
             Theme = ThemeManager.CurrentTheme
         };
@@ -378,8 +465,53 @@ public static class ProfileManager
         clicker.AutoTotemDelay = profile.AutoTotemDelay;
         clicker.AutoTotemBehaviorMode = profile.AutoTotemBehaviorMode;
 
+        clicker.HudLayout = BuildHudLayout(profile.HudLayout);
+
         foreach (var kvp in profile.ModuleKeys)
             InputHooks.SetModuleKey(kvp.Key, kvp.Value);
         ThemeManager.ApplyTheme(profile.Theme);
+    }
+
+    /// <summary>
+    /// Converts a <see cref="HudLayout"/> to a plain dictionary suitable for JSON
+    /// serialization inside <see cref="Profile"/>.
+    /// </summary>
+    private static Dictionary<string, HudElementLayout> BuildHudLayoutDict(HudLayout hudLayout)
+    {
+        var dict = new Dictionary<string, HudElementLayout>();
+        foreach (string id in new[]
+        {
+            HudElementId.ModuleList, HudElementId.ClosestPlayer, HudElementId.PixelParty,
+            HudElementId.ChestEspList, HudElementId.GtbHint, HudElementId.Nametags,
+        })
+        {
+            dict[id] = hudLayout.Get(id);
+        }
+        return dict;
+    }
+
+    /// <summary>
+    /// Builds a <see cref="HudLayout"/> from the nullable dictionary stored in a
+    /// <see cref="Profile"/>. Returns canonical defaults when the dictionary is null
+    /// (covers older profiles that predate the hudLayout field).
+    /// </summary>
+    private static HudLayout BuildHudLayout(Dictionary<string, HudElementLayout>? dict)
+    {
+        if (dict == null)
+            return new HudLayout();
+
+        // Reconstruct via ToJson/FromJson so that clamping and defaults are applied
+        // consistently, tolerating any invalid values that may have been stored on disk.
+        var jsonObj = new JsonObject();
+        foreach (var kv in dict)
+        {
+            jsonObj[kv.Key] = new JsonObject
+            {
+                ["x"]     = kv.Value.X,
+                ["y"]     = kv.Value.Y,
+                ["scale"] = kv.Value.Scale,
+            };
+        }
+        return HudLayout.FromJson(jsonObj);
     }
 }

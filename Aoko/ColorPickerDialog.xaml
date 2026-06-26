@@ -1,0 +1,113 @@
+<Window x:Class="Aoko.ColorPickerDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Pick a color"
+        Width="360"
+        SizeToContent="Height"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize"
+        Background="{DynamicResource BgBrush}">
+
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Saturation/Value square + hue bar -->
+        <StackPanel Grid.Row="0" Orientation="Horizontal">
+            <Border BorderBrush="{DynamicResource SliderBgBrush}" BorderThickness="1" CornerRadius="3">
+                <Canvas x:Name="SvCanvas" Width="220" Height="180" ClipToBounds="True"
+                        MouseLeftButtonDown="SvCanvas_MouseDown" MouseMove="SvCanvas_MouseMove" MouseLeftButtonUp="SvCanvas_MouseUp"
+                        Cursor="Cross">
+                    <Rectangle x:Name="SvHueLayer" Width="220" Height="180" Fill="#FF0000"/>
+                    <Rectangle Width="220" Height="180">
+                        <Rectangle.Fill>
+                            <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                                <GradientStop Offset="0" Color="#FFFFFFFF"/>
+                                <GradientStop Offset="1" Color="#00FFFFFF"/>
+                            </LinearGradientBrush>
+                        </Rectangle.Fill>
+                    </Rectangle>
+                    <Rectangle Width="220" Height="180">
+                        <Rectangle.Fill>
+                            <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                                <GradientStop Offset="0" Color="#00000000"/>
+                                <GradientStop Offset="1" Color="#FF000000"/>
+                            </LinearGradientBrush>
+                        </Rectangle.Fill>
+                    </Rectangle>
+                    <Ellipse x:Name="SvThumb" Width="12" Height="12" Stroke="White" StrokeThickness="2" IsHitTestVisible="False">
+                        <Ellipse.Effect>
+                            <DropShadowEffect BlurRadius="2" ShadowDepth="0" Color="Black"/>
+                        </Ellipse.Effect>
+                    </Ellipse>
+                </Canvas>
+            </Border>
+
+            <Border BorderBrush="{DynamicResource SliderBgBrush}" BorderThickness="1" CornerRadius="3" Margin="10,0,0,0">
+                <Canvas x:Name="HueCanvas" Width="22" Height="180" ClipToBounds="True"
+                        MouseLeftButtonDown="HueCanvas_MouseDown" MouseMove="HueCanvas_MouseMove" MouseLeftButtonUp="HueCanvas_MouseUp"
+                        Cursor="Hand">
+                    <Rectangle Width="22" Height="180">
+                        <Rectangle.Fill>
+                            <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                                <GradientStop Offset="0.000" Color="#FF0000"/>
+                                <GradientStop Offset="0.167" Color="#FFFF00"/>
+                                <GradientStop Offset="0.333" Color="#00FF00"/>
+                                <GradientStop Offset="0.500" Color="#00FFFF"/>
+                                <GradientStop Offset="0.667" Color="#0000FF"/>
+                                <GradientStop Offset="0.833" Color="#FF00FF"/>
+                                <GradientStop Offset="1.000" Color="#FF0000"/>
+                            </LinearGradientBrush>
+                        </Rectangle.Fill>
+                    </Rectangle>
+                    <Rectangle x:Name="HueThumb" Width="22" Height="4" Stroke="White" StrokeThickness="1.5" Fill="#80FFFFFF" IsHitTestVisible="False"/>
+                </Canvas>
+            </Border>
+        </StackPanel>
+
+        <!-- Preview + hex -->
+        <Grid Grid.Row="1" Margin="0,12,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <Border x:Name="PreviewSwatch" Grid.Column="0" Width="36" Height="36" CornerRadius="4"
+                    Background="#FF0000" BorderBrush="{DynamicResource SliderBgBrush}" BorderThickness="1" Margin="0,0,10,0"/>
+            <TextBlock Grid.Column="1" Text="Hex" Foreground="{DynamicResource DimTextBrush}" FontSize="12" VerticalAlignment="Center" Margin="0,0,8,0"/>
+            <TextBox x:Name="HexBox" Grid.Column="2" VerticalContentAlignment="Center" Padding="8,5" FontSize="13"
+                     Background="{DynamicResource PanelBrush}" Foreground="{DynamicResource TextBrush}"
+                     CaretBrush="{DynamicResource AccentBrush}" BorderBrush="{DynamicResource SliderBgBrush}" BorderThickness="1"
+                     KeyDown="HexBox_KeyDown" LostFocus="HexBox_LostFocus"/>
+        </Grid>
+
+        <!-- RGB sliders -->
+        <StackPanel Grid.Row="2" Margin="0,12,0,0">
+            <DockPanel Margin="0,0,0,2">
+                <TextBlock Text="R" Foreground="{DynamicResource DimTextBrush}" FontSize="12" Width="16" DockPanel.Dock="Left"/>
+                <TextBlock x:Name="RValue" Text="0" Foreground="{DynamicResource DimTextBrush}" FontSize="12" Width="34" TextAlignment="Right" DockPanel.Dock="Right"/>
+                <Slider x:Name="RSlider" Minimum="0" Maximum="255" Style="{StaticResource DarkSlider}" ValueChanged="RgbSlider_ValueChanged"/>
+            </DockPanel>
+            <DockPanel Margin="0,0,0,2">
+                <TextBlock Text="G" Foreground="{DynamicResource DimTextBrush}" FontSize="12" Width="16" DockPanel.Dock="Left"/>
+                <TextBlock x:Name="GValue" Text="0" Foreground="{DynamicResource DimTextBrush}" FontSize="12" Width="34" TextAlignment="Right" DockPanel.Dock="Right"/>
+                <Slider x:Name="GSlider" Minimum="0" Maximum="255" Style="{StaticResource DarkSlider}" ValueChanged="RgbSlider_ValueChanged"/>
+            </DockPanel>
+            <DockPanel>
+                <TextBlock Text="B" Foreground="{DynamicResource DimTextBrush}" FontSize="12" Width="16" DockPanel.Dock="Left"/>
+                <TextBlock x:Name="BValue" Text="0" Foreground="{DynamicResource DimTextBrush}" FontSize="12" Width="34" TextAlignment="Right" DockPanel.Dock="Right"/>
+                <Slider x:Name="BSlider" Minimum="0" Maximum="255" Style="{StaticResource DarkSlider}" ValueChanged="RgbSlider_ValueChanged"/>
+            </DockPanel>
+        </StackPanel>
+
+        <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
+            <Button Content="Cancel" Style="{StaticResource DarkButton}" Width="90" Margin="0,0,8,0" Padding="12,6" IsCancel="True" Click="CancelButton_Click"/>
+            <Button Content="OK" Style="{StaticResource DarkButton}" Width="90" Padding="12,6" IsDefault="True" Click="OkButton_Click"/>
+        </StackPanel>
+    </Grid>
+</Window>

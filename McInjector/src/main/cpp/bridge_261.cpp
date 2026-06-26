@@ -33,6 +33,7 @@
 #include "imgui_impl_opengl3.h"
 #include "json_config_reader.h"
 #include "bridge_capabilities.h"
+#include "hud_layout.h"
 #include "jni_core/scoped_env.h"
 #include "jni_core/local_frame.h"
 #include "jni_core/resolver.h"
@@ -174,9 +175,12 @@ struct Config {
     int   pixelPartyScanRadius = 28;
     bool  pixelPartyAutoLook = false;
     bool  pixelPartyAutoWalk = false;
+    bool  hudEditor = false;
 };
 static Config g_config;
 static Mutex  g_configMutex;
+static lc::HudLayout g_hudLayout = lc::HudLayout::DefaultLayout();
+static lc::HudEditorState g_hudEditor;
 static volatile LONG g_forceGlobalJniRemap_121 = 0;
 
 // ===================== CONFIG PARSER =====================
@@ -253,6 +257,15 @@ static void ParseConfig(const std::string& line) {
         InterlockedExchange(&g_forceGlobalJniRemap_121, 1);
         Log("ReloadMappings: received loader pulse; scheduling full JNI remap across modules.");
     }
+
+    g_config.hudEditor = reader.GetBool("hudEditor");
+    if (!g_config.hudEditor) {
+        g_hudEditor.grabbedId.clear();
+        g_hudEditor.mode = lc::HudEditorState::Mode::None;
+    }
+    g_hudEditor.active = g_config.hudEditor;
+    // Parse hudLayout (under same g_configMutex lock since we're already in it)
+    g_hudLayout = lc::ParseHudLayout(line);
 }
 
 static bool TrySendCapabilities(SOCKET sock) {
@@ -8873,6 +8886,148 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
     return 0;
 }
 
+// ===================== HUD EDITOR =====================
+static void UpdateHudEditor(int winW, int winH) {
+    if (!g_hudEditor.active) return;
+    if (winW <= 0 || winH <= 0) return;
+
+    // Dragging only works when the OS/GLFW cursor is available (any GUI or chat open).
+    bool cursorAvailable = false;
+    if (glfwGetCurrentContext_fn && glfwGetInputMode_fn) {
+        void* win = glfwGetCurrentContext_fn();
+        if (win) cursorAvailable = (glfwGetInputMode_fn(win, GLFW_CURSOR) == GLFW_CURSOR_NORMAL);
+    }
+
+    ImGuiIO& io = ImGui::GetIO();
+
+    // The 26.1 bridge has no WndProc hook, so ImGui never receives mouse-button
+    // messages (io.MouseDown stays false). Poll the physical button and cursor
+    // position directly, and feed them to ImGui so MousePos is also correct.
+    ImVec2 mouse = io.MousePos;
+    if (g_hwnd) {
+        POINT p;
+        if (GetCursorPos(&p) && ScreenToClient(g_hwnd, &p)) {
+            mouse = ImVec2((float)p.x, (float)p.y);
+            io.MousePos = mouse;
+        }
+    }
+
+    bool physDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+    static bool s_prevDown = false;
+    bool rawDown     = cursorAvailable && physDown;
+    bool mouseDown     = rawDown;
+    bool mouseClicked  = cursorAvailable && physDown && !s_prevDown;
+    bool mouseReleased = !physDown && s_prevDown;
+    s_prevDown = physDown;
+
+    // Struct for editor-visible elements
+    struct EditorElem { std::string id; ImVec2 tl; float w, h; };
+    std::vector<EditorElem> elems;
+
+    lc::HudLayout layoutSnap;
+    { LockGuard lk(g_configMutex); layoutSnap = g_hudLayout; }
+
+    // Only screen-anchored panels are editable. Nametags and chest ESP boxes
+    // stay attached to the player/chest in the world and are NOT listed here.
+    struct BaseSize { const char* id; float w, h; };
+    static const BaseSize baseSizes[] = {
+        { lc::ELEM_MODULELIST,    120.0f, 200.0f },
+        { lc::ELEM_CLOSESTPLAYER, 220.0f,  80.0f },
+        { lc::ELEM_PIXELPARTY,    200.0f,  70.0f },
+        { lc::ELEM_GTBHINT,       200.0f,  80.0f },
+        { nullptr, 0, 0 }
+    };
+    for (int i = 0; baseSizes[i].id; ++i) {
+        lc::HudElementLayout el = layoutSnap.Resolve(baseSizes[i].id);
+        float sw = baseSizes[i].w * el.scale;
+        float sh = baseSizes[i].h * el.scale;
+        ImVec2 tl = lc::HudElementPixelPos(el, sw, sh, winW, winH);
+        elems.push_back({ baseSizes[i].id, tl, sw, sh });
+    }
+
+    // 1. Begin gesture: hit-test on click
+    if (mouseClicked && g_hudEditor.grabbedId.empty()) {
+        const float gripSize = 14.0f;
+        for (const auto& e : elems) {
+            lc::HudElementLayout el = layoutSnap.Resolve(e.id);
+            if (!el.movable && !el.resizable) continue;
+
+            ImVec2 gripTL(e.tl.x + e.w - gripSize, e.tl.y + e.h - gripSize);
+            ImVec2 gripBR(e.tl.x + e.w, e.tl.y + e.h);
+            bool inGrip = el.resizable &&
+                mouse.x >= gripTL.x && mouse.x <= gripBR.x &&
+                mouse.y >= gripTL.y && mouse.y <= gripBR.y;
+            bool inBody = el.movable &&
+                mouse.x >= e.tl.x && mouse.x <= e.tl.x + e.w &&
+                mouse.y >= e.tl.y && mouse.y <= e.tl.y + e.h;
+
+            if (inGrip) {
+                g_hudEditor.grabbedId = e.id;
+                g_hudEditor.mode = lc::HudEditorState::Mode::Resize;
+                break;
+            } else if (inBody) {
+                g_hudEditor.grabbedId = e.id;
+                g_hudEditor.mode = lc::HudEditorState::Mode::Move;
+                g_hudEditor.grabOffset = ImVec2(mouse.x - e.tl.x, mouse.y - e.tl.y);
+                break;
+            }
+        }
+    }
+
+    // 2. Apply gesture while held
+    if (!g_hudEditor.grabbedId.empty() && mouseDown) {
+        LockGuard lk(g_configMutex);
+        lc::HudElementLayout& el = g_hudLayout.elements[g_hudEditor.grabbedId];
+        if (g_hudEditor.mode == lc::HudEditorState::Mode::Move) {
+            el.x = lc::ClampHudCoord((mouse.x - g_hudEditor.grabOffset.x) / (float)winW);
+            el.y = lc::ClampHudCoord((mouse.y - g_hudEditor.grabOffset.y) / (float)winH);
+        } else if (g_hudEditor.mode == lc::HudEditorState::Mode::Resize) {
+            float baseW = 120.0f;
+            static const BaseSize bs[] = {
+                { lc::ELEM_MODULELIST, 120, 200 }, { lc::ELEM_CLOSESTPLAYER, 220, 80 },
+                { lc::ELEM_PIXELPARTY, 200, 70 }, { lc::ELEM_GTBHINT, 200, 80 }, { nullptr, 0, 0 }
+            };
+            for (int i = 0; bs[i].id; ++i) {
+                if (g_hudEditor.grabbedId == bs[i].id) { baseW = bs[i].w; break; }
+            }
+            float anchorPx = el.x * (float)winW;
+            float desiredW = mouse.x - anchorPx;
+            el.scale = lc::ClampHudScale(desiredW / baseW);
+        }
+    }
+
+    // 3. End gesture: mark dirty
+    if (mouseReleased && !g_hudEditor.grabbedId.empty()) {
+        g_hudEditor.grabbedId.clear();
+        g_hudEditor.mode = lc::HudEditorState::Mode::None;
+        g_hudEditor.layoutDirty = true;
+    }
+
+    // 4. Draw bounding boxes for each element
+    ImDrawList* fg = ImGui::GetForegroundDrawList();
+    lc::HudLayout layoutDraw;
+    { LockGuard lk(g_configMutex); layoutDraw = g_hudLayout; }
+    for (const auto& e : elems) {
+        lc::HudElementLayout el = layoutDraw.Resolve(e.id);
+        float sw = e.w; // already scaled
+        float sh = e.h;
+        ImVec2 tl = lc::HudElementPixelPos(el, sw, sh, winW, winH);
+        ImVec2 br(tl.x + sw, tl.y + sh);
+
+        bool grabbed = (g_hudEditor.grabbedId == e.id);
+        ImU32 boxCol = grabbed ? IM_COL32(255, 200, 50, 200) : IM_COL32(80, 180, 255, 140);
+        fg->AddRect(tl, br, boxCol, 4.0f, 0, grabbed ? 2.0f : 1.5f);
+
+        // Label
+        fg->AddText(ImVec2(tl.x + 4, tl.y + 3), IM_COL32(255, 255, 255, 200), e.id.c_str());
+
+        // Corner resize grip
+        const float gripSz = 12.0f;
+        ImVec2 gripTL(br.x - gripSz, br.y - gripSz);
+        fg->AddRectFilled(gripTL, br, boxCol, 2.0f);
+    }
+}
+
 // ===================== HOOKED SwapBuffers =====================
 // Frame counter: skip first few frames after GL backend init to let driver stabilize.
 // Two-phase init: phase 1 = ImGui context + Win32 (no GL), phase 2 = GL backend (deferred).
@@ -9099,6 +9254,9 @@ BOOL WINAPI hwglSwapBuffers(HDC hDc) {
     ImGui::NewFrame();
 
     // 1.21 uses the external WPF window for module controls.
+    int winW = (int)ImGui::GetIO().DisplaySize.x;
+    int winH = (int)ImGui::GetIO().DisplaySize.y;
+    UpdateHudEditor(winW, winH);
 
     // Render overlay text for closest player (when enabled and menu closed)
     {
@@ -9206,25 +9364,29 @@ BOOL WINAPI hwglSwapBuffers(HDC hDc) {
                 if (!statsRow.empty()) contentH += smallSz + gapRow;
                 contentH += padY;
 
-                float cx = io.DisplaySize.x * 0.5f;
-                float by = io.DisplaySize.y - 120.0f;   // 120px from bottom = above hotbar + labels
+                lc::HudElementLayout cpLayout;
+                { LockGuard lkHud(g_configMutex); cpLayout = g_hudLayout.Resolve(lc::ELEM_CLOSESTPLAYER); }
+                contentW *= cpLayout.scale;
+                contentH *= cpLayout.scale;
 
-                float rx = std::floor(cx - contentW * 0.5f);
-                float ry = std::floor(by - contentH);
+                ImVec2 cpTL = lc::HudElementPixelPos(cpLayout, contentW, contentH, winW, winH);
+                float rx = cpTL.x;
+                float ry = cpTL.y;
+                float cx = rx + contentW * 0.5f;
 
                 ImVec2 pMin(rx, ry);
                 ImVec2 pMax(rx + contentW, ry + contentH);
 
                 // Background + outline
                 fg->AddRectFilled(pMin, pMax, IM_COL32(10, 10, 18, 210), 6.0f);
-                fg->AddRect(pMin, pMax, IM_COL32(80, 120, 255, 120), 6.0f, 0, 1.0f);
+                fg->AddRect(pMin, pMax, overlayTheme.accentPrimary, 6.0f, 0, 1.0f);
 
                 float curY = ry + padY;
 
                 // Name + distance row (white)
                 float ntx = std::floor(cx - nameSz.x * 0.5f);
                 fg->AddText(ImVec2(ntx + 1, curY + 1), IM_COL32(0,0,0,160), nameRow);
-                fg->AddText(ImVec2(ntx, curY), IM_COL32(255, 255, 255, 240), nameRow);
+                fg->AddText(ImVec2(ntx, curY), overlayTheme.moduleText, nameRow);
                 curY += fontSz + gapRow;
 
                 // HP bar
@@ -9323,11 +9485,15 @@ BOOL WINAPI hwglSwapBuffers(HDC hDc) {
                 if (!subRow.empty()) contentH += smallSz + gapRow;
                 contentH += padY;
 
-                float cx = io.DisplaySize.x * 0.5f;
-                float bottomOffset = renderClosestPlayer ? 200.0f : 120.0f;
-                float by = io.DisplaySize.y - bottomOffset;
-                float rx = std::floor(cx - contentW * 0.5f);
-                float ry = std::floor(by - contentH);
+                lc::HudElementLayout ppLayout;
+                { LockGuard lkHud(g_configMutex); ppLayout = g_hudLayout.Resolve(lc::ELEM_PIXELPARTY); }
+                contentW *= ppLayout.scale;
+                contentH *= ppLayout.scale;
+
+                ImVec2 ppTL = lc::HudElementPixelPos(ppLayout, contentW, contentH, winW, winH);
+                float rx = ppTL.x;
+                float ry = ppTL.y;
+                float cx = rx + contentW * 0.5f;
                 ImVec2 pMin(rx, ry);
                 ImVec2 pMax(rx + contentW, ry + contentH);
 
@@ -9459,11 +9625,12 @@ BOOL WINAPI hwglSwapBuffers(HDC hDc) {
                                         statsText += armBuf;
                                     }
 
-                                    const float nameFontSize = std::floor(ImGui::GetFontSize() * nameScale);
-                                    const float infoFontSize = std::floor(nameFontSize * 0.85f);
+                        const float layoutNtScale = g_hudLayout.Resolve(lc::ELEM_NAMETAGS).scale;
+                        const float nameFontSize = std::floor(ImGui::GetFontSize() * nameScale * layoutNtScale);
+                        const float infoFontSize = std::floor(nameFontSize * 0.85f);
                                     
                                     ImVec2 nameSz = ImGui::CalcTextSize(nameText.c_str());
-                                    nameSz.x *= nameScale; nameSz.y *= nameScale;
+                                    nameSz.x *= nameScale * layoutNtScale; nameSz.y *= nameScale * layoutNtScale;
                                     
                                     ImVec2 statsSz = {0,0};
                                     if (!statsText.empty()) {
@@ -9484,7 +9651,7 @@ BOOL WINAPI hwglSwapBuffers(HDC hDc) {
                                     if (statsSz.y > 0) totalH += statsSz.y + 2.0f;
                                     if (itemSz.y > 0) totalH += itemSz.y + 2.0f;
 
-                                    float pad = std::floor(4.0f * nameScale);
+                                    float pad = std::floor(4.0f * nameScale * layoutNtScale);
                                     float rx = std::floor(sx - maxW / 2.0f);
                                     float ry = std::floor(sy - totalH - pad * 2.0f);
 
@@ -9498,7 +9665,7 @@ BOOL WINAPI hwglSwapBuffers(HDC hDc) {
                                     // Name
                                     float nx = std::floor(sx - nameSz.x / 2.0f);
                                     fg->AddText(ImGui::GetFont(), nameFontSize, ImVec2(nx + 1, curY + 1), IM_COL32(0, 0, 0, 255), nameText.c_str());
-                                    fg->AddText(ImGui::GetFont(), nameFontSize, ImVec2(nx, curY), IM_COL32(255, 255, 255, 250), nameText.c_str());
+                                    fg->AddText(ImGui::GetFont(), nameFontSize, ImVec2(nx, curY), overlayTheme.moduleText, nameText.c_str());
                                     curY += nameSz.y + 2.0f;
                                     
                                     // Stats
@@ -9783,71 +9950,104 @@ BOOL WINAPI hwglSwapBuffers(HDC hDc) {
                     }
                 }
 
-                const float marginX = 10.0f;
-                float y = 10.0f;
-                
+                // Honor the HUD layout anchor + scale so the module list can be
+                // moved/resized in the HUD editor like the other screen-anchored
+                // panels (closestplayer, pixelparty). Previously this was hard-coded
+                // to the top-right corner and ignored g_hudLayout entirely, so the
+                // editor box moved but the list never did.
+                lc::HudElementLayout mlLayout;
+                { LockGuard lkHud(g_configMutex); mlLayout = g_hudLayout.Resolve(lc::ELEM_MODULELIST); }
+                const float scale = mlLayout.scale;
+
+                const float padX      = 8.0f * scale;
+                const float padY      = 3.0f * scale;
+                const float barW      = 3.0f * scale;
+                const float gapY      = 2.0f * scale;
+                const float fontH     = ImGui::GetFontSize() * scale;
+                const float shadowOff = (std::max)(1.0f, scale);
+                const float rightInset = 6.0f * scale; // keeps a small gap when flush-right
+                const int style = (std::max)(0, (std::min)(4, cfg.moduleListStyle));
+                ImFont* font = ImGui::GetFont();
+
+                const char* logoText = "aoko client";
+                const float boxH = padY + fontH + padY;
+
+                // ── Measuring pass: compute the block bounds (right-aligned bars). ──
+                float blockW = 0.0f;
+                float blockH = 0.0f;
+                float logoW = 0.0f, logoH = 0.0f, logoGap = 0.0f;
                 if (cfg.showLogo) {
-                    const char* logoText = "aoko client";
-                    ImVec2 logoSz = ImGui::CalcTextSize(logoText);
-                    float logoX = io.DisplaySize.x - marginX - logoSz.x;
-                    // Logo Shadow
-                    fg->AddText(ImVec2(logoX + 1, y + 1), overlayTheme.logoShadow, logoText);
-                    fg->AddText(ImVec2(logoX, y), overlayTheme.logoColor, logoText);
-                    y += logoSz.y + 8.0f;
+                    logoW   = ImGui::CalcTextSize(logoText).x * scale;
+                    logoH   = fontH;
+                    logoGap = 8.0f * scale;
+                    blockW  = (std::max)(blockW, logoW + rightInset);
+                    blockH += logoH + logoGap;
+                }
+                for (int i = 0; i < modCount; i++) {
+                    float textW = mods[i].width * scale;
+                    float boxW  = barW + padX + textW + padX;
+                    blockW = (std::max)(blockW, boxW + rightInset);
+                    blockH += boxH;
+                    if (i + 1 < modCount) blockH += gapY;
                 }
 
-                const float padX = 8.0f;
-                const float padY = 3.0f;
-                const float barW = 3.0f;
-                const float gapY = 2.0f;
-                const float fontH = ImGui::GetFontSize();
-                const int style = (std::max)(0, (std::min)(4, cfg.moduleListStyle));
-                
-                for (int i = 0; i < modCount; i++) {
-                    const ModLine& m = mods[i];
-                    ImVec2 textSz = ImGui::CalcTextSize(m.text);
-                    float boxW = barW + padX + textSz.x + padX;
-                    float boxH = padY + fontH + padY;
-                    float x0 = io.DisplaySize.x - marginX - boxW;
-                    float x1 = io.DisplaySize.x - marginX;
-                    float y0 = y;
-                    float y1 = y + boxH;
+                if (modCount > 0 || cfg.showLogo) {
+                    // Anchor the whole block via the shared HUD layout helper.
+                    ImVec2 tl = lc::HudElementPixelPos(mlLayout, blockW, blockH, winW, winH);
+                    const float x1 = tl.x + blockW - rightInset; // right edge of bars
+                    float y = tl.y;
 
-                    if (style == 0) {
-                        fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleBg);
-                        fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + barW, y1), m.accent);
-                        fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleBorder);
-                        ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
-                        fg->AddText(ImVec2(tx.x + 1, tx.y + 1), overlayTheme.moduleTextShadow, m.text);
-                        fg->AddText(tx, overlayTheme.moduleText, m.text);
-                    } else if (style == 1) {
-                        fg->AddRectFilled(ImVec2(x1 - textSz.x - 4, y0), ImVec2(x1, y1), overlayTheme.moduleMinimalBg);
-                        fg->AddRectFilled(ImVec2(x1 - 2, y0), ImVec2(x1, y1), m.accent);
-                        ImVec2 tx = ImVec2(x1 - textSz.x - 2, y0 + padY);
-                        fg->AddText(ImVec2(tx.x + 1, tx.y + 1), overlayTheme.moduleTextShadow, m.text);
-                        fg->AddText(tx, m.accent, m.text);
-                    } else if (style == 2) {
-                        fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleOutlinedBg);
-                        fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), m.accent, 4.0f, 0, 1.5f);
-                        ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
-                        fg->AddText(ImVec2(tx.x + 1, tx.y + 1), overlayTheme.moduleTextShadow, m.text);
-                        fg->AddText(tx, m.accent, m.text);
-                    } else if (style == 3) {
-                        fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleMinimalBg, 4.0f);
-                        fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleGlassBorder, 4.0f, 0, 1.0f);
-                        fg->AddRectFilled(ImVec2(x0 + 1.0f, y0 + 1.0f), ImVec2(x0 + barW + 1.0f, y1 - 1.0f), m.accent);
-                        ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
-                        fg->AddText(ImVec2(tx.x + 1, tx.y + 1), overlayTheme.moduleTextShadow, m.text);
-                        fg->AddText(tx, overlayTheme.moduleText, m.text);
-                    } else {
-                        fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), m.accent, 4.0f);
-                        fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleBorder, 4.0f, 0, 1.0f);
-                        ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
-                        fg->AddText(ImVec2(tx.x + 1, tx.y + 1), overlayTheme.moduleTextShadow, m.text);
-                        fg->AddText(tx, overlayTheme.moduleBoldText, m.text);
+                    if (cfg.showLogo) {
+                        float logoX = x1 - logoW;
+                        fg->AddText(font, fontH, ImVec2(logoX + shadowOff, y + shadowOff), overlayTheme.logoShadow, logoText);
+                        fg->AddText(font, fontH, ImVec2(logoX, y), overlayTheme.logoColor, logoText);
+                        y += logoH + logoGap;
                     }
 
-                    y += boxH + gapY;
+                    for (int i = 0; i < modCount; i++) {
+                        const ModLine& m = mods[i];
+                        float textW = m.width * scale;
+                        float boxW  = barW + padX + textW + padX;
+                        float x0 = x1 - boxW;
+                        float y0 = y;
+                        float y1 = y + boxH;
+
+                        if (style == 0) {
+                            fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleBg);
+                            fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + barW, y1), m.accent);
+                            fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleBorder);
+                            ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
+                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.moduleTextShadow, m.text);
+                            fg->AddText(font, fontH, tx, overlayTheme.moduleText, m.text);
+                        } else if (style == 1) {
+                            fg->AddRectFilled(ImVec2(x1 - textW - 4.0f * scale, y0), ImVec2(x1, y1), overlayTheme.moduleMinimalBg);
+                            fg->AddRectFilled(ImVec2(x1 - 2.0f * scale, y0), ImVec2(x1, y1), m.accent);
+                            ImVec2 tx = ImVec2(x1 - textW - 2.0f * scale, y0 + padY);
+                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.moduleTextShadow, m.text);
+                            fg->AddText(font, fontH, tx, m.accent, m.text);
+                        } else if (style == 2) {
+                            fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleOutlinedBg);
+                            fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), m.accent, 4.0f, 0, 1.5f);
+                            ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
+                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.moduleTextShadow, m.text);
+                            fg->AddText(font, fontH, tx, m.accent, m.text);
+                        } else if (style == 3) {
+                            fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleMinimalBg, 4.0f);
+                            fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleGlassBorder, 4.0f, 0, 1.0f);
+                            fg->AddRectFilled(ImVec2(x0 + 1.0f * scale, y0 + 1.0f * scale), ImVec2(x0 + barW + 1.0f * scale, y1 - 1.0f * scale), m.accent);
+                            ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
+                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.moduleTextShadow, m.text);
+                            fg->AddText(font, fontH, tx, overlayTheme.moduleText, m.text);
+                        } else {
+                            fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), m.accent, 4.0f);
+                            fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleBorder, 4.0f, 0, 1.0f);
+                            ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
+                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.moduleTextShadow, m.text);
+                            fg->AddText(font, fontH, tx, overlayTheme.moduleBoldText, m.text);
+                        }
+
+                        y += boxH + gapY;
+                    }
                 }
             }
         } else {
@@ -10193,7 +10393,16 @@ glfw_done:;
                     state += "}";
                     sentEntities++;
                 }
-                state += "]}\n";
+                state += "]";
+                {
+                    LockGuard lk(g_configMutex);
+                    if (g_hudEditor.layoutDirty) {
+                        state += ",\"hudLayout\":";
+                        state += lc::SerializeHudLayout(g_hudLayout);
+                        g_hudEditor.layoutDirty = false;
+                    }
+                }
+                state += "}\n";
                 send(cli, state.c_str(), (int)state.size(), 0);
             }
 

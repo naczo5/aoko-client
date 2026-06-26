@@ -81,6 +81,7 @@ public static class InputHooks
         ["reach"]         = 0,
         ["velocity"]      = 0,
         ["panic"]         = 0,
+        ["hudeditor"]     = 0,
     };
 
     public static void SetModuleKey(string moduleId, int vk)
@@ -142,6 +143,7 @@ public static class InputHooks
             case "reach":         c.ReachEnabled                = !c.ReachEnabled;                break;
             case "velocity":      c.VelocityEnabled             = !c.VelocityEnabled;             break;
             case "autototem":     c.AutoTotemEnabled            = !c.AutoTotemEnabled;            break;
+            case "hudeditor":     c.HudEditorActive             = !c.HudEditorActive;             break;
         }
     }
 

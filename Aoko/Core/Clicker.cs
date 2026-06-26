@@ -1339,6 +1339,36 @@ public class Clicker : INotifyPropertyChanged
         }
     }
 
+    private HudLayout _hudLayout = new HudLayout();
+    public HudLayout HudLayout
+    {
+        get => _hudLayout;
+        set
+        {
+            if (_hudLayout != value)
+            {
+                _hudLayout = value;
+                OnPropertyChanged(nameof(HudLayout));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    private bool _hudEditorActive = false;
+    public bool HudEditorActive
+    {
+        get => _hudEditorActive;
+        set
+        {
+            if (_hudEditorActive != value)
+            {
+                _hudEditorActive = value;
+                OnPropertyChanged(nameof(HudEditorActive));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
     public void UpdateGtbFromActionBar(string actionBarText)
     {
         if (!GtbHelperEnabled)

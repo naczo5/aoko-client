@@ -21,10 +21,14 @@
 #include "imgui_impl_opengl3.h"
 #include "json_config_reader.h"
 #include "bridge_capabilities.h"
+#include "hud_layout.h"
 #include "jni_core/scoped_env.h"
 #include "jni_core/local_frame.h"
 #include "jni_core/matrix_reader.h"
 #include "jni_core/helper_bridge.h"
+
+// Forward declare ImGui Win32 WndProc handler (declaration is in #if 0 block in header)
+extern LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 // MinGW's <GL/gl.h> may not declare modern GL enums used while preserving
 // Minecraft's render state around ImGui backend initialization.
@@ -171,9 +175,12 @@ struct Config {
     int pixelPartyScanRadius = 28;
     bool pixelPartyAutoLook = false;
     bool pixelPartyAutoWalk = false;
+    bool hudEditor = false;
 };
 static Config g_config;
 static Mutex g_configMutex;
+static lc::HudLayout g_hudLayout = lc::HudLayout::DefaultLayout();
+static lc::HudEditorState g_hudEditor;
 
 // Game State
 struct GameState {
@@ -5903,6 +5910,128 @@ static bool ShouldHideWorldRenderModules(const GameState& state) {
 }
 
 // ===================== HUD RENDERING =====================
+static void UpdateHudEditor(int winW, int winH) {
+    if (!g_hudEditor.active) return;
+    if (winW <= 0 || winH <= 0) return;
+
+    // Dragging only works when a GUI/chat is open (OS cursor available).
+    bool chatOpen = false;
+    { LockGuard lk(g_stateMutex); chatOpen = g_gameState.guiOpen; }
+
+    ImGuiIO& io = ImGui::GetIO();
+    ImVec2 mouse = io.MousePos;
+    bool mouseDown = chatOpen && io.MouseDown[0];
+    bool mouseClicked = chatOpen && ImGui::IsMouseClicked(0);
+    bool mouseReleased = ImGui::IsMouseReleased(0);
+
+    // Struct for editor-visible elements
+    struct EditorElem { std::string id; ImVec2 tl; float w, h; };
+    std::vector<EditorElem> elems;
+
+    lc::HudLayout layoutSnap;
+    { LockGuard lk(g_configMutex); layoutSnap = g_hudLayout; }
+
+    // Only screen-anchored panels are editable. Nametags and chest ESP boxes
+    // stay attached to the player/chest in the world and are NOT listed here.
+    struct BaseSize { const char* id; float w, h; };
+    static const BaseSize baseSizes[] = {
+        { lc::ELEM_MODULELIST,    120.0f, 200.0f },
+        { lc::ELEM_CLOSESTPLAYER, 220.0f,  80.0f },
+        { lc::ELEM_PIXELPARTY,    200.0f,  70.0f },
+        { lc::ELEM_GTBHINT,       200.0f,  80.0f },
+        { nullptr, 0, 0 }
+    };
+    for (int i = 0; baseSizes[i].id; ++i) {
+        lc::HudElementLayout el = layoutSnap.Resolve(baseSizes[i].id);
+        float sw = baseSizes[i].w * el.scale;
+        float sh = baseSizes[i].h * el.scale;
+        ImVec2 tl = lc::HudElementPixelPos(el, sw, sh, winW, winH);
+        elems.push_back({ baseSizes[i].id, tl, sw, sh });
+    }
+
+    // 1. Begin gesture: hit-test on click
+    if (mouseClicked && g_hudEditor.grabbedId.empty()) {
+        const float gripSize = 14.0f;
+        for (const auto& e : elems) {
+            lc::HudElementLayout el = layoutSnap.Resolve(e.id);
+            if (!el.movable && !el.resizable) continue;
+
+            ImVec2 gripTL(e.tl.x + e.w - gripSize, e.tl.y + e.h - gripSize);
+            ImVec2 gripBR(e.tl.x + e.w, e.tl.y + e.h);
+            bool inGrip = el.resizable &&
+                mouse.x >= gripTL.x && mouse.x <= gripBR.x &&
+                mouse.y >= gripTL.y && mouse.y <= gripBR.y;
+            bool inBody = el.movable &&
+                mouse.x >= e.tl.x && mouse.x <= e.tl.x + e.w &&
+                mouse.y >= e.tl.y && mouse.y <= e.tl.y + e.h;
+
+            if (inGrip) {
+                g_hudEditor.grabbedId = e.id;
+                g_hudEditor.mode = lc::HudEditorState::Mode::Resize;
+                break;
+            } else if (inBody) {
+                g_hudEditor.grabbedId = e.id;
+                g_hudEditor.mode = lc::HudEditorState::Mode::Move;
+                g_hudEditor.grabOffset = ImVec2(mouse.x - e.tl.x, mouse.y - e.tl.y);
+                break;
+            }
+        }
+    }
+
+    // 2. Apply gesture while held
+    if (!g_hudEditor.grabbedId.empty() && mouseDown) {
+        LockGuard lk(g_configMutex);
+        lc::HudElementLayout& el = g_hudLayout.elements[g_hudEditor.grabbedId];
+        if (g_hudEditor.mode == lc::HudEditorState::Mode::Move) {
+            el.x = lc::ClampHudCoord((mouse.x - g_hudEditor.grabOffset.x) / (float)winW);
+            el.y = lc::ClampHudCoord((mouse.y - g_hudEditor.grabOffset.y) / (float)winH);
+        } else if (g_hudEditor.mode == lc::HudEditorState::Mode::Resize) {
+            float baseW = 120.0f;
+            static const BaseSize bs[] = {
+                { lc::ELEM_MODULELIST, 120, 200 }, { lc::ELEM_CLOSESTPLAYER, 220, 80 },
+                { lc::ELEM_PIXELPARTY, 200, 70 }, { lc::ELEM_GTBHINT, 200, 80 }, { nullptr, 0, 0 }
+            };
+            for (int i = 0; bs[i].id; ++i) {
+                if (g_hudEditor.grabbedId == bs[i].id) { baseW = bs[i].w; break; }
+            }
+            float anchorPx = el.x * (float)winW;
+            float desiredW = mouse.x - anchorPx;
+            el.scale = lc::ClampHudScale(desiredW / baseW);
+        }
+    }
+
+    // 3. End gesture: mark dirty
+    if (mouseReleased && !g_hudEditor.grabbedId.empty()) {
+        g_hudEditor.grabbedId.clear();
+        g_hudEditor.mode = lc::HudEditorState::Mode::None;
+        g_hudEditor.layoutDirty = true;
+    }
+
+    // 4. Draw bounding boxes for each element
+    ImDrawList* fg = ImGui::GetForegroundDrawList();
+    lc::HudLayout layoutDraw;
+    { LockGuard lk(g_configMutex); layoutDraw = g_hudLayout; }
+    for (const auto& e : elems) {
+        lc::HudElementLayout el = layoutDraw.Resolve(e.id);
+        float sw = e.w; // already scaled
+        float sh = e.h;
+        ImVec2 tl = lc::HudElementPixelPos(el, sw, sh, winW, winH);
+        ImVec2 br(tl.x + sw, tl.y + sh);
+
+        bool grabbed = (g_hudEditor.grabbedId == e.id);
+        ImU32 boxCol = grabbed ? IM_COL32(255, 200, 50, 200) : IM_COL32(80, 180, 255, 140);
+        fg->AddRect(tl, br, boxCol, 4.0f, 0, grabbed ? 2.0f : 1.5f);
+
+        // Label
+        fg->AddText(ImVec2(tl.x + 4, tl.y + 3), IM_COL32(255, 255, 255, 200), e.id.c_str());
+
+        // Corner resize grip
+        const float gripSz = 12.0f;
+        ImVec2 gripTL(br.x - gripSz, br.y - gripSz);
+        fg->AddRectFilled(gripTL, br, boxCol, 2.0f);
+    }
+}
+
 void RenderHUD(int winW, int winH) {
 
     Config cfg; { LockGuard lk(g_configMutex); cfg = g_config; }
@@ -5959,70 +6088,103 @@ void RenderHUD(int winW, int winH) {
         return a.text < b.text;
     });
 
-    const float marginX = 10.0f;
-    float y = 10.0f;
+    // Honor the HUD layout anchor + scale so the module list can be moved AND
+    // resized in the HUD editor. The block is anchored via the shared
+    // HudElementPixelPos helper (same as the editor box and the other panels),
+    // and all metrics are multiplied by the element scale. Previously scale was
+    // ignored, so resizing the module list in the editor had no visible effect.
+    lc::HudElementLayout modLayout;
+    { LockGuard lk2(g_configMutex); modLayout = g_hudLayout.Resolve(lc::ELEM_MODULELIST); }
+    const float scale = modLayout.scale;
 
+    const float padX       = 8.0f * scale;
+    const float padY       = 3.0f * scale;
+    const float barW       = 3.0f * scale;
+    const float gapY       = 2.0f * scale;
+    const float fontH      = ImGui::GetFontSize() * scale;
+    const float shadowOff  = (std::max)(1.0f, scale);
+    const float rightInset = 6.0f * scale; // keeps a small gap when flush-right
+    const int style = (std::max)(0, (std::min)(4, cfg.moduleListStyle));
+    ImFont* font = ImGui::GetFont();
+
+    const char* logoText = "aoko client";
+    const float boxH = padY + fontH + padY;
+
+    // ── Measuring pass: compute the block bounds (right-aligned bars). ──
+    float blockW = 0.0f;
+    float blockH = 0.0f;
+    float logoW = 0.0f, logoH = 0.0f, logoGap = 0.0f;
     if (cfg.showLogo) {
-        const char* logoText = "aoko client";
-        ImVec2 logoSz = ImGui::CalcTextSize(logoText);
-        float logoX = io.DisplaySize.x - marginX - logoSz.x;
-        fg->AddText(ImVec2(logoX + 1, y + 1), ToImU32(theme.logoShadow), logoText);
-        fg->AddText(ImVec2(logoX, y), ToImU32(theme.logoColor), logoText);
-        y += logoSz.y + 8.0f;
+        logoW   = ImGui::CalcTextSize(logoText).x * scale;
+        logoH   = fontH;
+        logoGap = 8.0f * scale;
+        blockW  = (std::max)(blockW, logoW + rightInset);
+        blockH += logoH + logoGap;
+    }
+    for (size_t i = 0; i < mods.size(); i++) {
+        float textW = mods[i].width * scale;
+        float boxW  = barW + padX + textW + padX;
+        blockW = (std::max)(blockW, boxW + rightInset);
+        blockH += boxH;
+        if (i + 1 < mods.size()) blockH += gapY;
     }
 
-    const float padX = 8.0f;
-    const float padY = 3.0f;
-    const float barW = 3.0f;
-    const float gapY = 2.0f;
-    const float fontH = ImGui::GetFontSize();
-    const int style = (std::max)(0, (std::min)(4, cfg.moduleListStyle));
+    if (!mods.empty() || cfg.showLogo) {
+        ImVec2 tl = lc::HudElementPixelPos(modLayout, blockW, blockH, winW, winH);
+        const float x1 = tl.x + blockW - rightInset; // right edge of bars
+        float y = tl.y;
 
-    for (size_t i = 0; i < mods.size(); i++) {
-        const ModLine& m = mods[i];
-        ImVec2 textSz = ImGui::CalcTextSize(m.text.c_str());
-        float boxW = barW + padX + textSz.x + padX;
-        float boxH = padY + fontH + padY;
-        float x0 = io.DisplaySize.x - marginX - boxW;
-        float x1 = io.DisplaySize.x - marginX;
-        float y0 = y;
-        float y1 = y + boxH;
-
-        if (style == 0) {
-            fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleBg));
-            fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + barW, y1), m.accent);
-            fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleBorder));
-            ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
-            fg->AddText(ImVec2(tx.x + 1, tx.y + 1), ToImU32(theme.moduleTextShadow), m.text.c_str());
-            fg->AddText(tx, ToImU32(theme.moduleText), m.text.c_str());
-        } else if (style == 1) {
-            fg->AddRectFilled(ImVec2(x1 - textSz.x - 4, y0), ImVec2(x1, y1), ToImU32(theme.moduleMinimalBg));
-            fg->AddRectFilled(ImVec2(x1 - 2, y0), ImVec2(x1, y1), m.accent);
-            ImVec2 tx = ImVec2(x1 - textSz.x - 2, y0 + padY);
-            fg->AddText(ImVec2(tx.x + 1, tx.y + 1), ToImU32(theme.moduleTextShadow), m.text.c_str());
-            fg->AddText(tx, m.accent, m.text.c_str());
-        } else if (style == 2) {
-            fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleOutlinedBg));
-            fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), m.accent, 4.0f, 0, 1.5f);
-            ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
-            fg->AddText(ImVec2(tx.x + 1, tx.y + 1), ToImU32(theme.moduleTextShadow), m.text.c_str());
-            fg->AddText(tx, m.accent, m.text.c_str());
-        } else if (style == 3) {
-            fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleMinimalBg), 4.0f);
-            fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleGlassBorder), 4.0f, 0, 1.0f);
-            fg->AddRectFilled(ImVec2(x0 + 1.0f, y0 + 1.0f), ImVec2(x0 + barW + 1.0f, y1 - 1.0f), m.accent);
-            ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
-            fg->AddText(ImVec2(tx.x + 1, tx.y + 1), ToImU32(theme.moduleTextShadow), m.text.c_str());
-            fg->AddText(tx, ToImU32(theme.moduleText), m.text.c_str());
-        } else {
-            fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), m.accent, 4.0f);
-            fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleBorder), 4.0f, 0, 1.0f);
-            ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
-            fg->AddText(ImVec2(tx.x + 1, tx.y + 1), ToImU32(theme.moduleTextShadow), m.text.c_str());
-            fg->AddText(tx, ToImU32(theme.moduleBoldText), m.text.c_str());
+        if (cfg.showLogo) {
+            float logoX = x1 - logoW;
+            fg->AddText(font, fontH, ImVec2(logoX + shadowOff, y + shadowOff), ToImU32(theme.logoShadow), logoText);
+            fg->AddText(font, fontH, ImVec2(logoX, y), ToImU32(theme.logoColor), logoText);
+            y += logoH + logoGap;
         }
 
-        y += boxH + gapY;
+        for (size_t i = 0; i < mods.size(); i++) {
+            const ModLine& m = mods[i];
+            float textW = m.width * scale;
+            float boxW  = barW + padX + textW + padX;
+            float x0 = x1 - boxW;
+            float y0 = y;
+            float y1 = y + boxH;
+
+            if (style == 0) {
+                fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleBg));
+                fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + barW, y1), m.accent);
+                fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleBorder));
+                ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
+                fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), ToImU32(theme.moduleTextShadow), m.text.c_str());
+                fg->AddText(font, fontH, tx, ToImU32(theme.moduleText), m.text.c_str());
+            } else if (style == 1) {
+                fg->AddRectFilled(ImVec2(x1 - textW - 4.0f * scale, y0), ImVec2(x1, y1), ToImU32(theme.moduleMinimalBg));
+                fg->AddRectFilled(ImVec2(x1 - 2.0f * scale, y0), ImVec2(x1, y1), m.accent);
+                ImVec2 tx = ImVec2(x1 - textW - 2.0f * scale, y0 + padY);
+                fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), ToImU32(theme.moduleTextShadow), m.text.c_str());
+                fg->AddText(font, fontH, tx, m.accent, m.text.c_str());
+            } else if (style == 2) {
+                fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleOutlinedBg));
+                fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), m.accent, 4.0f, 0, 1.5f);
+                ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
+                fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), ToImU32(theme.moduleTextShadow), m.text.c_str());
+                fg->AddText(font, fontH, tx, m.accent, m.text.c_str());
+            } else if (style == 3) {
+                fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleMinimalBg), 4.0f);
+                fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleGlassBorder), 4.0f, 0, 1.0f);
+                fg->AddRectFilled(ImVec2(x0 + 1.0f * scale, y0 + 1.0f * scale), ImVec2(x0 + barW + 1.0f * scale, y1 - 1.0f * scale), m.accent);
+                ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
+                fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), ToImU32(theme.moduleTextShadow), m.text.c_str());
+                fg->AddText(font, fontH, tx, ToImU32(theme.moduleText), m.text.c_str());
+            } else {
+                fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), m.accent, 4.0f);
+                fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleBorder), 4.0f, 0, 1.0f);
+                ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
+                fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), ToImU32(theme.moduleTextShadow), m.text.c_str());
+                fg->AddText(font, fontH, tx, ToImU32(theme.moduleBoldText), m.text.c_str());
+            }
+
+            y += boxH + gapY;
+        }
     }
 
     if (cfg.gtbHelper) {
@@ -6275,6 +6437,7 @@ void RenderNametags(int w, int h) {
     bool nametagsEnabled = false;
     bool entityTelemetryNeeded = false;
     int nametagMaxCount = 8;
+    std::string guiTheme = "Default";
     {
          LockGuard lk(g_configMutex);
          nametagsEnabled = g_config.nametags;
@@ -6285,7 +6448,9 @@ void RenderNametags(int w, int h) {
          showArmor = g_config.nametagShowArmor;
          hideVanillaTags = g_config.nametagHideVanilla;
          nametagMaxCount = (std::max)(1, (std::min)(20, g_config.nametagMaxCount));
+         guiTheme = g_config.guiTheme;
     }
+    OverlayTheme nametagTheme = ResolveOverlayTheme(guiTheme);
 
     // Default to empty telemetry each run so stale entities are not reused.
     {
@@ -6830,7 +6995,7 @@ void RenderNametags(int w, int h) {
                  float centerX = px + (maxW + pad * 2.0f) * 0.5f;
                  float nameX = std::floor(centerX - nameSz.x * 0.5f);
                  fg->AddText(ImGui::GetFont(), nameFontSize, ImVec2(nameX + 1, curY + 1), IM_COL32(0, 0, 0, 255), displayName.c_str());
-                 fg->AddText(ImGui::GetFont(), nameFontSize, ImVec2(nameX, curY), IM_COL32(255, 255, 255, 250), displayName.c_str());
+                 fg->AddText(ImGui::GetFont(), nameFontSize, ImVec2(nameX, curY), ToImU32(nametagTheme.moduleText), displayName.c_str());
                  curY += nameSz.y + 2.0f;
 
                  if (!statsText.empty()) {
@@ -7000,11 +7165,13 @@ void RenderClosestPlayerInfo(int w, int h) {
     bool enabled = false;
     bool showHealth = true;
     bool showArmor = true;
+    std::string guiTheme = "Default";
     {
         LockGuard lk(g_configMutex);
         enabled = g_config.closestPlayerInfo;
         showHealth = g_config.nametagShowHealth;
         showArmor = g_config.nametagShowArmor;
+        guiTheme = g_config.guiTheme;
     }
     if (!enabled) return;
     if (!g_mapped || !g_mcInstance || !g_theWorldField || !g_listSizeMethod || !g_listGetMethod) return;
@@ -7135,6 +7302,7 @@ void RenderClosestPlayerInfo(int w, int h) {
     }
 
     ImDrawList* fg = ImGui::GetForegroundDrawList();
+    OverlayTheme theme = ResolveOverlayTheme(guiTheme);
     const float fontSz = ImGui::GetFontSize();
     const float smallSz = std::floor(fontSz * 0.82f);
     const float padX = 10.0f;
@@ -7146,25 +7314,30 @@ void RenderClosestPlayerInfo(int w, int h) {
     ImVec2 nameSz = ImGui::CalcTextSize(nameRow);
     ImVec2 statsSz = statsRow.empty() ? ImVec2(0, 0) : ImGui::CalcTextSize(statsRow.c_str());
 
+    lc::HudElementLayout cpLayout;
+    { LockGuard lkHud(g_configMutex); cpLayout = g_hudLayout.Resolve(lc::ELEM_CLOSESTPLAYER); }
+
     float contentW = (std::max)(boxW, (std::max)(nameSz.x + padX * 2.0f, statsSz.x + padX * 2.0f));
+    contentW *= cpLayout.scale;
     float contentH = padY + fontSz + gapRow + hpBarH + gapRow;
     if (!statsRow.empty()) contentH += smallSz + gapRow;
     contentH += padY;
+    contentH *= cpLayout.scale;
 
-    float cx = (float)w * 0.5f;
-    float by = (float)h - 120.0f;
-    float rx = std::floor(cx - contentW * 0.5f);
-    float ry = std::floor(by - contentH);
+    ImVec2 cpTL = lc::HudElementPixelPos(cpLayout, contentW, contentH, w, h);
+    float rx = cpTL.x;
+    float ry = cpTL.y;
+    float cx = rx + contentW * 0.5f;
 
     ImVec2 pMin(rx, ry);
     ImVec2 pMax(rx + contentW, ry + contentH);
     fg->AddRectFilled(pMin, pMax, IM_COL32(10, 10, 18, 210), 6.0f);
-    fg->AddRect(pMin, pMax, IM_COL32(80, 120, 255, 120), 6.0f, 0, 1.0f);
+    fg->AddRect(pMin, pMax, WithAlpha(theme.accentPrimary, 120), 6.0f, 0, 1.0f);
 
     float curY = ry + padY;
     float ntx = std::floor(cx - nameSz.x * 0.5f);
     fg->AddText(ImVec2(ntx + 1, curY + 1), IM_COL32(0, 0, 0, 160), nameRow);
-    fg->AddText(ImVec2(ntx, curY), IM_COL32(255, 255, 255, 240), nameRow);
+    fg->AddText(ImVec2(ntx, curY), ToImU32(theme.moduleText), nameRow);
     curY += fontSz + gapRow;
 
     float hpPct = (std::max)(0.0f, (std::min)(health / 20.0f, 1.0f));
@@ -7429,6 +7602,23 @@ void RenderChestESP(int w, int h) {
 // ===================== INPUT HOOK =====================
 // WndProc stays installed for reach's left-click edge detection.
 LRESULT CALLBACK HookedWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    // HUD editor: only intercept mouse when editor active AND a GUI/chat is open
+    // (chat open = OS cursor is available, so dragging works naturally).
+    if (g_hudEditor.active) {
+        bool chatOpen = false;
+        { LockGuard lk(g_stateMutex); chatOpen = g_gameState.guiOpen; }
+        if (chatOpen) {
+            bool isMouseMsg = (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP || msg == WM_MOUSEMOVE);
+            if (isMouseMsg) {
+                ImGui_ImplWin32_WndProcHandler(hwnd, msg, wParam, lParam);
+                // Consume clicks while a drag is active so the game GUI doesn't react
+                if (!g_hudEditor.grabbedId.empty() || msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP) {
+                    return 0;
+                }
+            }
+        }
+    }
+
     bool leftNowDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
     bool rawInputClickEdge = (msg == WM_INPUT) && leftNowDown && !g_reachRawInputPrevDown;
     if (msg == WM_INPUT) {
@@ -7681,6 +7871,7 @@ BOOL WINAPI HookedSwapBuffers(HDC hdc) {
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
 
+    UpdateHudEditor(w, h);
     RenderHUD(w, h);
     if (!ShouldHideWorldRenderModules(state)) {
         TryLockGuard jniTry(g_renderJniMutex);
@@ -7974,6 +8165,15 @@ void ParseConfig(const std::string& line) {
         g_config.pixelPartyScanRadius = ppRadius;
         g_config.pixelPartyAutoLook = reader.GetBool("pixelPartyAutoLook");
         g_config.pixelPartyAutoWalk = reader.GetBool("pixelPartyAutoWalk");
+
+        g_config.hudEditor = reader.GetBool("hudEditor");
+        if (!g_config.hudEditor) {
+            g_hudEditor.grabbedId.clear();
+            g_hudEditor.mode = lc::HudEditorState::Mode::None;
+        }
+        g_hudEditor.active = g_config.hudEditor;
+        // Parse hudLayout (under same g_configMutex lock since we're already in it)
+        g_hudLayout = lc::ParseHudLayout(line);
     }
 }
 
@@ -8120,6 +8320,14 @@ void ServerLoop() {
                 }
             }
             jsonToSend += entitiesJson;
+            {
+                LockGuard lk(g_configMutex);
+                if (g_hudEditor.layoutDirty) {
+                    jsonToSend += ",\"hudLayout\":";
+                    jsonToSend += lc::SerializeHudLayout(g_hudLayout);
+                    g_hudEditor.layoutDirty = false;
+                }
+            }
             jsonToSend += "}\n";
 
             // Send if we have data
