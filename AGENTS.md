@@ -136,6 +136,21 @@ When adding a setting, update ALL of:
 - The csproj auto-copies bridge DLLs from `Aoko\` root. Build scripts also copy into `bin\` folders. After a native rebuild, ensure the active run configuration has the latest DLL.
 - `bridge_261.cpp` fallback-array parsing: Yarn names are tried first, then Mojmap. Adding a new class lookup MUST follow the same pattern or dual-version support breaks.
 
+## Git
+
+### Branch action policy
+
+- `dev` is the working branch. Agents may run normal git actions on `dev` **without asking**: stage, commit, create/switch local branches, and merge feature branches into `dev`. If a remote tracking branch exists, pushing `dev` is allowed too.
+- `main` is protected. Do **NOT** commit, merge, rebase, push, or force-push to `main` unless the user explicitly asks or grants permission. Default to landing work on `dev` and let the user promote it to `main`.
+- Always confirm the current branch (`git rev-parse --abbrev-ref HEAD`) before committing. If you are on `main`, switch to `dev` (or ask the user) before making changes.
+- Destructive git operations (`reset --hard`, `clean -f`, `branch -D`, `push --force`) still require explicit user permission on **any** branch, including `dev`.
+- Only create commits when the work is complete and verified; keep unrelated concerns (e.g. line-ending normalization vs. source fixes) in separate commits.
+
+### Line endings
+
+- `.gitattributes` enforces LF in the repository with CRLF checkout on Windows (`* text=auto eol=crlf`). Let Git normalize; do not hand-convert endings.
+- If a diff shows a whole file changed but the content is identical (pure CRLF/LF churn), stop and run `git add --renormalize .` instead of committing the churn.
+
 ## Agent Workflow
 
 - Before finishing, run the relevant build command(s).
