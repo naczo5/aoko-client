@@ -1,0 +1,19 @@
+# Enforce consistent line endings to prevent CRLF/LF diff churn.
+# This is a Windows-only project: blobs are stored with LF in the repository
+# and checked out as CRLF in the working tree, regardless of each contributor's
+# core.autocrlf setting.
+* text=auto eol=crlf
+
+# Binary assets: never apply EOL conversion or text diffing.
+*.dll   binary
+*.exe   binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.pdf   binary
+*.ttf   binary
+*.otf   binary
+*.woff  binary
+*.woff2 binary
