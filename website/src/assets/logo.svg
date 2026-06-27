@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 40 40" role="img" aria-label="aoko">
+  <rect width="40" height="40" rx="9" fill="#0A0B0F"/>
+  <text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle"
+        font-family="'JetBrains Mono', ui-monospace, monospace" font-size="15" font-weight="700" fill="#E6E8EE">a<tspan fill="#6E8BFF">.</tspan></text>
+</svg>

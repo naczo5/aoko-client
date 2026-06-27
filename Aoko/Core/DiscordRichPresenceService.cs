@@ -12,7 +12,7 @@ namespace Aoko.Core;
 
 public sealed class DiscordRichPresenceService
 {
-    private const string RepoUrl = "https://github.com/naczo5/LegoClicker";
+    private const string RepoUrl = "https://github.com/naczo5/aoko-client";
     public const string DefaultApplicationId = "1488996793374212272";
 
     private static readonly string[] PipeNames =

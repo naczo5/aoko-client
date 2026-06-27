@@ -1,0 +1,24 @@
+# build output
+dist/
+.astro/
+
+# dependencies
+node_modules/
+
+# logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# environment
+.env
+.env.production
+
+# macOS
+.DS_Store
+
+# The repository root .gitignore ignores all *.md files; the docs content
+# under this project must be tracked, so re-include it here.
+!src/content/docs/**/*.md
+

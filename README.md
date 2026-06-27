@@ -3,7 +3,13 @@
 aoko client is a Windows utility client for Lunar Client.
 
 # Showcase
-[![Watch the showcase video](docs/screenshots/thumbnail.png)](https://www.youtube.com/watch?v=eR7QKAWw8D4)
+[![Watch the showcase video](website/public/screenshots/thumbnail.png)](https://www.youtube.com/watch?v=eR7QKAWw8D4)
+
+## Documentation
+
+- Full docs (landing page + per-module guides): https://naczo5.github.io/aoko-client/
+- Module reference index: https://naczo5.github.io/aoko-client/getting-started/
+- Docs source lives in [`website/`](website/) (Astro + Starlight); see [Website](#website) below.
 
 ## Current status
 
@@ -29,9 +35,9 @@ aoko client is a Windows utility client for Lunar Client.
 
 ## Screenshots
 
-![GUI Showcase GIF](screenshots/gui.gif)
+![GUI Showcase GIF](website/public/screenshots/gui.gif)
 
-![Gameplay HUD](screenshots/gameplay.jpg)
+![Gameplay HUD](website/public/screenshots/gameplay.jpg)
 
 ## Requirements
 
@@ -92,9 +98,37 @@ aoko/
 |  |- build.bat                # 1.8.9 bridge build (legacy)
 |  |- build_261.bat            # 26.1 bridge build
 |  `- src/main/cpp/            # Native bridge sources
-|- docs/                       # Website
+|- website/                    # Docs site (Astro + Starlight) + landing page in public/
 `- README.md
 ```
+
+## Website
+
+The documentation site and marketing landing page live in [`website/`](website/) as an
+[Astro](https://astro.build/) + [Starlight](https://starlight.astro.build/) project:
+
+- `website/public/` — the hand-rolled landing page (`index.html`, `style.css`, `main.js`,
+  favicons, `screenshots/`), served at the site root.
+- `website/src/content/docs/` — per-module documentation in Markdown (the sidebar/categories
+  mirror the in-GUI module layout).
+
+### Local development
+
+```text
+cd website
+npm install
+npm run dev      # local preview at http://localhost:4321/aoko-client/
+npm run build    # static output in website/dist/
+```
+
+### Deployment
+
+Pushing changes under `website/**` to `main` or `dev` triggers
+[`.github/workflows/docs.yml`](.github/workflows/docs.yml), which builds the site with the
+official Astro action and publishes it to GitHub Pages.
+
+> One-time setup: in the repository **Settings → Pages**, set the **Source** to
+> **GitHub Actions** (previously this repo served the static `docs/` folder from a branch).
 
 ## Architecture
 
