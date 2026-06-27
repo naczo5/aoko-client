@@ -1,5 +1,13 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 40 40" role="img" aria-label="aoko">
-  <rect width="40" height="40" rx="9" fill="#0A0B0F"/>
-  <text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle"
-        font-family="'JetBrains Mono', ui-monospace, monospace" font-size="15" font-weight="700" fill="#E6E8EE">a<tspan fill="#6E8BFF">.</tspan></text>
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-label="aoko">
+  <defs>
+    <radialGradient id="aokoGlow" cx="50%" cy="36%" r="78%">
+      <stop offset="0%" stop-color="#2B3A86"/>
+      <stop offset="52%" stop-color="#0F1530"/>
+      <stop offset="100%" stop-color="#0A0B0F"/>
+    </radialGradient>
+  </defs>
+  <rect width="256" height="256" rx="56" fill="url(#aokoGlow)"/>
+  <circle cx="100" cy="158" r="44" fill="none" stroke="#EEF0F6" stroke-width="22"/>
+  <rect x="144" y="104" width="22" height="98" rx="11" fill="#EEF0F6"/>
+  <circle cx="190" cy="190" r="13" fill="#9DB0FF"/>
 </svg>
