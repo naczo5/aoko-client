@@ -385,7 +385,7 @@ public sealed class DiscordRichPresenceService
         string trimmed = version.Trim();
         if (trimmed.StartsWith("1.21", StringComparison.OrdinalIgnoreCase))
             return "1.21";
-        if (trimmed.StartsWith("26.1", StringComparison.OrdinalIgnoreCase))
+        if (trimmed.StartsWith("26.", StringComparison.OrdinalIgnoreCase))
             return "26.1";
         if (trimmed.StartsWith("1.8", StringComparison.OrdinalIgnoreCase))
             return "1.8.9";

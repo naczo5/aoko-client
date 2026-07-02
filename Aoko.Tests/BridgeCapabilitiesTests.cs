@@ -6,6 +6,15 @@ namespace Aoko.Tests;
 public class BridgeCapabilitiesTests
 {
     [Fact]
+    public void ModernFallback_ExposesModernFeaturesFor262()
+    {
+        BridgeCapabilities caps = BridgeCapabilities.ForVersionFallback("26.2");
+
+        Assert.True(caps.SupportsModule("triggerbot"));
+        Assert.True(caps.SupportsModule("nametags"));
+    }
+
+    [Fact]
     public void ModernFallback_ExposesModernFeatures()
     {
         BridgeCapabilities caps = BridgeCapabilities.ForVersionFallback("26.1");

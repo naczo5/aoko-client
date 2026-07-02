@@ -417,6 +417,15 @@ static jmethodID g_removePotionEffectMethod = nullptr;
 static bool g_antiDebuffMethodResolved = false;
 static bool g_loggedAntiDebuffResolveFail = false;
 static DWORD g_lastAntiDebuffTickMs = 0;          // Throttle to ~20 tps (matches bridge_261)
+// AntiDebuff approach A: BLINDNESS is never removed (keeps sprint/crit gating in sync with
+// the server). Instead we detect it on the bg JNI thread and tell the glFogf render hook to
+// neutralize the blindness fog. g_blindFogSuppress is written by the bg thread and read by
+// the render thread, hence the interlocked LONG.
+static volatile LONG g_blindFogSuppress = 0;      // 1 while blindness fog should be hidden
+static jmethodID g_isPotionActiveMethod = nullptr; // EntityLivingBase.isPotionActive(Potion)
+static jobject   g_blindnessPotion = nullptr;      // global ref to static Potion.blindness
+static bool g_blindDetectResolved = false;
+static bool g_loggedBlindDetectFail = false;
 static bool g_reachClickPrevDown = false;
 static bool g_reachClickPrevSynthetic = false;
 static bool g_reachRawInputPrevDown = false;
@@ -3108,7 +3117,11 @@ static void UpdateVelocity(JNIEnv* env, const Config& cfg) {
 
 static void UpdateAntiDebuffLegacy(JNIEnv* env, const Config& cfg) {
     if (!env || !g_mcInstance || !g_thePlayerField) return;
-    if (!cfg.antiDebuffEnabled) return;
+    if (!cfg.antiDebuffEnabled) {
+        // Module off: make sure the fog hook stops overriding so blindness renders normally.
+        InterlockedExchange(&g_blindFogSuppress, 0);
+        return;
+    }
 
     DWORD nowMs = GetTickCount();
     if (nowMs - g_lastAntiDebuffTickMs < 50) return; // ~20 tps
@@ -3140,12 +3153,70 @@ static void UpdateAntiDebuffLegacy(JNIEnv* env, const Config& cfg) {
     }
 
     if (g_removePotionEffectMethod) {
-        // Blindness (15) and Nausea/Confusion (9). removePotionEffect is a no-op when absent.
-        static const int kIds[] = { 15, 9 };
+        // Approach A (anticheat-safe): keep BLINDNESS (id 15) in the effect map so its
+        // client-side sprint and critical-hit gating stays in sync with the server.
+        // Stripping it would let you sprint/crit while the server still thinks you are
+        // blind -> movement/combat desync that anticheats flag. The blindness *fog* is a
+        // pure visual and is neutralized separately via the glFogf hook (see
+        // HookedGlFogf / g_blindFogSuppress). Nausea/Confusion (id 9) gates nothing, so
+        // removing it is anticheat-safe and clears the screen-warp fully.
+        static const int kIds[] = { 9 };
         for (int id : kIds) {
             env->CallVoidMethod(selfObj, g_removePotionEffectMethod, id);
             if (env->ExceptionCheck()) { env->ExceptionClear(); }
         }
+    }
+
+    // --- Blindness fog suppression (approach A) ------------------------------------
+    // We deliberately leave BLINDNESS applied, so detect it here each tick and drive the
+    // glFogf render hook. Resolve isPotionActive(Potion) + the static Potion.blindness once.
+    if (!g_blindDetectResolved && !g_loggedBlindDetectFail) {
+        jclass cls = env->GetObjectClass(selfObj);
+        if (cls) {
+            g_isPotionActiveMethod = env->GetMethodID(cls, "isPotionActive", "(Lnet/minecraft/potion/Potion;)Z");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_isPotionActiveMethod = nullptr; }
+            if (!g_isPotionActiveMethod) {
+                g_isPotionActiveMethod = env->GetMethodID(cls, "func_70644_a", "(Lnet/minecraft/potion/Potion;)Z");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_isPotionActiveMethod = nullptr; }
+            }
+            env->DeleteLocalRef(cls);
+        }
+
+        jobject gcl = EnsureGameClassLoader(env);
+        jclass potionCls = gcl ? LoadClassWithLoader(env, gcl, "net.minecraft.potion.Potion") : nullptr;
+        if (potionCls) {
+            jfieldID blindField = env->GetStaticFieldID(potionCls, "blindness", "Lnet/minecraft/potion/Potion;");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); blindField = nullptr; }
+            if (!blindField) {
+                blindField = env->GetStaticFieldID(potionCls, "field_76440_q", "Lnet/minecraft/potion/Potion;");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); blindField = nullptr; }
+            }
+            if (blindField) {
+                jobject h = env->GetStaticObjectField(potionCls, blindField);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); h = nullptr; }
+                if (h) { g_blindnessPotion = env->NewGlobalRef(h); env->DeleteLocalRef(h); }
+            }
+            env->DeleteLocalRef(potionCls);
+        }
+
+        if (g_isPotionActiveMethod && g_blindnessPotion) {
+            g_blindDetectResolved = true;
+            Log("AntiDebuff: blindness-fog detection resolved (isPotionActive + Potion.blindness).");
+        } else if (!g_loggedBlindDetectFail) {
+            g_loggedBlindDetectFail = true;
+            Log(std::string("AntiDebuff: blindness-fog detection mappings unavailable - isPotionActive=")
+                + (g_isPotionActiveMethod ? "1" : "0")
+                + " blindness=" + (g_blindnessPotion ? "1" : "0")
+                + " (fog suppression idle).");
+        }
+    }
+
+    if (g_blindDetectResolved) {
+        jboolean blind = env->CallBooleanMethod(selfObj, g_isPotionActiveMethod, g_blindnessPotion);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); blind = JNI_FALSE; }
+        InterlockedExchange(&g_blindFogSuppress, blind ? 1 : 0);
+    } else {
+        InterlockedExchange(&g_blindFogSuppress, 0);
     }
 
     env->DeleteLocalRef(selfObj);
@@ -4064,11 +4135,17 @@ static void UpdatePixelPartyAssistLegacy(JNIEnv* env, const Config& cfg, const G
     // Anchor the scan to the platform floor instead of the live player Y. While the
     // player jumps (auto-walk pulses jump to gain speed) py rises a full block, which
     // previously pushed the colored floor out of the scanned band and made the target
-    // flicker off every jump. Re-lock the platform whenever the player is resting on a
-    // floor (feet ~ integer Y), and keep scanning that locked level while airborne.
+    // flicker off every jump. Re-lock the platform only when the player is genuinely
+    // resting on a floor (a solid block directly beneath the feet), and keep scanning
+    // that locked level while airborne.
+    //
+    // NOTE: the earlier heuristic re-locked whenever the feet fraction was near zero
+    // (pyFrac < 0.05). That also fired mid-jump every time py crossed an integer Y
+    // (e.g. passing through the apex), re-anchoring the band one level too high and
+    // dropping the real floor for a split second — the residual stutter being fixed here.
     int feetY = (int)std::floor(py);
-    double pyFrac = py - std::floor(py);
-    if (pyFrac < 0.05) {
+    bool grounded = IsSolidBlockAt(env, px, py - 0.1, pz);
+    if (grounded) {
         g_pixelPartyPlatformY = feetY - 1;
         g_pixelPartyPlatformYValid = true;
     }
@@ -8419,10 +8496,48 @@ bool PatchIAT(HMODULE hModule, const char* targetDll, const char* funcName, void
     return false;
 }
 
+// AntiDebuff approach A: neutralize the blindness fog at the OpenGL layer without removing
+// the BLINDNESS effect (so sprint/crit gating stays in sync with the server). 1.8.9 uses
+// fixed-function fog: when blind, EntityRenderer.setupFog sets GL_FOG_START ~0 and
+// GL_FOG_END to a few blocks, darkening the view. While the effect is active (flag set by
+// the bg JNI thread) we push the linear fog band far beyond render distance so it is not
+// visible. All other fog (and all calls while not blind) pass through untouched.
+typedef void (WINAPI* glFogfFn)(GLenum, GLfloat);
+static glFogfFn g_origGlFogf = nullptr;
+
+void WINAPI HookedGlFogf(GLenum pname, GLfloat param) {
+    if (g_blindFogSuppress && g_origGlFogf) {
+        if (pname == GL_FOG_START) { g_origGlFogf(GL_FOG_START, 900.0f);  return; }
+        if (pname == GL_FOG_END)   { g_origGlFogf(GL_FOG_END,   1000.0f); return; }
+    }
+    if (g_origGlFogf) g_origGlFogf(pname, param);
+}
+
 void InstallSwapBuffersHook() {
     MH_STATUS mhInit = MH_Initialize();
     if (mhInit == MH_OK || mhInit == MH_ERROR_ALREADY_INITIALIZED) {
         g_minhookInitialized = true;
+
+        // Hook opengl32!glFogf so AntiDebuff can hide blindness fog without removing the
+        // effect. Installed here (before the gdi32 hook returns on success) so it is set up
+        // whenever MinHook initializes.
+        if (!g_origGlFogf) {
+            HMODULE hGl = GetModuleHandleA("opengl32.dll");
+            if (hGl) {
+                void* pFogf = (void*)GetProcAddress(hGl, "glFogf");
+                if (pFogf) {
+                    MH_STATUS cs = MH_CreateHook(pFogf, (void*)HookedGlFogf, (void**)&g_origGlFogf);
+                    MH_STATUS es = (cs == MH_OK) ? MH_EnableHook(pFogf) : cs;
+                    if (cs == MH_OK && es == MH_OK) {
+                        Log("MinHook hooked opengl32!glFogf for AntiDebuff blindness-fog suppression.");
+                    } else {
+                        Log("WARNING: glFogf hook failed create=" + std::to_string((int)cs)
+                            + " enable=" + std::to_string((int)es));
+                    }
+                }
+            }
+        }
+
         HMODULE hGdiHook = GetModuleHandleA("gdi32.dll");
         if (hGdiHook) {
             void* pSwap = (void*)GetProcAddress(hGdiHook, "SwapBuffers");
@@ -8558,8 +8673,21 @@ void ParseConfig(const std::string& line) {
             std::string blocksRaw = reader.GetString("blockEspBlocks");
             std::vector<lc::BlockEspTargetDef> parsed = lc::ParseBlockEspTargets(blocksRaw);
             LockGuard tlk(g_blockEspTargetsMutex);
-            g_blockEspTargets.swap(parsed);
-            InterlockedIncrement(&g_blockEspTargetsVersion);
+            // The loader re-sends the full config ~5x/sec. Only bump the version (which
+            // invalidates the per-chunk scan cache) when the target set actually changes;
+            // otherwise the round-robin scan never accumulates before the next wipe and the
+            // module appears to do nothing.
+            bool changed = parsed.size() != g_blockEspTargets.size();
+            if (!changed) {
+                for (size_t i = 0; i < parsed.size(); i++) {
+                    if (parsed[i].id != g_blockEspTargets[i].id ||
+                        parsed[i].color != g_blockEspTargets[i].color) { changed = true; break; }
+                }
+            }
+            if (changed) {
+                g_blockEspTargets.swap(parsed);
+                InterlockedIncrement(&g_blockEspTargetsVersion);
+            }
         }
         g_config.reachEnabled = reader.GetBool("reachEnabled");
         g_config.velocityEnabled = reader.GetBool("velocityEnabled");

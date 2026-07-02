@@ -39,6 +39,7 @@
 #include "jni_core/local_frame.h"
 #include "jni_core/resolver.h"
 #include "jni_core/helper_bridge.h"
+#include "render_backend.h"
 
 // MinGW's <GL/gl.h> may not declare modern GL enums used with glGetIntegerv.
 #ifndef GL_CURRENT_PROGRAM
@@ -235,8 +236,21 @@ static void ParseConfig(const std::string& line) {
         std::string blocksRaw = reader.GetString("blockEspBlocks");
         std::vector<lc::BlockEspTargetDef> parsed = lc::ParseBlockEspTargets(blocksRaw);
         LockGuard tlk(g_blockEspTargetsMutex);
-        g_blockEspTargets.swap(parsed);
-        InterlockedIncrement(&g_blockEspTargetsVersion);
+        // The loader re-sends the full config ~5x/sec. Only bump the version (which
+        // invalidates the per-chunk scan cache) when the target set actually changes;
+        // otherwise the round-robin scan never accumulates before the next wipe and the
+        // module appears to do nothing.
+        bool changed = parsed.size() != g_blockEspTargets.size();
+        if (!changed) {
+            for (size_t i = 0; i < parsed.size(); i++) {
+                if (parsed[i].id != g_blockEspTargets[i].id ||
+                    parsed[i].color != g_blockEspTargets[i].color) { changed = true; break; }
+            }
+        }
+        if (changed) {
+            g_blockEspTargets.swap(parsed);
+            InterlockedIncrement(&g_blockEspTargetsVersion);
+        }
     }
     g_config.rightClick    = reader.GetBool("right");
     g_config.rightMinCPS   = reader.GetFloat("rightMinCPS");
@@ -487,10 +501,16 @@ static jmethodID g_setScreenMethod = nullptr; // Minecraft.setScreen(Screen)
 static jclass    g_chatScreenClass = nullptr;
 static jmethodID g_chatScreenCtor  = nullptr;
 static int       g_chatCtorKind    = 0; // 0=()V, 1=(String)V, 2=(String,Z)V
-static jfieldID  g_screenField     = nullptr; // Minecraft.currentScreen/screen
+static jfieldID  g_screenField     = nullptr; // Minecraft.currentScreen/screen (26.1 and earlier)
+static jfieldID  g_guiField        = nullptr; // Minecraft.gui (26.2+)
+static jclass    g_guiClass        = nullptr;
+static jmethodID g_guiGetScreenMethod = nullptr; // Gui.screen()
+static jmethodID g_guiSetScreenMethod = nullptr; // Gui.setScreen(Screen)
+static jmethodID g_guiOpenChatScreenMethod = nullptr; // Gui.openChatScreen(String)
 static bool      g_chatJniReady    = false;
 static bool      g_stateJniReady   = false;
 static std::string g_screenType;              // FQ name of Screen base class
+static std::string g_screenAccessPath;        // "legacy-field", "gui.screen()", or empty
 
 // Per-frame JNI state (read in SwapBuffers, consumed in TCP)
 static std::string g_jniScreenName;
@@ -625,6 +645,8 @@ struct Matrix4x4 {
 static jclass    g_renderSystemClass_121 = nullptr;
 static jmethodID g_getProjectionMatrix_121 = nullptr;
 static jmethodID g_getModelViewMatrix_121  = nullptr;
+static jfieldID  g_projectionMatrixField_121 = nullptr;
+static jfieldID  g_modelViewMatrixField_121 = nullptr;
 
 static jclass    g_matrix4fClass_121 = nullptr;
 static jfieldID  g_matrixM00=nullptr, g_matrixM01=nullptr, g_matrixM02=nullptr, g_matrixM03=nullptr;
@@ -1778,6 +1800,8 @@ static void ResetNametagSuppressionCaches121(JNIEnv* env, const char* reason);
 static void ResetAutoTotemCaches(JNIEnv* env);
 static void ResetModernJniRuntimeCaches121(JNIEnv* env, const char* reason);
 static bool TrackSuppressionWorldContext121(JNIEnv* env, jobject worldObj);
+static bool IsWorldTransitionActive();
+static void ScheduleWorldTransition(const char* reason, DWORD durationMs);
 static bool EnsureNametagSuppressionTeamMappings121(JNIEnv* env, jobject worldObj);
 static jobject GetScoreboard121(JNIEnv* env, jobject worldObj);
 static jobject EnsureNametagHideTeam121(JNIEnv* env, jobject scoreboardObj);
@@ -3023,11 +3047,17 @@ static void UpdatePixelPartyAssist(JNIEnv* env, const Config& cfg) {
     // Anchor the scan to the platform floor instead of the live player Y. While the
     // player jumps (auto-walk pulses jump to gain speed) py rises a full block, which
     // previously pushed the colored floor out of the scanned band and made the target
-    // flicker off every jump. Re-lock the platform whenever the player is resting on a
-    // floor (feet ~ integer Y), and keep scanning that locked level while airborne.
+    // flicker off every jump. Re-lock the platform only when the player is genuinely
+    // resting on a floor (a solid block directly beneath the feet), and keep scanning
+    // that locked level while airborne.
+    //
+    // NOTE: the earlier heuristic re-locked whenever the feet fraction was near zero
+    // (pyFrac < 0.05). That also fired mid-jump every time py crossed an integer Y
+    // (e.g. passing through the apex), re-anchoring the band one level too high and
+    // dropping the real floor for a split second — the residual stutter being fixed here.
     int feetY = (int)std::floor(py);
-    double pyFrac = py - std::floor(py);
-    if (pyFrac < 0.05) {
+    bool grounded = IsSolidBlockAt121(env, px, py - 0.1, pz);
+    if (grounded) {
         g_pixelPartyPlatformY_121 = feetY - 1;
         g_pixelPartyPlatformYValid_121 = true;
     }
@@ -3763,15 +3793,18 @@ static void EnsureAntiDebuffJni(JNIEnv* env) {
             "Lnet/minecraft/core/Holder;",  // Mojmap Holder
             nullptr
         };
-        struct EffDesc { jobject* slot; const char* yarn; const char* mojmap; };
+        struct EffDesc { jobject* slot; const char* yarn; const char* mojmap; const char* mojmapAlt; };
         EffDesc effects[] = {
-            { &g_effectBlindness_121, "field_5919", "BLINDNESS" },
-            { &g_effectNausea_121,    "field_5916", "CONFUSION" }, // Mojmap field name is CONFUSION (registry "nausea")
-            { &g_effectDarkness_121,  "field_38092", "DARKNESS" }, // 1.19+; resolves null on older worlds
+            { &g_effectBlindness_121, "field_5919", "BLINDNESS", nullptr },
+            // Registry id "nausea": current official Mojang mappings name the field
+            // NAUSEA, while older MCP/Searge-derived mappings used CONFUSION. The
+            // unobfuscated 26.1 build ships NAUSEA, so try it first then fall back.
+            { &g_effectNausea_121,    "field_5916", "NAUSEA", "CONFUSION" },
+            { &g_effectDarkness_121,  "field_38092", "DARKNESS", nullptr }, // 1.19+; resolves null on older worlds
         };
         for (auto& e : effects) {
             if (*e.slot) continue;
-            const char* fNames[] = { e.yarn, e.mojmap, nullptr };
+            const char* fNames[] = { e.yarn, e.mojmap, e.mojmapAlt, nullptr };
             jfieldID fid = nullptr;
             for (int ni = 0; fNames[ni] && !fid; ni++) {
                 for (int si = 0; holderSigs[si] && !fid; si++) {
@@ -3822,9 +3855,15 @@ static void UpdateAntiDebuff(JNIEnv* env, const Config& cfg) {
     if (env->ExceptionCheck()) { env->ExceptionClear(); selfObj = nullptr; }
     if (!selfObj) return;
 
-    // Re-remove targeted effects each tick. removeEffect is a no-op if absent, so
-    // this only clears the client-side visual/state for the fixed debuff set.
-    jobject targets[] = { g_effectBlindness_121, g_effectNausea_121, g_effectDarkness_121 };
+    // Approach A (anticheat-safe): do NOT strip BLINDNESS from the client effect map.
+    // Blindness gates sprinting and critical hits client-side (the game checks
+    // hasEffect(BLINDNESS) for both). Removing it would re-enable sprint/crits locally
+    // while the server still has the effect applied, producing a movement/combat desync
+    // that anticheats flag. Blindness must stay in the map so its gating matches the
+    // server; its fog is only a visual and is suppressed at the render layer instead.
+    // Nausea and Darkness gate no movement/combat, so removing them is anticheat-safe and
+    // fully clears their visuals (screen warp / darkening).
+    jobject targets[] = { g_effectNausea_121, g_effectDarkness_121 };
     for (jobject holder : targets) {
         if (!holder) continue;
         env->CallBooleanMethod(selfObj, g_removeEffect_121, holder);
@@ -5931,6 +5970,40 @@ static void UpdateBlockEspList(JNIEnv* env) {
     { LockGuard lk(g_blockEspListMutex); g_blockEspList.swap(merged); }
 }
 
+static const DWORD kScreenTransitionGraceMs = 2500;
+static const DWORD kWorldContextTransitionGraceMs = 3000;
+// Same-connection teleports (e.g. Hypixel waiting room -> arena) keep the same
+// ClientLevel and show no loading screen, so the world-instance / loading-screen
+// guards never fire. We detect the position discontinuity instead and pause scans
+// long enough for the destination chunks + block entities to finish streaming in.
+static const DWORD kTeleportTransitionGraceMs = 4000;
+// Blocks moved between consecutive scan polls that imply a teleport rather than
+// normal movement. Sprint/elytra is well under ~2 blocks per 50ms poll, so 24 is safe.
+static const double kTeleportJumpBlocks = 24.0;
+
+static bool IsWorldTransitionActive() {
+    return GetTickCount() < g_worldTransitionEndMs;
+}
+
+static void ScheduleWorldTransition(const char* reason, DWORD durationMs) {
+    DWORD now = GetTickCount();
+    DWORD end = now + durationMs;
+    if (end > g_worldTransitionEndMs) g_worldTransitionEndMs = end;
+
+    { LockGuard lk(g_playerListMutex); g_playerList.clear(); }
+    { LockGuard lk(g_chestListMutex); g_chestList.clear(); }
+    { LockGuard lk(g_blockEspListMutex); g_blockEspList.clear(); }
+    g_blockEspChunkCache.clear();
+    { LockGuard lk(g_bgCamMutex); g_bgCamState = BgCamState(); }
+
+    static DWORD s_lastLogMs = 0;
+    if (reason && *reason && (now - s_lastLogMs >= 1000)) {
+        s_lastLogMs = now;
+        Log(std::string("World transition: pausing overlay/scans for ") + std::to_string(durationMs)
+            + "ms (" + reason + ")");
+    }
+}
+
 static std::string CallTextToString(JNIEnv* env, jobject textObj) {
     if (!textObj) return "";
 
@@ -6086,7 +6159,7 @@ static void EnsureClosestPlayerCaches(JNIEnv* env) {
         }
     }
     if (!g_playerField_121) {
-        const char* playerNames[] = { "player", "field_1724", "f_91074_", nullptr };
+        const char* playerNames[] = { "player", "localPlayer", "field_1724", "f_91074_", nullptr };
         const char* playerSigs[] = {
             "Lnet/minecraft/class_746;",
             "Lnet/minecraft/client/player/LocalPlayer;",
@@ -6103,6 +6176,51 @@ static void EnsureClosestPlayerCaches(JNIEnv* env) {
     }
 
     env->DeleteLocalRef(mcCls);
+}
+
+static void TryResolveWorldFieldByReflection(JNIEnv* env, jclass mcCls) {
+    if (!env || !mcCls || g_worldField_121) return;
+
+    jclass cCls = env->FindClass("java/lang/Class");
+    jclass cFld = env->FindClass("java/lang/reflect/Field");
+    jmethodID mGF = cCls ? env->GetMethodID(cCls, "getDeclaredFields", "()[Ljava/lang/reflect/Field;") : nullptr;
+    jmethodID mFT = cFld ? env->GetMethodID(cFld, "getType", "()Ljava/lang/Class;") : nullptr;
+    jmethodID mFN = cFld ? env->GetMethodID(cFld, "getName", "()Ljava/lang/String;") : nullptr;
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return; }
+    if (!mGF || !mFT || !mFN) return;
+
+    jobjectArray fields = (jobjectArray)env->CallObjectMethod(mcCls, mGF);
+    if (!fields || env->ExceptionCheck()) { env->ExceptionClear(); return; }
+
+    jsize fc = env->GetArrayLength(fields);
+    for (int i = 0; i < fc && !g_worldField_121; i++) {
+        jobject f = env->GetObjectArrayElement(fields, i);
+        if (!f) continue;
+        jclass ft = (jclass)env->CallObjectMethod(f, mFT);
+        std::string ftn = ft ? GetClassNameFromClass(env, ft) : "";
+        if (ft) env->DeleteLocalRef(ft);
+        if (ftn.find("ClientLevel") == std::string::npos &&
+            ftn.find("ClientWorld") == std::string::npos &&
+            ftn.find("class_638") == std::string::npos) {
+            env->DeleteLocalRef(f);
+            continue;
+        }
+
+        jstring jfn = (jstring)env->CallObjectMethod(f, mFN);
+        const char* cfn = env->GetStringUTFChars(jfn, nullptr);
+        std::string fn = cfn ? cfn : "";
+        if (cfn) env->ReleaseStringUTFChars(jfn, cfn);
+        env->DeleteLocalRef(jfn);
+        env->DeleteLocalRef(f);
+
+        if (fn.empty()) continue;
+        std::string sig = "L" + ftn + ";";
+        std::replace(sig.begin(), sig.end(), '.', '/');
+        g_worldField_121 = env->GetFieldID(mcCls, fn.c_str(), sig.c_str());
+        if (env->ExceptionCheck()) { env->ExceptionClear(); g_worldField_121 = nullptr; }
+        else Log("Found world field via reflection: " + fn + " type=" + ftn);
+    }
+    env->DeleteLocalRef(fields);
 }
 
 static void DiscoverWorldPlayersListField(JNIEnv* env, jobject worldObj) {
@@ -6553,6 +6671,10 @@ static bool TrackSuppressionWorldContext121(JNIEnv* env, jobject worldObj) {
     }
     if (changed) {
         ResetNametagSuppressionCaches121(env, "world-context-changed");
+        ScheduleWorldTransition("world-context-changed", kWorldContextTransitionGraceMs);
+        if (g_lastNametagSuppressionWorld_121) {
+            env->DeleteGlobalRef(g_lastNametagSuppressionWorld_121);
+        }
         g_lastNametagSuppressionWorld_121 = env->NewGlobalRef(worldObj);
     }
     return changed;
@@ -7224,6 +7346,7 @@ static void CleanupJniGlobals(JNIEnv* env) {
     DeleteGlobalRefSafe(env, g_gameClassLoader);
     DeleteGlobalRefSafe(env, g_mcInstance);
     DeleteGlobalRefSafe(env, g_chatScreenClass);
+    DeleteGlobalRefSafe(env, g_guiClass);
 
     DeleteGlobalRefSafe(env, g_renderSystemClass_121);
     DeleteGlobalRefSafe(env, g_matrix4fClass_121);
@@ -7268,10 +7391,15 @@ static void ResetModernJniRuntimeCaches121(JNIEnv* env, const char* reason) {
     g_setScreenMethod = nullptr;
     g_chatScreenCtor = nullptr;
     g_chatCtorKind = 0;
+    g_guiField = nullptr;
+    g_guiGetScreenMethod = nullptr;
+    g_guiSetScreenMethod = nullptr;
+    g_guiOpenChatScreenMethod = nullptr;
     g_screenField = nullptr;
     g_chatJniReady = false;
     g_stateJniReady = false;
     g_screenType.clear();
+    g_screenAccessPath.clear();
     g_lastLoggedScreen.clear();
 
     g_jniScreenName.clear();
@@ -7340,6 +7468,8 @@ static void ResetModernJniRuntimeCaches121(JNIEnv* env, const char* reason) {
 
     g_getProjectionMatrix_121 = nullptr;
     g_getModelViewMatrix_121 = nullptr;
+    g_projectionMatrixField_121 = nullptr;
+    g_modelViewMatrixField_121 = nullptr;
     g_matrixGetFloatArray_121 = nullptr;
     g_matrixM00 = g_matrixM01 = g_matrixM02 = g_matrixM03 = nullptr;
     g_matrixM10 = g_matrixM11 = g_matrixM12 = g_matrixM13 = nullptr;
@@ -7406,7 +7536,7 @@ static void ResetModernJniRuntimeCaches121(JNIEnv* env, const char* reason) {
     g_lastPlayerListUpdateMs = 0;
     g_lastClosestUpdateMs = 0;
     g_lastChestScanMs = 0;
-    g_worldTransitionEndMs = GetTickCount() + 1000;
+    ScheduleWorldTransition("reload-mappings", 1000);
 
     {
         LockGuard lk(g_playerListMutex);
@@ -7451,6 +7581,7 @@ static void CleanupImGuiAndHooks() {
 
     MH_DisableHook(MH_ALL_HOOKS);
     o_wglSwapBuffers = nullptr;
+    RenderBackend_Shutdown();
     MH_Uninitialize();
 }
 
@@ -7712,6 +7843,123 @@ static jclass LoadClassWithLoader(JNIEnv* env, jobject cl, const char* name) {
     return cls;
 }
 
+static bool HasScreenAccess() {
+    return g_screenField != nullptr || g_guiGetScreenMethod != nullptr;
+}
+
+static jobject GetCurrentScreenObject(JNIEnv* env, jobject mcInst) {
+    if (!env || !mcInst) return nullptr;
+    if (g_screenField) {
+        jobject scr = env->GetObjectField(mcInst, g_screenField);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
+        return scr;
+    }
+    if (g_guiField && g_guiGetScreenMethod) {
+        jobject gui = env->GetObjectField(mcInst, g_guiField);
+        if (!gui || env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
+        jobject scr = env->CallObjectMethod(gui, g_guiGetScreenMethod);
+        env->DeleteLocalRef(gui);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
+        return scr;
+    }
+    return nullptr;
+}
+
+static std::string ScreenTypeFromReturnSig(const char* sig) {
+    if (!sig || sig[0] != '(') return {};
+    const char* ret = strchr(sig, ')');
+    if (!ret || ret[1] != 'L') return {};
+    std::string tn = ret + 2;
+    if (!tn.empty() && tn.back() == ';') tn.pop_back();
+    std::replace(tn.begin(), tn.end(), '/', '.');
+    return tn;
+}
+
+static bool ResolveGuiScreenPath(JNIEnv* env, jobject mcInst, jclass mcClass, jobject gcl, std::string& screenType) {
+    if (!env || !mcInst || !mcClass || g_screenField || g_guiGetScreenMethod) return false;
+
+    const char* guiFieldNames[] = { "gui", nullptr };
+    const char* guiFieldSigs[] = {
+        "Lnet/minecraft/client/gui/Gui;",
+        nullptr
+    };
+    for (int ni = 0; guiFieldNames[ni] && !g_guiField; ni++) {
+        for (int si = 0; guiFieldSigs[si] && !g_guiField; si++) {
+            g_guiField = env->GetFieldID(mcClass, guiFieldNames[ni], guiFieldSigs[si]);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_guiField = nullptr; }
+        }
+    }
+    if (!g_guiField) return false;
+
+    jobject guiObj = env->GetObjectField(mcInst, g_guiField);
+    if (!guiObj || env->ExceptionCheck()) { env->ExceptionClear(); return false; }
+
+    jclass guiCls = env->GetObjectClass(guiObj);
+    if (!guiCls || env->ExceptionCheck()) {
+        env->ExceptionClear();
+        env->DeleteLocalRef(guiObj);
+        return false;
+    }
+
+    const char* screenMethodNames[] = { "screen", "getScreen", nullptr };
+    const char* screenReturnSigs[] = {
+        "()Lnet/minecraft/client/gui/screens/Screen;",
+        "()Lnet/minecraft/client/gui/screen/Screen;",
+        "()Lnet/minecraft/class_437;",
+        nullptr
+    };
+    for (int ni = 0; screenMethodNames[ni] && !g_guiGetScreenMethod; ni++) {
+        for (int si = 0; screenReturnSigs[si] && !g_guiGetScreenMethod; si++) {
+            g_guiGetScreenMethod = env->GetMethodID(guiCls, screenMethodNames[ni], screenReturnSigs[si]);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_guiGetScreenMethod = nullptr; }
+            if (g_guiGetScreenMethod) {
+                std::string tn = ScreenTypeFromReturnSig(screenReturnSigs[si]);
+                if (!tn.empty()) {
+                    screenType = tn;
+                    g_screenType = tn;
+                }
+                Log(std::string("Screen path: gui.screen() via ") + screenMethodNames[ni] + " type=" + tn);
+                g_screenAccessPath = "gui.screen()";
+            }
+        }
+    }
+
+    if (!g_guiGetScreenMethod) {
+        env->DeleteLocalRef(guiCls);
+        env->DeleteLocalRef(guiObj);
+        return false;
+    }
+
+    if (g_guiClass) {
+        env->DeleteGlobalRef(g_guiClass);
+        g_guiClass = nullptr;
+    }
+    g_guiClass = (jclass)env->NewGlobalRef(guiCls);
+
+    if (!screenType.empty()) {
+        std::string screenSig = "L" + screenType + ";";
+        std::replace(screenSig.begin(), screenSig.end(), '.', '/');
+        std::string fullSig = "(" + screenSig + ")V";
+        g_guiSetScreenMethod = env->GetMethodID(guiCls, "setScreen", fullSig.c_str());
+        if (env->ExceptionCheck()) { env->ExceptionClear(); g_guiSetScreenMethod = nullptr; }
+        if (!g_guiSetScreenMethod) {
+            g_guiSetScreenMethod = env->GetMethodID(guiCls, "method_1507", fullSig.c_str());
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_guiSetScreenMethod = nullptr; }
+        }
+        if (g_guiSetScreenMethod) {
+            Log(std::string("Gui.setScreen resolved: sig=") + fullSig);
+        }
+    }
+
+    g_guiOpenChatScreenMethod = env->GetMethodID(guiCls, "openChatScreen", "(Ljava/lang/String;)V");
+    if (env->ExceptionCheck()) { env->ExceptionClear(); g_guiOpenChatScreenMethod = nullptr; }
+    if (g_guiOpenChatScreenMethod) Log("Gui.openChatScreen resolved");
+
+    env->DeleteLocalRef(guiCls);
+    env->DeleteLocalRef(guiObj);
+    return true;
+}
+
 // ===================== JNI DISCOVERY (ported from 1.8.9, adapted for 1.21) =====================
 // Uses JVMTI to scan loaded classes, finds Minecraft by singleton pattern,
 // discovers screen field by method hierarchy walking, finds ChatScreen + setScreen.
@@ -7857,6 +8105,23 @@ static bool DiscoverJniMappings(JNIEnv* env) {
     }
 
     if (g_screenField && !screenType.empty()) {
+        g_screenAccessPath = "legacy-field";
+        TRACE261_VALUE("screenType", screenType);
+    }
+
+    // 26.2+: screen moved to Minecraft.gui.screen()
+    if (!g_screenField) {
+        if (ResolveGuiScreenPath(env, mcInst, mcClass, gcl, screenType)) {
+            TRACE261_VALUE("screenType", screenType);
+        }
+    }
+
+    if (screenType.empty() && HasScreenAccess()) {
+        screenType = "net.minecraft.client.gui.screens.Screen";
+        g_screenType = screenType;
+    }
+
+    if (g_screenField && !screenType.empty()) {
         TRACE261_VALUE("screenType", screenType);
     }
 
@@ -7878,6 +8143,13 @@ static bool DiscoverJniMappings(JNIEnv* env) {
         }
         if (g_setScreenMethod) {
             Log(std::string("setScreen method (preferred): sig=") + fullSig);
+        }
+
+        // 26.2+: setScreen lives on Gui when not on Minecraft
+        if (!g_setScreenMethod && g_guiClass && !g_guiSetScreenMethod) {
+            g_guiSetScreenMethod = env->GetMethodID(g_guiClass, "setScreen", fullSig.c_str());
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_guiSetScreenMethod = nullptr; }
+            if (g_guiSetScreenMethod) Log(std::string("Gui.setScreen (late): sig=") + fullSig);
         }
 
     }
@@ -8022,8 +8294,15 @@ static bool DiscoverJniMappings(JNIEnv* env) {
         g_mcInstance = nullptr;
     }
     g_mcInstance = env->NewGlobalRef(mcInst);
-    g_stateJniReady = (g_screenField != nullptr);
-    g_chatJniReady  = (g_setScreenMethod != nullptr && g_chatScreenClass != nullptr && g_chatScreenCtor != nullptr);
+    g_stateJniReady = (g_mcInstance != nullptr && HasScreenAccess());
+    bool hasSetScreen = (g_setScreenMethod != nullptr || g_guiSetScreenMethod != nullptr);
+    bool hasChatPath = ((g_chatScreenClass != nullptr && g_chatScreenCtor != nullptr) || g_guiOpenChatScreenMethod != nullptr);
+    g_chatJniReady  = hasSetScreen && hasChatPath;
+    if (!g_screenAccessPath.empty()) {
+        Log("Screen access path: " + g_screenAccessPath);
+    } else if (!HasScreenAccess()) {
+        Log("WARNING: Screen access unresolved (no legacy field or gui.screen())");
+    }
     TRACE261_BRANCH("stateJniReady", g_stateJniReady);
     TRACE261_BRANCH("chatJniReady", g_chatJniReady);
 
@@ -8036,37 +8315,57 @@ static bool DiscoverJniMappings(JNIEnv* env) {
             g_renderSystemClass_121 = (jclass)env->NewGlobalRef(rsCls);
             
             Log("Trying getProjectionMatrix() -> Matrix4f");
-            g_getProjectionMatrix_121 = env->GetStaticMethodID(rsCls, "getProjectionMatrix", "()Lorg/joml/Matrix4f;");
-            if (g_getProjectionMatrix_121) {
-                Log("Found getProjectionMatrix with JOML Matrix4f signature");
-            } else {
-                env->ExceptionClear();
+            const char* projMethodNames[] = {
+                "getProjectionMatrix", "getProjectionMatrixCopy", nullptr
+            };
+            for (int i = 0; projMethodNames[i] && !g_getProjectionMatrix_121; i++) {
+                g_getProjectionMatrix_121 = env->GetStaticMethodID(rsCls, projMethodNames[i], "()Lorg/joml/Matrix4f;");
+                if (g_getProjectionMatrix_121) {
+                    Log(std::string("Found ") + projMethodNames[i] + " with JOML Matrix4f signature");
+                } else {
+                    env->ExceptionClear();
+                }
+            }
+            if (!g_getProjectionMatrix_121) {
                 Log("Trying getProjectionMatrix() -> Minecraft Matrix4f");
                 g_getProjectionMatrix_121 = env->GetStaticMethodID(rsCls, "getProjectionMatrix", "()Lnet/minecraft/class_10366;");
                 if (g_getProjectionMatrix_121) {
                     Log("Found getProjectionMatrix with Minecraft Matrix4f signature");
                 } else {
                     env->ExceptionClear();
-                    // Try Mojmap field name variant
                     Log("Trying projectionMatrix static field (Mojmap)");
-                    jfieldID projField = env->GetStaticFieldID(rsCls, "projectionMatrix", "Lorg/joml/Matrix4f;");
-                    if (projField && !env->ExceptionCheck()) {
-                        Log("Found projectionMatrix as static field (will need accessor wrapper)");
-                        // Store the field ID for later use (we'll need to adapt the code that calls this)
+                    g_projectionMatrixField_121 = env->GetStaticFieldID(rsCls, "projectionMatrix", "Lorg/joml/Matrix4f;");
+                    if (g_projectionMatrixField_121 && !env->ExceptionCheck()) {
+                        Log("Found projectionMatrix as static field");
                     } else {
                         env->ExceptionClear();
+                        g_projectionMatrixField_121 = nullptr;
                         Log("WARNING: getProjectionMatrix not found as method or field");
                     }
                 }
             }
             
             Log("Trying getModelViewMatrix() -> Matrix4f");
-            g_getModelViewMatrix_121 = env->GetStaticMethodID(rsCls, "getModelViewMatrix", "()Lorg/joml/Matrix4f;");
-            if (g_getModelViewMatrix_121) {
-                Log("Found getModelViewMatrix");
-            } else {
-                env->ExceptionClear();
-                Log("WARNING: getModelViewMatrix not found");
+            const char* viewMethodNames[] = {
+                "getModelViewMatrix", "getModelViewMatrixCopy", nullptr
+            };
+            for (int i = 0; viewMethodNames[i] && !g_getModelViewMatrix_121; i++) {
+                g_getModelViewMatrix_121 = env->GetStaticMethodID(rsCls, viewMethodNames[i], "()Lorg/joml/Matrix4f;");
+                if (g_getModelViewMatrix_121) {
+                    Log(std::string("Found ") + viewMethodNames[i]);
+                } else {
+                    env->ExceptionClear();
+                }
+            }
+            if (!g_getModelViewMatrix_121) {
+                g_modelViewMatrixField_121 = env->GetStaticFieldID(rsCls, "modelViewMatrix", "Lorg/joml/Matrix4f;");
+                if (g_modelViewMatrixField_121 && !env->ExceptionCheck()) {
+                    Log("Found modelViewMatrix as static field");
+                } else {
+                    env->ExceptionClear();
+                    g_modelViewMatrixField_121 = nullptr;
+                    Log("WARNING: getModelViewMatrix not found");
+                }
             }
             env->DeleteLocalRef(rsCls);
         } else {
@@ -8362,6 +8661,13 @@ static bool DiscoverJniMappings(JNIEnv* env) {
         Log("WARNING: Could not load Vec3d class");
     }
 
+    // Resolve world/player early so background threads can detect in-world state.
+    EnsureClosestPlayerCaches(env);
+    if (!g_worldField_121) {
+        TryResolveWorldFieldByReflection(env, mcClass);
+    }
+    Log(std::string("Mapped world=") + (g_worldField_121 ? "1" : "0") +
+        " player=" + (g_playerField_121 ? "1" : "0"));
 
     // Resolution diagnostics
     Log(std::string("Mapped GameRenderer=") + (g_gameRendererField_121 ? "1" : "0") + 
@@ -8373,8 +8679,8 @@ static bool DiscoverJniMappings(JNIEnv* env) {
         ", vec3dY=" + (g_vec3dY_121 ? "1" : "0") +
         ", vec3dZ=" + (g_vec3dZ_121 ? "1" : "0"));
     Log(std::string("Mapped RenderSystem=") + (g_renderSystemClass_121 ? "1" : "0") +
-        ", getProj=" + (g_getProjectionMatrix_121 ? "1" : "0") +
-        ", getModelView=" + (g_getModelViewMatrix_121 ? "1" : "0"));
+        ", getProj=" + (g_getProjectionMatrix_121 || g_projectionMatrixField_121 ? "1" : "0") +
+        ", getModelView=" + (g_getModelViewMatrix_121 || g_modelViewMatrixField_121 ? "1" : "0"));
     Log(std::string("Mapped Matrix4f=") + (g_matrix4fClass_121 ? "1" : "0") +
         ", getFloatArray=" + (g_matrixGetFloatArray_121 ? "1" : "0") +
         ", m00=" + (g_matrixM00 ? "1" : "0") + " m11=" + (g_matrixM11 ? "1" : "0") +
@@ -8426,6 +8732,26 @@ static bool IsInWorldNow(JNIEnv* env) {
         }
     }
     TRACE261_BRANCH("worldFieldResolved", g_worldField_121 != nullptr);
+    if (!g_worldField_121) {
+        jclass mcCls = env->GetObjectClass(g_mcInstance);
+        if (mcCls) {
+            TryResolveWorldFieldByReflection(env, mcCls);
+            env->DeleteLocalRef(mcCls);
+        }
+    }
+    if (!g_worldField_121 && g_playerField_121) {
+        jobject playerCheck = env->GetObjectField(g_mcInstance, g_playerField_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); playerCheck = nullptr; }
+        if (playerCheck) {
+            env->DeleteLocalRef(playerCheck);
+            static bool s_playerWorldFallbackDiag = false;
+            if (!s_playerWorldFallbackDiag) {
+                s_playerWorldFallbackDiag = true;
+                Log("In-world check: using localPlayer fallback (world field unresolved).");
+            }
+            return true;
+        }
+    }
     if (!g_worldField_121) return false;
     jobject worldCheck = env->GetObjectField(g_mcInstance, g_worldField_121);
     if (env->ExceptionCheck()) { env->ExceptionClear(); worldCheck = nullptr; }
@@ -8562,14 +8888,14 @@ static void EnsureHudTextFields(JNIEnv* env, jclass mcCls, jobject hudObj) {
 
 static void UpdateJniState() {
     TRACE261_PATH("enter");
-    bool prerequisites = TRACE261_IF("prerequisitesMet", (g_stateJniReady && g_jvm && g_mcInstance && g_screenField));
+    bool prerequisites = TRACE261_IF("prerequisitesMet", (g_stateJniReady && g_jvm && g_mcInstance && HasScreenAccess()));
     if (!prerequisites) return;
     JNIEnv* env = nullptr;
     bool envReady = TRACE261_IF("jniEnvReady", (g_jvm->GetEnv((void**)&env, JNI_VERSION_1_8) == JNI_OK && env));
     if (!envReady) return;
     unsigned long long nowMs = (unsigned long long)GetTickCount64();
 
-    jobject scr = env->GetObjectField(g_mcInstance, g_screenField);
+    jobject scr = GetCurrentScreenObject(env, g_mcInstance);
     if (env->ExceptionCheck()) { env->ExceptionClear(); return; }
 
     bool guiOpen = (scr != nullptr);
@@ -8626,9 +8952,12 @@ static void UpdateJniState() {
         bool isTransitionScreen =
             screenName.find("LevelLoadingScreen") != std::string::npos
             || screenName.find("ProgressScreen") != std::string::npos
-            || screenName.find("DeathScreen") != std::string::npos;
+            || screenName.find("DeathScreen") != std::string::npos
+            || screenName.find("ConnectScreen") != std::string::npos
+            || screenName.find("ServerReconfigScreen") != std::string::npos
+            || screenName.find("ReceivingLevelScreen") != std::string::npos;
         if (isTransitionScreen)
-            g_worldTransitionEndMs = GetTickCount() + 5000;
+            ScheduleWorldTransition("loading-screen", kScreenTransitionGraceMs);
         // NOTE: avoid forcing per-screen cache resets here; it causes remap thrash and
         // prevents mapping convergence on some runtimes.
     }
@@ -9129,8 +9458,8 @@ static void ReadCameraState(JNIEnv* env) {
             jclass grCls = env->GetObjectClass(gr);
             if (grCls) {
                 // Try known names first (including 26.1)
-                const char* projNames[] = { "lunar$savedProjection$v26_1", "lunar$savedProjection$v1_21", "lunar$savedProjection$v1_19_3", "lunar$savedProjection", nullptr };
-                const char* viewNames[] = { "lunar$savedModelView$v26_1", "lunar$savedModelView$v1_21", "lunar$savedModelView$v1_19_3", "lunar$savedModelView", nullptr };
+                const char* projNames[] = { "lunar$savedProjection$v26_2", "lunar$savedProjection$v26_1", "lunar$savedProjection$v1_21", "lunar$savedProjection$v1_19_3", "lunar$savedProjection", nullptr };
+                const char* viewNames[] = { "lunar$savedModelView$v26_2", "lunar$savedModelView$v26_1", "lunar$savedModelView$v1_21", "lunar$savedModelView$v1_19_3", "lunar$savedModelView", nullptr };
                 const char* matSig = "Lorg/joml/Matrix4f;";
 
                 for (int i = 0; projNames[i]; i++) {
@@ -9197,8 +9526,34 @@ static void ReadCameraState(JNIEnv* env) {
             jobject pO = env->GetObjectField(gr, g_lunarProjField_121);
             jobject vO = env->GetObjectField(gr, g_lunarViewField_121);
             if (pO && vO) {
-                if (ReadMatrix4f(env, pO, cs.proj) && ReadMatrix4f(env, vO, cs.view))
+                if (ReadMatrix4f(env, pO, cs.proj) && ReadMatrix4f(env, vO, cs.view)) {
                     cs.matsOk = true;
+                    static bool s_lunarMatDiag = false;
+                    if (!s_lunarMatDiag) { s_lunarMatDiag = true; Log("Matrix source: Lunar saved fields"); }
+                }
+            }
+            if (pO) env->DeleteLocalRef(pO);
+            if (vO) env->DeleteLocalRef(vO);
+        }
+        if (!cs.matsOk && g_renderSystemClass_121) {
+            jobject pO = nullptr;
+            jobject vO = nullptr;
+            if (g_getProjectionMatrix_121)
+                pO = env->CallStaticObjectMethod(g_renderSystemClass_121, g_getProjectionMatrix_121);
+            else if (g_projectionMatrixField_121)
+                pO = env->GetStaticObjectField(g_renderSystemClass_121, g_projectionMatrixField_121);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); pO = nullptr; }
+
+            if (g_getModelViewMatrix_121)
+                vO = env->CallStaticObjectMethod(g_renderSystemClass_121, g_getModelViewMatrix_121);
+            else if (g_modelViewMatrixField_121)
+                vO = env->GetStaticObjectField(g_renderSystemClass_121, g_modelViewMatrixField_121);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); vO = nullptr; }
+
+            if (pO && vO && ReadMatrix4f(env, pO, cs.proj) && ReadMatrix4f(env, vO, cs.view)) {
+                cs.matsOk = true;
+                static bool s_rsMatDiag = false;
+                if (!s_rsMatDiag) { s_rsMatDiag = true; Log("Matrix source: RenderSystem"); }
             }
             if (pO) env->DeleteLocalRef(pO);
             if (vO) env->DeleteLocalRef(vO);
@@ -9216,6 +9571,18 @@ static void ReadCameraState(JNIEnv* env) {
     }
 
     { LockGuard lk(g_bgCamMutex); g_bgCamState = cs; }
+}
+
+static DWORD WINAPI FastPollThreadProc(LPVOID);
+static DWORD WINAPI ChestScanThreadProc(LPVOID);
+
+static void StartBackgroundThreadsIfNeeded() {
+    static bool s_started = false;
+    if (s_started || !g_jvm) return;
+    s_started = true;
+    g_chestThreadHandle = CreateThread(nullptr, 0, ChestScanThreadProc, nullptr, 0, nullptr);
+    g_fastPollThreadHandle = CreateThread(nullptr, 0, FastPollThreadProc, nullptr, 0, nullptr);
+    Log("Background JNI threads started (state poll + chest scan).");
 }
 
 static DWORD WINAPI FastPollThreadProc(LPVOID) {
@@ -9239,6 +9606,10 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
     if (!g_jvm || g_jvm->AttachCurrentThread((void**)&env, nullptr) != JNI_OK) return 1;
     TRACE261_PATH("thread-start");
     DWORD lastAutoRemapRetryMs = 0;
+    // Teleport detection: track last scanned player position to catch same-world jumps
+    // (arena teleports) that bypass the loading-screen / world-instance guards.
+    double lastScanX = 0, lastScanY = 0, lastScanZ = 0;
+    bool lastScanPosValid = false;
     while (g_running) {
         Config cfg;
         { LockGuard lk(g_configMutex); cfg = g_config; }
@@ -9266,7 +9637,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
         }
 
         DWORD loopNow = GetTickCount();
-        bool needAutoRetry = ((!g_stateJniReady || !g_mcInstance || !g_screenField) && (loopNow - lastAutoRemapRetryMs >= 5000));
+        bool needAutoRetry = ((!g_stateJniReady || !g_mcInstance || !HasScreenAccess()) && (loopNow - lastAutoRemapRetryMs >= 5000));
         TRACE261_BRANCH("autoRemapRetryDue", needAutoRetry);
         if (needAutoRetry) {
             lastAutoRemapRetryMs = loopNow;
@@ -9275,12 +9646,46 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
             DiscoverJniMappings(env);
         }
 
-        if (g_stateJniReady) {
-            // All CallObjectMethod work runs here — never on the render thread.
-            ReadCameraState(env);   // camera pos/yaw/pitch/matrices → g_bgCamState
-            bool inWorldNow = IsInWorldNow(env);
+        if (g_mcInstance) {
+            bool inWorldNow = false;
+            if (g_stateJniReady) {
+                // All CallObjectMethod work runs here — never on the render thread.
+                if (!IsWorldTransitionActive())
+                    ReadCameraState(env);   // camera pos/yaw/pitch/matrices → g_bgCamState
+                inWorldNow = IsInWorldNow(env);
+            } else {
+                inWorldNow = IsInWorldNow(env);
+            }
             { LockGuard lk(g_jniStateMtx); g_jniInWorld = inWorldNow; }
-            if (inWorldNow) {
+            if (g_stateJniReady && inWorldNow) {
+                // Detect same-world teleports (e.g. Hypixel waiting room -> arena) that show
+                // no loading screen and keep the same world instance, so no other guard fires.
+                // A large position jump means the destination chunks are streaming in; pause
+                // chunk/block-entity scans until they settle to avoid racing the game thread.
+                //
+                // IMPORTANT: only run while NOT already in a transition. ScheduleWorldTransition
+                // zeroes g_bgCamState, and ReadCameraState is skipped during the grace, so any
+                // comparison against the camera while paused would see a fake origin<->real jump
+                // and re-arm the grace forever (permanent dead overlay). Re-seed on the first
+                // valid poll after any grace ends so it can't feed itself.
+                if (IsWorldTransitionActive()) {
+                    lastScanPosValid = false;
+                } else {
+                    double cx, cy, cz;
+                    { LockGuard lk(g_bgCamMutex); cx = g_bgCamState.camX; cy = g_bgCamState.camY; cz = g_bgCamState.camZ; }
+                    bool camValid = (cx != 0.0 || cy != 0.0 || cz != 0.0);
+                    if (camValid && lastScanPosValid) {
+                        double jdx = cx - lastScanX, jdy = cy - lastScanY, jdz = cz - lastScanZ;
+                        if (jdx*jdx + jdy*jdy + jdz*jdz > kTeleportJumpBlocks * kTeleportJumpBlocks) {
+                            ScheduleWorldTransition("teleport-jump", kTeleportTransitionGraceMs);
+                        }
+                    }
+                    if (camValid) {
+                        lastScanX = cx; lastScanY = cy; lastScanZ = cz;
+                        lastScanPosValid = true;
+                    }
+                }
+
                 // Detect world changes to reset stale JNI caches (prevents crash on server switch)
                 if (g_worldField_121) {
                     jobject worldObj = env->GetObjectField(g_mcInstance, g_worldField_121);
@@ -9288,6 +9693,9 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                     if (worldObj) {
                         if (!g_lastAutoTotemWorld_121 || env->IsSameObject(worldObj, g_lastAutoTotemWorld_121) == JNI_FALSE) {
                             if (env->ExceptionCheck()) env->ExceptionClear();
+                            if (g_lastAutoTotemWorld_121) {
+                                ScheduleWorldTransition("world-instance-changed", kWorldContextTransitionGraceMs);
+                            }
                             ResetAutoTotemCaches(env);
                             if (g_lastAutoTotemWorld_121) env->DeleteGlobalRef(g_lastAutoTotemWorld_121);
                             g_lastAutoTotemWorld_121 = env->NewGlobalRef(worldObj);
@@ -9296,54 +9704,57 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                     }
                 }
 
-                // Periodic diagnostic for chest esp config state
-                static DWORD s_cfgLogMs = 0;
-                DWORD nowMs = GetTickCount();
-                if (nowMs - s_cfgLogMs > 10000) {
-                    s_cfgLogMs = nowMs;
-                    Log("ScanThread cfg: chestEsp=" + std::to_string(cfg.chestEsp) + " nametags=" + std::to_string(cfg.nametags) + " closestPlayer=" + std::to_string(cfg.closestPlayer) + " hideVanilla=" + std::to_string(cfg.nametagHideVanilla));
-                }
+                if (!IsWorldTransitionActive()) {
+                    // Periodic diagnostic for chest esp config state
+                    static DWORD s_cfgLogMs = 0;
+                    DWORD nowMs = GetTickCount();
+                    if (nowMs - s_cfgLogMs > 10000) {
+                        s_cfgLogMs = nowMs;
+                        Log("ScanThread cfg: chestEsp=" + std::to_string(cfg.chestEsp) + " nametags=" + std::to_string(cfg.nametags) + " closestPlayer=" + std::to_string(cfg.closestPlayer) + " hideVanilla=" + std::to_string(cfg.nametagHideVanilla));
+                    }
 
-                static bool s_reachWasEnabled = false;
-                if (cfg.reachEnabled || s_reachWasEnabled) {
-                    UpdateReach(env, cfg);
-                    s_reachWasEnabled = cfg.reachEnabled;
-                }
+                    static bool s_reachWasEnabled = false;
+                    if (cfg.reachEnabled || s_reachWasEnabled) {
+                        UpdateReach(env, cfg);
+                        s_reachWasEnabled = cfg.reachEnabled;
+                    }
 
-                static bool s_velocityWasEnabled = false;
-                if (cfg.velocityEnabled || s_velocityWasEnabled) {
-                    UpdateVelocity(env, cfg);
-                    s_velocityWasEnabled = cfg.velocityEnabled;
-                }
+                    static bool s_velocityWasEnabled = false;
+                    if (cfg.velocityEnabled || s_velocityWasEnabled) {
+                        UpdateVelocity(env, cfg);
+                        s_velocityWasEnabled = cfg.velocityEnabled;
+                    }
 
-                static bool s_autoTotemWasEnabled = false;
-                if (cfg.autoTotemEnabled || s_autoTotemWasEnabled) {
-                    UpdateAutoTotem(env, cfg);
-                    s_autoTotemWasEnabled = cfg.autoTotemEnabled;
-                }
+                    static bool s_autoTotemWasEnabled = false;
+                    if (cfg.autoTotemEnabled || s_autoTotemWasEnabled) {
+                        UpdateAutoTotem(env, cfg);
+                        s_autoTotemWasEnabled = cfg.autoTotemEnabled;
+                    }
 
-                if (cfg.antiDebuffEnabled) {
-                    UpdateAntiDebuff(env, cfg);
-                }
+                    if (cfg.antiDebuffEnabled) {
+                        UpdateAntiDebuff(env, cfg);
+                    }
 
-                static bool s_speedBridgeWasEnabled = false;
-                if (cfg.speedBridge || s_speedBridgeWasEnabled || g_speedBridgeManagingSneak_121) {
-                    UpdateSpeedBridge(env, cfg, inWorldNow);
-                    s_speedBridgeWasEnabled = cfg.speedBridge;
-                }
+                    static bool s_speedBridgeWasEnabled = false;
+                    if (cfg.speedBridge || s_speedBridgeWasEnabled || g_speedBridgeManagingSneak_121) {
+                        UpdateSpeedBridge(env, cfg, inWorldNow);
+                        s_speedBridgeWasEnabled = cfg.speedBridge;
+                    }
 
-                if (cfg.closestPlayer)
-                    UpdateClosestPlayerOverlay(env);
-                if (cfg.pixelPartyAssist)
-                    UpdatePixelPartyAssist(env, cfg);
-                if (cfg.nametags || cfg.closestPlayer || cfg.aimAssist || cfg.nametagHideVanilla || g_nametagSuppressionActive_121)
-                    UpdatePlayerListOverlay(env);
-                if (cfg.chestEsp || cfg.chestStealer)
-                    UpdateChestList(env);
-                if (cfg.blockEsp)
-                    UpdateBlockEspList(env);
-            } else {
+                    if (cfg.closestPlayer)
+                        UpdateClosestPlayerOverlay(env);
+                    if (cfg.pixelPartyAssist)
+                        UpdatePixelPartyAssist(env, cfg);
+                    if (cfg.nametags || cfg.closestPlayer || cfg.aimAssist || cfg.nametagHideVanilla || g_nametagSuppressionActive_121)
+                        UpdatePlayerListOverlay(env);
+                    if (cfg.chestEsp || cfg.chestStealer)
+                        UpdateChestList(env);
+                    if (cfg.blockEsp)
+                        UpdateBlockEspList(env);
+                }
+            } else if (g_stateJniReady && !inWorldNow) {
                 // Left world — reset caches so next world gets fresh JNI lookups
+                lastScanPosValid = false;
                 ResetAutoTotemCaches(env);
                 DeleteGlobalRefSafe(env, g_lastAutoTotemWorld_121);
                 if (g_nametagSuppressionActive_121 || !g_modifiedTeamVisibility_121.empty() || !g_lcHideTagsMembers_121.empty()) {
@@ -9359,6 +9770,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                 { LockGuard lk4(g_pixelPartyMutex); g_pixelPartySnap = PixelPartySnap121(); }
             }
         } else {
+            lastScanPosValid = false;
             if (g_nametagSuppressionActive_121 || !g_modifiedTeamVisibility_121.empty() || !g_lcHideTagsMembers_121.empty()) {
                 ResetNametagSuppressionCaches121(env, "jni-not-ready");
             }
@@ -9520,254 +9932,9 @@ static void UpdateHudEditor(int winW, int winH) {
     }
 }
 
-// ===================== HOOKED SwapBuffers =====================
-// Frame counter: skip first few frames after GL backend init to let driver stabilize.
-// Two-phase init: phase 1 = ImGui context + Win32 (no GL), phase 2 = GL backend (deferred).
-
-BOOL WINAPI hwglSwapBuffers(HDC hDc) {
-    TRACE261_PATH("enter");
-    bool hasHdc = TRACE261_IF("hasHdc", hDc != nullptr);
-    if (!hasHdc) return o_wglSwapBuffers(hDc);
-
-    // If there is no current GL context, do not touch OpenGL/ImGui.
-    HGLRC currentRc = wglGetCurrentContext();
-    bool hasCurrentGlrc = TRACE261_IF("hasCurrentGlrc", currentRc != nullptr);
-    if (!hasCurrentGlrc) return o_wglSwapBuffers(hDc);
-
-    HWND window = WindowFromDC(hDc);
-    bool hasWindow = TRACE261_IF("windowValid", (window && IsWindow(window)));
-    if (!hasWindow) return o_wglSwapBuffers(hDc);
-
-    // Only run on the main GLFW game window
-    char cls[256] = {};
-    bool classReadOk = TRACE261_IF("windowClassRead", GetClassNameA(window, cls, sizeof(cls)-1) != 0);
-    if (!classReadOk)
-        return o_wglSwapBuffers(hDc);
-    bool isGlfwGameWindow = TRACE261_IF("isGlfwGameWindow", strcmp(cls, "GLFW30") == 0);
-    if (!isGlfwGameWindow)
-        return o_wglSwapBuffers(hDc);
-
-    // ── Phase 1: ImGui context + Win32 backend (NO OpenGL calls at all) ──
-    // Runs on the very first GLFW swap call.  We must not touch GL here so the
-    // NVIDIA driver's internal swap-chain state is completely undisturbed.
-    if (!g_imguiPhase1Done) {
-        TRACE261_PATH("imgui-phase1-init");
-        g_hwnd = window;
-        g_imguiGlrc = currentRc;
-
-        ImGui::CreateContext();
-        ImGuiIO& io = ImGui::GetIO();
-        io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-        io.IniFilename = nullptr;
-
-        // DPI-aware font config (no GL – just configures atlas data)
-        float dpiScale = 1.0f;
-        {
-            UINT dpi = 96;
-            HMODULE hUser32 = GetModuleHandleA("user32.dll");
-            if (hUser32) {
-                typedef UINT (WINAPI* FnGetDpiForWindow)(HWND);
-                auto fn = (FnGetDpiForWindow)GetProcAddress(hUser32, "GetDpiForWindow");
-                if (fn) dpi = fn(g_hwnd);
-            }
-            dpiScale = (dpi > 0) ? ((float)dpi / 96.0f) : 1.0f;
-            if (dpiScale < 0.75f) dpiScale = 0.75f;
-            if (dpiScale > 2.5f) dpiScale = 2.5f;
-        }
-        io.Fonts->Clear();
-        ImFontConfig fontCfg;
-        fontCfg.RasterizerDensity = 1.0f;
-        fontCfg.SizePixels = 16.0f * dpiScale;
-        fontCfg.OversampleH = 3;
-        fontCfg.OversampleV = 2;
-        fontCfg.PixelSnapH = true;
-        ImFont* loadedFont = nullptr;
-        std::string bridgeDir = GetBridgeDir();
-        std::vector<std::string> fontCandidates = {
-            bridgeDir + "\\minecraftia.ttf",
-            bridgeDir + "\\Minecraftia.ttf",
-            bridgeDir + "\\Data\\minecraftia.ttf",
-            bridgeDir + "\\Data\\Minecraftia.ttf",
-            "C:\\Windows\\Fonts\\minecraftia.ttf",
-            "C:\\Windows\\Fonts\\Minecraftia.ttf"
-        };
-
-        for (const auto& fontPath : fontCandidates) {
-            if (!FileExistsA(fontPath)) continue;
-            if (!IsLikelyFontBinary(fontPath)) {
-                Log("Skipping invalid font file (not binary TTF/OTF): " + fontPath);
-                continue;
-            }
-            loadedFont = io.Fonts->AddFontFromFileTTF(fontPath.c_str(), fontCfg.SizePixels, &fontCfg);
-            if (loadedFont) {
-                Log("Loaded ImGui font: " + fontPath);
-                break;
-            }
-        }
-
-        if (!loadedFont) {
-            io.Fonts->AddFontDefault(&fontCfg);
-            Log("Minecraftia not found, using default ImGui font.");
-        }
-        io.FontGlobalScale = 1.0f;
-        ImGuiStyle& st = ImGui::GetStyle();
-        st.ScaleAllSizes(dpiScale);
-
-        ImGui_ImplWin32_InitForOpenGL(g_hwnd);
-
-        g_imguiPhase1Done = true;
-        g_imguiWarmupFrames = 3; // let 3 clean frames pass before touching GL
-        Log("ImGui phase-1 done (context + Win32). GL backend deferred.");
-        return o_wglSwapBuffers(hDc);
-    }
-
-    // Warmup: let clean frames pass between phases / after GL init.
-    if (g_imguiWarmupFrames > 0) {
-        TRACE261_PATH("imgui-warmup-frame-skip");
-        g_imguiWarmupFrames--;
-        return o_wglSwapBuffers(hDc);
-    }
-
-    // If the GL context was recreated, defer a safe OpenGL backend reset.
-    // Do NOT shutdown/reinit immediately: doing glDelete* on stale IDs in a different
-    // context can corrupt Minecraft/Lunar rendering and may trigger nvoglv64.dll crashes.
-    if (g_imguiInitialized && g_imguiGlBackendReady && g_imguiGlrc && currentRc != g_imguiGlrc) {
-        TRACE261_PATH("imgui-glrc-changed-schedule-reset");
-        Log("OpenGL context changed; scheduling ImGui OpenGL backend reset.");
-        g_imguiPendingBackendReset = true;
-        g_imguiPendingGlrc = currentRc;
-        g_imguiWarmupFrames = 3;
-        return o_wglSwapBuffers(hDc);
-    }
-
-    // Execute the pending reset on a clean frame, then defer actual Init to a later frame.
-    if (g_imguiPendingBackendReset) {
-        TRACE261_PATH("imgui-execute-deferred-reset");
-        Log("ImGui: executing deferred OpenGL backend shutdown (skip GL deletes)");
-        ImGui_ImplOpenGL3_SetSkipGLDeletes(true);
-        ImGui_ImplOpenGL3_Shutdown();
-        ImGui_ImplOpenGL3_SetSkipGLDeletes(false);
-
-        g_imguiGlBackendReady = false;
-        g_imguiInitialized = false;
-        g_imguiGlrc = g_imguiPendingGlrc;
-        g_imguiPendingBackendReset = false;
-        g_imguiWarmupFrames = 3;
-        return o_wglSwapBuffers(hDc);
-    }
-
-    // ── Phase 2: OpenGL 3.3 backend init (compiles shaders, uploads font atlas) ──
-    // Runs on a SEPARATE frame well after phase 1.  We return immediately after
-    // so the driver only sees our GL init work, with no rendering or ImGui draw
-    // calls mixed in.
-    if (!g_imguiInitialized) {
-        TRACE261_PATH("imgui-phase2-init");
-        static bool glModernLoadedLogged = false;
-        if (!glModernLoadedLogged) {
-            bool ok = LoadModernOpenGL();
-            Log(std::string("Modern OpenGL loader: ") + (ok ? "ok" : "FAILED"));
-            glModernLoadedLogged = true;
-        }
-
-        // ImGui init can touch GL bindings. Backup/restore the critical state so we don't
-        // leave Minecraft/Lunar in a weird state for the next frame.
-        GLint last_program = 0;
-        GLint last_active_texture = 0;
-        GLint last_texture_2d = 0;
-        GLint last_array_buffer = 0;
-        GLint last_element_array_buffer = 0;
-        GLint last_vertex_array = 0;
-    #ifdef GL_PIXEL_UNPACK_BUFFER_BINDING
-        GLint last_pixel_unpack_buffer = 0;
-    #endif
-
-        glGetIntegerv(GL_CURRENT_PROGRAM, &last_program);
-        glGetIntegerv(GL_ACTIVE_TEXTURE, &last_active_texture);
-        glGetIntegerv(GL_TEXTURE_BINDING_2D, &last_texture_2d);
-        glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &last_array_buffer);
-        glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &last_element_array_buffer);
-    #ifdef GL_VERTEX_ARRAY_BINDING
-        glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &last_vertex_array);
-    #endif
-    #ifdef GL_PIXEL_UNPACK_BUFFER_BINDING
-        glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &last_pixel_unpack_buffer);
-    #endif
-
-        ImGui_ImplOpenGL3_Init("#version 330 core");
-
-        if (glUseProgram_)
-            glUseProgram_((GLuint)last_program);
-        if (glActiveTexture_)
-            glActiveTexture_((GLenum)last_active_texture);
-        glBindTexture(GL_TEXTURE_2D, (GLuint)last_texture_2d);
-        if (glBindBuffer_) {
-            glBindBuffer_(GL_ARRAY_BUFFER, (GLuint)last_array_buffer);
-            glBindBuffer_(GL_ELEMENT_ARRAY_BUFFER, (GLuint)last_element_array_buffer);
-        }
-    #ifdef GL_VERTEX_ARRAY_BINDING
-        if (glBindVertexArray_)
-            glBindVertexArray_((GLuint)last_vertex_array);
-    #endif
-    #ifdef GL_PIXEL_UNPACK_BUFFER_BINDING
-        if (glBindBuffer_)
-            glBindBuffer_(GL_PIXEL_UNPACK_BUFFER, (GLuint)last_pixel_unpack_buffer);
-    #endif
-
-        g_imguiGlBackendReady = true;
-        g_imguiInitialized = true;
-        g_imguiGlrc = currentRc;
-        g_imguiWarmupFrames = 3; // 3 more clean frames before rendering
-        Log("ImGui phase-2 done (OpenGL 3.3 core GL backend). Ready to render.");
-        return o_wglSwapBuffers(hDc);
-    }
-
-    // JNI game state (screen name, holdingBlock etc.) is updated by the background thread.
-    // Start chest scan background thread once as soon as the JVM is available.
-    // The thread calls UpdateChestList which uses CallObjectMethod — forbidden on the render thread.
-    {
-        static bool s_chestThreadStarted = false;
-        if (g_jvm && !s_chestThreadStarted) {
-            TRACE261_PATH("start-background-threads");
-            s_chestThreadStarted = true;
-            g_chestThreadHandle = CreateThread(nullptr, 0, ChestScanThreadProc, nullptr, 0, nullptr);
-            g_fastPollThreadHandle = CreateThread(nullptr, 0, FastPollThreadProc, nullptr, 0, nullptr);
-        }
-    }
-
-    // Update closest player / nametags modules — MOVED to background thread (ChestScanThreadProc).
-    // Calling CallObjectMethod on the render thread causes nvoglv64.dll crashes (see 1.21_MAPPINGS.md).
-
-    // Update inventory detection
-    UpdateRealGuiState();
-
-    // Render ImGui
-    ImGui_ImplOpenGL3_NewFrame();
-    ImGui_ImplWin32_NewFrame();
-    ImGui::NewFrame();
-
-    // 1.21 uses the external WPF window for module controls.
-    int winW = (int)ImGui::GetIO().DisplaySize.x;
-    int winH = (int)ImGui::GetIO().DisplaySize.y;
-    UpdateHudEditor(winW, winH);
-
-    // Render overlay text for closest player (when enabled and menu closed)
-    {
-        Config cfg;
-        { LockGuard lk(g_configMutex); cfg = g_config; }
-        OverlayTheme overlayTheme = ResolveOverlayTheme(cfg.guiTheme);
-        bool inWorld = false;
-        { LockGuard lk(g_jniStateMtx); inWorld = g_jniInWorld; }
-        
-        // Diagnostic logging (only once at start)
-        static bool s_overlayDiagLogged = false;
-        if (!s_overlayDiagLogged) {
-            s_overlayDiagLogged = true;
-            Log(std::string("Overlay render check: inWorld=") + (inWorld ? "true" : "false") +
-                " showModuleList=" + (cfg.showModuleList ? "true" : "false"));
-        }
-        
-        if (inWorld) {
-            TRACE261_PATH("overlay-render-active");
+static void RenderOverlayPanels(bool inWorld, const Config& cfg, const OverlayTheme& overlayTheme, int winW, int winH) {
+    if (!inWorld || IsWorldTransitionActive()) return;
+    TRACE261_PATH("overlay-render-active");
             ImDrawList* fg = ImGui::GetForegroundDrawList();
             ImGuiIO& io = ImGui::GetIO();
             BgCamState cpCamState;
@@ -10683,23 +10850,371 @@ BOOL WINAPI hwglSwapBuffers(HDC hDc) {
                     }
                 }
             }
-        } else {
-            TRACE261_PATH("overlay-render-skipped");
-        }
-    }
+}
 
+void Bridge_BeginOverlayImGuiFrame(int winW, int winH) {
+    ImGui_ImplOpenGL3_NewFrame();
+    ImGui_ImplWin32_NewFrame();
+    ImGui::NewFrame();
+    UpdateHudEditor(winW, winH);
+}
+
+void Bridge_RenderOverlayPanels(bool inWorld) {
+    Config cfg;
+    { LockGuard lk(g_configMutex); cfg = g_config; }
+    OverlayTheme overlayTheme = ResolveOverlayTheme(cfg.guiTheme);
+    int winW = (int)ImGui::GetIO().DisplaySize.x;
+    int winH = (int)ImGui::GetIO().DisplaySize.y;
+    RenderOverlayPanels(inWorld, cfg, overlayTheme, winW, winH);
+}
+
+void Bridge_EndOverlayImGuiFrame_OpenGL() {
     ImGui::Render();
-    // Avoid driver issues when minimized / zero-sized backbuffer.
     ImGuiIO& io = ImGui::GetIO();
     if (io.DisplaySize.x > 1.0f && io.DisplaySize.y > 1.0f) {
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
     }
-
-    // Flush all ImGui GL commands before handing control back to the NVIDIA driver's
-    // swap implementation.  Without this, pending draw calls may reference ImGui GL
-    // objects that the driver hasn't seen yet, causing an EXCEPTION_ACCESS_VIOLATION
-    // inside nvoglv64.dll.
     glFlush();
+}
+
+void Bridge_EndOverlayImGuiFrame_VulkanAuxGL() {
+    Bridge_EndOverlayImGuiFrame_OpenGL();
+}
+
+static HWND FindGlfwGameWindowForOverlay() {
+    HWND found = nullptr;
+    EnumWindows([](HWND hwnd, LPARAM lp) -> BOOL {
+        char cls[256] = {};
+        if (GetClassNameA(hwnd, cls, sizeof(cls)) && strcmp(cls, "GLFW30") == 0) {
+            *(HWND*)lp = hwnd;
+            return FALSE;
+        }
+        return TRUE;
+    }, (LPARAM)&found);
+    return found;
+}
+
+bool Bridge_RenderVulkanOverlayFrame(HWND hwnd, int width, int height) {
+    if (!hwnd || width <= 1 || height <= 1) return false;
+    if (IsWorldTransitionActive()) return false;
+    if (RenderBackend_GetActiveKind() == GfxBackendKind::OpenGL) return false;
+
+    StartBackgroundThreadsIfNeeded();
+
+    static HDC s_auxHdc = nullptr;
+    static HGLRC s_auxGlrc = nullptr;
+    static HWND s_auxHwnd = nullptr;
+
+    if (!s_auxHdc || s_auxHwnd != hwnd) {
+        if (s_auxGlrc) { wglMakeCurrent(nullptr, nullptr); wglDeleteContext(s_auxGlrc); s_auxGlrc = nullptr; }
+        if (s_auxHdc) { ReleaseDC(s_auxHwnd, s_auxHdc); s_auxHdc = nullptr; }
+        s_auxHwnd = hwnd;
+        s_auxHdc = GetDC(hwnd);
+        if (!s_auxHdc) return false;
+
+        PIXELFORMATDESCRIPTOR pfd = {};
+        pfd.nSize = sizeof(pfd);
+        pfd.nVersion = 1;
+        pfd.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
+        pfd.iPixelType = PFD_TYPE_RGBA;
+        pfd.cColorBits = 32;
+        pfd.cAlphaBits = 8;
+        int pf = ChoosePixelFormat(s_auxHdc, &pfd);
+        if (!pf || !SetPixelFormat(s_auxHdc, pf, &pfd)) return false;
+        s_auxGlrc = wglCreateContext(s_auxHdc);
+        if (!s_auxGlrc) return false;
+    }
+
+    if (!wglMakeCurrent(s_auxHdc, s_auxGlrc)) return false;
+
+    if (!g_imguiPhase1Done) {
+        g_hwnd = hwnd;
+        g_imguiGlrc = s_auxGlrc;
+        ImGui::CreateContext();
+        ImGuiIO& io = ImGui::GetIO();
+        io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+        io.IniFilename = nullptr;
+        io.Fonts->AddFontDefault();
+        ImGui_ImplWin32_InitForOpenGL(hwnd);
+        g_imguiPhase1Done = true;
+        Log("ImGui phase-1 done on Vulkan aux GL context.");
+    }
+
+    if (!g_imguiInitialized) {
+        LoadModernOpenGL();
+        ImGui_ImplOpenGL3_Init("#version 330 core");
+        g_imguiGlBackendReady = true;
+        g_imguiInitialized = true;
+        g_imguiGlrc = s_auxGlrc;
+        Log("ImGui phase-2 done on Vulkan aux GL context.");
+    }
+
+    ImGuiIO& io = ImGui::GetIO();
+    io.DisplaySize = ImVec2((float)width, (float)height);
+
+    UpdateRealGuiState();
+    Bridge_BeginOverlayImGuiFrame(width, height);
+
+    bool inWorld = false;
+    { LockGuard lk(g_jniStateMtx); inWorld = g_jniInWorld; }
+    Bridge_RenderOverlayPanels(inWorld);
+
+    Bridge_EndOverlayImGuiFrame_VulkanAuxGL();
+    wglMakeCurrent(nullptr, nullptr);
+    RenderBackend_NotifyVulkanFrame();
+    return true;
+}
+
+// ===================== HOOKED SwapBuffers =====================
+// Frame counter: skip first few frames after GL backend init to let driver stabilize.
+// Two-phase init: phase 1 = ImGui context + Win32 (no GL), phase 2 = GL backend (deferred).
+
+BOOL WINAPI hwglSwapBuffers(HDC hDc) {
+    TRACE261_PATH("enter");
+    bool hasHdc = TRACE261_IF("hasHdc", hDc != nullptr);
+    if (!hasHdc) return o_wglSwapBuffers(hDc);
+
+    // If there is no current GL context, do not touch OpenGL/ImGui.
+    HGLRC currentRc = wglGetCurrentContext();
+    bool hasCurrentGlrc = TRACE261_IF("hasCurrentGlrc", currentRc != nullptr);
+    if (!hasCurrentGlrc) {
+        static bool s_loggedNoGlrc = false;
+        if (!s_loggedNoGlrc) { s_loggedNoGlrc = true; Log("wglSwapBuffers: no current GLRC (Vulkan or not yet bound); skipping overlay init."); }
+        return o_wglSwapBuffers(hDc);
+    }
+
+    HWND window = WindowFromDC(hDc);
+    bool hasWindow = TRACE261_IF("windowValid", (window && IsWindow(window)));
+    if (!hasWindow) return o_wglSwapBuffers(hDc);
+
+    // Only run on the main GLFW game window
+    char cls[256] = {};
+    bool classReadOk = TRACE261_IF("windowClassRead", GetClassNameA(window, cls, sizeof(cls)-1) != 0);
+    if (!classReadOk)
+        return o_wglSwapBuffers(hDc);
+    bool isGlfwGameWindow = TRACE261_IF("isGlfwGameWindow", strcmp(cls, "GLFW30") == 0);
+    if (!isGlfwGameWindow) {
+        static bool s_loggedNonGlfw = false;
+        if (!s_loggedNonGlfw) { s_loggedNonGlfw = true; Log(std::string("wglSwapBuffers: non-GLFW window class '") + cls + "'; skipping overlay."); }
+        return o_wglSwapBuffers(hDc);
+    }
+
+    // ── Phase 1: ImGui context + Win32 backend (NO OpenGL calls at all) ──
+    // Runs on the very first GLFW swap call.  We must not touch GL here so the
+    // NVIDIA driver's internal swap-chain state is completely undisturbed.
+    if (!g_imguiPhase1Done) {
+        TRACE261_PATH("imgui-phase1-init");
+        g_hwnd = window;
+        g_imguiGlrc = currentRc;
+
+        ImGui::CreateContext();
+        ImGuiIO& io = ImGui::GetIO();
+        io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+        io.IniFilename = nullptr;
+
+        // DPI-aware font config (no GL – just configures atlas data)
+        float dpiScale = 1.0f;
+        {
+            UINT dpi = 96;
+            HMODULE hUser32 = GetModuleHandleA("user32.dll");
+            if (hUser32) {
+                typedef UINT (WINAPI* FnGetDpiForWindow)(HWND);
+                auto fn = (FnGetDpiForWindow)GetProcAddress(hUser32, "GetDpiForWindow");
+                if (fn) dpi = fn(g_hwnd);
+            }
+            dpiScale = (dpi > 0) ? ((float)dpi / 96.0f) : 1.0f;
+            if (dpiScale < 0.75f) dpiScale = 0.75f;
+            if (dpiScale > 2.5f) dpiScale = 2.5f;
+        }
+        io.Fonts->Clear();
+        ImFontConfig fontCfg;
+        fontCfg.RasterizerDensity = 1.0f;
+        fontCfg.SizePixels = 16.0f * dpiScale;
+        fontCfg.OversampleH = 3;
+        fontCfg.OversampleV = 2;
+        fontCfg.PixelSnapH = true;
+        ImFont* loadedFont = nullptr;
+        std::string bridgeDir = GetBridgeDir();
+        std::vector<std::string> fontCandidates = {
+            bridgeDir + "\\minecraftia.ttf",
+            bridgeDir + "\\Minecraftia.ttf",
+            bridgeDir + "\\Data\\minecraftia.ttf",
+            bridgeDir + "\\Data\\Minecraftia.ttf",
+            "C:\\Windows\\Fonts\\minecraftia.ttf",
+            "C:\\Windows\\Fonts\\Minecraftia.ttf"
+        };
+
+        for (const auto& fontPath : fontCandidates) {
+            if (!FileExistsA(fontPath)) continue;
+            if (!IsLikelyFontBinary(fontPath)) {
+                Log("Skipping invalid font file (not binary TTF/OTF): " + fontPath);
+                continue;
+            }
+            loadedFont = io.Fonts->AddFontFromFileTTF(fontPath.c_str(), fontCfg.SizePixels, &fontCfg);
+            if (loadedFont) {
+                Log("Loaded ImGui font: " + fontPath);
+                break;
+            }
+        }
+
+        if (!loadedFont) {
+            io.Fonts->AddFontDefault(&fontCfg);
+            Log("Minecraftia not found, using default ImGui font.");
+        }
+        io.FontGlobalScale = 1.0f;
+        ImGuiStyle& st = ImGui::GetStyle();
+        st.ScaleAllSizes(dpiScale);
+
+        ImGui_ImplWin32_InitForOpenGL(g_hwnd);
+
+        g_imguiPhase1Done = true;
+        g_imguiWarmupFrames = 3; // let 3 clean frames pass before touching GL
+        Log("ImGui phase-1 done (context + Win32). GL backend deferred.");
+        return o_wglSwapBuffers(hDc);
+    }
+
+    // Warmup: let clean frames pass between phases / after GL init.
+    if (g_imguiWarmupFrames > 0) {
+        TRACE261_PATH("imgui-warmup-frame-skip");
+        g_imguiWarmupFrames--;
+        return o_wglSwapBuffers(hDc);
+    }
+
+    // If the GL context was recreated, defer a safe OpenGL backend reset.
+    // Do NOT shutdown/reinit immediately: doing glDelete* on stale IDs in a different
+    // context can corrupt Minecraft/Lunar rendering and may trigger nvoglv64.dll crashes.
+    if (g_imguiInitialized && g_imguiGlBackendReady && g_imguiGlrc && currentRc != g_imguiGlrc) {
+        TRACE261_PATH("imgui-glrc-changed-schedule-reset");
+        Log("OpenGL context changed; scheduling ImGui OpenGL backend reset.");
+        g_imguiPendingBackendReset = true;
+        g_imguiPendingGlrc = currentRc;
+        g_imguiWarmupFrames = 3;
+        return o_wglSwapBuffers(hDc);
+    }
+
+    // Execute the pending reset on a clean frame, then defer actual Init to a later frame.
+    if (g_imguiPendingBackendReset) {
+        TRACE261_PATH("imgui-execute-deferred-reset");
+        Log("ImGui: executing deferred OpenGL backend shutdown (skip GL deletes)");
+        ImGui_ImplOpenGL3_SetSkipGLDeletes(true);
+        ImGui_ImplOpenGL3_Shutdown();
+        ImGui_ImplOpenGL3_SetSkipGLDeletes(false);
+
+        g_imguiGlBackendReady = false;
+        g_imguiInitialized = false;
+        g_imguiGlrc = g_imguiPendingGlrc;
+        g_imguiPendingBackendReset = false;
+        g_imguiWarmupFrames = 3;
+        return o_wglSwapBuffers(hDc);
+    }
+
+    // ── Phase 2: OpenGL 3.3 backend init (compiles shaders, uploads font atlas) ──
+    // Runs on a SEPARATE frame well after phase 1.  We return immediately after
+    // so the driver only sees our GL init work, with no rendering or ImGui draw
+    // calls mixed in.
+    if (!g_imguiInitialized) {
+        TRACE261_PATH("imgui-phase2-init");
+        static bool glModernLoadedLogged = false;
+        if (!glModernLoadedLogged) {
+            bool ok = LoadModernOpenGL();
+            Log(std::string("Modern OpenGL loader: ") + (ok ? "ok" : "FAILED"));
+            glModernLoadedLogged = true;
+        }
+
+        // ImGui init can touch GL bindings. Backup/restore the critical state so we don't
+        // leave Minecraft/Lunar in a weird state for the next frame.
+        GLint last_program = 0;
+        GLint last_active_texture = 0;
+        GLint last_texture_2d = 0;
+        GLint last_array_buffer = 0;
+        GLint last_element_array_buffer = 0;
+        GLint last_vertex_array = 0;
+    #ifdef GL_PIXEL_UNPACK_BUFFER_BINDING
+        GLint last_pixel_unpack_buffer = 0;
+    #endif
+
+        glGetIntegerv(GL_CURRENT_PROGRAM, &last_program);
+        glGetIntegerv(GL_ACTIVE_TEXTURE, &last_active_texture);
+        glGetIntegerv(GL_TEXTURE_BINDING_2D, &last_texture_2d);
+        glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &last_array_buffer);
+        glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &last_element_array_buffer);
+    #ifdef GL_VERTEX_ARRAY_BINDING
+        glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &last_vertex_array);
+    #endif
+    #ifdef GL_PIXEL_UNPACK_BUFFER_BINDING
+        glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &last_pixel_unpack_buffer);
+    #endif
+
+        ImGui_ImplOpenGL3_Init("#version 330 core");
+
+        if (glUseProgram_)
+            glUseProgram_((GLuint)last_program);
+        if (glActiveTexture_)
+            glActiveTexture_((GLenum)last_active_texture);
+        glBindTexture(GL_TEXTURE_2D, (GLuint)last_texture_2d);
+        if (glBindBuffer_) {
+            glBindBuffer_(GL_ARRAY_BUFFER, (GLuint)last_array_buffer);
+            glBindBuffer_(GL_ELEMENT_ARRAY_BUFFER, (GLuint)last_element_array_buffer);
+        }
+    #ifdef GL_VERTEX_ARRAY_BINDING
+        if (glBindVertexArray_)
+            glBindVertexArray_((GLuint)last_vertex_array);
+    #endif
+    #ifdef GL_PIXEL_UNPACK_BUFFER_BINDING
+        if (glBindBuffer_)
+            glBindBuffer_(GL_PIXEL_UNPACK_BUFFER, (GLuint)last_pixel_unpack_buffer);
+    #endif
+
+        g_imguiGlBackendReady = true;
+        g_imguiInitialized = true;
+        g_imguiGlrc = currentRc;
+        g_imguiWarmupFrames = 3; // 3 more clean frames before rendering
+        Log("ImGui phase-2 done (OpenGL 3.3 core GL backend). Ready to render.");
+        return o_wglSwapBuffers(hDc);
+    }
+
+    // JNI game state (screen name, holdingBlock etc.) is updated by the background thread.
+    // Start chest scan background thread once as soon as the JVM is available.
+    StartBackgroundThreadsIfNeeded();
+
+    // During world/server transitions, skip all ImGui/GL overlay work. Chunk maps and GL
+    // contexts are unstable here; drawing overlays caused nvoglv64 access violations.
+    if (IsWorldTransitionActive()) {
+        return o_wglSwapBuffers(hDc);
+    }
+
+    // Update closest player / nametags modules — MOVED to background thread (ChestScanThreadProc).
+    // Calling CallObjectMethod on the render thread causes nvoglv64.dll crashes (see 1.21_MAPPINGS.md).
+
+    // Update inventory detection
+    UpdateRealGuiState();
+    RenderBackend_NotifyOpenGlFrame(window);
+
+    int winW = (int)ImGui::GetIO().DisplaySize.x;
+    int winH = (int)ImGui::GetIO().DisplaySize.y;
+    Bridge_BeginOverlayImGuiFrame(winW, winH);
+
+    {
+        Config cfg;
+        { LockGuard lk(g_configMutex); cfg = g_config; }
+        OverlayTheme overlayTheme = ResolveOverlayTheme(cfg.guiTheme);
+        bool inWorld = false;
+        { LockGuard lk(g_jniStateMtx); inWorld = g_jniInWorld; }
+
+        static bool s_overlayDiagLogged = false;
+        if (!s_overlayDiagLogged) {
+            s_overlayDiagLogged = true;
+            Log(std::string("Overlay render check: inWorld=") + (inWorld ? "true" : "false") +
+                " showModuleList=" + (cfg.showModuleList ? "true" : "false"));
+        }
+
+        RenderOverlayPanels(inWorld, cfg, overlayTheme, winW, winH);
+        if (!inWorld) {
+            TRACE261_PATH("overlay-render-skipped");
+        }
+    }
+
+    Bridge_EndOverlayImGuiFrame_OpenGL();
 
     return o_wglSwapBuffers(hDc);
 }
@@ -10747,6 +11262,12 @@ DWORD WINAPI MainThread(LPVOID) {
         Log("ERROR: Failed to hook wglSwapBuffers."); return 0;
     }
     Log("wglSwapBuffers hooked.");
+    RenderBackend_SetLogFn([](const char* msg) { Log(msg); });
+    if (RenderBackend_InitHooks()) {
+        Log("Vulkan present hook ready at startup.");
+    } else {
+        Log("Vulkan present hook disabled (Lunar 26.1 uses OpenGL; set AOKO_BRIDGE261_VULKAN=1 to opt in).");
+    }
 
     // ---- Load GLFW function pointers (no hook needed; just direct calls) ----
     for (int attempt = 0; attempt < 30; attempt++) {
@@ -10784,7 +11305,10 @@ glfw_done:;
             for (int attempt = 0; attempt < 5; attempt++) {
                 {
                     LockGuard remapGuard(g_jniRemapMtx);
-                    if (DiscoverJniMappings(denv)) break;
+                    if (DiscoverJniMappings(denv)) {
+                        StartBackgroundThreadsIfNeeded();
+                        break;
+                    }
                 }
                 Log("Discovery attempt " + std::to_string(attempt+1) + " failed, retrying in 3s...");
                 Sleep(3000);

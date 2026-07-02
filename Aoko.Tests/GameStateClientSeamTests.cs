@@ -6,6 +6,7 @@ public class GameStateClientSeamTests
 {
     [Theory]
     [InlineData("26.1", "26.1")]
+    [InlineData("26.2", "26.1")]
     [InlineData("26", "26.1")]
     [InlineData("minecraft 26", "26.1")]
     [InlineData("1.21.4", "1.21")]

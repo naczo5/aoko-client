@@ -26,7 +26,7 @@ public sealed class BridgeCapabilities
         bool is121 = !string.IsNullOrWhiteSpace(injectedVersion)
             && injectedVersion.StartsWith("1.21", StringComparison.OrdinalIgnoreCase);
         bool is261 = !string.IsNullOrWhiteSpace(injectedVersion)
-            && injectedVersion.StartsWith("26.1", StringComparison.OrdinalIgnoreCase);
+            && injectedVersion.StartsWith("26.", StringComparison.OrdinalIgnoreCase);
 
         if (is121 || is261)
         {
