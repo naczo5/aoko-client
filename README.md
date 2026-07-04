@@ -154,11 +154,8 @@ therefore their usecase (like private or anarchy servers).
 
 ## TODO
 
-- [ ] Fix block party assist jump behavior
-- [ ] Fix HUD edit - module list not editable
-- [ ] Add different configs handling
-- [ ] Add custom color palettes
-- [x] Add AntiDebuff module - removes effects like blindness, nausea
+- [ ] make antidebuff work correctly on modern versions
+
 
 ## Support
 
