@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="description" content="aoko client is a foss, injectable utility client for Lunar. Built for 1.8.9, 1.21.x, and 26.1." />
   <meta name="robots" content="index,follow" />
-  <meta name="theme-color" content="#0A0B0F" />
+  <meta name="theme-color" content="#08090C" />
 
   <link rel="canonical" href="https://naczo5.github.io/aoko-client/" />
   <link rel="icon" type="image/x-icon" href="favicon.ico">
@@ -27,204 +27,298 @@
   <meta name="twitter:image" content="https://naczo5.github.io/aoko-client/screenshots/gameplay.jpg" />
   <title>aoko — a foss, injectable utility client for Lunar</title>
   <link rel="stylesheet" href="style.css" />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
 </head>
 <body>
 
   <!-- NAV -->
   <nav>
     <div class="nav-inner">
-      <a href="#" class="logo-mini">aoko<span class="dot">.</span></a>
+      <a href="#top" class="logo-mini">aoko<span class="dot">_</span></a>
       <ul>
-        <li><a href="#features">features</a></li>
+        <li><a href="#registry">registry</a></li>
         <li><a href="#status">status</a></li>
+        <li><a href="#arch">arch</a></li>
         <li><a href="#setup">setup</a></li>
         <li><a href="getting-started/">docs</a></li>
-        <li><a href="https://github.com/naczo5/aoko-client/releases" class="nav-dl">download</a></li>
+        <li><a href="https://github.com/naczo5/aoko-client/releases" class="nav-dl">get&nbsp;binary</a></li>
       </ul>
     </div>
   </nav>
 
   <!-- HERO -->
-  <section class="hero">
-    <h1 class="hero-logo">aoko<span class="dot">.</span></h1>
-    <p class="tagline">a foss, injectable utility client for lunar.<br>built for 1.8.9, 1.21.x, and 26.1.</p>
-    <div class="hero-btns">
-      <a href="https://github.com/naczo5/aoko-client/releases" class="btn-primary">download</a>
-      <a href="#features" class="btn-text">view features <span class="arrow">-&gt;</span></a>
+  <section class="hero" id="top">
+    <div class="hero-grid">
+      <div class="hero-left">
+        <div class="kicker"><span class="kick-dot"></span>foss · injectable · lunar client</div>
+        <h1 class="hero-logo">aoko<span class="cursor-block">_</span></h1>
+        <p class="tagline">A free, open-source utility client that injects straight into Lunar. One bridge, three versions: <b>1.8.9</b>, <b>1.21.x</b>, and <b>26.1</b>.</p>
+        <div class="hero-btns">
+          <a href="https://github.com/naczo5/aoko-client/releases" class="btn-primary">./download</a>
+          <a href="#registry" class="btn-text">browse modules <span class="arrow">→</span></a>
+        </div>
+        <div class="hero-meta">
+          <span><i>lang</i> c# · c++</span>
+          <span><i>license</i> gpl-3</span>
+          <span><i>platform</i> win x64</span>
+        </div>
+      </div>
+
+      <!-- INJECTION CONSOLE -->
+      <div class="console" id="console" role="img" aria-label="Simulated aoko injection sequence: locating javaw.exe, mapping the JVM, injecting the bridge DLL, handshaking over TCP 25590, and loading modules.">
+        <div class="console-bar">
+          <span class="tl-dot"></span><span class="tl-dot"></span><span class="tl-dot"></span>
+          <span class="console-title">aoko@lunar — injector</span>
+        </div>
+        <pre class="console-body" id="console-body" aria-hidden="true"></pre>
+      </div>
     </div>
+
     <figure class="hero-preview">
-      <img src="screenshots/121_gui.png" alt="aoko external gui" loading="eager" />
-      <figcaption>external gui.</figcaption>
+      <img src="screenshots/121_gui.png" alt="aoko external gui" loading="eager" width="880" />
+      <figcaption>[ external gui — 1.21.x ]</figcaption>
     </figure>
   </section>
 
-  <hr class="rule" />
+  <div class="ticker" aria-hidden="true">
+    <div class="ticker-track">
+      <span>autoclicker</span><span>·</span><span>aim assist</span><span>·</span><span>triggerbot</span><span>·</span><span>speedbridge</span><span>·</span><span>reach</span><span>·</span><span>velocity</span><span>·</span><span>autototem</span><span>·</span><span>antidebuff</span><span>·</span><span>chest stealer</span><span>·</span><span>gtb helper</span><span>·</span><span>nametags</span><span>·</span><span>chest esp</span><span>·</span><span>block esp</span><span>·</span><span>closest player</span><span>·</span><span>discord rpc</span><span>·</span>
+      <span>autoclicker</span><span>·</span><span>aim assist</span><span>·</span><span>triggerbot</span><span>·</span><span>speedbridge</span><span>·</span><span>reach</span><span>·</span><span>velocity</span><span>·</span><span>autototem</span><span>·</span><span>antidebuff</span><span>·</span><span>chest stealer</span><span>·</span><span>gtb helper</span><span>·</span><span>nametags</span><span>·</span><span>chest esp</span><span>·</span><span>block esp</span><span>·</span><span>closest player</span><span>·</span><span>discord rpc</span><span>·</span>
+    </div>
+  </div>
 
-  <!-- FEATURES -->
-  <section id="features" class="section">
+  <!-- REGISTRY -->
+  <section id="registry" class="section">
     <div class="section-head">
-      <h2><span class="slash">/</span> features</h2>
-      <p>core modules and capabilities.</p>
+      <h2><span class="idx">01</span> module registry</h2>
+      <p>Everything aoko ships, grouped by subsystem. Expand a row for details.</p>
     </div>
 
-    <div class="cols">
-      <div class="col">
-        <div class="col-num">01. combat</div>
-        <div class="entry">
-          <div class="entry-name">autoclicker</div>
-          <div class="entry-desc">lmb/rmb with configurable cps, jitter, block-only mode, and gui/chest safety checks.</div>
-        </div>
-        <div class="entry">
-          <div class="entry-name">aim assist</div>
-          <div class="entry-desc">adjustable fov, targeting range, and smoothing strength.</div>
-        </div>
-        <div class="entry">
-          <div class="entry-name">triggerbot</div>
-          <div class="entry-desc">crosshair-gated firing with cooldown threshold and hit-chance controls.</div>
-        </div>
-        <div class="entry">
-          <div class="entry-name">speedbridge</div>
-          <div class="entry-desc">edge sneak assist with block-only, hold-sneak, looking-down, and safety timing controls.</div>
-        </div>
-        <div class="entry">
-          <div class="entry-name">reach &amp; velocity</div>
-          <div class="entry-desc">extra combat tuning &mdash; reach extender and velocity dampener with hit-chance.</div>
-        </div>
-        <div class="entry">
-          <div class="entry-name">autototem</div>
-          <div class="entry-desc">ghost (inventory only) and anarchy modes, health threshold, and elytra switch.</div>
-        </div>
+    <div class="reg-group" data-group="combat">
+      <div class="reg-label">combat<span class="reg-count">7</span></div>
+      <div class="reg-rows">
+        <details class="mod">
+          <summary><span class="mod-i">▸</span><span class="mod-name">autoclicker</span><span class="mod-tag">input</span></summary>
+          <p>LMB/RMB with configurable CPS range, jitter, block-only mode, and GUI/chest safety checks.</p>
+        </details>
+        <details class="mod">
+          <summary><span class="mod-i">▸</span><span class="mod-name">aim assist</span><span class="mod-tag">aim</span></summary>
+          <p>Adjustable FOV, targeting range, and smoothing strength for on-target correction.</p>
+        </details>
+        <details class="mod">
+          <summary><span class="mod-i">▸</span><span class="mod-name">triggerbot</span><span class="mod-tag">aim</span></summary>
+          <p>Crosshair-gated firing with a cooldown threshold and hit-chance controls.</p>
+        </details>
+        <details class="mod">
+          <summary><span class="mod-i">▸</span><span class="mod-name">reach</span><span class="mod-tag">combat</span></summary>
+          <p>Reach extender with a tunable range and hit-chance gate.</p>
+        </details>
+        <details class="mod">
+          <summary><span class="mod-i">▸</span><span class="mod-name">velocity</span><span class="mod-tag">combat</span></summary>
+          <p>Knockback dampener with horizontal / vertical percentages and hit-chance.</p>
+        </details>
+        <details class="mod">
+          <summary><span class="mod-i">▸</span><span class="mod-name">autototem</span><span class="mod-tag">survival</span></summary>
+          <p>Ghost (inventory-only) and anarchy modes, health threshold, and elytra switch.</p>
+        </details>
+        <details class="mod">
+          <summary><span class="mod-i">▸</span><span class="mod-name">antidebuff</span><span class="mod-tag">survival</span></summary>
+          <p>Hides Blindness/Nausea client-side, plus Darkness on 1.21 / 26.1.</p>
+        </details>
       </div>
+    </div>
 
-      <div class="col">
-        <div class="col-num">02. visuals</div>
-        <div class="entry">
-          <div class="entry-name">nametags</div>
-          <div class="entry-desc">player tags detailing health, armor tier, and held items.</div>
-        </div>
-        <div class="entry">
-          <div class="entry-name">closest player</div>
-          <div class="entry-desc">on-screen tracking panel displaying direction, exact distance, and equipment.</div>
-        </div>
-        <div class="entry">
-          <div class="entry-name">chest esp</div>
-          <div class="entry-desc">chest highlighting through walls with count limits and distance culling.</div>
-        </div>
-        <div class="entry">
-          <div class="entry-name">module list &amp; logo</div>
-          <div class="entry-desc">configurable in-game module list (default, minimal, outlined, glass, bold) with optional logo.</div>
-        </div>
-        <div class="entry">
-          <div class="entry-name">gtb helper</div>
-          <div class="entry-desc">reads guess-the-build hints and shows candidate words in an overlay list.</div>
-        </div>
-        <div class="entry">
-          <div class="entry-name">discord rich presence</div>
-          <div class="entry-desc">live state, version, and active module count surfaced through discord rpc.</div>
-        </div>
+    <div class="reg-group" data-group="movement">
+      <div class="reg-label">movement<span class="reg-count">2</span></div>
+      <div class="reg-rows">
+        <details class="mod">
+          <summary><span class="mod-i">▸</span><span class="mod-name">speedbridge</span><span class="mod-tag">assist</span></summary>
+          <p>Edge sneak assist with block-only, hold-sneak, looking-down, and safety timing controls.</p>
+        </details>
+        <details class="mod">
+          <summary><span class="mod-i">▸</span><span class="mod-name">blockparty assist</span><span class="mod-tag">assist</span></summary>
+          <p>Reads the safe color and helps you get there in PixelParty / BlockParty rounds.</p>
+        </details>
+      </div>
+    </div>
+
+    <div class="reg-group" data-group="visual">
+      <div class="reg-label">visual<span class="reg-count">5</span></div>
+      <div class="reg-rows">
+        <details class="mod">
+          <summary><span class="mod-i">▸</span><span class="mod-name">nametags</span><span class="mod-tag">esp</span></summary>
+          <p>Player tags detailing health, armor tier, and held items.</p>
+        </details>
+        <details class="mod">
+          <summary><span class="mod-i">▸</span><span class="mod-name">closest player</span><span class="mod-tag">hud</span></summary>
+          <p>On-screen panel showing direction, exact distance, and equipment of the nearest player.</p>
+        </details>
+        <details class="mod">
+          <summary><span class="mod-i">▸</span><span class="mod-name">chest esp</span><span class="mod-tag">esp</span></summary>
+          <p>Chest highlighting through walls with count limits and distance culling.</p>
+        </details>
+        <details class="mod">
+          <summary><span class="mod-i">▸</span><span class="mod-name">block esp</span><span class="mod-tag">esp</span></summary>
+          <p>Highlights configured block types through terrain for quick scanning.</p>
+        </details>
+        <details class="mod">
+          <summary><span class="mod-i">▸</span><span class="mod-name">module list &amp; logo</span><span class="mod-tag">hud</span></summary>
+          <p>Configurable in-game module list (default, minimal, outlined, glass, bold) with optional logo.</p>
+        </details>
+      </div>
+    </div>
+
+    <div class="reg-group" data-group="utility">
+      <div class="reg-label">utility<span class="reg-count">3</span></div>
+      <div class="reg-rows">
+        <details class="mod">
+          <summary><span class="mod-i">▸</span><span class="mod-name">chest stealer</span><span class="mod-tag">inventory</span></summary>
+          <p>External cursor-based stealer that empties containers fast, safely off the game thread.</p>
+        </details>
+        <details class="mod">
+          <summary><span class="mod-i">▸</span><span class="mod-name">gtb helper</span><span class="mod-tag">overlay</span></summary>
+          <p>Reads Guess-The-Build hints and lists candidate words in an overlay.</p>
+        </details>
+        <details class="mod">
+          <summary><span class="mod-i">▸</span><span class="mod-name">discord rpc</span><span class="mod-tag">integration</span></summary>
+          <p>Live state, version, and active module count surfaced through Discord Rich Presence.</p>
+        </details>
       </div>
     </div>
   </section>
-
-  <hr class="rule" />
 
   <!-- STATUS -->
   <section id="status" class="section">
     <div class="section-head">
-      <h2><span class="slash">/</span> status</h2>
-      <p>last checked: <span id="status-date"></span>.</p>
+      <h2><span class="idx">02</span> build status</h2>
+      <p>last checked <span id="status-date"></span> · session <span id="uptime">00:00:00</span></p>
     </div>
-    <ul class="status-list">
-      <li><span class="dot-s">●</span> lunar client 1.8.9 &mdash; supported</li>
-      <li><span class="dot-s">●</span> lunar client 1.21.x &mdash; supported</li>
-      <li><span class="dot-s">●</span> lunar client 26.1 &mdash; supported</li>
-    </ul>
+    <div class="status-grid">
+      <div class="stat">
+        <div class="stat-top"><span class="led ok"></span>online</div>
+        <div class="stat-ver">lunar 1.8.9</div>
+        <div class="stat-note">legacy bridge · bridge.dll</div>
+      </div>
+      <div class="stat">
+        <div class="stat-top"><span class="led ok"></span>online</div>
+        <div class="stat-ver">lunar 1.21.x</div>
+        <div class="stat-note">modern bridge · bridge_261.dll</div>
+      </div>
+      <div class="stat">
+        <div class="stat-top"><span class="led ok"></span>online</div>
+        <div class="stat-ver">lunar 26.1</div>
+        <div class="stat-note">modern bridge · bridge_261.dll</div>
+      </div>
+    </div>
   </section>
-
-  <hr class="rule" />
 
   <!-- ARCHITECTURE -->
-  <section class="section">
+  <section id="arch" class="section">
     <div class="section-head">
-      <h2><span class="slash">/</span> architecture</h2>
-      <p>loader and bridge overview.</p>
+      <h2><span class="idx">03</span> architecture</h2>
+      <p>How the loader and native bridge talk to the game.</p>
     </div>
-    <div class="cols">
-      <div class="col">
-        <div class="col-num">01. loader</div>
-        <div class="entry">
-          <div class="entry-name">c# / .net 8 wpf</div>
-          <div class="entry-desc">finds <code>javaw.exe</code> and injects the native bridge dll. owns the external gui, profiles, keybinds, and discord rpc.</div>
-        </div>
+
+    <div class="arch">
+      <div class="node">
+        <div class="node-head">loader</div>
+        <div class="node-sub">c# / .net 8 wpf</div>
+        <ul>
+          <li>locates <code>javaw.exe</code></li>
+          <li>injects the bridge dll</li>
+          <li>owns gui, profiles, keybinds</li>
+          <li>discord rpc</li>
+        </ul>
       </div>
-      <div class="col">
-        <div class="col-num">02. bridge</div>
-        <div class="entry">
-          <div class="entry-name">c++ jni overlay</div>
-          <div class="entry-desc">attaches to jvm/jni, reads game state, and renders imgui overlays through <code>SwapBuffers</code>. config and state sync over tcp <code>25590</code>.</div>
-        </div>
+
+      <div class="wire">
+        <span class="wire-line"></span>
+        <span class="wire-label">tcp · 25590</span>
+        <span class="wire-line"></span>
+      </div>
+
+      <div class="node">
+        <div class="node-head">bridge</div>
+        <div class="node-sub">c++ jni overlay</div>
+        <ul>
+          <li>attaches to the jvm</li>
+          <li>reads game state</li>
+          <li>renders imgui via <code>SwapBuffers</code></li>
+          <li>yarn → mojmap fallback</li>
+        </ul>
+      </div>
+
+      <div class="wire">
+        <span class="wire-line"></span>
+        <span class="wire-label">jni</span>
+        <span class="wire-line"></span>
+      </div>
+
+      <div class="node node-jvm">
+        <div class="node-head">jvm</div>
+        <div class="node-sub">lunar client</div>
+        <ul>
+          <li>1.8.9 · obf</li>
+          <li>1.21.x · yarn</li>
+          <li>26.1 · mojmap</li>
+        </ul>
       </div>
     </div>
   </section>
-
-  <hr class="rule" />
 
   <!-- SETUP -->
   <section id="setup" class="section">
     <div class="section-head">
-      <h2><span class="slash">/</span> setup</h2>
-      <p>requirements and quick start.</p>
+      <h2><span class="idx">04</span> setup</h2>
+      <p>Injecting into a running world is recommended so every module initializes.</p>
     </div>
     <div class="cols">
       <div class="col">
-        <div class="col-num">01. requirements</div>
-        <div class="entry-list">
-          <p>windows 10/11 x64.</p>
-          <p>lunar client (1.8.9, 1.21.x, 26.1).</p>
-          <p>release exe is self-contained &mdash; no .net install needed.</p>
-          <p>mingw-w64 + jdk 17 headers (build only).</p>
-        </div>
+        <div class="col-num">requirements</div>
+        <ul class="req">
+          <li>windows 10/11 x64</li>
+          <li>lunar client (1.8.9, 1.21.x, 26.1)</li>
+          <li>release exe is self-contained — no .net install</li>
+          <li>mingw-w64 + jdk 17 headers (build only)</li>
+        </ul>
       </div>
       <div class="col">
-        <div class="col-num">02. usage</div>
+        <div class="col-num">usage</div>
         <ol class="steps">
-          <li>launch lunar client.</li>
+          <li>launch lunar client, join a world.</li>
           <li>run <code>Aoko.exe</code>.</li>
-          <li>click <strong>inject</strong>.</li>
-          <li>use the external gui after inject.</li>
-          <li>bind keys under the <strong>keybinds</strong> tab to toggle modules.</li>
+          <li>click <b>inject</b>.</li>
+          <li>drive everything from the external gui.</li>
+          <li>bind keys under <b>keybinds</b> to toggle modules.</li>
         </ol>
       </div>
     </div>
   </section>
 
-  <hr class="rule" />
-
   <!-- DOWNLOAD -->
   <section id="download" class="section">
     <div class="section-head">
-      <h2><span class="slash">/</span> download</h2>
-      <p>open source build for windows x64.</p>
+      <h2><span class="idx">05</span> download</h2>
+      <p>Open-source build for Windows x64.</p>
     </div>
     <div class="dl-block">
       <div class="dl-meta">
         <div><span>version</span><span class="v">latest (main)</span></div>
-        <div><span>target</span><span class="v">lunar 1.8.9, 1.21.x, 26.1</span></div>
+        <div><span>target</span><span class="v">lunar 1.8.9 · 1.21.x · 26.1</span></div>
         <div><span>platform</span><span class="v">windows x64</span></div>
         <div><span>license</span><span class="v">gpl-3</span></div>
       </div>
-      <a href="https://github.com/naczo5/aoko-client/releases" class="btn-primary" id="github-link">open latest releases</a>
-      <p class="dl-note">build from source using the commands in <code>README.md</code>.</p>
+      <a href="https://github.com/naczo5/aoko-client/releases" class="btn-primary" id="github-link">open latest releases →</a>
+      <p class="dl-note"># or build from source — see <code>README.md</code></p>
     </div>
   </section>
-
-  <hr class="rule" />
 
   <!-- FOOTER -->
   <footer>
     <div class="footer-inner">
-      <span class="logo-mini">aoko<span class="dot">.</span></span>
+      <span class="logo-mini">aoko<span class="dot">_</span></span>
       <p>use at your own risk.</p>
       <p class="footer-small">not affiliated with mojang, microsoft, or lunar client. for educational purposes only.</p>
     </div>
