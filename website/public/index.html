@@ -26,7 +26,8 @@
   <meta name="twitter:description" content="Built for 1.8.9, 1.21.x, and 26.1." />
   <meta name="twitter:image" content="https://naczo5.github.io/aoko-client/screenshots/gameplay.jpg" />
   <title>aoko — a foss, injectable utility client for Lunar</title>
-  <link rel="stylesheet" href="style.css?v=2" />
+  <link rel="stylesheet" href="style.css?v=3" />
+  <link rel="stylesheet" href="preview.css?v=1" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
@@ -66,13 +67,23 @@
         </div>
       </div>
 
-      <!-- INJECTION CONSOLE -->
-      <div class="console" id="console" role="img" aria-label="Simulated aoko injection sequence: locating javaw.exe, mapping the JVM, injecting the bridge DLL, handshaking over TCP 25590, and loading modules.">
-        <div class="console-bar">
+      <!-- PREVIEW LAUNCHER -->
+      <div class="launcher" id="launcher">
+        <div class="launcher-bar">
           <span class="tl-dot"></span><span class="tl-dot"></span><span class="tl-dot"></span>
-          <span class="console-title">aoko@lunar — injector</span>
+          <span class="launcher-title">aoko — live preview</span>
         </div>
-        <pre class="console-body" id="console-body" aria-hidden="true"></pre>
+        <div class="launcher-screen">
+          <div class="launcher-glow" aria-hidden="true"></div>
+          <div class="launcher-copy">
+            <div class="launcher-kicker">interactive demo</div>
+            <p class="launcher-lead">Try the external GUI in your browser — no download.</p>
+          </div>
+          <button type="button" class="launcher-btn" id="preview-open" aria-haspopup="dialog" aria-controls="aoko-desktop">
+            <span class="launcher-btn-icon" aria-hidden="true">▶</span> preview
+          </button>
+          <div class="launcher-hint">opens a simulated desktop · esc to close</div>
+        </div>
       </div>
     </div>
 
@@ -324,6 +335,11 @@
     </div>
   </footer>
 
-  <script src="main.js?v=2"></script>
+  <!-- FAUX WINDOWS DESKTOP OVERLAY (populated by preview.js) -->
+  <div class="aoko-desktop" id="aoko-desktop" role="dialog" aria-modal="true" aria-label="aoko client live preview" hidden></div>
+
+  <script src="main.js?v=3"></script>
+  <script src="preview-data.js?v=1"></script>
+  <script src="preview.js?v=1"></script>
 </body>
 </html>

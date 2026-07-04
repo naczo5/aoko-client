@@ -187,15 +187,15 @@ nav ul a:hover { color: var(--text); }
 }
 .hero-meta i { color: var(--dim); font-style: normal; margin-right: 0.4rem; }
 
-/* CONSOLE */
-.console {
+/* PREVIEW LAUNCHER (replaces old injection console) */
+.launcher {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 5px;
   overflow: hidden;
   box-shadow: 0 24px 60px -30px rgba(0,0,0,0.9);
 }
-.console-bar {
+.launcher-bar {
   display: flex;
   align-items: center;
   gap: 7px;
@@ -205,32 +205,82 @@ nav ul a:hover { color: var(--text); }
 }
 .tl-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--line); }
 .tl-dot:nth-child(1) { background: #3a3d45; }
-.console-title {
+.launcher-title {
   margin-left: 8px;
   font-family: var(--font-mono);
   font-size: 0.72rem;
   color: var(--dim);
 }
-.console-body {
-  font-family: var(--font-mono);
-  font-size: 0.8rem;
-  line-height: 1.75;
-  color: var(--muted);
-  padding: 16px 16px 18px;
+.launcher-screen {
+  position: relative;
   min-height: 232px;
-  white-space: pre-wrap;
-  word-break: break-word;
+  padding: 30px 26px 26px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 1rem;
+  background:
+    radial-gradient(120% 90% at 80% 0%, rgba(224,87,75,0.10), transparent 55%),
+    linear-gradient(180deg, var(--panel-2), var(--panel));
+  overflow: hidden;
 }
-.console-body .ok  { color: var(--ok); }
-.console-body .hi  { color: var(--text); }
-.console-body .ac  { color: var(--accent); }
-.console-body .pr  { color: var(--accent); }
-.caret {
-  display: inline-block;
-  width: 8px;
-  background: var(--accent);
-  color: transparent;
-  animation: blink 1.1s steps(1) infinite;
+.launcher-glow {
+  position: absolute;
+  inset: auto -40% -60% auto;
+  width: 70%; height: 130%;
+  background: radial-gradient(circle, rgba(107,141,171,0.18), transparent 65%);
+  filter: blur(20px);
+  pointer-events: none;
+}
+.launcher-copy { position: relative; z-index: 1; }
+.launcher-kicker {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--accent);
+  margin-bottom: 0.5rem;
+}
+.launcher-lead {
+  color: var(--text);
+  font-size: 1.02rem;
+  line-height: 1.5;
+  max-width: 30ch;
+}
+.launcher-btn {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-family: var(--font-mono);
+  font-size: 0.92rem;
+  font-weight: 500;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--accent);
+  border-radius: 2px;
+  padding: 13px 30px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.1s ease, box-shadow 0.15s ease;
+}
+.launcher-btn:hover {
+  background: rgba(224,87,75,0.12);
+  border-color: var(--accent);
+  box-shadow: 0 8px 30px -12px rgba(224,87,75,0.5);
+}
+.launcher-btn:active { transform: translateY(1px); }
+.launcher-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.launcher-btn-icon { color: var(--accent); font-size: 0.8rem; }
+.launcher-hint {
+  position: relative;
+  z-index: 1;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--dim);
+  letter-spacing: 0.03em;
 }
 
 /* HERO PREVIEW */
@@ -474,7 +524,7 @@ footer p { color: var(--muted); font-size: 0.84rem; }
 /* RESPONSIVE */
 @media (max-width: 860px) {
   .hero-grid { grid-template-columns: 1fr; gap: 2.4rem; }
-  .console { order: 2; }
+  .launcher { order: 2; }
   .status-grid { grid-template-columns: 1fr; }
   .arch { flex-direction: column; }
   .wire { flex-direction: row; min-width: 0; padding: 0.6rem 0; width: 100%; }
