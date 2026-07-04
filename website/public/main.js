@@ -72,13 +72,22 @@
     })();
   }
 
-  // start when console scrolls into view (or immediately if already visible)
-  const io = new IntersectionObserver((entries, obs) => {
-    entries.forEach((e) => {
-      if (e.isIntersecting) { typeLine(); obs.disconnect(); }
-    });
-  }, { threshold: 0.4 });
-  io.observe(body);
+  // start once — via IntersectionObserver, or a fallback timer if it never fires
+  let started = false;
+  function start() { if (started) return; started = true; typeLine(); }
+
+  if ('IntersectionObserver' in window) {
+    const io = new IntersectionObserver((entries, obs) => {
+      entries.forEach((e) => {
+        if (e.isIntersecting) { start(); obs.disconnect(); }
+      });
+    }, { threshold: 0.15 });
+    io.observe(body);
+    // safety net: the console sits in the hero, so start even if IO is quiet
+    setTimeout(start, 1200);
+  } else {
+    start();
+  }
 })();
 
 /* ---- status date + session uptime ---- */
