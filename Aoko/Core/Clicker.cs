@@ -445,6 +445,7 @@ public class Clicker : INotifyPropertyChanged
 
             AimAssistEnabled = false;
             TriggerbotEnabled = false;
+            SilentAuraEnabled = false;
             SpeedBridgeEnabled = false;
             GtbHelperEnabled = false;
             PixelPartyAssistEnabled = false;
@@ -1368,6 +1369,150 @@ public class Clicker : INotifyPropertyChanged
         }
     }
 
+    private bool _silentAuraEnabled = false;
+    public bool SilentAuraEnabled
+    {
+        get => _silentAuraEnabled;
+        set
+        {
+            if (_silentAuraEnabled == value) return;
+            _silentAuraEnabled = value;
+            OnPropertyChanged(nameof(SilentAuraEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private float _silentAuraRange = 3.0f;
+    public float SilentAuraRange
+    {
+        get => _silentAuraRange;
+        set
+        {
+            float clamped = Math.Clamp(value, 2.5f, 4.0f);
+            if (Math.Abs(_silentAuraRange - clamped) < 0.001f) return;
+            _silentAuraRange = clamped;
+            OnPropertyChanged(nameof(SilentAuraRange));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private float _silentAuraAimRange = 4.0f;
+    public float SilentAuraAimRange
+    {
+        get => _silentAuraAimRange;
+        set
+        {
+            float clamped = Math.Clamp(value, 3.0f, 6.0f);
+            if (Math.Abs(_silentAuraAimRange - clamped) < 0.001f) return;
+            _silentAuraAimRange = clamped;
+            OnPropertyChanged(nameof(SilentAuraAimRange));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private float _silentAuraRotSpeed = 35.0f;
+    public float SilentAuraRotSpeed
+    {
+        get => _silentAuraRotSpeed;
+        set
+        {
+            float clamped = Math.Clamp(value, 10.0f, 90.0f);
+            if (Math.Abs(_silentAuraRotSpeed - clamped) < 0.001f) return;
+            _silentAuraRotSpeed = clamped;
+            OnPropertyChanged(nameof(SilentAuraRotSpeed));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private string _silentAuraTargetMode = "distance";
+    public string SilentAuraTargetMode
+    {
+        get => _silentAuraTargetMode;
+        set
+        {
+            string normalized = string.Equals(value, "health", StringComparison.OrdinalIgnoreCase) ? "health" : "distance";
+            if (_silentAuraTargetMode == normalized) return;
+            _silentAuraTargetMode = normalized;
+            OnPropertyChanged(nameof(SilentAuraTargetMode));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private int _silentAuraSwitchDelayMs = 400;
+    public int SilentAuraSwitchDelayMs
+    {
+        get => _silentAuraSwitchDelayMs;
+        set
+        {
+            int clamped = Math.Clamp(value, 0, 2000);
+            if (_silentAuraSwitchDelayMs == clamped) return;
+            _silentAuraSwitchDelayMs = clamped;
+            OnPropertyChanged(nameof(SilentAuraSwitchDelayMs));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private int _silentAuraAccuracy = 90;
+    public int SilentAuraAccuracy
+    {
+        get => _silentAuraAccuracy;
+        set
+        {
+            int clamped = Math.Clamp(value, 50, 100);
+            if (_silentAuraAccuracy == clamped) return;
+            _silentAuraAccuracy = clamped;
+            OnPropertyChanged(nameof(SilentAuraAccuracy));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _silentAuraSpamMode = true;
+    public bool SilentAuraSpamMode
+    {
+        get => _silentAuraSpamMode;
+        set
+        {
+            if (_silentAuraSpamMode == value) return;
+            _silentAuraSpamMode = value;
+            OnPropertyChanged(nameof(SilentAuraSpamMode));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private float _silentAuraSpamMinCps = 14.0f;
+    public float SilentAuraSpamMinCps
+    {
+        get => _silentAuraSpamMinCps;
+        set
+        {
+            float clamped = Math.Clamp(value, 8.0f, 20.0f);
+            if (Math.Abs(_silentAuraSpamMinCps - clamped) < 0.001f) return;
+            _silentAuraSpamMinCps = clamped;
+            if (_silentAuraSpamMinCps > _silentAuraSpamMaxCps)
+                _silentAuraSpamMaxCps = _silentAuraSpamMinCps;
+            OnPropertyChanged(nameof(SilentAuraSpamMinCps));
+            OnPropertyChanged(nameof(SilentAuraSpamMaxCps));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private float _silentAuraSpamMaxCps = 18.0f;
+    public float SilentAuraSpamMaxCps
+    {
+        get => _silentAuraSpamMaxCps;
+        set
+        {
+            float clamped = Math.Clamp(value, 8.0f, 20.0f);
+            if (Math.Abs(_silentAuraSpamMaxCps - clamped) < 0.001f) return;
+            _silentAuraSpamMaxCps = clamped;
+            if (_silentAuraSpamMinCps > _silentAuraSpamMaxCps)
+                _silentAuraSpamMinCps = _silentAuraSpamMaxCps;
+            OnPropertyChanged(nameof(SilentAuraSpamMinCps));
+            OnPropertyChanged(nameof(SilentAuraSpamMaxCps));
+            StateChanged?.Invoke();
+        }
+    }
+
     private bool _speedBridgeEnabled = false;
     public bool SpeedBridgeEnabled
     {
@@ -1884,8 +2029,12 @@ public class Clicker : INotifyPropertyChanged
         var rect = WindowDetection.GetMinecraftWindowRect();
         if (!rect.HasValue) return false;
 
-        int width = rect.Value.Right - rect.Value.Left;
-        int height = rect.Value.Bottom - rect.Value.Top;
+        int width = state.ViewportWidth > 0
+            ? state.ViewportWidth
+            : rect.Value.Right - rect.Value.Left;
+        int height = state.ViewportHeight > 0
+            ? state.ViewportHeight
+            : rect.Value.Bottom - rect.Value.Top;
         if (width <= 0 || height <= 0) return false;
 
         double cx = width * 0.5;
@@ -1915,8 +2064,12 @@ public class Clicker : INotifyPropertyChanged
         var rect = WindowDetection.GetMinecraftWindowRect();
         if (!rect.HasValue) return false;
 
-        int width = rect.Value.Right - rect.Value.Left;
-        int height = rect.Value.Bottom - rect.Value.Top;
+        int width = state.ViewportWidth > 0
+            ? state.ViewportWidth
+            : rect.Value.Right - rect.Value.Left;
+        int height = state.ViewportHeight > 0
+            ? state.ViewportHeight
+            : rect.Value.Bottom - rect.Value.Top;
         if (width <= 0 || height <= 0) return false;
 
         double cx = width * 0.5;
@@ -2136,6 +2289,7 @@ public class Clicker : INotifyPropertyChanged
             double targetInterval = 1000.0 / cps; // in milliseconds
 
             // Perform click
+            StatsTracker.Instance.RecordClick(cps, _useLeftButton);
             PerformClick(_useLeftButton);
             
             // Drift Compensation
@@ -2181,8 +2335,12 @@ public class Clicker : INotifyPropertyChanged
         var rect = WindowDetection.GetMinecraftWindowRect();
         if (!rect.HasValue) return;
 
-        int width = rect.Value.Right - rect.Value.Left;
-        int height = rect.Value.Bottom - rect.Value.Top;
+        int width = state.ViewportWidth > 0
+            ? state.ViewportWidth
+            : rect.Value.Right - rect.Value.Left;
+        int height = state.ViewportHeight > 0
+            ? state.ViewportHeight
+            : rect.Value.Bottom - rect.Value.Top;
         if (width <= 0 || height <= 0) return;
 
         double centerX = width * 0.5;

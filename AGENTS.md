@@ -15,8 +15,8 @@ Operating guide for coding agents working in `legoclickerC`. Build/test/lint com
 
 - `Aoko/`: .NET 8 WPF loader + external GUI (publishes as `Aoko.exe`).
 - `Aoko/Core/`: clicker engine, input hooks, profile persistence, TCP client, GTB solver.
-- `McInjector/`: native bridge DLLs (`bridge.dll` for 1.8.9, `bridge_261.dll` for 26.1 / 1.21.x).
-- `McInjector/src/main/cpp/`: JNI/Win32/OpenGL/ImGui/MinHook bridge sources.
+- `McInjector/`: native bridge DLLs (`bridge.dll` for 1.8.9, `bridge_261.dll` for 26.1 / 26.2 / 1.21.x).
+- `McInjector/src/main/cpp/`: JNI/Win32/OpenGL/Vulkan/ImGui/MinHook bridge sources.
 - `McInjector/src/main/java/`: **Unused/obsolete Java agent code. Ignore it.** The C++ bridges perform all JNI, rendering, and TCP duties themselves.
 
 ## Required Toolchain
@@ -86,6 +86,7 @@ C# tests use **xUnit** (`Aoko.Tests\`). Native harness tests are a standalone C+
 - Input simulation normally happens in C# via Win32 `SendInput`; bridge-side game interaction is allowed only when it is explicitly owned by a module, version-gated, validated, and kept out of raw packet spam or combat-only calls.
 - `bridge_261.cpp` uses Yarn-first, Mojmap-fallback class name arrays to support both 1.21 (obfuscated, Yarn mappings) and 26.1 (unobfuscated, Mojang mappings) from a single DLL.
 - `bridge.cpp` (1.8.9) now links the shared ImGui/OpenGL backend and MinHook sources. Do not assume legacy rendering is raw GL-only.
+- **Renderer auto-detect (`bridge_261.dll`):** the overlay renders through either OpenGL (`wglSwapBuffers` hook in `bridge_261.cpp`) or Vulkan (`render_backend.cpp` + `imgui/imgui_impl_vulkan.*`, for Lunar 26.2's Vulkan renderer). Whichever present path fires first wins the session (`RenderBackend_GetActiveKind()` / `vkoverlay::ArbitrateBackend`); the other path then no-ops its overlay. The ImGui context + Win32 platform + fonts are created renderer-neutrally (`EnsureImGuiContextNeutral` / `Bridge_EnsureImGuiPlatform`); only the renderer backend differs. Vulkan headers + the ImGui Vulkan backend are vendored under `McInjector/src/main/cpp/{vulkan,imgui}/` and loaded dynamically (`-DIMGUI_IMPL_VULKAN_NO_PROTOTYPES`, no `vulkan-1.lib` link). Kill-switch: `AOKO_BRIDGE261_VULKAN=0`. Pure helpers live in `vk_overlay_helpers.h` and are unit-tested in `tests/vk_overlay_tests.cpp` (`run_tests.bat`).
 - **Menu-injection compatibility (1.8.9):** mappings and features must recover correctly when injected while in menus/lobby, not only when already in a world.
 - Release publish `build_release.bat` copies DLLs from `McInjector\` (not `Aoko\`), so both bridges must be built first.
 

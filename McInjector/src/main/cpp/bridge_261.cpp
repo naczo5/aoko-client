@@ -35,6 +35,7 @@
 #include "bridge_capabilities.h"
 #include "hud_layout.h"
 #include "block_esp_common.h"
+#include "screen_projection.h"
 #include "jni_core/scoped_env.h"
 #include "jni_core/local_frame.h"
 #include "jni_core/resolver.h"
@@ -130,6 +131,16 @@ struct Config {
     bool  clickInChests  = false;
     bool  aimAssist      = false;
     bool  triggerbot     = false;
+    bool  silentAura     = false;
+    float silentAuraRange = 3.0f;    // attack range (blocks)
+    float silentAuraAimRange = 4.0f; // lock-on / rotation range (>= attack range)
+    float silentAuraRotSpeed = 35.0f;
+    bool  silentAuraPreferHealth = false; // false = closest target, true = lowest health
+    int   silentAuraSwitchDelayMs = 400;  // min time locked before switching targets
+    float silentAuraAccuracy = 90.0f;     // 100 = perfect aim, lower = more miss chance
+    bool  silentAuraSpamMode = true;
+    float silentAuraSpamMinCps = 14.0f;
+    float silentAuraSpamMaxCps = 18.0f;
     bool  nametags       = false;
     bool  chestEsp       = false;
     bool  chestStealer   = false;
@@ -214,6 +225,20 @@ static void ParseConfig(const std::string& line) {
     g_config.clickInChests = reader.GetBool("clickInChests");
     g_config.aimAssist     = reader.GetBool("aimAssist");
     g_config.triggerbot    = reader.GetBool("triggerbot");
+    g_config.silentAura    = reader.GetBool("silentAura");
+    g_config.silentAuraRange = lc::ClampFloat(reader.GetFloat("silentAuraRange", g_config.silentAuraRange), 2.5f, 4.0f);
+    g_config.silentAuraAimRange = lc::ClampFloat(reader.GetFloat("silentAuraAimRange", g_config.silentAuraAimRange), 3.0f, 6.0f);
+    if (g_config.silentAuraAimRange < g_config.silentAuraRange)
+        g_config.silentAuraAimRange = g_config.silentAuraRange;
+    g_config.silentAuraRotSpeed = lc::ClampFloat(reader.GetFloat("silentAuraRotSpeed", g_config.silentAuraRotSpeed), 10.0f, 90.0f);
+    g_config.silentAuraPreferHealth = (reader.GetString("silentAuraTargetMode") == "health");
+    g_config.silentAuraSwitchDelayMs = lc::ClampInt(reader.GetInt("silentAuraSwitchDelayMs", g_config.silentAuraSwitchDelayMs), 0, 2000);
+    g_config.silentAuraAccuracy = lc::ClampFloat(reader.GetFloat("silentAuraAccuracy", g_config.silentAuraAccuracy), 50.0f, 100.0f);
+    g_config.silentAuraSpamMode = reader.GetBool("silentAuraSpamMode", g_config.silentAuraSpamMode);
+    g_config.silentAuraSpamMinCps = lc::ClampFloat(reader.GetFloat("silentAuraSpamMinCps", g_config.silentAuraSpamMinCps), 8.0f, 20.0f);
+    g_config.silentAuraSpamMaxCps = lc::ClampFloat(reader.GetFloat("silentAuraSpamMaxCps", g_config.silentAuraSpamMaxCps), 8.0f, 20.0f);
+    if (g_config.silentAuraSpamMinCps > g_config.silentAuraSpamMaxCps)
+        g_config.silentAuraSpamMinCps = g_config.silentAuraSpamMaxCps;
     g_config.nametags      = reader.GetBool("nametags");
     g_config.chestEsp      = reader.GetBool("chestEsp");
     g_config.chestStealer  = reader.GetBool("chestStealerEnabled");
@@ -477,6 +502,36 @@ static HGLRC g_imguiPendingGlrc = nullptr;
 static HWND   g_hwnd     = nullptr;
 static JavaVM* g_jvm     = nullptr;
 
+// ImGui owns the only authoritative draw viewport. JNI scans run on a different
+// thread, so publish a small synchronized snapshot instead of reading Win32 or
+// ImGui state from those scans.
+struct OverlayViewport121 {
+    int width = 0;
+    int height = 0;
+    unsigned long generation = 0;
+};
+static OverlayViewport121 g_overlayViewport121 = {};
+static Mutex g_overlayViewportMutex121;
+static volatile LONG g_rendererProjectionAccepted121 = 0;
+static volatile LONG g_rendererProjectionRejected121 = 0;
+
+static void PublishOverlayViewport121(int width, int height) {
+    if (width <= 1 || height <= 1) return;
+    LockGuard lk(g_overlayViewportMutex121);
+    if (g_overlayViewport121.width != width || g_overlayViewport121.height != height) {
+        ++g_overlayViewport121.generation;
+    }
+    g_overlayViewport121.width = width;
+    g_overlayViewport121.height = height;
+}
+
+static bool ReadOverlayViewport121(OverlayViewport121* out) {
+    if (!out) return false;
+    LockGuard lk(g_overlayViewportMutex121);
+    *out = g_overlayViewport121;
+    return out->width > 1 && out->height > 1;
+}
+
 typedef void* (*PFN_glfwGetCurrentContext)();
 typedef void  (*PFN_glfwSetInputMode)(void* window, int mode, int value);
 typedef int   (*PFN_glfwGetInputMode)(void* window, int mode);
@@ -619,6 +674,25 @@ static jmethodID g_getConnectionMethod_121 = nullptr; // Minecraft.getConnection
 static jfieldID  g_gameModeFieldCached_121 = nullptr;  // Minecraft.gameMode
 static jmethodID g_getCarriedMethod_121 = nullptr;     // AbstractContainerMenu.getCarried()
 static jmethodID g_isEmptyMethod_121 = nullptr;        // ItemStack.isEmpty()
+static jmethodID g_silentAuraAttackMethod_121 = nullptr; // MultiPlayerGameMode.attack(Player, Entity)
+static jmethodID g_silentAuraSwingMethod_121 = nullptr;  // LivingEntity.swing(InteractionHand)
+static jmethodID g_silentAuraSetYawMethod_121 = nullptr; // Entity.setYRot(float)
+static jmethodID g_silentAuraSetPitchMethod_121 = nullptr; // Entity.setXRot(float)
+static jmethodID g_silentAuraSetBodyYawMethod_121 = nullptr; // LivingEntity.setYBodyRot(float)
+static jobject   g_silentAuraMainHand_121 = nullptr;     // InteractionHand.MAIN_HAND
+static bool      g_silentAuraMethodsResolved_121 = false;
+static bool      g_silentAuraRuntimeBlocked_121 = false;
+static bool      g_loggedSilentAuraResolveFail_121 = false;
+static DWORD     g_silentAuraNextResolveMs_121 = 0;
+static DWORD     g_silentAuraLastScanMs_121 = 0;
+static DWORD     g_silentAuraLastAttackMs_121 = 0;
+static float     g_silentAuraLastAppliedYaw_121 = 0.0f;
+static bool      g_silentAuraLastYawValid_121 = false;
+static std::string g_silentAuraCurrentTarget_121;   // stable name of the locked target
+static DWORD     g_silentAuraLastSwitchMs_121 = 0;   // last time the target changed
+static float     g_silentAuraAimOffsetYaw_121 = 0.0f;   // accuracy-driven aim error (deg)
+static float     g_silentAuraAimOffsetPitch_121 = 0.0f;
+static DWORD     g_silentAuraNextOffsetMs_121 = 0;
 
 static jobject   g_lastAutoTotemWorld_121 = nullptr;   // Tracks world obj to detect transitions
 
@@ -647,6 +721,8 @@ static jmethodID g_getProjectionMatrix_121 = nullptr;
 static jmethodID g_getModelViewMatrix_121  = nullptr;
 static jfieldID  g_projectionMatrixField_121 = nullptr;
 static jfieldID  g_modelViewMatrixField_121 = nullptr;
+static jmethodID g_gameRendererBasicProjectionMatrix_121 = nullptr;
+static jmethodID g_gameRendererProjectPointToScreen_121 = nullptr;
 
 static jclass    g_matrix4fClass_121 = nullptr;
 static jfieldID  g_matrixM00=nullptr, g_matrixM01=nullptr, g_matrixM02=nullptr, g_matrixM03=nullptr;
@@ -654,6 +730,7 @@ static jfieldID  g_matrixM10=nullptr, g_matrixM11=nullptr, g_matrixM12=nullptr, 
 static jfieldID  g_matrixM20=nullptr, g_matrixM21=nullptr, g_matrixM22=nullptr, g_matrixM23=nullptr;
 static jfieldID  g_matrixM30=nullptr, g_matrixM31=nullptr, g_matrixM32=nullptr, g_matrixM33=nullptr;
 static jmethodID g_matrixGetFloatArray_121 = nullptr; // Matrix4f.get(float[]) -> float[]
+static jmethodID g_matrix4fCtor_121 = nullptr;
 
 // JNI globals: camera extraction
 static jfieldID  g_gameRendererField_121 = nullptr; // Lnet/minecraft/class_757;
@@ -663,6 +740,7 @@ static jclass    g_cameraClass_121 = nullptr;
 static jfieldID  g_cameraPosF_121= nullptr;
 static jfieldID  g_cameraYawF_121 = nullptr;
 static jfieldID  g_cameraPitchF_121 = nullptr;
+static jmethodID g_cameraViewRotationProjection_121 = nullptr;
 
 static jclass    g_vec3dClass_121  = nullptr;
 static jfieldID  g_vec3dX_121=nullptr, g_vec3dY_121=nullptr, g_vec3dZ_121=nullptr;
@@ -670,6 +748,7 @@ static jfieldID  g_vec3dX_121=nullptr, g_vec3dY_121=nullptr, g_vec3dZ_121=nullpt
 // Cached Lunar Client saved-matrix field IDs (set once by bg thread, valid for lifetime)
 static jfieldID  g_lunarProjField_121 = nullptr;
 static jfieldID  g_lunarViewField_121 = nullptr;
+static bool      g_lunarMatrixLookupDone_121 = false;
 
 // Shared camera state: written by background thread, read by render thread (no JNI on render thread)
 struct BgCamState {
@@ -753,24 +832,16 @@ static bool WorldToScreen(LegoVec3 pos, LegoVec3 camPos, const Matrix4x4& view, 
     // 3. Multiply by Projection matrix
     float ndcX = clipX * proj.m[0] + clipY * proj.m[4] + clipZ * proj.m[8] + clipW * proj.m[12];
     float ndcY = clipX * proj.m[1] + clipY * proj.m[5] + clipZ * proj.m[9] + clipW * proj.m[13];
-    float ndcZ = clipX * proj.m[2] + clipY * proj.m[6] + clipZ * proj.m[10] + clipW * proj.m[14];
     float ndcW = clipX * proj.m[3] + clipY * proj.m[7] + clipZ * proj.m[11] + clipW * proj.m[15];
 
     if (!std::isfinite(ndcW) || ndcW < 0.1f) return false;
-
-    // 4. Perspective Divide
     ndcX /= ndcW;
     ndcY /= ndcW;
     if (!std::isfinite(ndcX) || !std::isfinite(ndcY)) return false;
 
-    // 5. Map to screen (Vulkan/DirectX y-axis mapping used in modern MC? No, OpenGL is +Y up. 
-    // Minecraft maps top-left as 0,0 for GUI. ndcY +1 is top, -1 is bottom. 
-    // So 1.0f - ndcY will map top to 0.)
     *sx = (ndcX + 1.0f) * 0.5f * (float)winW;
     *sy = (1.0f - ndcY) * 0.5f * (float)winH;
-    if (!std::isfinite(*sx) || !std::isfinite(*sy)) return false;
-
-    return true;
+    return std::isfinite(*sx) && std::isfinite(*sy);
 }
 
 // WorldToScreen using camera angles (yaw/pitch from JNI) -- no OpenGL state needed.
@@ -785,57 +856,89 @@ static bool WorldToScreen_Angles(LegoVec3 worldPos, LegoVec3 camPos,
     float dz = (float)(worldPos.z - camPos.z);
 
     const float PI = 3.14159265f;
-    float yaw   = yawDeg   * (PI / 180.0f);
+    float yaw = yawDeg * (PI / 180.0f);
     float pitch = pitchDeg * (PI / 180.0f);
-    float sinY  = sinf(yaw),   cosY  = cosf(yaw);
-    float sinP  = sinf(pitch), cosP  = cosf(pitch);
-
-    // Minecraft axes: +X east, +Y up, +Z south
-    // Forward vector (direction camera faces, yaw=0 → south)
-    float fX = -sinY * cosP;
-    float fY = -sinP;
-    float fZ =  cosY * cosP;
-
-    // Build an orthonormal basis using cross products to avoid handedness mistakes.
-    // right = normalize(worldUp x forward) so that yaw=0 -> right = +X (east)
-    const float upX0 = 0.0f, upY0 = 1.0f, upZ0 = 0.0f;
-    float rX = upY0 * fZ - upZ0 * fY;
-    float rY = upZ0 * fX - upX0 * fZ;
-    float rZ = upX0 * fY - upY0 * fX;
+    float sinY = sinf(yaw), cosY = cosf(yaw);
+    float sinP = sinf(pitch), cosP = cosf(pitch);
+    float fX = -sinY * cosP, fY = -sinP, fZ = cosY * cosP;
+    float rX = fZ, rY = 0.0f, rZ = -fX;
     float rLen = sqrtf(rX * rX + rY * rY + rZ * rZ);
-    if (rLen < 1e-6f) {
-        // Looking straight up/down; pick an arbitrary right.
-        rX = 1.0f; rY = 0.0f; rZ = 0.0f;
-        rLen = 1.0f;
-    }
+    if (rLen < 1e-6f) { rX = 1.0f; rY = 0.0f; rZ = 0.0f; rLen = 1.0f; }
     rX /= rLen; rY /= rLen; rZ /= rLen;
-
-    // up = forward x right (right-handed)
     float uX = fY * rZ - fZ * rY;
     float uY = fZ * rX - fX * rZ;
     float uZ = fX * rY - fY * rX;
-
-    // Project delta onto view axes
-    float vFwd   = dx * fX + dy * fY + dz * fZ;
+    float vFwd = dx * fX + dy * fY + dz * fZ;
     float vRight = dx * rX + dy * rY + dz * rZ;
-    float vUp    = dx * uX + dy * uY + dz * uZ;
+    float vUp = dx * uX + dy * uY + dz * uZ;
+    if (!std::isfinite(vFwd) || vFwd < 0.1f) return false;
 
-    if (!std::isfinite(vFwd) || vFwd < 0.1f) return false;   // behind camera
-
-    float aspect     = (float)winW / (float)winH;
+    float aspect = (float)winW / (float)winH;
     float tanHalfFov = tanf(fovDeg * 0.5f * (PI / 180.0f));
-
     float ndcX = (vRight / vFwd) / (tanHalfFov * aspect);
-    float ndcY = (vUp    / vFwd) / tanHalfFov;
+    float ndcY = (vUp / vFwd) / tanHalfFov;
     if (!std::isfinite(ndcX) || !std::isfinite(ndcY)) return false;
-
-    // Don't early-reject based on NDC bounds; callers can clamp/skip based on their own logic.
-    // This prevents boxes from disappearing when some corners are off-screen.
-
     *sx = (ndcX + 1.0f) * 0.5f * (float)winW;
     *sy = (1.0f - ndcY) * 0.5f * (float)winH;
-    if (!std::isfinite(*sx) || !std::isfinite(*sy)) return false;
-    return true;
+    return std::isfinite(*sx) && std::isfinite(*sy);
+}
+
+static bool ProjectWorldPointToScreen121(JNIEnv* env, jobject gameRenderer,
+                                         LegoVec3 worldPos, float* sx, float* sy) {
+    if (!env || !gameRenderer || !sx || !sy || !g_gameRendererProjectPointToScreen_121
+        || !g_vec3dClass_121 || !g_vec3dCtor_121 || !g_vec3dX_121 || !g_vec3dY_121
+        || (g_lunarProjField_121 && g_lunarViewField_121)) {
+        return false;
+    }
+
+    jobject point = env->NewObject(g_vec3dClass_121, g_vec3dCtor_121,
+                                   (jdouble)worldPos.x, (jdouble)worldPos.y, (jdouble)worldPos.z);
+    if (env->ExceptionCheck() || !point) {
+        env->ExceptionClear();
+        return false;
+    }
+    jobject screen = env->CallObjectMethod(gameRenderer, g_gameRendererProjectPointToScreen_121, point);
+    if (env->ExceptionCheck() || !screen) {
+        env->ExceptionClear();
+        env->DeleteLocalRef(point);
+        return false;
+    }
+
+    double x = env->GetDoubleField(screen, g_vec3dX_121);
+    double y = env->GetDoubleField(screen, g_vec3dY_121);
+    double z = g_vec3dZ_121 ? env->GetDoubleField(screen, g_vec3dZ_121) : NAN;
+    bool readable = !env->ExceptionCheck();
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    env->DeleteLocalRef(screen);
+    env->DeleteLocalRef(point);
+    if (!readable) {
+        InterlockedIncrement(&g_rendererProjectionRejected121);
+        return false;
+    }
+
+    OverlayViewport121 viewport;
+    lc::ScreenProjection projected;
+    const bool ok = ReadOverlayViewport121(&viewport) &&
+        lc::ConvertNdcProjectionToViewport(x, y, z, viewport.width, viewport.height, &projected);
+    if (ok) {
+        *sx = projected.x;
+        *sy = projected.y;
+        InterlockedIncrement(&g_rendererProjectionAccepted121);
+    } else {
+        InterlockedIncrement(&g_rendererProjectionRejected121);
+    }
+
+    static DWORD s_projectionDiagMs = 0;
+    DWORD now = GetTickCount();
+    if (now - s_projectionDiagMs >= 5000) {
+        s_projectionDiagMs = now;
+        Log("Fabric renderer projection: rawNdc=(" + std::to_string(x) + "," + std::to_string(y) + "," + std::to_string(z)
+            + ") viewport=" + std::to_string(viewport.width) + "x" + std::to_string(viewport.height)
+            + " result=" + (ok ? "pixel=(" + std::to_string(projected.x) + "," + std::to_string(projected.y) + ")" : "rejected")
+            + " accepted=" + std::to_string((long long)InterlockedCompareExchange(&g_rendererProjectionAccepted121, 0, 0))
+            + " rejected=" + std::to_string((long long)InterlockedCompareExchange(&g_rendererProjectionRejected121, 0, 0)));
+    }
+    return ok;
 }
 
 // ===================== RENDER MODULE STATE (1.21 incremental) =====================
@@ -850,12 +953,23 @@ struct PlayerData121 {
     double hp;
     int armor;
     std::string heldItem;
+    float screenX;
+    float screenY;
+    bool hasScreenPoint;
+    float nametagScreenX;
+    float nametagScreenY;
+    bool hasNametagScreenPoint;
 };
 static std::vector<PlayerData121> g_playerList;
 static Mutex g_playerListMutex;
 static DWORD g_lastPlayerListUpdateMs = 0;
 
-struct ChestData121 { double x, y, z; double dist; };
+struct ChestData121 {
+    double x, y, z;
+    double dist;
+    float minScreenX, minScreenY, maxScreenX, maxScreenY;
+    bool hasScreenRect;
+};
 static std::vector<ChestData121> g_chestList;
 static Mutex g_chestListMutex;
 static DWORD g_lastChestScanMs = 0;
@@ -1793,6 +1907,7 @@ static jmethodID FindMethodBySignature(JNIEnv* env, jclass tgtCls, const std::st
 static void EnsureClosestPlayerCaches(JNIEnv* env);
 static void EnsureEntityMethods(JNIEnv* env, jobject entObj);
 static void DiscoverWorldPlayersListField(JNIEnv* env, jobject worldObj);
+static void UpdateSilentAura(JNIEnv* env, const Config& cfg);
 static bool AreNametagSuppressionCoreMappingsReady121();
 static bool AreNametagSuppressionRestoreMappingsReady121();
 static void LogNametagSuppressionMissingMappings121(JNIEnv* env, jobject worldObj);
@@ -4377,6 +4492,28 @@ static void UpdatePlayerListOverlay(JNIEnv* env) {
     // Fast path: use HelperBridge to pack all entity data in one JNI call.
     int processedCount = 0;
     bool usedHelper = false;
+    // The renderer projector is only callable on this background JNI thread.
+    // Its screen coordinates are stale by the next swap frame during fast turns,
+    // so render-time angle projection owns Fabric visual placement instead.
+    const bool cacheRendererScreenPoints = false;
+    jobject gameRendererForProjection = nullptr;
+    if (cacheRendererScreenPoints && g_gameRendererProjectPointToScreen_121 && g_gameRendererField_121) {
+        gameRendererForProjection = env->GetObjectField(g_mcInstance, g_gameRendererField_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); gameRendererForProjection = nullptr; }
+    }
+    auto appendPlayer = [&](const std::string& name, const LightweightEntity& lw,
+                            double hp, int armor, const std::string& held) {
+        PlayerData121 data{name, lw.dist, lw.x, lw.y, lw.z, hp, armor, held};
+        if (gameRendererForProjection) {
+            data.hasScreenPoint = ProjectWorldPointToScreen121(
+                env, gameRendererForProjection, LegoVec3{lw.x, lw.y + 0.95, lw.z},
+                &data.screenX, &data.screenY);
+            data.hasNametagScreenPoint = ProjectWorldPointToScreen121(
+                env, gameRendererForProjection, LegoVec3{lw.x, lw.y + 1.9, lw.z},
+                &data.nametagScreenX, &data.nametagScreenY);
+        }
+        localList.emplace_back(std::move(data));
+    };
 
     if (HelperBridge::IsLoaded() && !hideVanillaTags) {
         // Build a java.util.List view from lwList objects for the helper.
@@ -4456,7 +4593,7 @@ static void UpdatePlayerListOverlay(JNIEnv* env) {
 
                     int armor = GetEntityArmor(env, nullptr); // skip armor in fast path
                     std::string held;
-                    localList.emplace_back(PlayerData121{name, lw.dist, lw.x, lw.y, lw.z, hp, armor, held});
+                    appendPlayer(name, lw, hp, armor, held);
                     processedCount++;
                 }
             }
@@ -4486,13 +4623,31 @@ static void UpdatePlayerListOverlay(JNIEnv* env) {
 
                 int armor = GetEntityArmor(env, lw.obj);
                 std::string held = GetHeldItemInfo(env, lw.obj);
-
-                localList.emplace_back(PlayerData121{name, lw.dist, lw.x, lw.y, lw.z, hp, armor, held});
+                appendPlayer(name, lw, hp, armor, held);
                 processedCount++;
             }
             env->DeleteLocalRef(lw.obj);
         }
     }
+
+    static DWORD s_playerProjectionLogMs = 0;
+    if (now - s_playerProjectionLogMs >= 5000) {
+        s_playerProjectionLogMs = now;
+        int rendererProjected = 0;
+        int nametagsProjected = 0;
+        for (const auto& player : localList) {
+            if (player.hasScreenPoint) ++rendererProjected;
+            if (player.hasNametagScreenPoint) ++nametagsProjected;
+        }
+        Log("PlayerOverlay: candidates=" + std::to_string(lwList.size())
+            + " published=" + std::to_string(localList.size())
+            + " pointProjected=" + std::to_string(rendererProjected)
+            + " nametagProjected=" + std::to_string(nametagsProjected)
+            + " source=" + ((g_lunarProjField_121 && g_lunarViewField_121) ? "Lunar matrices"
+                : ((rendererProjected > 0 || nametagsProjected > 0) ? "Fabric renderer projection" : "angle fallback")));
+    }
+
+    if (gameRendererForProjection) env->DeleteLocalRef(gameRendererForProjection);
 
     // Clean up local references exactly once.
     if (hideTeamObj) env->DeleteLocalRef(hideTeamObj);
@@ -5701,6 +5856,43 @@ static void UpdateChestList(JNIEnv* env) {
     env->DeleteLocalRef(worldObj);
 
     std::sort(localList.begin(), localList.end(), [](const ChestData121& a, const ChestData121& b){ return a.dist < b.dist; });
+
+    // Screen-space rectangles generated on this scan thread are stale during
+    // high-speed camera movement. Fabric chest ESP is projected at render time
+    // from the current camera snapshot instead.
+    const bool cacheRendererScreenRects = false;
+    if (cacheRendererScreenRects && g_gameRendererProjectPointToScreen_121 && g_gameRendererField_121) {
+        jobject gameRenderer = env->GetObjectField(g_mcInstance, g_gameRendererField_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); gameRenderer = nullptr; }
+        if (gameRenderer) {
+            const size_t projectionLimit = (std::min)(localList.size(), (size_t)20);
+            const double offsets[8][3] = {
+                {-0.5, 0.0, -0.5}, {0.5, 0.0, -0.5}, {-0.5, 0.0, 0.5}, {0.5, 0.0, 0.5},
+                {-0.5, 1.0, -0.5}, {0.5, 1.0, -0.5}, {-0.5, 1.0, 0.5}, {0.5, 1.0, 0.5}
+            };
+            for (size_t i = 0; i < projectionLimit; ++i) {
+                ChestData121& chest = localList[i];
+                float minX = 999999.0f, minY = 999999.0f;
+                float maxX = -999999.0f, maxY = -999999.0f;
+                int projectedCorners = 0;
+                for (int corner = 0; corner < 8; ++corner) {
+                    float x = 0.0f, y = 0.0f;
+                    if (!ProjectWorldPointToScreen121(env, gameRenderer,
+                            LegoVec3{chest.x + offsets[corner][0], chest.y + offsets[corner][1], chest.z + offsets[corner][2]},
+                            &x, &y)) continue;
+                    minX = (std::min)(minX, x); minY = (std::min)(minY, y);
+                    maxX = (std::max)(maxX, x); maxY = (std::max)(maxY, y);
+                    ++projectedCorners;
+                }
+                if (projectedCorners >= 4) {
+                    chest.minScreenX = minX; chest.minScreenY = minY;
+                    chest.maxScreenX = maxX; chest.maxScreenY = maxY;
+                    chest.hasScreenRect = true;
+                }
+            }
+            env->DeleteLocalRef(gameRenderer);
+        }
+    }
     { LockGuard lk(g_chestListMutex); g_chestList.swap(localList); }
 }
 
@@ -6176,6 +6368,577 @@ static void EnsureClosestPlayerCaches(JNIEnv* env) {
     }
 
     env->DeleteLocalRef(mcCls);
+}
+
+// Resolve only the vanilla interaction entry point needed by Silent Aura. This is
+// deliberately separate from the AutoTotem resolver so enabling this module does not
+// force unrelated inventory mappings or reflection work.
+static void EnsureSilentAuraJni(JNIEnv* env) {
+    if (!env || !g_mcInstance || g_silentAuraMethodsResolved_121 || g_silentAuraRuntimeBlocked_121) return;
+    DWORD now = GetTickCount();
+    if (now < g_silentAuraNextResolveMs_121) return;
+    g_silentAuraNextResolveMs_121 = now + 1000;
+
+    jclass mcCls = env->GetObjectClass(g_mcInstance);
+    if (env->ExceptionCheck() || !mcCls) {
+        env->ExceptionClear();
+        return;
+    }
+
+    if (!g_gameModeFieldCached_121) {
+        const char* fieldNames[] = { "gameMode", "field_1761", "f_91078_", nullptr };
+        const char* fieldSigs[] = {
+            "Lnet/minecraft/client/multiplayer/MultiPlayerGameMode;",
+            "Lnet/minecraft/class_636;",
+            nullptr
+        };
+        for (int ni = 0; fieldNames[ni] && !g_gameModeFieldCached_121; ni++) {
+            for (int si = 0; fieldSigs[si] && !g_gameModeFieldCached_121; si++) {
+                g_gameModeFieldCached_121 = env->GetFieldID(mcCls, fieldNames[ni], fieldSigs[si]);
+                if (env->ExceptionCheck()) {
+                    env->ExceptionClear();
+                    g_gameModeFieldCached_121 = nullptr;
+                }
+            }
+        }
+    }
+    env->DeleteLocalRef(mcCls);
+
+    if (g_gameModeFieldCached_121 && !g_silentAuraAttackMethod_121) {
+        jobject gameModeObj = env->GetObjectField(g_mcInstance, g_gameModeFieldCached_121);
+        if (env->ExceptionCheck() || !gameModeObj) {
+            env->ExceptionClear();
+            gameModeObj = nullptr;
+        }
+        if (gameModeObj) {
+            jclass modeCls = env->GetObjectClass(gameModeObj);
+            if (env->ExceptionCheck() || !modeCls) {
+                env->ExceptionClear();
+            } else {
+                const char* methodNames[] = { "attack", "attackEntity", "method_2918", nullptr };
+                const char* methodSigs[] = {
+                    "(Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/entity/Entity;)V",
+                    "(Lnet/minecraft/class_1657;Lnet/minecraft/class_1297;)V",
+                    "(Lnet/minecraft/entity/player/PlayerEntity;Lnet/minecraft/entity/Entity;)V",
+                    nullptr
+                };
+                for (int ni = 0; methodNames[ni] && !g_silentAuraAttackMethod_121; ni++) {
+                    for (int si = 0; methodSigs[si] && !g_silentAuraAttackMethod_121; si++) {
+                        g_silentAuraAttackMethod_121 = env->GetMethodID(modeCls, methodNames[ni], methodSigs[si]);
+                        if (env->ExceptionCheck()) {
+                            env->ExceptionClear();
+                            g_silentAuraAttackMethod_121 = nullptr;
+                        }
+                    }
+                }
+                env->DeleteLocalRef(modeCls);
+            }
+            env->DeleteLocalRef(gameModeObj);
+        }
+    }
+
+    if (!g_silentAuraSwingMethod_121 || !g_silentAuraSetYawMethod_121 || !g_silentAuraSetPitchMethod_121) {
+        const char* livingNames[] = {
+            "net.minecraft.world.entity.LivingEntity",
+            "net.minecraft.class_1309",
+            "net.minecraft.entity.LivingEntity",
+            nullptr
+        };
+        jclass livingCls = nullptr;
+        for (int i = 0; livingNames[i] && !livingCls; i++) {
+            livingCls = LoadClassWithLoader(env, g_gameClassLoader, livingNames[i]);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); livingCls = nullptr; }
+        }
+        if (livingCls) {
+            if (!g_silentAuraSwingMethod_121) {
+                const char* swingNames[] = { "swing", "method_6104", nullptr };
+                const char* swingSigs[] = {
+                    "(Lnet/minecraft/world/InteractionHand;)V",
+                    "(Lnet/minecraft/class_1268;)V",
+                    nullptr
+                };
+                for (int ni = 0; swingNames[ni] && !g_silentAuraSwingMethod_121; ni++) {
+                    for (int si = 0; swingSigs[si] && !g_silentAuraSwingMethod_121; si++) {
+                        g_silentAuraSwingMethod_121 = env->GetMethodID(livingCls, swingNames[ni], swingSigs[si]);
+                        if (env->ExceptionCheck()) {
+                            env->ExceptionClear();
+                            g_silentAuraSwingMethod_121 = nullptr;
+                        }
+                    }
+                }
+            }
+            if (!g_silentAuraSetBodyYawMethod_121) {
+                const char* bodyYawNames[] = { "setYBodyRot", "method_21701", nullptr };
+                for (int i = 0; bodyYawNames[i] && !g_silentAuraSetBodyYawMethod_121; i++) {
+                    g_silentAuraSetBodyYawMethod_121 = env->GetMethodID(livingCls, bodyYawNames[i], "(F)V");
+                    if (env->ExceptionCheck()) {
+                        env->ExceptionClear();
+                        g_silentAuraSetBodyYawMethod_121 = nullptr;
+                    }
+                }
+            }
+            env->DeleteLocalRef(livingCls);
+        }
+
+        const char* entityNames[] = {
+            "net.minecraft.world.entity.Entity",
+            "net.minecraft.class_1297",
+            "net.minecraft.entity.Entity",
+            nullptr
+        };
+        jclass entityCls = nullptr;
+        for (int i = 0; entityNames[i] && !entityCls; i++) {
+            entityCls = LoadClassWithLoader(env, g_gameClassLoader, entityNames[i]);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); entityCls = nullptr; }
+        }
+        if (entityCls) {
+            if (!g_silentAuraSetYawMethod_121) {
+                const char* yawNames[] = { "setYRot", "method_36456", "setYaw", nullptr };
+                for (int i = 0; yawNames[i] && !g_silentAuraSetYawMethod_121; i++) {
+                    g_silentAuraSetYawMethod_121 = env->GetMethodID(entityCls, yawNames[i], "(F)V");
+                    if (env->ExceptionCheck()) {
+                        env->ExceptionClear();
+                        g_silentAuraSetYawMethod_121 = nullptr;
+                    }
+                }
+            }
+            if (!g_silentAuraSetPitchMethod_121) {
+                const char* pitchNames[] = { "setXRot", "method_36457", "setPitch", nullptr };
+                for (int i = 0; pitchNames[i] && !g_silentAuraSetPitchMethod_121; i++) {
+                    g_silentAuraSetPitchMethod_121 = env->GetMethodID(entityCls, pitchNames[i], "(F)V");
+                    if (env->ExceptionCheck()) {
+                        env->ExceptionClear();
+                        g_silentAuraSetPitchMethod_121 = nullptr;
+                    }
+                }
+            }
+            env->DeleteLocalRef(entityCls);
+        }
+    }
+
+    if (!g_silentAuraMainHand_121) {
+        const char* handClassNames[] = {
+            "net.minecraft.world.InteractionHand",
+            "net.minecraft.class_1268",
+            nullptr
+        };
+        const char* mainHandSigs[] = {
+            "Lnet/minecraft/world/InteractionHand;",
+            "Lnet/minecraft/class_1268;",
+            nullptr
+        };
+        jclass handCls = nullptr;
+        for (int i = 0; handClassNames[i] && !handCls; i++) {
+            handCls = LoadClassWithLoader(env, g_gameClassLoader, handClassNames[i]);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); handCls = nullptr; }
+        }
+        if (handCls) {
+            jfieldID mainField = nullptr;
+            for (int si = 0; mainHandSigs[si] && !mainField; si++) {
+                mainField = env->GetStaticFieldID(handCls, "MAIN_HAND", mainHandSigs[si]);
+                if (env->ExceptionCheck()) {
+                    env->ExceptionClear();
+                    mainField = nullptr;
+                }
+            }
+            if (mainField) {
+                jobject mainHand = env->GetStaticObjectField(handCls, mainField);
+                if (env->ExceptionCheck()) {
+                    env->ExceptionClear();
+                    mainHand = nullptr;
+                }
+                if (mainHand) {
+                    g_silentAuraMainHand_121 = env->NewGlobalRef(mainHand);
+                    env->DeleteLocalRef(mainHand);
+                }
+            }
+            env->DeleteLocalRef(handCls);
+        }
+    }
+
+    // Click-based aura only needs the rotation setters; attacks go through Win32
+    // clicks (the game does the combat), so the vanilla attack/swing methods are
+    // no longer required to consider the module resolved.
+    g_silentAuraMethodsResolved_121 =
+        g_silentAuraSetYawMethod_121 != nullptr &&
+        g_silentAuraSetPitchMethod_121 != nullptr;
+    if (!g_silentAuraMethodsResolved_121 && !g_loggedSilentAuraResolveFail_121) {
+        g_loggedSilentAuraResolveFail_121 = true;
+        Log(std::string("SilentAura JNI unresolved: setYaw=")
+            + (g_silentAuraSetYawMethod_121 ? "1" : "0")
+            + " setPitch=" + (g_silentAuraSetPitchMethod_121 ? "1" : "0"));
+    }
+}
+
+static float NormalizeSilentAuraAngle(float angle) {
+    while (angle > 180.0f) angle -= 360.0f;
+    while (angle < -180.0f) angle += 360.0f;
+    return angle;
+}
+
+static float SilentAuraShortestYawDelta(float from, float to) {
+    return NormalizeSilentAuraAngle(to - from);
+}
+
+// Keep yaw on the shortest continuous path to avoid Grim AimModulo360 snaps.
+static float SilentAuraClosestYaw(float current, float target) {
+    return current + SilentAuraShortestYawDelta(current, target);
+}
+
+static float SilentAuraAngleDelta(float from, float to) {
+    return std::abs(SilentAuraShortestYawDelta(from, to));
+}
+
+// Exponential smoothing (EMA) toward the target: velocity is proportional to the
+// remaining error, so the aim eases in and decelerates onto the target instead of
+// moving at a constant (linear) rate. This mirrors the Aim Assist temporal filter.
+static float SilentAuraEmaStep(float current, float target, float alpha) {
+    return current + (target - current) * alpha;
+}
+
+// Map the rotation-speed slider (10..90) to an EMA smoothing factor. Higher = snappier.
+static float SilentAuraSmoothingAlpha(float rotSpeed) {
+    float t = (lc::ClampFloat(rotSpeed, 10.0f, 90.0f) - 10.0f) / 80.0f; // 0..1
+    return 0.08f + t * 0.42f; // ~0.08 (very smooth) .. 0.50 (snappy)
+}
+
+struct SilentAuraAimAngles {
+    float yaw = 0.0f;
+    float pitch = 0.0f;
+    bool valid = false;
+    bool onTarget = false; // current view intersects the target hitbox (safe to click)
+};
+
+// Aim at the target's body centre so the crosshair drives deep into the hitbox (not the
+// edge). EMA smoothing handles the "closest-point" feel: near the centre the per-tick
+// steps shrink to almost nothing, so it tracks smoothly without snapping. onTarget is a
+// generous hit test used to gate clicking.
+static SilentAuraAimAngles ComputeSilentAuraAimAngles(
+    double selfX, double selfY, double selfZ,
+    double targetX, double targetY, double targetZ,
+    float currentYaw, float currentPitch) {
+    const double eyeHeight = 1.62;
+    const double boxHalfWidth = 0.30;   // player hitbox ~0.6 wide
+    const double aimCenterH = 1.05;     // chest height above feet
+    const double aimHalfHeight = 0.65;  // vertical tolerance around chest
+
+    double dx = targetX - selfX;
+    double dz = targetZ - selfZ;
+    double horiz = std::sqrt(dx * dx + dz * dz);
+
+    SilentAuraAimAngles out;
+    if (!std::isfinite(horiz) || horiz < 1e-6) return out;
+
+    const double RAD = 57.29577951308232;
+    float yawCenter = (float)(std::atan2(-dx, dz) * RAD);
+    double dyCenter = (targetY + aimCenterH) - (selfY + eyeHeight);
+    float pitchCenter = (float)(std::atan2(-dyCenter, horiz) * RAD);
+
+    // Angular half-extents of the hitbox at this distance.
+    float yawHalf = (float)(std::atan2(boxHalfWidth, horiz) * RAD);
+    float pitchHalf = (float)(std::atan2(aimHalfHeight, horiz) * RAD);
+
+    // Aim straight at the centre point.
+    out.yaw = yawCenter;
+    out.pitch = std::max(-90.0f, std::min(90.0f, pitchCenter));
+
+    // Generous hit test: crosshair anywhere on the body silhouette (plus a small margin).
+    const float margin = 2.0f;
+    float yawErr = std::abs(SilentAuraShortestYawDelta(yawCenter, currentYaw));
+    float pitchErr = std::abs(currentPitch - pitchCenter);
+    out.onTarget = (yawErr <= yawHalf + margin) && (pitchErr <= pitchHalf + margin);
+    out.valid = std::isfinite(out.yaw) && std::isfinite(out.pitch);
+    return out;
+}
+
+static float SilentAuraWrapSetYaw(float yaw) {
+    // Minecraft stores yaw in [-180, 180]; keep writes in-range without 360 jumps.
+    return NormalizeSilentAuraAngle(yaw);
+}
+
+static void SetSilentAuraPlayerLook(JNIEnv* env, jobject player, float yaw, float pitch) {
+    if (!env || !player) return;
+    float writeYaw = SilentAuraWrapSetYaw(yaw);
+    float writePitch = std::max(-90.0f, std::min(90.0f, pitch));
+    if (g_silentAuraSetYawMethod_121) {
+        env->CallVoidMethod(player, g_silentAuraSetYawMethod_121, writeYaw);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+    if (g_silentAuraSetPitchMethod_121) {
+        env->CallVoidMethod(player, g_silentAuraSetPitchMethod_121, writePitch);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+    if (g_silentAuraSetBodyYawMethod_121) {
+        env->CallVoidMethod(player, g_silentAuraSetBodyYawMethod_121, writeYaw);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+    g_silentAuraLastAppliedYaw_121 = writeYaw;
+    g_silentAuraLastYawValid_121 = true;
+}
+
+// Auto-click state for the silent aura. Instead of sending an attack packet
+// (MultiPlayerGameMode.attack), the aura now clicks like the autoclicker via Win32
+// SendInput. The game performs the attack itself using the rotation we set, which is
+// far less detectable than driving the vanilla combat method over the wire.
+static DWORD g_silentAuraLastClickMs_121 = 0;
+static float g_silentAuraRotPhase_121 = 0.0f;
+
+static void SilentAuraSendClick() {
+    INPUT in[2] = {};
+    in[0].type = INPUT_MOUSE;
+    in[0].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+    in[1].type = INPUT_MOUSE;
+    in[1].mi.dwFlags = MOUSEEVENTF_LEFTUP;
+    SendInput(2, in, sizeof(INPUT));
+}
+
+static void UpdateSilentAura(JNIEnv* env, const Config& cfg) {
+    if (!cfg.silentAura) {
+        g_silentAuraLastScanMs_121 = 0;
+        g_silentAuraLastAttackMs_121 = 0;
+        g_silentAuraLastClickMs_121 = 0;
+        g_silentAuraLastYawValid_121 = false;
+        g_silentAuraCurrentTarget_121.clear();
+        g_silentAuraLastSwitchMs_121 = 0;
+        g_silentAuraAimOffsetYaw_121 = 0.0f;
+        g_silentAuraAimOffsetPitch_121 = 0.0f;
+        g_silentAuraNextOffsetMs_121 = 0;
+        return;
+    }
+    if (!env || !g_mcInstance || IsWorldTransitionActive()) return;
+
+    DWORD now = GetTickCount();
+    if (now - g_silentAuraLastScanMs_121 < 20) return;
+    g_silentAuraLastScanMs_121 = now;
+
+    bool guiOpen = false;
+    float attackCooldown = 0.0f;
+    {
+        LockGuard lk(g_jniStateMtx);
+        guiOpen = g_jniGuiOpen;
+        attackCooldown = g_jniAttackCooldown;
+    }
+    if (guiOpen) return;
+
+    EnsureClosestPlayerCaches(env);
+    EnsureSilentAuraJni(env);
+    if (!g_silentAuraMethodsResolved_121 || !g_worldField_121 || !g_playerField_121) return;
+
+    jobject worldObj = env->GetObjectField(g_mcInstance, g_worldField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); worldObj = nullptr; }
+    jobject selfObj = env->GetObjectField(g_mcInstance, g_playerField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); selfObj = nullptr; }
+    if (!worldObj || !selfObj) {
+        if (worldObj) env->DeleteLocalRef(worldObj);
+        if (selfObj) env->DeleteLocalRef(selfObj);
+        return;
+    }
+
+    EnsureEntityMethods(env, selfObj);
+    if (!g_getX_121 || !g_getY_121 || !g_getZ_121 || !g_getHealth_121 || !g_getYaw_121 || !g_getPitch_121) {
+        env->DeleteLocalRef(worldObj);
+        env->DeleteLocalRef(selfObj);
+        return;
+    }
+    DiscoverWorldPlayersListField(env, worldObj);
+    if (!g_worldPlayersListField_121) {
+        env->DeleteLocalRef(worldObj);
+        env->DeleteLocalRef(selfObj);
+        return;
+    }
+
+    jobject listObj = env->GetObjectField(worldObj, g_worldPlayersListField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); listObj = nullptr; }
+    if (!listObj) {
+        env->DeleteLocalRef(worldObj);
+        env->DeleteLocalRef(selfObj);
+        return;
+    }
+
+    jclass listCls = env->GetObjectClass(listObj);
+    jmethodID listSize = listCls ? env->GetMethodID(listCls, "size", "()I") : nullptr;
+    jmethodID listGet = listCls ? env->GetMethodID(listCls, "get", "(I)Ljava/lang/Object;") : nullptr;
+    if (env->ExceptionCheck()) { env->ExceptionClear(); listSize = listGet = nullptr; }
+    if (!listSize || !listGet) {
+        if (listCls) env->DeleteLocalRef(listCls);
+        env->DeleteLocalRef(listObj);
+        env->DeleteLocalRef(worldObj);
+        env->DeleteLocalRef(selfObj);
+        return;
+    }
+
+    double selfX = CallDoubleNoArgs(env, selfObj, g_getX_121);
+    double selfY = CallDoubleNoArgs(env, selfObj, g_getY_121);
+    double selfZ = CallDoubleNoArgs(env, selfObj, g_getZ_121);
+    int count = env->CallIntMethod(listObj, listSize);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); count = 0; }
+
+    double attackRange = (double)lc::ClampFloat(cfg.silentAuraRange, 2.5f, 4.0f);
+    double aimRange = (double)lc::ClampFloat(cfg.silentAuraAimRange, 3.0f, 6.0f);
+    if (aimRange < attackRange) aimRange = attackRange;
+    double aimRangeSq = aimRange * aimRange;
+
+    // Pick the preferred target (closest, or lowest health) and separately locate the
+    // currently-locked target so we can honor the switch delay. Clicking uses SendInput,
+    // so we never need to retain the entity object - track coordinates only.
+    double bestScore = 1e18;
+    std::string bestName;
+    double bestX = 0.0, bestY = 0.0, bestZ = 0.0, bestDistSq = 0.0;
+    bool haveBest = false;
+
+    bool haveCur = false;
+    double curX = 0.0, curY = 0.0, curZ = 0.0, curDistSq = 0.0;
+
+    for (int i = 0; i < count; i++) {
+        jobject candidate = env->CallObjectMethod(listObj, listGet, (jint)i);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); break; }
+        if (!candidate) continue;
+        if (env->IsSameObject(candidate, selfObj) == JNI_TRUE) {
+            env->DeleteLocalRef(candidate);
+            continue;
+        }
+        if (g_playerEntityClass_121 && env->IsInstanceOf(candidate, g_playerEntityClass_121) != JNI_TRUE) {
+            env->DeleteLocalRef(candidate);
+            continue;
+        }
+
+        float health = env->CallFloatMethod(candidate, g_getHealth_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); health = 0.0f; }
+        if (!std::isfinite(health) || health <= 0.1f) {
+            env->DeleteLocalRef(candidate);
+            continue;
+        }
+
+        double x = CallDoubleNoArgs(env, candidate, g_getX_121);
+        double y = CallDoubleNoArgs(env, candidate, g_getY_121);
+        double z = CallDoubleNoArgs(env, candidate, g_getZ_121);
+        double dx = x - selfX;
+        double dy = y - selfY;
+        double dz = z - selfZ;
+        double distSq = dx * dx + dy * dy + dz * dz;
+        if (!std::isfinite(distSq) || distSq > aimRangeSq) {
+            env->DeleteLocalRef(candidate);
+            continue;
+        }
+
+        std::string stableName = GetStablePlayerName(env, candidate);
+        if (stableName.empty() || LooksLikeFakePlayerLine(stableName)) {
+            env->DeleteLocalRef(candidate);
+            continue;
+        }
+
+        // Lower score = preferred. Health mode: lowest health first, distance breaks ties.
+        double score = cfg.silentAuraPreferHealth
+            ? ((double)health * 10000.0 + distSq)
+            : distSq;
+        if (score < bestScore) {
+            bestScore = score;
+            bestName = stableName;
+            bestX = x; bestY = y; bestZ = z;
+            bestDistSq = distSq;
+            haveBest = true;
+        }
+
+        if (!g_silentAuraCurrentTarget_121.empty() && stableName == g_silentAuraCurrentTarget_121) {
+            haveCur = true;
+            curX = x; curY = y; curZ = z;
+            curDistSq = distSq;
+        }
+
+        env->DeleteLocalRef(candidate);
+    }
+
+    // Decide the locked target, respecting the switch delay to avoid flicking between
+    // players that are at similar distance/health.
+    bool haveChosen = false;
+    double chX = 0.0, chY = 0.0, chZ = 0.0, chDistSq = 0.0;
+    if (haveCur) {
+        DWORD switchDelay = (DWORD)std::max(0, cfg.silentAuraSwitchDelayMs);
+        bool switchAllowed = haveBest && bestName != g_silentAuraCurrentTarget_121 &&
+            (g_silentAuraLastSwitchMs_121 == 0 || now - g_silentAuraLastSwitchMs_121 >= switchDelay);
+        if (switchAllowed) {
+            g_silentAuraCurrentTarget_121 = bestName;
+            g_silentAuraLastSwitchMs_121 = now;
+            chX = bestX; chY = bestY; chZ = bestZ; chDistSq = bestDistSq;
+        } else {
+            chX = curX; chY = curY; chZ = curZ; chDistSq = curDistSq;
+        }
+        haveChosen = true;
+    } else if (haveBest) {
+        if (bestName != g_silentAuraCurrentTarget_121) {
+            g_silentAuraCurrentTarget_121 = bestName;
+            g_silentAuraLastSwitchMs_121 = now;
+        }
+        chX = bestX; chY = bestY; chZ = bestZ; chDistSq = bestDistSq;
+        haveChosen = true;
+    } else {
+        g_silentAuraCurrentTarget_121.clear();
+        g_silentAuraLastYawValid_121 = false;
+    }
+
+    if (haveChosen) {
+        float currentYaw = env->CallFloatMethod(selfObj, g_getYaw_121);
+        float currentPitch = env->CallFloatMethod(selfObj, g_getPitch_121);
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            currentYaw = g_silentAuraLastYawValid_121 ? g_silentAuraLastAppliedYaw_121 : 0.0f;
+            currentPitch = 0.0f;
+        }
+
+        // Refresh the accuracy-driven aim error occasionally (not every tick) so the
+        // crosshair settles slightly off-centre. Lower accuracy -> larger error ->
+        // more genuine misses; 100% accuracy holds a perfect lock.
+        if (now >= g_silentAuraNextOffsetMs_121) {
+            float accuracy = lc::ClampFloat(cfg.silentAuraAccuracy, 50.0f, 100.0f);
+            float maxErr = (100.0f - accuracy) / 100.0f * 8.0f; // up to 4 deg at 50%, 0 at 100%
+            g_silentAuraAimOffsetYaw_121 = (((float)(rand() % 2001) / 1000.0f) - 1.0f) * maxErr;
+            g_silentAuraAimOffsetPitch_121 = (((float)(rand() % 2001) / 1000.0f) - 1.0f) * maxErr;
+            g_silentAuraNextOffsetMs_121 = now + 140 + (DWORD)(rand() % 160);
+        }
+
+        SilentAuraAimAngles aim = ComputeSilentAuraAimAngles(
+            selfX, selfY, selfZ, chX, chY, chZ, currentYaw, currentPitch);
+        if (aim.valid) {
+            float alpha = SilentAuraSmoothingAlpha(cfg.silentAuraRotSpeed);
+            float targetYaw = aim.yaw + g_silentAuraAimOffsetYaw_121;
+            float targetPitch = aim.pitch + g_silentAuraAimOffsetPitch_121;
+
+            // EMA smoothing: velocity proportional to remaining error (eases in/out).
+            float newYaw = currentYaw + SilentAuraShortestYawDelta(currentYaw, targetYaw) * alpha;
+            float newPitch = SilentAuraEmaStep(currentPitch, targetPitch, alpha);
+            SetSilentAuraPlayerLook(env, selfObj, newYaw, newPitch);
+
+            // Click like the autoclicker only when the crosshair is actually on the
+            // target hitbox and it is inside attack range. The aim error above is what
+            // makes some clicks miss - the game does the raycast/attack itself.
+            bool inAttackRange = chDistSq <= attackRange * attackRange;
+            if (aim.onTarget && inAttackRange) {
+                bool cooldownReady = true;
+                if (!cfg.silentAuraSpamMode)
+                    cooldownReady = std::isfinite(attackCooldown) && attackCooldown >= 0.995f;
+
+                if (cooldownReady) {
+                    float minCps = lc::ClampFloat(cfg.silentAuraSpamMinCps, 8.0f, 20.0f);
+                    float maxCps = lc::ClampFloat(cfg.silentAuraSpamMaxCps, 8.0f, 20.0f);
+                    if (minCps > maxCps) minCps = maxCps;
+                    float cps = minCps;
+                    if (maxCps > minCps)
+                        cps = minCps + ((float)(rand() % 10001) / 10000.0f) * (maxCps - minCps);
+                    DWORD intervalMs = (DWORD)std::max(1.0f, 1000.0f / cps);
+                    if (g_silentAuraLastClickMs_121 == 0 ||
+                        now - g_silentAuraLastClickMs_121 >= intervalMs) {
+                        SilentAuraSendClick();
+                        g_silentAuraLastClickMs_121 = now;
+                    }
+                }
+            }
+        }
+    }
+
+    if (listCls) env->DeleteLocalRef(listCls);
+    env->DeleteLocalRef(listObj);
+    env->DeleteLocalRef(worldObj);
+    env->DeleteLocalRef(selfObj);
 }
 
 static void TryResolveWorldFieldByReflection(JNIEnv* env, jclass mcCls) {
@@ -7316,6 +8079,19 @@ static void ResetAutoTotemCaches(JNIEnv* env) {
     g_gameModeFieldCached_121 = nullptr;
     g_getCarriedMethod_121 = nullptr;
     g_isEmptyMethod_121 = nullptr;
+    g_silentAuraAttackMethod_121 = nullptr;
+    g_silentAuraSwingMethod_121 = nullptr;
+    g_silentAuraSetYawMethod_121 = nullptr;
+    g_silentAuraSetPitchMethod_121 = nullptr;
+    g_silentAuraSetBodyYawMethod_121 = nullptr;
+    DeleteGlobalRefSafe(env, g_silentAuraMainHand_121);
+    g_silentAuraMethodsResolved_121 = false;
+    g_silentAuraRuntimeBlocked_121 = false;
+    g_loggedSilentAuraResolveFail_121 = false;
+    g_silentAuraNextResolveMs_121 = 0;
+    g_silentAuraLastScanMs_121 = 0;
+    g_silentAuraLastAttackMs_121 = 0;
+    g_silentAuraLastYawValid_121 = false;
 
     DeleteGlobalRefSafe(env, g_itemsClass_121);
     DeleteGlobalRefSafe(env, g_equipmentSlotClass_121);
@@ -7470,7 +8246,10 @@ static void ResetModernJniRuntimeCaches121(JNIEnv* env, const char* reason) {
     g_getModelViewMatrix_121 = nullptr;
     g_projectionMatrixField_121 = nullptr;
     g_modelViewMatrixField_121 = nullptr;
+    g_gameRendererBasicProjectionMatrix_121 = nullptr;
+    g_gameRendererProjectPointToScreen_121 = nullptr;
     g_matrixGetFloatArray_121 = nullptr;
+    g_matrix4fCtor_121 = nullptr;
     g_matrixM00 = g_matrixM01 = g_matrixM02 = g_matrixM03 = nullptr;
     g_matrixM10 = g_matrixM11 = g_matrixM12 = g_matrixM13 = nullptr;
     g_matrixM20 = g_matrixM21 = g_matrixM22 = g_matrixM23 = nullptr;
@@ -7481,9 +8260,11 @@ static void ResetModernJniRuntimeCaches121(JNIEnv* env, const char* reason) {
     g_cameraPosF_121 = nullptr;
     g_cameraYawF_121 = nullptr;
     g_cameraPitchF_121 = nullptr;
+    g_cameraViewRotationProjection_121 = nullptr;
     g_vec3dX_121 = g_vec3dY_121 = g_vec3dZ_121 = nullptr;
     g_lunarProjField_121 = nullptr;
     g_lunarViewField_121 = nullptr;
+    g_lunarMatrixLookupDone_121 = false;
     g_optionsField_121 = nullptr;
     g_fovField_121 = nullptr;
     g_simpleOptionGet_121 = nullptr;
@@ -7558,6 +8339,11 @@ static void ResetModernJniRuntimeCaches121(JNIEnv* env, const char* reason) {
 
 static void CleanupImGuiAndHooks() {
 
+    // Tear down the Vulkan overlay backend (and its hooks) FIRST, while the ImGui context
+    // is still alive — ImGui_ImplVulkan_Shutdown() requires a valid context. No-ops on
+    // OpenGL sessions where the Vulkan backend was never initialized.
+    RenderBackend_Shutdown();
+
     if (g_imguiPhase1Done) {
         ImGui_ImplWin32_Shutdown();
         g_imguiPhase1Done = false;
@@ -7581,7 +8367,6 @@ static void CleanupImGuiAndHooks() {
 
     MH_DisableHook(MH_ALL_HOOKS);
     o_wglSwapBuffers = nullptr;
-    RenderBackend_Shutdown();
     MH_Uninitialize();
 }
 
@@ -8386,6 +9171,8 @@ static bool DiscoverJniMappings(JNIEnv* env) {
                 g_matrixGetFloatArray_121 = env->GetMethodID(m4Cls, "get", "([F)[F");
                 if (env->ExceptionCheck()) { env->ExceptionClear(); g_matrixGetFloatArray_121 = nullptr; }
             }
+            g_matrix4fCtor_121 = env->GetMethodID(m4Cls, "<init>", "()V");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_matrix4fCtor_121 = nullptr; }
             if (env->ExceptionCheck()) env->ExceptionClear();
             env->DeleteLocalRef(m4Cls);
         } else {
@@ -8432,6 +9219,37 @@ static bool DiscoverJniMappings(JNIEnv* env) {
             }
         }
         if (grCls) {
+            const char* projectionNames[] = { "getBasicProjectionMatrix", "method_22973", nullptr };
+            for (int i = 0; projectionNames[i] && !g_gameRendererBasicProjectionMatrix_121; i++) {
+                g_gameRendererBasicProjectionMatrix_121 = env->GetMethodID(
+                    grCls, projectionNames[i], "(F)Lorg/joml/Matrix4f;");
+                if (env->ExceptionCheck()) {
+                    env->ExceptionClear();
+                    g_gameRendererBasicProjectionMatrix_121 = nullptr;
+                }
+                if (g_gameRendererBasicProjectionMatrix_121) {
+                    Log(std::string("Found GameRenderer projection method: ") + projectionNames[i]);
+                }
+            }
+            if (!g_gameRendererProjectPointToScreen_121) {
+                const char* pointSigs[] = {
+                    "(Lnet/minecraft/world/phys/Vec3;)Lnet/minecraft/world/phys/Vec3;",
+                    "(Lnet/minecraft/class_243;)Lnet/minecraft/class_243;",
+                    nullptr
+                };
+                const char* pointNames[] = { "projectPointToScreen", "method_70778", nullptr };
+                for (int n = 0; pointNames[n] && !g_gameRendererProjectPointToScreen_121; ++n) {
+                    for (int i = 0; pointSigs[i] && !g_gameRendererProjectPointToScreen_121; i++) {
+                        g_gameRendererProjectPointToScreen_121 = env->GetMethodID(
+                            grCls, pointNames[n], pointSigs[i]);
+                        if (env->ExceptionCheck()) {
+                            env->ExceptionClear();
+                            g_gameRendererProjectPointToScreen_121 = nullptr;
+                        }
+                    }
+                }
+                if (g_gameRendererProjectPointToScreen_121) Log("Found GameRenderer point projection method");
+            }
             const char* cameraFieldNames[] = { "field_18765", "camera", "mainCamera", "f_109099_", nullptr };
             const char* cameraFieldSigs[] = {
                 "Lnet/minecraft/class_4184;",
@@ -8624,6 +9442,8 @@ static bool DiscoverJniMappings(JNIEnv* env) {
     
     if (vecCls) {
         g_vec3dClass_121 = (jclass)env->NewGlobalRef(vecCls);
+        g_vec3dCtor_121 = env->GetMethodID(vecCls, "<init>", "(DDD)V");
+        if (env->ExceptionCheck()) { env->ExceptionClear(); g_vec3dCtor_121 = nullptr; }
         const char* vecXNames[] = { "field_1352", "x", "f_82479_", "xCoord", nullptr };
         const char* vecYNames[] = { "field_1351", "y", "f_82480_", "yCoord", nullptr };
         const char* vecZNames[] = { "field_1350", "field_1353", "z", "f_82481_", "zCoord", nullptr };
@@ -9374,6 +10194,8 @@ static void ReadCameraState(JNIEnv* env) {
 
     BgCamState cs = {};
     cs.fov = 70.0f; // default
+    Matrix4x4 fabricCameraProjection = {};
+    bool fabricCameraProjectionReady = false;
 
     if (g_optionsField_121 && g_fovField_121 && g_simpleOptionGet_121) {
         jobject opts = env->GetObjectField(g_mcInstance, g_optionsField_121);
@@ -9399,6 +10221,17 @@ static void ReadCameraState(JNIEnv* env) {
             env->DeleteLocalRef(opts);
         }
         if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+    // Some Fabric option wrappers report a transient/default numeric value while
+    // the screen is changing. A zero/invalid FOV makes every angle projection
+    // fail, so retain the vanilla default until a usable value is available.
+    if (!std::isfinite(cs.fov) || cs.fov < 30.0f || cs.fov > 170.0f) {
+        static bool s_loggedInvalidFov = false;
+        if (!s_loggedInvalidFov) {
+            s_loggedInvalidFov = true;
+            Log("Camera FOV read was invalid; using 70 degree fallback.");
+        }
+        cs.fov = 70.0f;
     }
 
     jobject gr = env->GetObjectField(g_mcInstance, g_gameRendererField_121);
@@ -9450,11 +10283,45 @@ static void ReadCameraState(JNIEnv* env) {
                     }
                 }
             }
+
+            // Minecraft 26.1 moved the active world projection from
+            // RenderSystem into Camera. This matrix includes the game's real
+            // FOV and render transforms, so it is the Fabric equivalent of
+            // Lunar's saved renderer matrices.
+            if (!g_cameraViewRotationProjection_121 && g_cameraClass_121) {
+                // 26.1 writes into a caller-provided Matrix4f rather than
+                // allocating one: Camera.getViewRotationProjectionMatrix(dest).
+                g_cameraViewRotationProjection_121 = env->GetMethodID(
+                    g_cameraClass_121, "getViewRotationProjectionMatrix",
+                    "(Lorg/joml/Matrix4f;)Lorg/joml/Matrix4f;");
+                if (env->ExceptionCheck()) {
+                    env->ExceptionClear();
+                    g_cameraViewRotationProjection_121 = nullptr;
+                } else {
+                    Log("Found Fabric Camera projection method: getViewRotationProjectionMatrix(Matrix4f).");
+                }
+            }
+            if (g_cameraViewRotationProjection_121 && g_matrix4fClass_121 && g_matrix4fCtor_121) {
+                jobject destination = env->NewObject(g_matrix4fClass_121, g_matrix4fCtor_121);
+                if (!env->ExceptionCheck() && destination) {
+                    jobject matrix = env->CallObjectMethod(camera, g_cameraViewRotationProjection_121, destination);
+                    if (!env->ExceptionCheck()) {
+                        fabricCameraProjectionReady = ReadMatrix4f(env, matrix ? matrix : destination, fabricCameraProjection);
+                    } else {
+                        env->ExceptionClear();
+                    }
+                    if (matrix) env->DeleteLocalRef(matrix);
+                    env->DeleteLocalRef(destination);
+                } else {
+                    env->ExceptionClear();
+                }
+            }
             env->DeleteLocalRef(camera);
         } else env->ExceptionClear();
 
-        // Matrices: cache Lunar saved-field IDs on first call (handles version-specific field suffixes)
-        if (!g_lunarProjField_121 || !g_lunarViewField_121) {
+        // Fabric has no Lunar fields. Probe once so the fast camera poll never
+        // repeats reflective field enumeration on a standard Fabric runtime.
+        if (!g_lunarMatrixLookupDone_121) {
             jclass grCls = env->GetObjectClass(gr);
             if (grCls) {
                 // Try known names first (including 26.1)
@@ -9521,6 +10388,7 @@ static void ReadCameraState(JNIEnv* env) {
                 }
                 env->DeleteLocalRef(grCls);
             }
+            g_lunarMatrixLookupDone_121 = true;
         }
         if (g_lunarProjField_121 && g_lunarViewField_121) {
             jobject pO = env->GetObjectField(gr, g_lunarProjField_121);
@@ -9535,14 +10403,33 @@ static void ReadCameraState(JNIEnv* env) {
             if (pO) env->DeleteLocalRef(pO);
             if (vO) env->DeleteLocalRef(vO);
         }
-        if (!cs.matsOk && g_renderSystemClass_121) {
+        if (!cs.matsOk && fabricCameraProjectionReady) {
+            cs.proj = fabricCameraProjection;
+            std::memset(cs.view.m, 0, sizeof(cs.view.m));
+            cs.view.m[0] = cs.view.m[5] = cs.view.m[10] = cs.view.m[15] = 1.0f;
+            cs.matsOk = true;
+            static bool s_fabricCameraMatDiag = false;
+            if (!s_fabricCameraMatDiag) {
+                s_fabricCameraMatDiag = true;
+                Log("Matrix source: Fabric Camera view-rotation projection.");
+            }
+        }
+        const bool hasProjectionSource = g_getProjectionMatrix_121 || g_projectionMatrixField_121 || g_gameRendererBasicProjectionMatrix_121;
+        if (!cs.matsOk && g_renderSystemClass_121 && hasProjectionSource) {
             jobject pO = nullptr;
             jobject vO = nullptr;
+            bool usingGameRendererProjection = false;
             if (g_getProjectionMatrix_121)
                 pO = env->CallStaticObjectMethod(g_renderSystemClass_121, g_getProjectionMatrix_121);
             else if (g_projectionMatrixField_121)
                 pO = env->GetStaticObjectField(g_renderSystemClass_121, g_projectionMatrixField_121);
             if (env->ExceptionCheck()) { env->ExceptionClear(); pO = nullptr; }
+
+            if (!pO && g_gameRendererBasicProjectionMatrix_121) {
+                pO = env->CallObjectMethod(gr, g_gameRendererBasicProjectionMatrix_121, (jfloat)cs.fov);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); pO = nullptr; }
+                usingGameRendererProjection = pO != nullptr;
+            }
 
             if (g_getModelViewMatrix_121)
                 vO = env->CallStaticObjectMethod(g_renderSystemClass_121, g_getModelViewMatrix_121);
@@ -9553,7 +10440,12 @@ static void ReadCameraState(JNIEnv* env) {
             if (pO && vO && ReadMatrix4f(env, pO, cs.proj) && ReadMatrix4f(env, vO, cs.view)) {
                 cs.matsOk = true;
                 static bool s_rsMatDiag = false;
-                if (!s_rsMatDiag) { s_rsMatDiag = true; Log("Matrix source: RenderSystem"); }
+                if (!s_rsMatDiag) {
+                    s_rsMatDiag = true;
+                    Log(usingGameRendererProjection
+                        ? "Matrix source: GameRenderer basic projection + RenderSystem modelview"
+                        : "Matrix source: RenderSystem");
+                }
             }
             if (pO) env->DeleteLocalRef(pO);
             if (vO) env->DeleteLocalRef(vO);
@@ -9567,7 +10459,7 @@ static void ReadCameraState(JNIEnv* env) {
         Log(std::string("CamState: camFound=1 pos=(") + std::to_string(cs.camX) + ","
             + std::to_string(cs.camY) + "," + std::to_string(cs.camZ)
             + ") yaw=" + std::to_string(cs.yaw) + " pitch=" + std::to_string(cs.pitch)
-            + " matsOk=" + (cs.matsOk ? "1" : "0"));
+            + " fov=" + std::to_string(cs.fov) + " matsOk=" + (cs.matsOk ? "1" : "0"));
     }
 
     { LockGuard lk(g_bgCamMutex); g_bgCamState = cs; }
@@ -9593,6 +10485,7 @@ static DWORD WINAPI FastPollThreadProc(LPVOID) {
             LockGuard remapGuard(g_jniRemapMtx);
             if (g_stateJniReady) {
                 UpdateJniState();
+                if (!IsWorldTransitionActive()) ReadCameraState(env);
             }
         }
         Sleep(5); // 200Hz poll
@@ -9649,9 +10542,8 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
         if (g_mcInstance) {
             bool inWorldNow = false;
             if (g_stateJniReady) {
-                // All CallObjectMethod work runs here — never on the render thread.
-                if (!IsWorldTransitionActive())
-                    ReadCameraState(env);   // camera pos/yaw/pitch/matrices → g_bgCamState
+                // World/chunk work remains on this scan thread. Camera state is
+                // refreshed independently by the 200 Hz fast-poll thread.
                 inWorldNow = IsInWorldNow(env);
             } else {
                 inWorldNow = IsInWorldNow(env);
@@ -9731,6 +10623,8 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                         s_autoTotemWasEnabled = cfg.autoTotemEnabled;
                     }
 
+                    UpdateSilentAura(env, cfg);
+
                     if (cfg.antiDebuffEnabled) {
                         UpdateAntiDebuff(env, cfg);
                     }
@@ -9782,7 +10676,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
             g_blockEspChunkCache.clear();
             { LockGuard lk3(g_bgCamMutex); g_bgCamState = BgCamState(); }
         }
-        Sleep(cfg.aimAssist ? 5 : 50); // very fast poll for aim assist
+        Sleep((cfg.aimAssist || cfg.silentAura) ? 5 : 50); // fast poll for aim assist / Silent Aura
     }
     ReleaseSpeedBridgeSneak121(env);
     ResetSpeedBridgeMovementTracking121();
@@ -9800,6 +10694,15 @@ static void UpdateHudEditor(int winW, int winH) {
     if (glfwGetCurrentContext_fn && glfwGetInputMode_fn) {
         void* win = glfwGetCurrentContext_fn();
         if (win) cursorAvailable = (glfwGetInputMode_fn(win, GLFW_CURSOR) == GLFW_CURSOR_NORMAL);
+    }
+    if (!cursorAvailable) {
+        // Under Vulkan there is no current GL context (glfwGetCurrentContext() == NULL), so
+        // the GLFW query above yields nothing. Fall back to the OS cursor visibility, which
+        // tracks whether the game has released the cursor (a GUI/chat is open) on either
+        // renderer. Harmless for OpenGL: a truly captured cursor is also not "showing".
+        CURSORINFO ci = {};
+        ci.cbSize = sizeof(ci);
+        if (GetCursorInfo(&ci)) cursorAvailable = (ci.flags & CURSOR_SHOWING) != 0;
     }
 
     ImGuiIO& io = ImGui::GetIO();
@@ -10197,7 +11100,9 @@ static void RenderOverlayPanels(bool inWorld, const Config& cfg, const OverlayTh
             }
 
             const DWORD overlayNowMs = GetTickCount();
-            const float overlaySmoothAlpha = (std::max)(0.15f, (std::min)(0.65f, io.DeltaTime * 14.0f));
+            // World-space overlays must follow the current camera exactly.
+            // Temporal smoothing makes boxes and nametags trail during turns.
+            const float overlaySmoothAlpha = 1.0f;
             struct SmoothedPoint { std::string key; float sx, sy; DWORD lastSeenMs; };
             struct SmoothedRect  { std::string key; float minSX, minSY, maxSX, maxSY; DWORD lastSeenMs; };
             static std::vector<SmoothedPoint> s_nametagSmooth;
@@ -10235,12 +11140,17 @@ static void RenderOverlayPanels(bool inWorld, const Config& cfg, const OverlayTh
 
                         float sx = 0, sy = 0;
 
-                        bool projected = false;
-                        bool useMatrices = TRACE261_IF("nametagUseMatrices", matsOk);
-                        if (useMatrices) {
-                            projected = WorldToScreen(headPos, cam, viewMat, projMat, winW, winH, &sx, &sy);
+                        bool projected = it.hasNametagScreenPoint;
+                        if (projected) {
+                            sx = it.nametagScreenX;
+                            sy = it.nametagScreenY;
                         } else {
-                            projected = WorldToScreen_Angles(headPos, cam, yaw, pitch, fov, winW, winH, &sx, &sy);
+                            bool useMatrices = TRACE261_IF("nametagUseMatrices", matsOk);
+                            if (useMatrices) {
+                                projected = WorldToScreen(headPos, cam, viewMat, projMat, winW, winH, &sx, &sy);
+                            } else {
+                                projected = WorldToScreen_Angles(headPos, cam, yaw, pitch, fov, winW, winH, &sx, &sy);
+                            }
                         }
 
                         if (!projected) continue;
@@ -10372,12 +11282,17 @@ static void RenderOverlayPanels(bool inWorld, const Config& cfg, const OverlayTh
                 if (!s_espDiagLogged && !g_chestList.empty()) {
                     s_espDiagLogged = true;
                     const auto& ch0 = g_chestList[0];
-                    float csx = 0, csy = 0;
-                    LegoVec3 center = { ch0.x, ch0.y + 0.5, ch0.z };
-                    bool ok = espMatsOk
-                        ? WorldToScreen(center, espCam, espView, espProj, (int)io.DisplaySize.x, (int)io.DisplaySize.y, &csx, &csy)
-                        : WorldToScreen_Angles(center, espCam, espYaw, espPitch, cpCamState.fov, (int)io.DisplaySize.x, (int)io.DisplaySize.y, &csx, &csy);
+                    float csx = ch0.hasScreenRect ? (ch0.minScreenX + ch0.maxScreenX) * 0.5f : 0.0f;
+                    float csy = ch0.hasScreenRect ? (ch0.minScreenY + ch0.maxScreenY) * 0.5f : 0.0f;
+                    bool ok = ch0.hasScreenRect;
+                    if (!ok) {
+                        LegoVec3 center = { ch0.x, ch0.y + 0.5, ch0.z };
+                        ok = espMatsOk
+                            ? WorldToScreen(center, espCam, espView, espProj, (int)io.DisplaySize.x, (int)io.DisplaySize.y, &csx, &csy)
+                            : WorldToScreen_Angles(center, espCam, espYaw, espPitch, cpCamState.fov, (int)io.DisplaySize.x, (int)io.DisplaySize.y, &csx, &csy);
+                    }
                     Log(std::string("ChestESP diag: matsOk=") + (espMatsOk?"1":"0")
+                        + " rendererProjection=" + (ch0.hasScreenRect ? "1" : "0")
                         + " yaw=" + std::to_string(espYaw) + " pitch=" + std::to_string(espPitch)
                         + " cam=(" + std::to_string(espCam.x) + "," + std::to_string(espCam.y) + "," + std::to_string(espCam.z) + ")"
                         + " chest=(" + std::to_string(ch0.x) + "," + std::to_string(ch0.y) + "," + std::to_string(ch0.z) + ")"
@@ -10420,21 +11335,26 @@ static void RenderOverlayPanels(bool inWorld, const Config& cfg, const OverlayTh
                             {-0.5, 1.0, -0.5}, {0.5, 1.0, -0.5}, {-0.5, 1.0, 0.5}, {0.5, 1.0, 0.5}
                         };
 
-                        float minSX = 999999, minSY = 999999, maxSX = -999999, maxSY = -999999;
-                        int projectedCorners = 0;
-                        for (int c = 0; c < 8; c++) {
-                            LegoVec3 corner = { ch.x + offsets[c][0], ch.y + offsets[c][1], ch.z + offsets[c][2] };
-                            float csx = 0, csy = 0;
-                            bool useMatrices = TRACE261_IF("chestEspUseMatrices", espMatsOk);
-                            bool ok = useMatrices
-                                ? WorldToScreen(corner, espCam, espView, espProj, winW, winH, &csx, &csy)
-                                : WorldToScreen_Angles(corner, espCam, espYaw, espPitch, fov, winW, winH, &csx, &csy);
-                            if (!ok) continue;
-                            if (csx < minSX) minSX = csx;
-                            if (csy < minSY) minSY = csy;
-                            if (csx > maxSX) maxSX = csx;
-                            if (csy > maxSY) maxSY = csy;
-                            projectedCorners++;
+                        float minSX = ch.minScreenX, minSY = ch.minScreenY;
+                        float maxSX = ch.maxScreenX, maxSY = ch.maxScreenY;
+                        int projectedCorners = ch.hasScreenRect ? 8 : 0;
+                        if (!ch.hasScreenRect) {
+                            minSX = minSY = 999999.0f;
+                            maxSX = maxSY = -999999.0f;
+                            for (int c = 0; c < 8; c++) {
+                                LegoVec3 corner = { ch.x + offsets[c][0], ch.y + offsets[c][1], ch.z + offsets[c][2] };
+                                float csx = 0, csy = 0;
+                                bool useMatrices = TRACE261_IF("chestEspUseMatrices", espMatsOk);
+                                bool ok = useMatrices
+                                    ? WorldToScreen(corner, espCam, espView, espProj, winW, winH, &csx, &csy)
+                                    : WorldToScreen_Angles(corner, espCam, espYaw, espPitch, fov, winW, winH, &csx, &csy);
+                                if (!ok) continue;
+                                if (csx < minSX) minSX = csx;
+                                if (csy < minSY) minSY = csy;
+                                if (csx > maxSX) maxSX = csx;
+                                if (csy > maxSY) maxSY = csy;
+                                projectedCorners++;
+                            }
                         }
                         if (projectedCorners < 4) continue; // skip if mostly off-screen
 
@@ -10705,7 +11625,7 @@ static void RenderOverlayPanels(bool inWorld, const Config& cfg, const OverlayTh
             if (renderModuleList) {
                 // Module list (top-right) - original-like (right aligned colored bars)
                 struct ModLine { const char* text; ImU32 accent; float width; };
-                ModLine mods[16];
+                ModLine mods[24];
                 int modCount = 0;
 
                 auto pushMod = [&](const char* text, ImU32 accent) {
@@ -10728,6 +11648,7 @@ static void RenderOverlayPanels(bool inWorld, const Config& cfg, const OverlayTh
                 if (cfg.rightClick)    pushMod("Rightclick", overlayTheme.accentTertiary);
                 if (cfg.aimAssist)     pushMod("Aim Assist", overlayTheme.accentPrimary);
                 if (cfg.triggerbot)    pushMod("Triggerbot", overlayTheme.accentSecondary);
+                if (cfg.silentAura)    pushMod("Silent Aura", overlayTheme.accentSecondary);
                 if (cfg.speedBridge)   pushMod("SpeedBridge", overlayTheme.accentPrimary);
                 if (cfg.chestStealer)  pushMod("Chest Stealer", overlayTheme.accentTertiary);
                 if (cfg.chestEsp)      pushMod("Chest ESP", overlayTheme.accentSecondary);
@@ -10740,6 +11661,7 @@ static void RenderOverlayPanels(bool inWorld, const Config& cfg, const OverlayTh
                 if (cfg.reachEnabled)  pushMod("Reach", overlayTheme.accentPrimary);
                 if (cfg.velocityEnabled) pushMod("Velocity", overlayTheme.accentTertiary);
                 if (cfg.autoTotemEnabled) pushMod("AutoTotem", overlayTheme.accentPrimary);
+                if (cfg.antiDebuffEnabled) pushMod("AntiDebuff", overlayTheme.accentPrimary);
 
                 // Sort by width descending (staggered original look)
                 for (int a = 0; a < modCount; a++) {
@@ -10852,7 +11774,125 @@ static void RenderOverlayPanels(bool inWorld, const Config& cfg, const OverlayTh
             }
 }
 
+// ── Renderer-neutral ImGui init ──────────────────────────────────────────────
+// Creates the ImGui context, loads the (DPI-aware) font atlas, and initializes the
+// Win32 platform backend. Performs NO OpenGL/Vulkan calls, so it is safe to run on
+// either present path. Idempotent: returns true once the context/platform is ready.
+// 'forOpenGL' selects the Win32 init variant (the OpenGL path uses the *ForOpenGL flavor
+// for viewport/context bookkeeping; the Vulkan path uses the plain init).
+static bool EnsureImGuiContextNeutral(HWND hwnd, bool forOpenGL) {
+    if (g_imguiPhase1Done) return true;
+    if (!hwnd) return false;
+
+    g_hwnd = hwnd;
+
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    io.IniFilename = nullptr;
+
+    // DPI-aware font config (no GL – just configures atlas data).
+    float dpiScale = 1.0f;
+    {
+        UINT dpi = 96;
+        HMODULE hUser32 = GetModuleHandleA("user32.dll");
+        if (hUser32) {
+            typedef UINT (WINAPI* FnGetDpiForWindow)(HWND);
+            auto fn = (FnGetDpiForWindow)GetProcAddress(hUser32, "GetDpiForWindow");
+            if (fn) dpi = fn(g_hwnd);
+        }
+        dpiScale = (dpi > 0) ? ((float)dpi / 96.0f) : 1.0f;
+        if (dpiScale < 0.75f) dpiScale = 0.75f;
+        if (dpiScale > 2.5f) dpiScale = 2.5f;
+    }
+    io.Fonts->Clear();
+    ImFontConfig fontCfg;
+    fontCfg.RasterizerDensity = 1.0f;
+    fontCfg.SizePixels = 16.0f * dpiScale;
+    fontCfg.OversampleH = 3;
+    fontCfg.OversampleV = 2;
+    fontCfg.PixelSnapH = true;
+    ImFont* loadedFont = nullptr;
+    std::string bridgeDir = GetBridgeDir();
+    std::vector<std::string> fontCandidates = {
+        bridgeDir + "\\minecraftia.ttf",
+        bridgeDir + "\\Minecraftia.ttf",
+        bridgeDir + "\\Data\\minecraftia.ttf",
+        bridgeDir + "\\Data\\Minecraftia.ttf",
+        "C:\\Windows\\Fonts\\minecraftia.ttf",
+        "C:\\Windows\\Fonts\\Minecraftia.ttf"
+    };
+    for (const auto& fontPath : fontCandidates) {
+        if (!FileExistsA(fontPath)) continue;
+        if (!IsLikelyFontBinary(fontPath)) {
+            Log("Skipping invalid font file (not binary TTF/OTF): " + fontPath);
+            continue;
+        }
+        loadedFont = io.Fonts->AddFontFromFileTTF(fontPath.c_str(), fontCfg.SizePixels, &fontCfg);
+        if (loadedFont) {
+            Log("Loaded ImGui font: " + fontPath);
+            break;
+        }
+    }
+    if (!loadedFont) {
+        io.Fonts->AddFontDefault(&fontCfg);
+        Log("Minecraftia not found, using default ImGui font.");
+    }
+    io.FontGlobalScale = 1.0f;
+    ImGuiStyle& st = ImGui::GetStyle();
+    st.ScaleAllSizes(dpiScale);
+
+    if (forOpenGL) ImGui_ImplWin32_InitForOpenGL(g_hwnd);
+    else           ImGui_ImplWin32_Init(g_hwnd);
+
+    g_imguiPhase1Done = true;
+    Log(std::string("ImGui context + Win32 platform initialized (neutral, ") +
+        (forOpenGL ? "OpenGL" : "Vulkan") + " variant).");
+    return true;
+}
+
+// Renderer-neutral seams consumed by the Vulkan backend (render_backend.cpp).
+bool Bridge_EnsureImGuiPlatform(HWND hwnd) {
+    return EnsureImGuiContextNeutral(hwnd, /*forOpenGL=*/false);
+}
+
+bool Bridge_IsImGuiPlatformReady() {
+    return g_imguiPhase1Done;
+}
+
+// Build one overlay frame. MUST be called after the active renderer backend's NewFrame().
+// Runs platform NewFrame + ImGui::NewFrame + game-state update + panel draw + ImGui::Render().
+// Returns the finalized draw data, or nullptr when the frame should be skipped.
+ImDrawData* Bridge_BuildOverlayDrawData(int winW, int winH) {
+    if (!g_imguiPhase1Done) return nullptr;
+    if (IsWorldTransitionActive()) return nullptr;
+
+    StartBackgroundThreadsIfNeeded();
+    UpdateRealGuiState();
+
+    PublishOverlayViewport121(winW, winH);
+    ImGui_ImplWin32_NewFrame();
+    ImGui::NewFrame();
+    UpdateHudEditor(winW, winH);
+
+    ImGuiIO& io = ImGui::GetIO();
+    int w = (int)io.DisplaySize.x;
+    int h = (int)io.DisplaySize.y;
+
+    Config cfg;
+    { LockGuard lk(g_configMutex); cfg = g_config; }
+    OverlayTheme overlayTheme = ResolveOverlayTheme(cfg.guiTheme);
+    bool inWorld = false;
+    { LockGuard lk(g_jniStateMtx); inWorld = g_jniInWorld; }
+    RenderOverlayPanels(inWorld, cfg, overlayTheme, w, h);
+
+    ImGui::Render();
+    if (io.DisplaySize.x <= 1.0f || io.DisplaySize.y <= 1.0f) return nullptr;
+    return ImGui::GetDrawData();
+}
+
 void Bridge_BeginOverlayImGuiFrame(int winW, int winH) {
+    PublishOverlayViewport121(winW, winH);
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
@@ -10877,93 +11917,11 @@ void Bridge_EndOverlayImGuiFrame_OpenGL() {
     glFlush();
 }
 
-void Bridge_EndOverlayImGuiFrame_VulkanAuxGL() {
-    Bridge_EndOverlayImGuiFrame_OpenGL();
-}
-
-static HWND FindGlfwGameWindowForOverlay() {
-    HWND found = nullptr;
-    EnumWindows([](HWND hwnd, LPARAM lp) -> BOOL {
-        char cls[256] = {};
-        if (GetClassNameA(hwnd, cls, sizeof(cls)) && strcmp(cls, "GLFW30") == 0) {
-            *(HWND*)lp = hwnd;
-            return FALSE;
-        }
-        return TRUE;
-    }, (LPARAM)&found);
-    return found;
-}
-
-bool Bridge_RenderVulkanOverlayFrame(HWND hwnd, int width, int height) {
-    if (!hwnd || width <= 1 || height <= 1) return false;
-    if (IsWorldTransitionActive()) return false;
-    if (RenderBackend_GetActiveKind() == GfxBackendKind::OpenGL) return false;
-
-    StartBackgroundThreadsIfNeeded();
-
-    static HDC s_auxHdc = nullptr;
-    static HGLRC s_auxGlrc = nullptr;
-    static HWND s_auxHwnd = nullptr;
-
-    if (!s_auxHdc || s_auxHwnd != hwnd) {
-        if (s_auxGlrc) { wglMakeCurrent(nullptr, nullptr); wglDeleteContext(s_auxGlrc); s_auxGlrc = nullptr; }
-        if (s_auxHdc) { ReleaseDC(s_auxHwnd, s_auxHdc); s_auxHdc = nullptr; }
-        s_auxHwnd = hwnd;
-        s_auxHdc = GetDC(hwnd);
-        if (!s_auxHdc) return false;
-
-        PIXELFORMATDESCRIPTOR pfd = {};
-        pfd.nSize = sizeof(pfd);
-        pfd.nVersion = 1;
-        pfd.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
-        pfd.iPixelType = PFD_TYPE_RGBA;
-        pfd.cColorBits = 32;
-        pfd.cAlphaBits = 8;
-        int pf = ChoosePixelFormat(s_auxHdc, &pfd);
-        if (!pf || !SetPixelFormat(s_auxHdc, pf, &pfd)) return false;
-        s_auxGlrc = wglCreateContext(s_auxHdc);
-        if (!s_auxGlrc) return false;
-    }
-
-    if (!wglMakeCurrent(s_auxHdc, s_auxGlrc)) return false;
-
-    if (!g_imguiPhase1Done) {
-        g_hwnd = hwnd;
-        g_imguiGlrc = s_auxGlrc;
-        ImGui::CreateContext();
-        ImGuiIO& io = ImGui::GetIO();
-        io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-        io.IniFilename = nullptr;
-        io.Fonts->AddFontDefault();
-        ImGui_ImplWin32_InitForOpenGL(hwnd);
-        g_imguiPhase1Done = true;
-        Log("ImGui phase-1 done on Vulkan aux GL context.");
-    }
-
-    if (!g_imguiInitialized) {
-        LoadModernOpenGL();
-        ImGui_ImplOpenGL3_Init("#version 330 core");
-        g_imguiGlBackendReady = true;
-        g_imguiInitialized = true;
-        g_imguiGlrc = s_auxGlrc;
-        Log("ImGui phase-2 done on Vulkan aux GL context.");
-    }
-
-    ImGuiIO& io = ImGui::GetIO();
-    io.DisplaySize = ImVec2((float)width, (float)height);
-
-    UpdateRealGuiState();
-    Bridge_BeginOverlayImGuiFrame(width, height);
-
-    bool inWorld = false;
-    { LockGuard lk(g_jniStateMtx); inWorld = g_jniInWorld; }
-    Bridge_RenderOverlayPanels(inWorld);
-
-    Bridge_EndOverlayImGuiFrame_VulkanAuxGL();
-    wglMakeCurrent(nullptr, nullptr);
-    RenderBackend_NotifyVulkanFrame();
-    return true;
-}
+// The former Vulkan aux-OpenGL overlay path (Bridge_EndOverlayImGuiFrame_VulkanAuxGL,
+// FindGlfwGameWindowForOverlay, Bridge_RenderVulkanOverlayFrame) has been removed. Vulkan
+// sessions now render through the real Vulkan ImGui backend in render_backend.cpp, which
+// composites into the game's own swapchain images (no secondary GL context / no GL-over-
+// Vulkan race).
 
 // ===================== HOOKED SwapBuffers =====================
 // Frame counter: skip first few frames after GL backend init to let driver stabilize.
@@ -10999,75 +11957,23 @@ BOOL WINAPI hwglSwapBuffers(HDC hDc) {
         return o_wglSwapBuffers(hDc);
     }
 
+    // Backend arbitration: if the Vulkan present path already owns this session, never run
+    // the OpenGL overlay (avoids two backends fighting over one ImGui context). Otherwise
+    // claim OpenGL now so the Vulkan present hook bails from its very first frame.
+    if (RenderBackend_GetActiveKind() == GfxBackendKind::Vulkan) {
+        static bool s_loggedVkActive = false;
+        if (!s_loggedVkActive) { s_loggedVkActive = true; Log("wglSwapBuffers: Vulkan backend owns the session; OpenGL overlay disabled."); }
+        return o_wglSwapBuffers(hDc);
+    }
+    RenderBackend_NotifyOpenGlFrame(window);
+
     // ── Phase 1: ImGui context + Win32 backend (NO OpenGL calls at all) ──
     // Runs on the very first GLFW swap call.  We must not touch GL here so the
     // NVIDIA driver's internal swap-chain state is completely undisturbed.
     if (!g_imguiPhase1Done) {
         TRACE261_PATH("imgui-phase1-init");
-        g_hwnd = window;
         g_imguiGlrc = currentRc;
-
-        ImGui::CreateContext();
-        ImGuiIO& io = ImGui::GetIO();
-        io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-        io.IniFilename = nullptr;
-
-        // DPI-aware font config (no GL – just configures atlas data)
-        float dpiScale = 1.0f;
-        {
-            UINT dpi = 96;
-            HMODULE hUser32 = GetModuleHandleA("user32.dll");
-            if (hUser32) {
-                typedef UINT (WINAPI* FnGetDpiForWindow)(HWND);
-                auto fn = (FnGetDpiForWindow)GetProcAddress(hUser32, "GetDpiForWindow");
-                if (fn) dpi = fn(g_hwnd);
-            }
-            dpiScale = (dpi > 0) ? ((float)dpi / 96.0f) : 1.0f;
-            if (dpiScale < 0.75f) dpiScale = 0.75f;
-            if (dpiScale > 2.5f) dpiScale = 2.5f;
-        }
-        io.Fonts->Clear();
-        ImFontConfig fontCfg;
-        fontCfg.RasterizerDensity = 1.0f;
-        fontCfg.SizePixels = 16.0f * dpiScale;
-        fontCfg.OversampleH = 3;
-        fontCfg.OversampleV = 2;
-        fontCfg.PixelSnapH = true;
-        ImFont* loadedFont = nullptr;
-        std::string bridgeDir = GetBridgeDir();
-        std::vector<std::string> fontCandidates = {
-            bridgeDir + "\\minecraftia.ttf",
-            bridgeDir + "\\Minecraftia.ttf",
-            bridgeDir + "\\Data\\minecraftia.ttf",
-            bridgeDir + "\\Data\\Minecraftia.ttf",
-            "C:\\Windows\\Fonts\\minecraftia.ttf",
-            "C:\\Windows\\Fonts\\Minecraftia.ttf"
-        };
-
-        for (const auto& fontPath : fontCandidates) {
-            if (!FileExistsA(fontPath)) continue;
-            if (!IsLikelyFontBinary(fontPath)) {
-                Log("Skipping invalid font file (not binary TTF/OTF): " + fontPath);
-                continue;
-            }
-            loadedFont = io.Fonts->AddFontFromFileTTF(fontPath.c_str(), fontCfg.SizePixels, &fontCfg);
-            if (loadedFont) {
-                Log("Loaded ImGui font: " + fontPath);
-                break;
-            }
-        }
-
-        if (!loadedFont) {
-            io.Fonts->AddFontDefault(&fontCfg);
-            Log("Minecraftia not found, using default ImGui font.");
-        }
-        io.FontGlobalScale = 1.0f;
-        ImGuiStyle& st = ImGui::GetStyle();
-        st.ScaleAllSizes(dpiScale);
-
-        ImGui_ImplWin32_InitForOpenGL(g_hwnd);
-
-        g_imguiPhase1Done = true;
+        EnsureImGuiContextNeutral(window, /*forOpenGL=*/true);
         g_imguiWarmupFrames = 3; // let 3 clean frames pass before touching GL
         Log("ImGui phase-1 done (context + Win32). GL backend deferred.");
         return o_wglSwapBuffers(hDc);
@@ -11264,9 +12170,9 @@ DWORD WINAPI MainThread(LPVOID) {
     Log("wglSwapBuffers hooked.");
     RenderBackend_SetLogFn([](const char* msg) { Log(msg); });
     if (RenderBackend_InitHooks()) {
-        Log("Vulkan present hook ready at startup.");
+        Log("Vulkan present-path hooks armed (auto-detect; OpenGL still used unless the game presents via Vulkan).");
     } else {
-        Log("Vulkan present hook disabled (Lunar 26.1 uses OpenGL; set AOKO_BRIDGE261_VULKAN=1 to opt in).");
+        Log("Vulkan present-path hooks not armed (vulkan-1.dll absent or disabled via AOKO_BRIDGE261_VULKAN=0). OpenGL overlay only.");
     }
 
     // ---- Load GLFW function pointers (no hook needed; just direct calls) ----
@@ -11415,6 +12321,10 @@ glfw_done:;
                 snprintf(fovBuf, sizeof(fovBuf), "%.2f", camState.fov);
                 state += ",\"fov\":";
                 state += fovBuf;
+                state += ",\"viewportWidth\":";
+                state += std::to_string(winW);
+                state += ",\"viewportHeight\":";
+                state += std::to_string(winH);
                 state += ",\"holdingBlock\":";
                 state += holdBlock ? "true" : "false";
                 state += ",\"lookingAtBlock\":";
@@ -11477,10 +12387,14 @@ glfw_done:;
                 for (const auto& p : players) {
                     if (sentEntities >= 32) break; // Limit JSON size
                     float sx = -1.0f, sy = -1.0f;
-                    bool projected = false;
+                    bool projected = p.hasScreenPoint;
+                    if (projected) {
+                        sx = p.screenX;
+                        sy = p.screenY;
+                    }
 
                     bool canProject = TRACE261_IF("entityProjectionCamFound", camState.camFound);
-                    if (canProject) {
+                    if (!projected && canProject) {
                         auto projectPoint = [&](const LegoVec3& pos, float* outX, float* outY) -> bool {
                             bool useMatrices = TRACE261_IF("entityProjectionUseMatrices", camState.matsOk);
                             return useMatrices

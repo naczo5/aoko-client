@@ -11,6 +11,7 @@ public class BridgeCapabilitiesTests
         BridgeCapabilities caps = BridgeCapabilities.ForVersionFallback("26.2");
 
         Assert.True(caps.SupportsModule("triggerbot"));
+        Assert.True(caps.SupportsModule("silentaura"));
         Assert.True(caps.SupportsModule("nametags"));
     }
 
@@ -25,6 +26,15 @@ public class BridgeCapabilitiesTests
         Assert.True(caps.SupportsSetting("pixelpartyassist"));
         Assert.True(caps.SupportsStateField("pixelpartyyawdelta"));
         Assert.True(caps.SupportsSetting("cheststealerenabled"));
+        Assert.True(caps.SupportsSetting("silentarange"));
+        Assert.True(caps.SupportsSetting("silentaurarotspeed"));
+        Assert.True(caps.SupportsSetting("silentauraaimrange"));
+        Assert.True(caps.SupportsSetting("silentauratargetmode"));
+        Assert.True(caps.SupportsSetting("silentauraswitchdelayms"));
+        Assert.True(caps.SupportsSetting("silentauraaccuracy"));
+        Assert.True(caps.SupportsSetting("silentauraspammode"));
+        Assert.True(caps.SupportsSetting("silentauraspammincps"));
+        Assert.True(caps.SupportsSetting("silentauraspammaxcps"));
         Assert.True(caps.SupportsStateField("cheststealerstate"));
         Assert.True(caps.SupportsSetting("nametagshowhelditem"));
         Assert.True(caps.SupportsStateField("attackcooldown"));

@@ -10,6 +10,8 @@
     <RootNamespace>Aoko</RootNamespace>
     <Product>aoko client</Product>
     <Description>aoko client loader and external GUI</Description>
+    <!-- Local-build fallback. Release scripts override this from the Git tag/version argument. -->
+    <VersionPrefix>0.10.0</VersionPrefix>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>false</SelfContained>
   </PropertyGroup>
