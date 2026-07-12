@@ -461,6 +461,7 @@ public class Clicker : INotifyPropertyChanged
             VelocityEnabled = false;
             AutoTotemEnabled = false;
             AntiDebuffEnabled = false;
+            HitDelayFixEnabled = false;
 
             ShowModuleList = false;
             ShowLogo = false;
@@ -1339,6 +1340,18 @@ public class Clicker : INotifyPropertyChanged
         {
             _antiDebuffEnabled = value;
             OnPropertyChanged(nameof(AntiDebuffEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _hitDelayFixEnabled = false;
+    public bool HitDelayFixEnabled
+    {
+        get => _hitDelayFixEnabled;
+        set
+        {
+            _hitDelayFixEnabled = value;
+            OnPropertyChanged(nameof(HitDelayFixEnabled));
             StateChanged?.Invoke();
         }
     }

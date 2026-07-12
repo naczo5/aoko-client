@@ -83,6 +83,7 @@ public partial class MainWindow : Window
         ["closestplayer"] = "Closest Player",
         ["reach"] = "Reach",
         ["velocity"] = "Velocity",
+        ["hitdelayfix"] = "Hit Delay Fix",
         ["panic"] = "Panic"
     };
 
@@ -311,6 +312,7 @@ public partial class MainWindow : Window
         bool velocitySupported = IsModuleSupported("velocity");
         bool autoTotemSupported = IsModuleSupported("autototem");
         bool antiDebuffSupported = IsModuleSupported("antidebuff");
+        bool hitDelayFixSupported = IsModuleSupported("hitdelayfix");
         bool reloadMappingsSupported = GameStateClient.Instance.SupportsSetting("reloadMappingsNonce");
 
         AimAssistCard.IsEnabled = aimAssistSupported;
@@ -324,6 +326,7 @@ public partial class MainWindow : Window
         VelocityCard.IsEnabled = velocitySupported;
         AutoTotemCard.IsEnabled = autoTotemSupported;
         AntiDebuffCard.IsEnabled = antiDebuffSupported;
+        HitDelayFixCard.IsEnabled = hitDelayFixSupported;
 
         var clicker = Clicker.Instance;
         if (!aimAssistSupported && clicker.AimAssistEnabled) clicker.AimAssistEnabled = false;
@@ -337,6 +340,7 @@ public partial class MainWindow : Window
         if (!velocitySupported && clicker.VelocityEnabled) clicker.VelocityEnabled = false;
         if (!autoTotemSupported && clicker.AutoTotemEnabled) clicker.AutoTotemEnabled = false;
         if (!antiDebuffSupported && clicker.AntiDebuffEnabled) clicker.AntiDebuffEnabled = false;
+        if (!hitDelayFixSupported && clicker.HitDelayFixEnabled) clicker.HitDelayFixEnabled = false;
 
         // Update availability text - only show unavailable message for Triggerbot (intentionally 1.21-only)
         AimAssistAvailabilityText.Text = aimAssistSupported ? "Available" : "Unavailable on current bridge";
@@ -347,6 +351,7 @@ public partial class MainWindow : Window
         VelocityAvailabilityText.Text = velocitySupported ? "Available" : "Unavailable on current bridge";
         AutoTotemAvailabilityText.Text = autoTotemSupported ? "Available" : "Unavailable on current bridge";
         AntiDebuffAvailabilityText.Text = antiDebuffSupported ? "Available" : "Unavailable on current bridge";
+        HitDelayFixAvailabilityText.Text = hitDelayFixSupported ? "Available" : "Unavailable on current bridge";
         ChestStealerAvailabilityText.Text = chestStealerSupported ? "Available" : "Unavailable on current bridge";
         GtbHelperAvailabilityText.Text = gtbSupported
             ? "Hypixel Guess The Build helper using action-bar hints."

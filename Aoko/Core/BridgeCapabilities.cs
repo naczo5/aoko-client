@@ -51,6 +51,7 @@ public sealed class BridgeCapabilities
                     "velocity",
                     "autototem",
                     "antidebuff",
+                    "hitdelayfix",
                     "pixelpartyassist",
                     "hudeditor"
                 ),                BuildSet(
@@ -125,6 +126,7 @@ public sealed class BridgeCapabilities
                     "autototemdelay",
                     "autototembehaviormode",
                     "antidebuffenabled",
+                    "hitdelayfixenabled",
                     "pixelpartyassist",
                     "pixelpartyscanradius",
                     "pixelpartyautolook",
@@ -167,6 +169,7 @@ public sealed class BridgeCapabilities
                 "reach",
                 "velocity",
                 "antidebuff",
+                "hitdelayfix",
                 "pixelpartyassist",
                 "hudeditor"
             ),
@@ -213,6 +216,7 @@ public sealed class BridgeCapabilities
                 "velocityvertical",
                 "velocitychance",
                 "antidebuffenabled",
+                "hitdelayfixenabled",
                 "showmodulelist",
                 "moduleliststyle",
                 "showlogo",

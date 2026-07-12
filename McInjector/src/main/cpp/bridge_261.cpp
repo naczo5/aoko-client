@@ -191,6 +191,7 @@ struct Config {
     int   autoTotemDelay = 0;
     int   autoTotemBehaviorMode = 0; // 0=Ghost (inventory only), 1=Anarchy
     bool  antiDebuffEnabled = false;
+    bool  hitDelayFixEnabled = false;
     bool  pixelPartyAssist = false;
     int   pixelPartyScanRadius = 28;
     bool  pixelPartyAutoLook = false;
@@ -311,6 +312,7 @@ static void ParseConfig(const std::string& line) {
     g_config.autoTotemDelay = lc::ClampInt(reader.GetInt("autoTotemDelay", 0), 0, 20);
     g_config.autoTotemBehaviorMode = lc::ClampInt(reader.GetInt("autoTotemBehaviorMode", 0), 0, 1);
     g_config.antiDebuffEnabled = reader.GetBool("antiDebuffEnabled");
+    g_config.hitDelayFixEnabled = reader.GetBool("hitDelayFixEnabled");
     g_config.pixelPartyAssist = reader.GetBool("pixelPartyAssist");
     g_config.pixelPartyScanRadius = lc::ClampInt(reader.GetInt("pixelPartyScanRadius", g_config.pixelPartyScanRadius), 8, 48);
     g_config.pixelPartyAutoLook = reader.GetBool("pixelPartyAutoLook");
@@ -1300,6 +1302,9 @@ static std::string GetStablePlayerName(JNIEnv* env, jobject playerObj) {
 
 // HitResult / crosshair target caches (for lookingAtBlock)
 static jfieldID g_crosshairTargetField_121 = nullptr; // MinecraftClient.<hitResult>
+static jfieldID g_missDelayField_121 = nullptr; // MinecraftClient missTime / field_1771
+static DWORD g_nextHitDelayFixResolveMs_121 = 0;
+static bool g_loggedHitDelayFixResolveFailure_121 = false;
 static jclass   g_hitResultClass_121 = nullptr;       // net.minecraft.class_239
 static jclass   g_blockHitResultClass_121 = nullptr;  // net.minecraft.class_3965
 
@@ -1435,6 +1440,56 @@ static void EnsureCrosshairTargetField(JNIEnv* env, jclass mcCls) {
 
     if (fid) g_crosshairTargetField_121 = fid;
     TRACE261_BRANCH("crosshairTargetResolved", g_crosshairTargetField_121 != nullptr);
+}
+
+// The modern client keeps the post-MISS throttle under version-specific field
+// names. Only exact, known mappings are used so an unresolved runtime fails
+// closed instead of writing an unrelated integer field.
+static void EnsureHitDelayFixField121(JNIEnv* env, jclass mcCls) {
+    if (!env || !mcCls || g_missDelayField_121) return;
+
+    DWORD now = GetTickCount();
+    if (g_nextHitDelayFixResolveMs_121 != 0
+        && (LONG)(now - g_nextHitDelayFixResolveMs_121) < 0) return;
+    g_nextHitDelayFixResolveMs_121 = now + 2000;
+
+    const char* names[] = {
+        "field_1771",      // Yarn intermediary, 1.21.x
+        "attackCooldown",  // Yarn named mapping for the miss-delay field
+        "missTime",        // Mojmap / unobfuscated runtime
+        nullptr
+    };
+    for (int i = 0; names[i]; i++) {
+        jfieldID field = env->GetFieldID(mcCls, names[i], "I");
+        if (env->ExceptionCheck()) { env->ExceptionClear(); field = nullptr; }
+        if (field) {
+            g_missDelayField_121 = field;
+            Log(std::string("HitDelayFix: resolved modern miss-delay field ") + names[i]);
+            return;
+        }
+    }
+
+    if (!g_loggedHitDelayFixResolveFailure_121) {
+        g_loggedHitDelayFixResolveFailure_121 = true;
+        Log("HitDelayFix: modern miss-delay mapping unavailable; module will remain idle.");
+    }
+}
+
+static void UpdateHitDelayFix121(JNIEnv* env, bool enabled, bool guiOpen, bool inWorld,
+    jclass mcCls, int hitResultType) {
+    // HitResult.Type.MISS has ordinal 0; existing state extraction uses
+    // BLOCK=1 and ENTITY=2. This never changes player attack strength.
+    if (!env || !enabled || guiOpen || !inWorld || hitResultType != 0 || !g_mcInstance) return;
+
+    EnsureHitDelayFixField121(env, mcCls);
+    if (!g_missDelayField_121) return;
+
+    jint delay = env->GetIntField(g_mcInstance, g_missDelayField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return; }
+    if (delay != 0) {
+        env->SetIntField(g_mcInstance, g_missDelayField_121, 0);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
 }
 
 
@@ -8291,6 +8346,9 @@ static void ResetModernJniRuntimeCaches121(JNIEnv* env, const char* reason) {
 
     g_hitResultGetType_121 = nullptr;
     g_crosshairTargetField_121 = nullptr;
+    g_missDelayField_121 = nullptr;
+    g_nextHitDelayFixResolveMs_121 = 0;
+    g_loggedHitDelayFixResolveFailure_121 = false;
 
     g_worldField_121 = nullptr;
     g_playerField_121 = nullptr;
@@ -9714,6 +9772,8 @@ static void UpdateJniState() {
     bool envReady = TRACE261_IF("jniEnvReady", (g_jvm->GetEnv((void**)&env, JNI_VERSION_1_8) == JNI_OK && env));
     if (!envReady) return;
     unsigned long long nowMs = (unsigned long long)GetTickCount64();
+    bool hitDelayFixEnabled = false;
+    { LockGuard lk(g_configMutex); hitDelayFixEnabled = g_config.hitDelayFixEnabled; }
 
     jobject scr = GetCurrentScreenObject(env, g_mcInstance);
     if (env->ExceptionCheck()) { env->ExceptionClear(); return; }
@@ -9810,6 +9870,7 @@ static void UpdateJniState() {
                     TRACE261_PATH("hitresult-ordinal-path");
                     lookingAtBlock = (hitOrd == 1);
                     lookingAtEntity = (hitOrd == 2);
+                    UpdateHitDelayFix121(env, hitDelayFixEnabled, guiOpen, inWorld, mcCls, hitOrd);
                 }
                 env->DeleteLocalRef(hitObj);
             }
@@ -11677,6 +11738,7 @@ static void RenderOverlayPanels(bool inWorld, const Config& cfg, const OverlayTh
                 if (cfg.velocityEnabled) pushMod("Velocity", overlayTheme.accentTertiary);
                 if (cfg.autoTotemEnabled) pushMod("AutoTotem", overlayTheme.accentPrimary);
                 if (cfg.antiDebuffEnabled) pushMod("AntiDebuff", overlayTheme.accentPrimary);
+                if (cfg.hitDelayFixEnabled) pushMod("Hit Delay Fix", overlayTheme.accentPrimary);
 
                 // Sort by width descending (staggered original look)
                 for (int a = 0; a < modCount; a++) {

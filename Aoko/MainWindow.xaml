@@ -348,6 +348,16 @@
                             </StackPanel>
                         </Border>
 
+                        <Border x:Name="HitDelayFixCard" Style="{StaticResource ControlCardStyle}" Margin="0,12,0,0">
+                            <StackPanel>
+                                <TextBlock Text="Hit Delay Fix" Foreground="{DynamicResource TextBrush}" FontSize="16" FontWeight="Bold" Margin="0,0,0,10"/>
+                                <TextBlock x:Name="HitDelayFixAvailabilityText" Text="Available" Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,0,0,8"/>
+                                <CheckBox Content="Enable Hit Delay Fix" IsChecked="{Binding HitDelayFixEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                <TextBlock Text="Resets the client-side delay after a miss. It does not change weapon attack strength or send packets."
+                                           Foreground="{DynamicResource DimTextBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,8,0,0"/>
+                            </StackPanel>
+                        </Border>
+
                     </StackPanel>
                 </ScrollViewer>
             </TabItem>

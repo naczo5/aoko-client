@@ -164,6 +164,7 @@ struct Config {
     int velocityVertical = 100;
     int velocityChance = 100;
     bool antiDebuffEnabled = false;
+    bool hitDelayFixEnabled = false;
     bool showModuleList = true;
     int moduleListStyle = 0;
     bool showLogo = true;
@@ -394,6 +395,7 @@ static jmethodID g_renderItemAndEffectIntoGUIMethod   = nullptr;
 static jmethodID g_renderItemIntoGUIMethod            = nullptr;
 
 static jfieldID g_objectMouseOverField = nullptr;
+static jfieldID g_leftClickCounterField = nullptr;
 static jfieldID g_pointedEntityField = nullptr;
 static jclass g_movingObjectPositionClass = nullptr;
 static jfieldID g_typeOfHitField = nullptr;
@@ -862,6 +864,35 @@ bool DiscoverMappings(JNIEnv* env) {
         }
     }
 
+    // Forge production jars keep the 1.8.9 SRG names, so their player class
+    // does not advertise the deobfuscated getHealth name used by the heuristic
+    // above. Resolve the stable Minecraft fields directly before giving up.
+    if (!g_thePlayerField) {
+        g_thePlayerField = env->GetFieldID(mcClass, "thePlayer", "Lnet/minecraft/client/entity/EntityPlayerSP;");
+        if (!g_thePlayerField) {
+            env->ExceptionClear();
+            g_thePlayerField = env->GetFieldID(mcClass, "field_71439_g", "Lnet/minecraft/client/entity/EntityPlayerSP;");
+        }
+        if (g_thePlayerField) {
+            playerType = "net.minecraft.client.entity.EntityPlayerSP";
+            Log("Player field: resolved direct 1.8.9/Forge mapping");
+        } else {
+            env->ExceptionClear();
+        }
+    }
+    if (!g_currentScreenField) {
+        g_currentScreenField = env->GetFieldID(mcClass, "currentScreen", "Lnet/minecraft/client/gui/GuiScreen;");
+        if (!g_currentScreenField) {
+            env->ExceptionClear();
+            g_currentScreenField = env->GetFieldID(mcClass, "field_71462_r", "Lnet/minecraft/client/gui/GuiScreen;");
+        }
+        if (g_currentScreenField) {
+            Log("Screen field: resolved direct 1.8.9/Forge mapping");
+        } else {
+            env->ExceptionClear();
+        }
+    }
+
     // Find getHealth and position fields on player hierarchy
     if (g_thePlayerField && !playerType.empty()) {
         TRACE_VALUE("playerType", playerType);
@@ -884,10 +915,10 @@ bool DiscoverMappings(JNIEnv* env) {
                         std::string rtn = rt ? GetClassNameFromClass(env, rt) : "";
                         jobjectArray ps = (jobjectArray)env->CallObjectMethod(mt, mMParams);
                         jsize pc2 = ps ? env->GetArrayLength(ps) : 0;
-                        if (std::string(cmn) == "getHealth" && rtn == "float" && pc2 == 0) {
-                            g_getHealthMethod = env->GetMethodID(wc, "getHealth", "()F");
+                        if ((std::string(cmn) == "getHealth" || std::string(cmn) == "func_110143_aJ") && rtn == "float" && pc2 == 0) {
+                            g_getHealthMethod = env->GetMethodID(wc, cmn, "()F");
                             if (env->ExceptionCheck()) env->ExceptionClear();
-                            Log("getHealth() in " + wcn);
+                            if (g_getHealthMethod) Log("getHealth() in " + wcn);
                         }
                         env->ReleaseStringUTFChars(jmn, cmn);
                     }
@@ -1053,7 +1084,17 @@ bool DiscoverMappings(JNIEnv* env) {
         if (world) {
              jclass worldClass = env->GetObjectClass(world);
              g_playerEntitiesField = env->GetFieldID(worldClass, "playerEntities", "Ljava/util/List;");
+             if (!g_playerEntitiesField) {
+                 env->ExceptionClear();
+                 g_playerEntitiesField = env->GetFieldID(worldClass, "field_73010_i", "Ljava/util/List;");
+             }
+             if (!g_playerEntitiesField) env->ExceptionClear();
              g_loadedTileEntityListField = env->GetFieldID(worldClass, "loadedTileEntityList", "Ljava/util/List;");
+             if (!g_loadedTileEntityListField) {
+                 env->ExceptionClear();
+                 g_loadedTileEntityListField = env->GetFieldID(worldClass, "field_147482_g", "Ljava/util/List;");
+             }
+             if (!g_loadedTileEntityListField) env->ExceptionClear();
               
              if (g_playerEntitiesField) Log("Found playerEntities field");
              if (g_loadedTileEntityListField) Log("Found loadedTileEntityList field");
@@ -1069,6 +1110,10 @@ bool DiscoverMappings(JNIEnv* env) {
     }
     if (tileEntityClass) {
         g_tileEntityPosField = env->GetFieldID(tileEntityClass, "pos", "Lnet/minecraft/util/BlockPos;");
+        if (!g_tileEntityPosField) {
+            env->ExceptionClear();
+            g_tileEntityPosField = env->GetFieldID(tileEntityClass, "field_174879_c", "Lnet/minecraft/util/BlockPos;");
+        }
         if (!g_tileEntityPosField) env->ExceptionClear();
     }
 
@@ -1204,6 +1249,11 @@ bool DiscoverMappings(JNIEnv* env) {
         if (!g_objectMouseOverField) { env->ExceptionClear(); g_objectMouseOverField = env->GetFieldID(mcClass, "field_71476_x", "Lnet/minecraft/util/MovingObjectPosition;"); }
         if (!g_objectMouseOverField) env->ExceptionClear();
         else Log("Found objectMouseOver field");
+
+        g_leftClickCounterField = env->GetFieldID(mcClass, "leftClickCounter", "I");
+        if (!g_leftClickCounterField) { env->ExceptionClear(); g_leftClickCounterField = env->GetFieldID(mcClass, "field_71429_W", "I"); }
+        if (!g_leftClickCounterField) Log("HitDelayFix: leftClickCounter mapping unavailable; module will remain idle.");
+        else Log("HitDelayFix: found leftClickCounter field");
 
         g_pointedEntityField = env->GetFieldID(mcClass, "pointedEntity", "Lnet/minecraft/entity/Entity;");
         if (!g_pointedEntityField) { env->ExceptionClear(); g_pointedEntityField = env->GetFieldID(mcClass, "field_147125_j", "Lnet/minecraft/entity/Entity;"); }
@@ -1720,6 +1770,11 @@ void TryResolveWorldMappings(JNIEnv* env) {
             TRACE_BRANCH("playerEntitiesCanonicalHit", g_playerEntitiesField != nullptr);
             if (!g_playerEntitiesField) {
                 env->ExceptionClear();
+                g_playerEntitiesField = env->GetFieldID(worldClass, "field_73010_i", "Ljava/util/List;");
+                TRACE_BRANCH("playerEntitiesSrgHit", g_playerEntitiesField != nullptr);
+            }
+            if (!g_playerEntitiesField) {
+                env->ExceptionClear();
             } else {
                 Log("Late-bound playerEntities field");
             }
@@ -1728,6 +1783,11 @@ void TryResolveWorldMappings(JNIEnv* env) {
         if (!g_loadedTileEntityListField) {
             g_loadedTileEntityListField = env->GetFieldID(worldClass, "loadedTileEntityList", "Ljava/util/List;");
             TRACE_BRANCH("loadedTileEntityListCanonicalHit", g_loadedTileEntityListField != nullptr);
+            if (!g_loadedTileEntityListField) {
+                env->ExceptionClear();
+                g_loadedTileEntityListField = env->GetFieldID(worldClass, "field_147482_g", "Ljava/util/List;");
+                TRACE_BRANCH("loadedTileEntityListSrgHit", g_loadedTileEntityListField != nullptr);
+            }
             if (!g_loadedTileEntityListField) {
                 env->ExceptionClear();
             } else {
@@ -2150,7 +2210,12 @@ static void TryResolveScreenFieldDirect(JNIEnv* env) {
     TRACE_BRANCH("currentScreenCanonicalHit", direct != nullptr);
     if (!direct) {
         env->ExceptionClear();
-        return;
+        direct = env->GetFieldID(g_mcClass, "field_71462_r", "Lnet/minecraft/client/gui/GuiScreen;");
+        TRACE_BRANCH("currentScreenSrgHit", direct != nullptr);
+        if (!direct) {
+            env->ExceptionClear();
+            return;
+        }
     }
 
     if (g_currentScreenField != direct) {
@@ -2845,6 +2910,11 @@ static void TryResolveChestEspMappings(JNIEnv* env) {
         if (teClass) {
             g_tileEntityPosField = env->GetFieldID(teClass, "pos", "Lnet/minecraft/util/BlockPos;");
             TRACE_BRANCH("tileEntityPosCanonicalHit", g_tileEntityPosField != nullptr);
+            if (!g_tileEntityPosField) {
+                env->ExceptionClear();
+                g_tileEntityPosField = env->GetFieldID(teClass, "field_174879_c", "Lnet/minecraft/util/BlockPos;");
+                TRACE_BRANCH("tileEntityPosSrgHit", g_tileEntityPosField != nullptr);
+            }
             if (!g_tileEntityPosField) env->ExceptionClear();
         }
     }
@@ -4301,6 +4371,50 @@ static void LogChestStealerMappingMissing(const char* detail) {
 static std::string ChestStealerLower(std::string s) {
     for (char& ch : s) ch = (char)std::tolower((unsigned char)ch);
     return s;
+}
+
+// Module-owned, client-side only: Minecraft 1.8.9 applies a short click lockout
+// after a MovingObjectPosition MISS. Reset only that counter while the current
+// crosshair result remains a MISS; do not invoke combat methods or send packets.
+static void UpdateHitDelayFixLegacy(JNIEnv* env, const Config& cfg, const GameState& state) {
+    if (!env || !cfg.hitDelayFixEnabled || !state.mapped || state.guiOpen
+        || !g_mcInstance || !g_leftClickCounterField || !g_objectMouseOverField
+        || !g_typeOfHitField || !g_enumNameMethod) {
+        return;
+    }
+
+    jobject mop = env->GetObjectField(g_mcInstance, g_objectMouseOverField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); mop = nullptr; }
+    if (!mop) return;
+
+    bool isMiss = false;
+    jobject typeOfHit = env->GetObjectField(mop, g_typeOfHitField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); typeOfHit = nullptr; }
+    if (typeOfHit) {
+        jstring name = (jstring)env->CallObjectMethod(typeOfHit, g_enumNameMethod);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); name = nullptr; }
+        if (name) {
+            const char* chars = env->GetStringUTFChars(name, nullptr);
+            if (chars) {
+                isMiss = strcmp(chars, "MISS") == 0;
+                env->ReleaseStringUTFChars(name, chars);
+            } else if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+            }
+            env->DeleteLocalRef(name);
+        }
+        env->DeleteLocalRef(typeOfHit);
+    }
+    env->DeleteLocalRef(mop);
+
+    if (!isMiss) return;
+
+    jint delay = env->GetIntField(g_mcInstance, g_leftClickCounterField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return; }
+    if (delay != 0) {
+        env->SetIntField(g_mcInstance, g_leftClickCounterField, 0);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
 }
 
 static void LogChestStealerSkippedMenu(const std::string& title) {
@@ -6256,6 +6370,7 @@ void RenderHUD(int winW, int winH) {
     if (cfg.reachEnabled)      pushMod("Reach", ToImU32(theme.accentPrimary));
     if (cfg.velocityEnabled)   pushMod("Velocity", ToImU32(theme.accentTertiary));
     if (cfg.antiDebuffEnabled) pushMod("AntiDebuff", ToImU32(theme.accentPrimary));
+    if (cfg.hitDelayFixEnabled) pushMod("Hit Delay Fix", ToImU32(theme.accentPrimary));
 
     std::sort(mods.begin(), mods.end(), [](const ModLine& a, const ModLine& b) {
         if (a.width != b.width) return a.width > b.width;
@@ -8692,6 +8807,7 @@ void ParseConfig(const std::string& line) {
         }
         g_config.reachEnabled = reader.GetBool("reachEnabled");
         g_config.velocityEnabled = reader.GetBool("velocityEnabled");
+        g_config.hitDelayFixEnabled = reader.GetBool("hitDelayFixEnabled");
 
         std::string showModuleListRaw = reader.GetString("showModuleList");
         g_config.showModuleList = showModuleListRaw.empty() ? true : (showModuleListRaw == "true");
@@ -8897,6 +9013,7 @@ void ServerLoop() {
                 if (cfgSnapshot.antiDebuffEnabled) {
                     UpdateAntiDebuffLegacy(env, cfgSnapshot);
                 }
+                UpdateHitDelayFixLegacy(env, cfgSnapshot, state);
                 if (cfgSnapshot.blockEsp) {
                     UpdateBlockEspListLegacy(env, cfgSnapshot);
                 }
