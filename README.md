@@ -13,8 +13,9 @@ aoko client is a Windows utility client for Lunar Client.
 
 ## Current status
 
-- Supported versions: **26.1**, **1.21.x**, and **1.8.9**.
+- Supported versions: **26.2**, **26.1**, **1.21.x**, and **1.8.9**.
 - All supported versions are used through the external GUI in `Aoko/`.
+- On **Lunar 26.2** the game can present via the new **Vulkan** renderer; `bridge_261.dll` auto-detects OpenGL vs Vulkan at runtime and renders the overlay natively on either (kill-switch: set `AOKO_BRIDGE261_VULKAN=0` to force-disable the Vulkan path).
 
 ## Features (current)
 

@@ -28,6 +28,12 @@ public class GameState
     [JsonPropertyName("fov")]
     public float Fov { get; set; } = 70.0f;
 
+    [JsonPropertyName("viewportWidth")]
+    public int ViewportWidth { get; set; }
+
+    [JsonPropertyName("viewportHeight")]
+    public int ViewportHeight { get; set; }
+
     [JsonPropertyName("holdingBlock")]
     public bool HoldingBlock { get; set; }
 

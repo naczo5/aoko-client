@@ -2,7 +2,20 @@
 setlocal
 cd /d "%~dp0"
 
+set "RELEASE_VERSION=%~1"
+if not defined RELEASE_VERSION (
+    echo [Release] Checking GitHub for the latest published release...
+    for /f "delims=" %%V in ('powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\Get-NextReleaseVersion.ps1"') do set "RELEASE_VERSION=%%V"
+)
+
+if not defined RELEASE_VERSION (
+    echo [Release] ERROR: Could not determine the next version from GitHub.
+    echo [Release] Check your connection or pass it explicitly, for example: build_release.bat 0.10.1
+    exit /b 1
+)
+
 echo [Release] Starting full release build...
+echo [Release] Version: %RELEASE_VERSION%
 
 call build_dll.bat
 if %errorlevel% neq 0 (
@@ -10,7 +23,7 @@ if %errorlevel% neq 0 (
     exit /b %errorlevel%
 )
 
-call build_exe.bat
+call build_exe.bat "%RELEASE_VERSION%"
 if %errorlevel% neq 0 (
     echo [Release] C# Build failed.
     exit /b %errorlevel%
@@ -76,6 +89,8 @@ if exist "%ZIP_PATH%" del /q "%ZIP_PATH%" >nul 2>&1
 echo.
 echo =======================================
 echo [Release] Build complete!
+echo [Release] Version: %RELEASE_VERSION%
+echo [Release] Create the GitHub release with tag: v%RELEASE_VERSION%
 echo [Release] Folder output: %~dp0%RELEASE_DIR%
 echo [Release] Auto-zip disabled (zip was unreliable here).
 echo [Release] Zip this folder manually when ready.

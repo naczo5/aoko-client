@@ -2,6 +2,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:local="clr-namespace:Aoko"
+        xmlns:core="clr-namespace:Aoko.Core"
         Title="aoko client"
         Width="360" Height="310"
         WindowStyle="SingleBorderWindow"
@@ -118,9 +119,43 @@
                                     BorderThickness="1"
                                     CornerRadius="6"
                                     Padding="7,10,7,8">
-                                <StackPanel IsItemsHost="True"
-                                            KeyboardNavigation.TabIndex="1"
-                                            VerticalAlignment="Top"/>
+                                <Grid>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="*"/>
+                                        <RowDefinition Height="Auto"/>
+                                    </Grid.RowDefinitions>
+
+                                    <StackPanel Grid.Row="0"
+                                                IsItemsHost="True"
+                                                KeyboardNavigation.TabIndex="1"
+                                                VerticalAlignment="Top"/>
+
+                                    <Button x:Name="UpdateStatusButton"
+                                            Grid.Row="1"
+                                            Margin="0,8,0,0"
+                                            Padding="8"
+                                            Background="{DynamicResource SliderBgBrush}"
+                                            Foreground="{DynamicResource DimTextBrush}"
+                                            BorderBrush="{DynamicResource SliderFgBrush}"
+                                            BorderThickness="1"
+                                            Cursor="Hand"
+                                            Click="UpdateStatusButton_Click"
+                                            ToolTip="Check for a newer aoko release">
+                                        <StackPanel>
+                                            <TextBlock x:Name="UpdateStatusText"
+                                                       Text="Checking for updates..."
+                                                       FontSize="11"
+                                                       FontWeight="SemiBold"
+                                                       TextAlignment="Center"
+                                                       TextWrapping="Wrap"/>
+                                            <TextBlock x:Name="CurrentVersionText"
+                                                       Foreground="{DynamicResource DimTextBrush}"
+                                                       FontSize="9"
+                                                       Margin="0,2,0,0"
+                                                       TextAlignment="Center"/>
+                                        </StackPanel>
+                                    </Button>
+                                </Grid>
                             </Border>
 
                             <Border Grid.Column="2"
@@ -312,6 +347,7 @@
                                           IsEnabled="{Binding TriggerbotEnabled}"/>
                             </StackPanel>
                         </Border>
+
                     </StackPanel>
                 </ScrollViewer>
             </TabItem>
@@ -578,6 +614,7 @@
                                     <Button x:Name="KeybindBreakBlocksButton" Tag="breakblocks" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
                                     <Button x:Name="KeybindAimAssistButton" Tag="aimassist" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
                                     <Button x:Name="KeybindTriggerbotButton" Tag="triggerbot" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
+                                    <Button x:Name="KeybindSilentAuraButton" Tag="silentaura" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
                                     <Button x:Name="KeybindSpeedBridgeButton" Tag="speedbridge" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
                                     <Button x:Name="KeybindGtbHelperButton" Tag="gtbhelper" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
                                     <Button x:Name="KeybindPixelPartyAssistButton" Tag="pixelpartyassist" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
@@ -601,6 +638,102 @@
             <TabItem Header="Risky">
                 <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" HorizontalContentAlignment="Stretch">
                     <StackPanel Margin="12">
+                        <Border x:Name="SilentAuraCard" Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
+                            <StackPanel>
+                                <CheckBox Content="Silent Aura" IsChecked="{Binding SilentAuraEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                <TextBlock x:Name="SilentAuraAvailabilityText" Text="Available" Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,6,0,0"/>
+                                <Border Background="#33E0533D" BorderBrush="#E0533D" BorderThickness="1" CornerRadius="4" Padding="8,6" Margin="0,8,0,0">
+                                    <TextBlock Foreground="#F0A090" FontSize="11" FontWeight="SemiBold" TextWrapping="Wrap"
+                                               Text="⚠ Warning: the rotations are pretty blatant and easily visible to other players and anti-cheats. Not recommended on popular / well-moderated servers — use only on private or anarchy servers, at your own risk."/>
+                                </Border>
+                                <TextBlock Text="Autonomously locks onto players with smooth, closest-point aiming and clicks like the autoclicker (no attack packets)."
+                                           Foreground="{DynamicResource DimTextBrush}"
+                                           FontSize="11"
+                                           TextWrapping="Wrap"
+                                           Margin="0,8,0,0"/>
+                                <DockPanel Margin="0,10,0,0" IsEnabled="{Binding SilentAuraEnabled}">
+                                    <TextBlock Text="Target priority" Foreground="{DynamicResource TextBrush}" FontSize="12" VerticalAlignment="Center" DockPanel.Dock="Left" />
+                                    <ComboBox SelectedValue="{Binding SilentAuraTargetMode, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                              SelectedValuePath="Tag"
+                                              Style="{StaticResource DarkComboBox}"
+                                              HorizontalAlignment="Right" MinWidth="150">
+                                        <ComboBoxItem Content="Closest" Tag="distance"/>
+                                        <ComboBoxItem Content="Lowest health" Tag="health"/>
+                                    </ComboBox>
+                                </DockPanel>
+                                <CheckBox Content="Spam PvP (ignore cooldown)" IsChecked="{Binding SilentAuraSpamMode, Mode=TwoWay}"
+                                          Style="{StaticResource DarkCheckBox}" Margin="0,10,0,0"
+                                          IsEnabled="{Binding SilentAuraEnabled}"/>
+                                <TextBlock Text="On: rapid attacks for 1.8-style spam servers. Off: waits for the attack cooldown bar (1.9+)."
+                                           Foreground="{DynamicResource DimTextBrush}"
+                                           FontSize="11"
+                                           TextWrapping="Wrap"
+                                           Margin="0,6,0,0"/>
+                                <StackPanel Margin="0,10,0,0" IsEnabled="{Binding SilentAuraSpamMode}">
+                                    <DockPanel>
+                                        <TextBlock Text="Spam min CPS" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left" />
+                                        <TextBlock Text="{Binding SilentAuraSpamMinCps, StringFormat={}{0:0}}" Foreground="{DynamicResource DimTextBrush}" FontSize="12" HorizontalAlignment="Right" DockPanel.Dock="Right" />
+                                    </DockPanel>
+                                    <Slider Minimum="8" Maximum="20" TickFrequency="1" IsSnapToTickEnabled="True"
+                                            Value="{Binding SilentAuraSpamMinCps, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                            Style="{StaticResource DarkSlider}"/>
+                                    <DockPanel Margin="0,10,0,0">
+                                        <TextBlock Text="Spam max CPS" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left" />
+                                        <TextBlock Text="{Binding SilentAuraSpamMaxCps, StringFormat={}{0:0}}" Foreground="{DynamicResource DimTextBrush}" FontSize="12" HorizontalAlignment="Right" DockPanel.Dock="Right" />
+                                    </DockPanel>
+                                    <Slider Minimum="8" Maximum="20" TickFrequency="1" IsSnapToTickEnabled="True"
+                                            Value="{Binding SilentAuraSpamMaxCps, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                            Style="{StaticResource DarkSlider}"/>
+                                </StackPanel>
+                                <DockPanel Margin="0,10,0,0" IsEnabled="{Binding SilentAuraEnabled}">
+                                    <TextBlock Text="Attack range" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left" />
+                                    <TextBlock Text="{Binding SilentAuraRange, StringFormat={}{0:0.0}}" Foreground="{DynamicResource DimTextBrush}" FontSize="12" HorizontalAlignment="Right" DockPanel.Dock="Right" />
+                                </DockPanel>
+                                <Slider Minimum="2.5" Maximum="4.0" TickFrequency="0.1" IsSnapToTickEnabled="True"
+                                        Value="{Binding SilentAuraRange, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                        Style="{StaticResource DarkSlider}" IsEnabled="{Binding SilentAuraEnabled}"/>
+                                <DockPanel Margin="0,10,0,0" IsEnabled="{Binding SilentAuraEnabled}">
+                                    <TextBlock Text="Aim range" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left" />
+                                    <TextBlock Text="{Binding SilentAuraAimRange, StringFormat={}{0:0.0}}" Foreground="{DynamicResource DimTextBrush}" FontSize="12" HorizontalAlignment="Right" DockPanel.Dock="Right" />
+                                </DockPanel>
+                                <Slider Minimum="3.0" Maximum="6.0" TickFrequency="0.1" IsSnapToTickEnabled="True"
+                                        Value="{Binding SilentAuraAimRange, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                        Style="{StaticResource DarkSlider}" IsEnabled="{Binding SilentAuraEnabled}"/>
+                                <TextBlock Text="Locks rotation onto players within aim range; only attacks when they are inside attack range."
+                                           Foreground="{DynamicResource DimTextBrush}"
+                                           FontSize="11"
+                                           TextWrapping="Wrap"
+                                           Margin="0,6,0,0"/>
+                                <DockPanel Margin="0,10,0,0" IsEnabled="{Binding SilentAuraEnabled}">
+                                    <TextBlock Text="Aim speed" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left" />
+                                    <TextBlock Text="{Binding SilentAuraRotSpeed, StringFormat={}{0:0}}" Foreground="{DynamicResource DimTextBrush}" FontSize="12" HorizontalAlignment="Right" DockPanel.Dock="Right" />
+                                </DockPanel>
+                                <Slider Minimum="10" Maximum="90" TickFrequency="5" IsSnapToTickEnabled="True"
+                                        Value="{Binding SilentAuraRotSpeed, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                        Style="{StaticResource DarkSlider}" IsEnabled="{Binding SilentAuraEnabled}"/>
+                                <TextBlock Text="Lower = smoother, slower lock-on. Higher = snappier."
+                                           Foreground="{DynamicResource DimTextBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,6,0,0"/>
+                                <DockPanel Margin="0,10,0,0" IsEnabled="{Binding SilentAuraEnabled}">
+                                    <TextBlock Text="Accuracy" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left" />
+                                    <TextBlock Text="{Binding SilentAuraAccuracy, StringFormat={}{0:0}%}" Foreground="{DynamicResource DimTextBrush}" FontSize="12" HorizontalAlignment="Right" DockPanel.Dock="Right" />
+                                </DockPanel>
+                                <Slider Minimum="50" Maximum="100" TickFrequency="5" IsSnapToTickEnabled="True"
+                                        Value="{Binding SilentAuraAccuracy, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                        Style="{StaticResource DarkSlider}" IsEnabled="{Binding SilentAuraEnabled}"/>
+                                <TextBlock Text="100% = perfect lock. Lower adds aim error so some clicks miss."
+                                           Foreground="{DynamicResource DimTextBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,6,0,0"/>
+                                <DockPanel Margin="0,10,0,0" IsEnabled="{Binding SilentAuraEnabled}">
+                                    <TextBlock Text="Switch delay" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left" />
+                                    <TextBlock Text="{Binding SilentAuraSwitchDelayMs, StringFormat={}{0} ms}" Foreground="{DynamicResource DimTextBrush}" FontSize="12" HorizontalAlignment="Right" DockPanel.Dock="Right" />
+                                </DockPanel>
+                                <Slider Minimum="0" Maximum="2000" TickFrequency="50" IsSnapToTickEnabled="True"
+                                        Value="{Binding SilentAuraSwitchDelayMs, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                        Style="{StaticResource DarkSlider}" IsEnabled="{Binding SilentAuraEnabled}"/>
+                                <TextBlock Text="Minimum time locked on a target before it may switch to another - prevents flicking between nearby players."
+                                           Foreground="{DynamicResource DimTextBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,6,0,0"/>
+                            </StackPanel>
+                        </Border>
+
                         <Border x:Name="ReachCard" Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
                             <StackPanel>
                                 <TextBlock Text="Reach" Foreground="{DynamicResource TextBrush}" FontSize="16" FontWeight="Bold" Margin="0,0,0,10" />
@@ -734,6 +867,91 @@
                 </ScrollViewer>
             </TabItem>
         
+            <TabItem Header="Stats" DataContext="{x:Static core:StatsTracker.Instance}">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" HorizontalContentAlignment="Stretch">
+                    <StackPanel Margin="12">
+                        <WrapPanel Margin="0,0,0,4">
+                            <Border Style="{StaticResource ControlCardStyle}" Width="150" Margin="0,0,8,8">
+                                <StackPanel>
+                                    <TextBlock Text="Playtime" Foreground="{DynamicResource DimTextBrush}" FontSize="11"/>
+                                    <TextBlock Text="{Binding TotalPlaytimeText}" Foreground="{DynamicResource TextBrush}" FontSize="20" FontWeight="SemiBold" Margin="0,4,0,0"/>
+                                </StackPanel>
+                            </Border>
+                            <Border Style="{StaticResource ControlCardStyle}" Width="150" Margin="0,0,8,8">
+                                <StackPanel>
+                                    <TextBlock Text="Clicks" Foreground="{DynamicResource DimTextBrush}" FontSize="11"/>
+                                    <TextBlock Text="{Binding TotalClicks}" Foreground="{DynamicResource TextBrush}" FontSize="20" FontWeight="SemiBold" Margin="0,4,0,0"/>
+                                    <TextBlock Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,2,0,0">
+                                        <Run Text="L "/><Run Text="{Binding LeftClicks, Mode=OneWay}"/><Run Text="  R "/><Run Text="{Binding RightClicks, Mode=OneWay}"/>
+                                    </TextBlock>
+                                </StackPanel>
+                            </Border>
+                            <Border Style="{StaticResource ControlCardStyle}" Width="150" Margin="0,0,8,8">
+                                <StackPanel>
+                                    <TextBlock Text="Avg CPS" Foreground="{DynamicResource DimTextBrush}" FontSize="11"/>
+                                    <TextBlock Text="{Binding AverageCpsText}" Foreground="{DynamicResource TextBrush}" FontSize="20" FontWeight="SemiBold" Margin="0,4,0,0"/>
+                                    <TextBlock Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,2,0,0">
+                                        <Run Text="Peak "/><Run Text="{Binding PeakCpsText, Mode=OneWay}"/>
+                                    </TextBlock>
+                                </StackPanel>
+                            </Border>
+                            <Button Content="Reset Stats" Click="ResetStatsButton_Click" Style="{StaticResource DarkButton}"
+                                    Padding="14,6" Margin="0,0,8,8" Height="40" VerticalAlignment="Top" Cursor="Hand"/>
+                        </WrapPanel>
+
+                        <Border Style="{StaticResource ControlCardStyle}">
+                            <StackPanel>
+                                <DockPanel Margin="0,0,0,10">
+                                    <TextBlock Text="CPS Distribution" Foreground="{DynamicResource TextBrush}" FontSize="16" FontWeight="Bold" DockPanel.Dock="Left"/>
+                                    <TextBlock Foreground="{DynamicResource DimTextBrush}" FontSize="11" DockPanel.Dock="Right" HorizontalAlignment="Right">
+                                        <Run Text="{Binding CpsSampleCount, Mode=OneWay}"/><Run Text=" samples"/>
+                                    </TextBlock>
+                                </DockPanel>
+                                <Border Background="{DynamicResource SliderBgBrush}" CornerRadius="6" Padding="8" MinHeight="158">
+                                    <Grid>
+                                        <ItemsControl ItemsSource="{Binding CpsBuckets}" VerticalAlignment="Bottom">
+                                            <ItemsControl.ItemsPanel>
+                                                <ItemsPanelTemplate>
+                                                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center"/>
+                                                </ItemsPanelTemplate>
+                                            </ItemsControl.ItemsPanel>
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate>
+                                                    <Grid Margin="3,0" ToolTip="{Binding CountText}" Visibility="{Binding Visibility}">
+                                                        <Grid.RowDefinitions>
+                                                            <RowDefinition Height="124"/>
+                                                            <RowDefinition Height="Auto"/>
+                                                        </Grid.RowDefinitions>
+                                                        <Border Grid.Row="0" Width="18" Height="{Binding BarHeight}" VerticalAlignment="Bottom"
+                                                                Background="{DynamicResource AccentBrush}" CornerRadius="3"/>
+                                                        <TextBlock Grid.Row="1" Text="{Binding Label}" Foreground="{DynamicResource DimTextBrush}"
+                                                                   FontSize="9" HorizontalAlignment="Center" Margin="0,5,0,0"/>
+                                                    </Grid>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                        <TextBlock Text="No samples yet" Foreground="{DynamicResource DimTextBrush}" FontSize="12"
+                                                   HorizontalAlignment="Center" VerticalAlignment="Center">
+                                            <TextBlock.Style>
+                                                <Style TargetType="TextBlock">
+                                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding HasCpsSamples}" Value="False">
+                                                            <Setter Property="Visibility" Value="Visible"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </TextBlock.Style>
+                                        </TextBlock>
+                                    </Grid>
+                                </Border>
+                            </StackPanel>
+                        </Border>
+
+                    </StackPanel>
+                </ScrollViewer>
+            </TabItem>
+
             <TabItem Header="Settings">
                 <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" HorizontalContentAlignment="Stretch">
                     <StackPanel Margin="12">

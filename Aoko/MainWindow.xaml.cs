@@ -60,6 +60,9 @@ public partial class MainWindow : Window
     private bool _controlMode;
     private string? _pendingKeybindModuleId;
     private int _uiUpdateQueued;
+    private readonly CancellationTokenSource _updateCheckCancellation = new();
+    private string? _latestReleaseUrl;
+    private bool _updateCheckInProgress;
     private static readonly Dictionary<string, string> ModuleTitles = new()
     {
         ["autoclicker"] = "AutoClicker",
@@ -69,6 +72,7 @@ public partial class MainWindow : Window
         ["breakblocks"] = "Break Blocks",
         ["aimassist"] = "Aim Assist",
         ["triggerbot"] = "Triggerbot",
+        ["silentaura"] = "Silent Aura",
         ["speedbridge"] = "SpeedBridge",
         ["gtbhelper"] = "GTB Helper",
         ["pixelpartyassist"] = "Pixel Party Assist",
@@ -149,6 +153,7 @@ public partial class MainWindow : Window
         InitializeComponent();
         LoadCustomPalettes();
         SourceInitialized += (_, _) => ApplyNativeTitleBarTheme();
+        Loaded += async (_, _) => await CheckForUpdatesAsync();
         Activated += (_, _) => QueueRenderRefresh();
         StateChanged += (_, _) =>
         {
@@ -178,6 +183,7 @@ public partial class MainWindow : Window
         }
 
         DiscordRichPresenceService.Instance.Start();
+        StatsTracker.Instance.StartSessionTimer();
 
         // Initial UI state
         UpdateGameStateUI();
@@ -286,6 +292,8 @@ public partial class MainWindow : Window
     {
         if (string.Equals(moduleId, "triggerbot", StringComparison.OrdinalIgnoreCase))
             return "Unavailable on 1.8.9 (cooldown-era PvP only)";
+        if (string.Equals(moduleId, "silentaura", StringComparison.OrdinalIgnoreCase))
+            return "Unavailable on 1.8.9 (modern interaction API only)";
 
         return "Unavailable on current bridge";
     }
@@ -294,6 +302,7 @@ public partial class MainWindow : Window
     {
         bool aimAssistSupported = IsModuleSupported("aimassist");
         bool triggerbotSupported = IsModuleSupported("triggerbot");
+        bool silentAuraSupported = IsModuleSupported("silentaura");
         bool speedBridgeSupported = IsModuleSupported("speedbridge");
         bool gtbSupported = IsModuleSupported("gtbhelper");
         bool pixelPartySupported = IsModuleSupported("pixelpartyassist");
@@ -306,6 +315,7 @@ public partial class MainWindow : Window
 
         AimAssistCard.IsEnabled = aimAssistSupported;
         TriggerbotCard.IsEnabled = triggerbotSupported;
+        SilentAuraCard.IsEnabled = silentAuraSupported;
         SpeedBridgeCard.IsEnabled = speedBridgeSupported;
         GtbHelperCard.IsEnabled = gtbSupported;
         PixelPartyAssistCard.IsEnabled = pixelPartySupported;
@@ -318,6 +328,7 @@ public partial class MainWindow : Window
         var clicker = Clicker.Instance;
         if (!aimAssistSupported && clicker.AimAssistEnabled) clicker.AimAssistEnabled = false;
         if (!triggerbotSupported && clicker.TriggerbotEnabled) clicker.TriggerbotEnabled = false;
+        if (!silentAuraSupported && clicker.SilentAuraEnabled) clicker.SilentAuraEnabled = false;
         if (!speedBridgeSupported && clicker.SpeedBridgeEnabled) clicker.SpeedBridgeEnabled = false;
         if (!gtbSupported && clicker.GtbHelperEnabled) clicker.GtbHelperEnabled = false;
         if (!pixelPartySupported && clicker.PixelPartyAssistEnabled) clicker.PixelPartyAssistEnabled = false;
@@ -330,6 +341,7 @@ public partial class MainWindow : Window
         // Update availability text - only show unavailable message for Triggerbot (intentionally 1.21-only)
         AimAssistAvailabilityText.Text = aimAssistSupported ? "Available" : "Unavailable on current bridge";
         TriggerbotAvailabilityText.Text = triggerbotSupported ? "Available" : "Unavailable on 1.8.9 (cooldown-era PvP only)";
+        SilentAuraAvailabilityText.Text = silentAuraSupported ? "Available" : "Unavailable on 1.8.9 (modern interaction API only)";
         SpeedBridgeAvailabilityText.Text = speedBridgeSupported ? "Available" : "Unavailable on current bridge";
         ReachAvailabilityText.Text = reachSupported ? "Available" : "Unavailable on current bridge";
         VelocityAvailabilityText.Text = velocitySupported ? "Available" : "Unavailable on current bridge";
@@ -345,6 +357,7 @@ public partial class MainWindow : Window
 
         KeybindAimAssistButton.IsEnabled = aimAssistSupported;
         KeybindTriggerbotButton.IsEnabled = triggerbotSupported;
+        KeybindSilentAuraButton.IsEnabled = silentAuraSupported;
         KeybindSpeedBridgeButton.IsEnabled = speedBridgeSupported;
         KeybindGtbHelperButton.IsEnabled = gtbSupported;
         KeybindPixelPartyAssistButton.IsEnabled = pixelPartySupported;
@@ -1151,7 +1164,9 @@ public partial class MainWindow : Window
 
     protected override void OnClosed(EventArgs e)
     {
+        _updateCheckCancellation.Cancel();
         DiscordRichPresenceService.Instance.Stop();
+        StatsTracker.Instance.StopSessionTimer();
 
         var profile = ProfileManager.CreateFromClicker();
         profile.Name = "config";
@@ -1164,6 +1179,70 @@ public partial class MainWindow : Window
         base.OnClosed(e);
     }
 
+    private async void UpdateStatusButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (!string.IsNullOrWhiteSpace(_latestReleaseUrl))
+        {
+            try
+            {
+                Process.Start(new ProcessStartInfo(_latestReleaseUrl) { UseShellExecute = true });
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Failed to open release page: {ex.Message}");
+            }
+
+            return;
+        }
+
+        await CheckForUpdatesAsync();
+    }
+
+    private async Task CheckForUpdatesAsync()
+    {
+        if (_updateCheckInProgress || _updateCheckCancellation.IsCancellationRequested)
+            return;
+
+        _updateCheckInProgress = true;
+        _latestReleaseUrl = null;
+        SetUpdateStatus("Checking for updates...", $"Current v{UpdateService.CurrentVersion}");
+
+        try
+        {
+            UpdateCheckResult result = await UpdateService.CheckAsync(_updateCheckCancellation.Token);
+            if (result.IsUpdateAvailable)
+            {
+                _latestReleaseUrl = result.ReleaseUrl;
+                SetUpdateStatus($"Update v{result.LatestVersion} available", $"Current v{result.CurrentVersion} • click to view");
+            }
+            else
+            {
+                SetUpdateStatus("Up to date", $"Current v{result.CurrentVersion}");
+            }
+        }
+        catch (OperationCanceledException) when (_updateCheckCancellation.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"Update check failed: {ex.Message}");
+            SetUpdateStatus("Update check unavailable", $"Current v{UpdateService.CurrentVersion} • click to retry");
+        }
+        finally
+        {
+            _updateCheckInProgress = false;
+        }
+    }
+
+    private void SetUpdateStatus(string status, string version)
+    {
+        ControlPanel.ApplyTemplate();
+        if (ControlPanel.Template.FindName("UpdateStatusText", ControlPanel) is TextBlock statusText)
+            statusText.Text = status;
+        if (ControlPanel.Template.FindName("CurrentVersionText", ControlPanel) is TextBlock versionText)
+            versionText.Text = version;
+    }
+
     private void KeybindButton_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not Button btn || btn.Tag is not string moduleId) return;
@@ -1171,6 +1250,11 @@ public partial class MainWindow : Window
         _pendingKeybindModuleId = moduleId;
         InputHooks.StartKeyCapture();
         UpdateKeybindButtons();
+    }
+
+    private void ResetStatsButton_Click(object sender, RoutedEventArgs e)
+    {
+        StatsTracker.Instance.Reset();
     }
 
     // ── Block ESP block-list editing ────────────────────────────────────────────
@@ -1257,6 +1341,7 @@ public partial class MainWindow : Window
         SetKeybindButtonContent(KeybindBreakBlocksButton, "breakblocks");
         SetKeybindButtonContent(KeybindAimAssistButton, "aimassist");
         SetKeybindButtonContent(KeybindTriggerbotButton, "triggerbot");
+        SetKeybindButtonContent(KeybindSilentAuraButton, "silentaura");
         SetKeybindButtonContent(KeybindSpeedBridgeButton, "speedbridge");
         SetKeybindButtonContent(KeybindGtbHelperButton, "gtbhelper");
         SetKeybindButtonContent(KeybindPixelPartyAssistButton, "pixelpartyassist");

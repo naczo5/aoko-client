@@ -894,6 +894,16 @@ public class GameStateClient : INotifyPropertyChanged
                     aimAssistRange = clicker.AimAssistRange,
                     aimAssistStrength = clicker.AimAssistStrength,
                     triggerbot = clicker.TriggerbotEnabled,
+                    silentAura = clicker.SilentAuraEnabled,
+                    silentAuraRange = clicker.SilentAuraRange,
+                    silentAuraAimRange = clicker.SilentAuraAimRange,
+                    silentAuraRotSpeed = clicker.SilentAuraRotSpeed,
+                    silentAuraTargetMode = clicker.SilentAuraTargetMode,
+                    silentAuraSwitchDelayMs = clicker.SilentAuraSwitchDelayMs,
+                    silentAuraAccuracy = clicker.SilentAuraAccuracy,
+                    silentAuraSpamMode = clicker.SilentAuraSpamMode,
+                    silentAuraSpamMinCps = clicker.SilentAuraSpamMinCps,
+                    silentAuraSpamMaxCps = clicker.SilentAuraSpamMaxCps,
                     speedBridge = clicker.SpeedBridgeEnabled,
                     speedBridgeBlockOnly = clicker.SpeedBridgeBlockOnly,
                     speedBridgeDelayMs = clicker.SpeedBridgeDelayMs,
@@ -953,6 +963,7 @@ public class GameStateClient : INotifyPropertyChanged
                     keybindBreakBlocks   = InputHooks.GetModuleKey("breakblocks"),
                     keybindAimAssist     = InputHooks.GetModuleKey("aimassist"),
                     keybindTriggerbot    = InputHooks.GetModuleKey("triggerbot"),
+                    keybindSilentAura    = InputHooks.GetModuleKey("silentaura"),
                     keybindSpeedBridge   = InputHooks.GetModuleKey("speedbridge"),
                     keybindGtbHelper     = InputHooks.GetModuleKey("gtbhelper"),
                     keybindNametags      = InputHooks.GetModuleKey("nametags"),
@@ -1048,6 +1059,9 @@ public class GameStateClient : INotifyPropertyChanged
                     break;
                 case "toggleTriggerbot":
                     clicker.TriggerbotEnabled = !clicker.TriggerbotEnabled;
+                    break;
+                case "toggleSilentAura":
+                    clicker.SilentAuraEnabled = !clicker.SilentAuraEnabled;
                     break;
                 case "toggleSpeedBridge":
                     clicker.SpeedBridgeEnabled = !clicker.SpeedBridgeEnabled;

@@ -5,6 +5,7 @@
 #include "../src/main/cpp/block_esp_common.h"
 #include "../src/main/cpp/json_config_reader.h"
 #include "../src/main/cpp/bridge_capabilities.h"
+#include "../src/main/cpp/screen_projection.h"
 
 static int g_failures = 0;
 
@@ -99,6 +100,34 @@ static void TestCapabilitiesAdvertiseBlockEsp()
     ExpectTrue(modern.find("\"blockespblocks\"") != std::string::npos, "modern advertises blockespblocks setting");
 }
 
+static void ExpectNear(float expected, float actual, const char* message)
+{
+    if (std::fabs(expected - actual) > 0.001f) {
+        std::cerr << "FAIL: " << message << " expected=" << expected << " actual=" << actual << std::endl;
+        ++g_failures;
+    }
+}
+
+static void TestScreenProjection()
+{
+    lc::ScreenProjection result;
+    ExpectTrue(lc::ConvertNdcProjectionToViewport(0.0, 0.0, 0.0, 1920, 1080, &result), "projection center is valid");
+    ExpectNear(960.0f, result.x, "projection center x");
+    ExpectNear(540.0f, result.y, "projection center y");
+
+    ExpectTrue(lc::ConvertNdcProjectionToViewport(-1.0, 1.0, -1.0, 1920, 1080, &result), "projection top-left is valid");
+    ExpectNear(0.0f, result.x, "projection top-left x");
+    ExpectNear(0.0f, result.y, "projection top-left y");
+
+    ExpectTrue(lc::ConvertNdcProjectionToViewport(1.0, -1.0, 1.0, 1920, 1080, &result), "projection bottom-right is valid");
+    ExpectNear(1920.0f, result.x, "projection bottom-right x");
+    ExpectNear(1080.0f, result.y, "projection bottom-right y");
+
+    ExpectTrue(!lc::ConvertNdcProjectionToViewport(1.01, 0.0, 0.0, 1920, 1080, &result), "off-screen projection falls back");
+    ExpectTrue(!lc::ConvertNdcProjectionToViewport(0.0, 0.0, 1.01, 1920, 1080, &result), "clipped projection falls back");
+    ExpectTrue(!lc::ConvertNdcProjectionToViewport(NAN, 0.0, 0.0, 1920, 1080, &result), "invalid projection falls back");
+}
+
 int main()
 {
     TestNormalizeId();
@@ -106,6 +135,7 @@ int main()
     TestParseTargets();
     TestParsesFromQuotedConfigValue();
     TestCapabilitiesAdvertiseBlockEsp();
+    TestScreenProjection();
 
     if (g_failures != 0) {
         std::cerr << "Native block-esp tests failed: " << g_failures << std::endl;

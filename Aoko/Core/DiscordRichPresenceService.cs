@@ -363,6 +363,7 @@ public sealed class DiscordRichPresenceService
         if (clicker.BreakBlocksEnabled) count++;
         if (clicker.AimAssistEnabled) count++;
         if (clicker.TriggerbotEnabled) count++;
+        if (clicker.SilentAuraEnabled) count++;
         if (clicker.GtbHelperEnabled) count++;
         if (clicker.PixelPartyAssistEnabled) count++;
         if (clicker.NametagsEnabled) count++;

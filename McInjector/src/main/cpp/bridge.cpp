@@ -6255,6 +6255,7 @@ void RenderHUD(int winW, int winH) {
     if (cfg.breakBlocks)       pushMod("Break Blocks", ToImU32(theme.accentTertiary));
     if (cfg.reachEnabled)      pushMod("Reach", ToImU32(theme.accentPrimary));
     if (cfg.velocityEnabled)   pushMod("Velocity", ToImU32(theme.accentTertiary));
+    if (cfg.antiDebuffEnabled) pushMod("AntiDebuff", ToImU32(theme.accentPrimary));
 
     std::sort(mods.begin(), mods.end(), [](const ModLine& a, const ModLine& b) {
         if (a.width != b.width) return a.width > b.width;

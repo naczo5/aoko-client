@@ -16,6 +16,8 @@ public class GameStateAndProfileTests
               "screenName": "HUD",
               "actionBar": "The theme is C_T",
               "health": 18.5,
+              "viewportWidth": 1920,
+              "viewportHeight": 1001,
               "entities": [
                 { "sx": 120.5, "sy": 44.2, "dist": 3.25, "name": "Steve", "hp": 20.0 }
               ]
@@ -30,6 +32,8 @@ public class GameStateAndProfileTests
         Assert.Equal("HUD", state.ScreenName);
         Assert.Equal("The theme is C_T", state.ActionBar);
         Assert.Equal(18.5f, state.Health);
+        Assert.Equal(1920, state.ViewportWidth);
+        Assert.Equal(1001, state.ViewportHeight);
         Assert.Single(state.Entities);
         Assert.Equal("Steve", state.Entities[0].Name);
         Assert.Equal(3.25, state.Entities[0].Distance, 3);
@@ -92,6 +96,16 @@ public class GameStateAndProfileTests
         Assert.Equal(12.0f, profile.MaxCPS);
         Assert.True(profile.LeftClickEnabled);
         Assert.False(profile.TriggerbotEnabled);
+        Assert.False(profile.SilentAuraEnabled);
+        Assert.Equal(3.0f, profile.SilentAuraRange);
+        Assert.Equal(4.0f, profile.SilentAuraAimRange);
+        Assert.Equal(35.0f, profile.SilentAuraRotSpeed);
+        Assert.Equal("distance", profile.SilentAuraTargetMode);
+        Assert.Equal(400, profile.SilentAuraSwitchDelayMs);
+        Assert.Equal(90, profile.SilentAuraAccuracy);
+        Assert.True(profile.SilentAuraSpamMode);
+        Assert.Equal(14.0f, profile.SilentAuraSpamMinCps);
+        Assert.Equal(18.0f, profile.SilentAuraSpamMaxCps);
         Assert.False(profile.ChestStealerEnabled);
         Assert.Equal(120, profile.ChestStealerDelayMs);
         Assert.Equal(100, profile.ReachChance);
@@ -106,7 +120,8 @@ public class GameStateAndProfileTests
         {
             Name = "PvP",
             MinCPS = 9.5f,
-            TriggerbotEnabled = true
+            TriggerbotEnabled = true,
+            SilentAuraEnabled = true
         };
 
         var options = new JsonSerializerOptions
@@ -124,6 +139,7 @@ public class GameStateAndProfileTests
         Assert.Equal("PvP", node!["name"]?.GetValue<string>());
         Assert.Equal(9.5, node[minCpsKey!]!.GetValue<double>(), 3);
         Assert.True(node["triggerbotEnabled"]!.GetValue<bool>());
+        Assert.True(node["silentAuraEnabled"]!.GetValue<bool>());
     }
 
     [Fact]
