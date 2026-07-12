@@ -10151,27 +10151,42 @@ static void UpdateJniState() {
 }
 
 // ===================== SCREEN DETECTION =====================
-// Combine GLFW cursor polling (fast) with JNI screen name (accurate).
+// Combine cursor visibility (fast) with the JNI screen name (accurate) to decide whether a
+// real Minecraft GUI (inventory/chest/menu) is open, so world-space overlays (nametags/ESP)
+// hide behind it — matching the OpenGL behavior.
 static void UpdateRealGuiState() {
     TRACE261_PATH("enter");
     // JNI state (screen name) is already updated in UpdateJniState() each frame.
-    // g_realGuiOpen tracks cursor-visible Minecraft screens, excluding chat.
-    if (!glfwGetCurrentContext_fn || !glfwGetInputMode_fn) {
-        TRACE261_PATH("glfw-unavailable");
-        g_realGuiOpen = false;
-        return;
+
+    // Determine whether the OS/GLFW cursor is currently visible (a GUI/chat freed the cursor).
+    // OpenGL sessions can query GLFW's cursor mode. Under Vulkan there is no current GL context
+    // (glfwGetCurrentContext() == NULL), so fall back to the Win32 cursor visibility, which
+    // tracks the same thing on either renderer.
+    bool cursorVisible = false;
+    bool haveGlfwAnswer = false;
+    if (glfwGetCurrentContext_fn && glfwGetInputMode_fn) {
+        void* win = glfwGetCurrentContext_fn();
+        TRACE261_BRANCH("glfwWindowAvailable", win != nullptr);
+        if (win) {
+            int mode = glfwGetInputMode_fn(win, GLFW_CURSOR);
+            TRACE261_VALUE("cursorMode", std::to_string(mode));
+            cursorVisible = (mode == GLFW_CURSOR_NORMAL);
+            haveGlfwAnswer = true;
+        }
     }
-    void* win = glfwGetCurrentContext_fn();
-    TRACE261_BRANCH("glfwWindowAvailable", win != nullptr);
-    if (!win) { g_realGuiOpen = false; return; }
-    int mode = glfwGetInputMode_fn(win, GLFW_CURSOR);
-    TRACE261_VALUE("cursorMode", std::to_string(mode));
-    // Only report realGuiOpen when cursor is NORMAL and JNI reports a non-chat screen.
-    if (mode == GLFW_CURSOR_NORMAL) {
+    if (!haveGlfwAnswer) {
+        TRACE261_PATH("cursor-visibility-win32-fallback");
+        CURSORINFO ci = {};
+        ci.cbSize = sizeof(ci);
+        if (GetCursorInfo(&ci)) cursorVisible = (ci.flags & CURSOR_SHOWING) != 0;
+    }
+
+    // Only report realGuiOpen when the cursor is visible and JNI reports a non-chat screen.
+    if (cursorVisible) {
         TRACE261_PATH("cursor-normal-path");
         std::string sn;
         { LockGuard lk(g_jniStateMtx); sn = g_jniScreenName; }
-        // "ChatScreen" is our own cursor-unlock screen, not a real Minecraft GUI
+        // "ChatScreen" is our own cursor-unlock screen, not a real Minecraft GUI.
         g_realGuiOpen = !sn.empty() && sn != "ChatScreen";
     } else {
         TRACE261_PATH("cursor-nonnormal-or-menu-path");
