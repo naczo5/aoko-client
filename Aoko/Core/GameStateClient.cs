@@ -955,6 +955,7 @@ public class GameStateClient : INotifyPropertyChanged
                     autoTotemDelay = clicker.AutoTotemDelay,
                     autoTotemBehaviorMode = clicker.AutoTotemBehaviorMode,
                     antiDebuffEnabled = clicker.AntiDebuffEnabled,
+                    hitDelayFixEnabled = clicker.HitDelayFixEnabled,
                     // Per-module keybinds
                     keybindAutoclicker   = InputHooks.GetModuleKey("autoclicker"),
                     keybindRightClick    = InputHooks.GetModuleKey("rightclick"),

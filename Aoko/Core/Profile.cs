@@ -97,6 +97,7 @@ public class Profile
     public int AutoTotemBehaviorMode { get; set; } = 0;
 
     public bool AntiDebuffEnabled { get; set; } = false;
+    public bool HitDelayFixEnabled { get; set; } = false;
 
     // Nullable so older JSON (without hudLayout) deserializes without error;
     // a null value is treated as canonical defaults in ApplyToClicker.
@@ -420,6 +421,7 @@ public static class ProfileManager
             AutoTotemBehaviorMode = clicker.AutoTotemBehaviorMode,
 
             AntiDebuffEnabled = clicker.AntiDebuffEnabled,
+            HitDelayFixEnabled = clicker.HitDelayFixEnabled,
 
             HudLayout = BuildHudLayoutDict(clicker.HudLayout),
 
@@ -526,6 +528,7 @@ public static class ProfileManager
         clicker.AutoTotemBehaviorMode = profile.AutoTotemBehaviorMode;
 
         clicker.AntiDebuffEnabled = profile.AntiDebuffEnabled;
+        clicker.HitDelayFixEnabled = profile.HitDelayFixEnabled;
 
         clicker.HudLayout = BuildHudLayout(profile.HudLayout);
 
