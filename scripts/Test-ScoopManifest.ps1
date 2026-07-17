@@ -79,7 +79,9 @@ if ($ArchivePath) {
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $archive = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path -LiteralPath $ArchivePath))
     try {
-        $entries = @($archive.Entries | ForEach-Object FullName)
+        # Windows-created ZIPs use backslashes while the GitHub runner is Linux.
+        # ZIP entry separators are logically equivalent for the packaged files.
+        $entries = @($archive.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
         foreach ($requiredEntry in 'Aoko.exe', 'bridge.dll', 'bridge_261.dll', 'Data/gtb_wordlist.js', 'Data/minecraftia.ttf') {
             if ($entries -notcontains $requiredEntry) {
                 throw "Release archive is missing required file '$requiredEntry'."

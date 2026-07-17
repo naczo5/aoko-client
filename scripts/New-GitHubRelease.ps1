@@ -85,7 +85,7 @@ $releaseArguments = @(
     'release', 'create', $tag, "$zipPath#Aoko.zip",
     '--repo', $repository,
     '--target', 'main',
-    '--title', "Aoko v$Version",
+    '--title', "aoko v$Version",
     '--generate-notes'
 )
 if ($Draft) {

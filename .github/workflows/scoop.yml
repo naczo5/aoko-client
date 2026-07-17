@@ -3,6 +3,12 @@ name: Update Scoop manifest
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published stable release tag to synchronize (for example, v0.10.2)
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -13,7 +19,6 @@ concurrency:
 
 jobs:
   update-manifest:
-    if: github.event.release.draft == false && github.event.release.prerelease == false
     runs-on: ubuntu-latest
     steps:
       - name: Check out the bucket branch
@@ -22,28 +27,54 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
 
-      - name: Download and verify the release asset
-        id: release
+      - name: Load and verify release metadata
+        id: metadata
         env:
-          RELEASE_EVENT: ${{ toJson(github.event.release) }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
         shell: bash
         run: |
           set -euo pipefail
 
-          asset_count="$(jq '[.assets[] | select(.name == "Aoko.zip")] | length' <<< "$RELEASE_EVENT")"
+          if [[ -z "$RELEASE_TAG" ]]; then
+            echo "::error title=Missing release tag::No release tag was supplied."
+            exit 1
+          fi
+
+          release_path="$RUNNER_TEMP/release.json"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$release_path"
+
+          if [[ "$(jq -r '.draft or .prerelease' "$release_path")" == "true" ]]; then
+            echo "::notice title=Release skipped::Scoop only synchronizes published stable releases."
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "eligible=true" >> "$GITHUB_OUTPUT"
+          echo "release_path=$release_path" >> "$GITHUB_OUTPUT"
+
+      - name: Download and verify the release asset
+        if: steps.metadata.outputs.eligible == 'true'
+        id: release
+        env:
+          RELEASE_PATH: ${{ steps.metadata.outputs.release_path }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          asset_count="$(jq '[.assets[] | select(.name == "Aoko.zip")] | length' "$RELEASE_PATH")"
           if [[ "$asset_count" != "1" ]]; then
             echo "::error title=Required release asset unavailable::Expected exactly one asset named Aoko.zip; found $asset_count."
             exit 1
           fi
 
-          tag_name="$(jq -r '.tag_name' <<< "$RELEASE_EVENT")"
+          tag_name="$(jq -r '.tag_name' "$RELEASE_PATH")"
           version="${tag_name#v}"
           if [[ ! "$version" =~ ^[0-9]+(\.[0-9]+){2,3}$ ]]; then
             echo "::error title=Invalid release tag::Stable Scoop releases must use a numeric tag such as v0.10.1; found '$tag_name'."
             exit 1
           fi
 
-          asset_url="$(jq -r '.assets[] | select(.name == "Aoko.zip") | .browser_download_url' <<< "$RELEASE_EVENT")"
+          asset_url="$(jq -r '.assets[] | select(.name == "Aoko.zip") | .browser_download_url' "$RELEASE_PATH")"
           archive_path="$RUNNER_TEMP/Aoko.zip"
           curl --fail --location --retry 3 --output "$archive_path" "$asset_url"
 
@@ -53,6 +84,7 @@ jobs:
           echo "archive_path=$archive_path" >> "$GITHUB_OUTPUT"
 
       - name: Update the manifest
+        if: steps.metadata.outputs.eligible == 'true'
         env:
           VERSION: ${{ steps.release.outputs.version }}
           URL: ${{ steps.release.outputs.url }}
@@ -67,6 +99,7 @@ jobs:
           mv "$temp_manifest" bucket/aoko.json
 
       - name: Validate the manifest and archive
+        if: steps.metadata.outputs.eligible == 'true'
         shell: pwsh
         run: >
           ./scripts/Test-ScoopManifest.ps1
@@ -76,6 +109,7 @@ jobs:
           -ArchivePath '${{ steps.release.outputs.archive_path }}'
 
       - name: Commit the manifest update
+        if: steps.metadata.outputs.eligible == 'true'
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           VERSION: ${{ steps.release.outputs.version }}
