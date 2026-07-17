@@ -109,6 +109,21 @@ Run from repository root unless noted.
 
 - `build_release.bat`
 
+### Create a GitHub release locally
+
+With [GitHub CLI](https://cli.github.com/) authenticated (`gh auth login`), the
+local release helper builds both bridges and the self-contained app, creates
+`Aoko.zip`, then uploads it as a GitHub release asset:
+
+```powershell
+.\scripts\New-GitHubRelease.ps1 -Version 0.10.2
+```
+
+It only runs from a clean, up-to-date `main` branch and refuses to reuse an
+existing tag. Add `-Draft` to create a draft for review; publish that draft in
+GitHub when ready. Publishing a stable release triggers the Scoop manifest
+workflow automatically.
+
 ## Tests
 
 - Run C# tests: `dotnet test Aoko.Tests\Aoko.Tests.csproj`
