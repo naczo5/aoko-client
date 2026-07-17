@@ -47,8 +47,12 @@ if ([string]::IsNullOrWhiteSpace($repository) -or $LASTEXITCODE -ne 0) {
 }
 
 $tag = "v$Version"
-$existingRelease = & gh release view $tag --repo $repository --json tagName --jq '.tagName' 2>$null
-if ($LASTEXITCODE -eq 0) {
+$existingReleaseTags = @(& gh release list --repo $repository --limit 100 --json tagName --jq '.[].tagName')
+if ($LASTEXITCODE -ne 0) {
+    throw 'Could not list existing GitHub releases.'
+}
+
+if ($existingReleaseTags -contains $tag) {
     throw "GitHub release '$tag' already exists."
 }
 
