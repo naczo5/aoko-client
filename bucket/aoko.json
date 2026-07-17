@@ -1,28 +1,28 @@
 {
-    "version": "0.10.1",
-    "description": "Windows utility client for Lunar Client",
-    "homepage": "https://github.com/naczo5/aoko-client",
-    "license": "GPL-3.0-only",
-    "architecture": {
-        "64bit": {
-            "url": "https://github.com/naczo5/aoko-client/releases/download/v0.10.1/Aoko.zip",
-            "hash": "ba834c503d4e4cee6c17947b5ee48213bc4c367ad52f1ba7b3be0953803061ab"
-        }
-    },
-    "shortcuts": [
-        [
-            "Aoko.exe",
-            "Aoko"
-        ]
-    ],
-    "checkver": {
-        "github": "https://github.com/naczo5/aoko-client"
-    },
-    "autoupdate": {
-        "architecture": {
-            "64bit": {
-                "url": "https://github.com/naczo5/aoko-client/releases/download/v$version/Aoko.zip"
-            }
-        }
+  "version": "0.10.2",
+  "description": "Windows utility client for Lunar Client",
+  "homepage": "https://github.com/naczo5/aoko-client",
+  "license": "GPL-3.0-only",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/naczo5/aoko-client/releases/download/v0.10.2/Aoko.zip",
+      "hash": "ef72f24623c458a2ac561d446aff4a5ed285a4ea57e99c25f891e40e77fb1e78"
     }
+  },
+  "shortcuts": [
+    [
+      "Aoko.exe",
+      "Aoko"
+    ]
+  ],
+  "checkver": {
+    "github": "https://github.com/naczo5/aoko-client"
+  },
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/naczo5/aoko-client/releases/download/v$version/Aoko.zip"
+      }
+    }
+  }
 }
