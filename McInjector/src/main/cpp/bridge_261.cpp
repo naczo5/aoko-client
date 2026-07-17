@@ -33,6 +33,8 @@
 #include "imgui_impl_opengl3.h"
 #include "json_config_reader.h"
 #include "bridge_capabilities.h"
+#include "nick_hider.h"
+#include "nick_hider_jvmti.h"
 #include "hud_layout.h"
 #include "block_esp_common.h"
 #include "screen_projection.h"
@@ -142,6 +144,8 @@ struct Config {
     float silentAuraSpamMinCps = 14.0f;
     float silentAuraSpamMaxCps = 18.0f;
     bool  nametags       = false;
+    bool  nickHiderEnabled = false;
+    std::string nickHiderAlias;
     bool  chestEsp       = false;
     bool  chestStealer   = false;
     int   chestStealerDelayMs = 120;
@@ -241,6 +245,18 @@ static void ParseConfig(const std::string& line) {
     if (g_config.silentAuraSpamMinCps > g_config.silentAuraSpamMaxCps)
         g_config.silentAuraSpamMinCps = g_config.silentAuraSpamMaxCps;
     g_config.nametags      = reader.GetBool("nametags");
+    g_config.nickHiderEnabled = reader.GetBool("nickHiderEnabled");
+    g_config.nickHiderAlias = lc::NormalizeNickHiderAlias(reader.GetString("nickHiderAlias"));
+    if (g_config.nickHiderAlias.empty()) g_config.nickHiderEnabled = false;
+    lc::ConfigureNickHiderJvmti(g_config.nickHiderEnabled, g_config.nickHiderAlias);
+    static bool lastNickHiderEnabled = false;
+    static std::string lastNickHiderAlias;
+    if (g_config.nickHiderEnabled != lastNickHiderEnabled || g_config.nickHiderAlias != lastNickHiderAlias) {
+        lastNickHiderEnabled = g_config.nickHiderEnabled;
+        lastNickHiderAlias = g_config.nickHiderAlias;
+        Log("NickHider config: enabled=" + std::string(g_config.nickHiderEnabled ? "true" : "false")
+            + " aliasLength=" + std::to_string(g_config.nickHiderAlias.size()));
+    }
     g_config.chestEsp      = reader.GetBool("chestEsp");
     g_config.chestStealer  = reader.GetBool("chestStealerEnabled");
     std::string showModuleListRaw = reader.GetString("showModuleList");
@@ -4379,6 +4395,8 @@ static void UpdatePlayerListOverlay(JNIEnv* env) {
     TrackSuppressionWorldContext121(env, worldObj);
 
     EnsureEntityMethods(env, selfObj);
+    const std::string localAccountName = GetStablePlayerName(env, selfObj);
+    lc::SetNickHiderJvmtiLocalName(localAccountName);
     bool suppressionMappingsReady = true;
     bool suppressionRestoreReady = true;
     if (hideVanillaTags || restoreVanillaTags || g_nametagSuppressionActive_121) {
@@ -4558,7 +4576,7 @@ static void UpdatePlayerListOverlay(JNIEnv* env) {
     }
     auto appendPlayer = [&](const std::string& name, const LightweightEntity& lw,
                             double hp, int armor, const std::string& held) {
-        PlayerData121 data{name, lw.dist, lw.x, lw.y, lw.z, hp, armor, held};
+        PlayerData121 data{lc::ReplaceNickHiderText(name, cfg.nickHiderEnabled, localAccountName, cfg.nickHiderAlias), lw.dist, lw.x, lw.y, lw.z, hp, armor, held};
         if (gameRendererForProjection) {
             data.hasScreenPoint = ProjectWorldPointToScreen121(
                 env, gameRendererForProjection, LegoVec3{lw.x, lw.y + 0.95, lw.z},
@@ -10575,11 +10593,18 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
     if (!g_jvm || g_jvm->AttachCurrentThread((void**)&env, nullptr) != JNI_OK) return 1;
     TRACE261_PATH("thread-start");
     DWORD lastAutoRemapRetryMs = 0;
+    DWORD lastNickHiderRefreshMs = 0;
     // Teleport detection: track last scanned player position to catch same-world jumps
     // (arena teleports) that bypass the loading-screen / world-instance guards.
     double lastScanX = 0, lastScanY = 0, lastScanZ = 0;
     bool lastScanPosValid = false;
     while (g_running) {
+        const DWORD nickHiderNow = GetTickCount();
+        if (nickHiderNow - lastNickHiderRefreshMs >= 2000) {
+            lastNickHiderRefreshMs = nickHiderNow;
+            lc::RefreshNickHiderJvmtiTargets();
+            lc::FlushNickHiderJvmtiDiagnostics();
+        }
         Config cfg;
         { LockGuard lk(g_configMutex); cfg = g_config; }
 
@@ -10715,7 +10740,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                         UpdateClosestPlayerOverlay(env);
                     if (cfg.pixelPartyAssist)
                         UpdatePixelPartyAssist(env, cfg);
-                    if (cfg.nametags || cfg.closestPlayer || cfg.aimAssist || cfg.nametagHideVanilla || g_nametagSuppressionActive_121)
+                    if (cfg.nametags || cfg.nickHiderEnabled || cfg.closestPlayer || cfg.aimAssist || cfg.nametagHideVanilla || g_nametagSuppressionActive_121)
                         UpdatePlayerListOverlay(env);
                     if (cfg.chestEsp || cfg.chestStealer)
                         UpdateChestList(env);
@@ -10756,6 +10781,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
     }
     ReleaseSpeedBridgeSneak121(env);
     ResetSpeedBridgeMovementTracking121();
+    lc::ShutdownNickHiderJvmti(env);
     g_jvm->DetachCurrentThread();
     return 0;
 }
@@ -11730,6 +11756,7 @@ static void RenderOverlayPanels(bool inWorld, const Config& cfg, const OverlayTh
                 if (cfg.chestEsp)      pushMod("Chest ESP", overlayTheme.accentSecondary);
                 if (cfg.blockEsp)      pushMod("Block ESP", overlayTheme.accentSecondary);
                 if (cfg.nametags)      pushMod("Nametags", overlayTheme.accentPrimary);
+                if (cfg.nickHiderEnabled) pushMod("Nick Hider", overlayTheme.accentTertiary);
                 if (cfg.gtbHelper)     pushMod("GTB Helper", overlayTheme.accentTertiary);
                 if (cfg.pixelPartyAssist) pushMod("Pixel Party", overlayTheme.accentSecondary);
                 if (cfg.jitter)        pushMod("Jitter", overlayTheme.accentSecondary);
@@ -12284,6 +12311,7 @@ glfw_done:;
             attached = true;
         }
         if (denv) {
+            lc::InstallNickHiderJvmti(g_jvm, lc::NickHiderJvmtiGeneration::Modern121, Log);
             // Retry discovery a few times (MC may not be fully loaded yet)
             for (int attempt = 0; attempt < 5; attempt++) {
                 {

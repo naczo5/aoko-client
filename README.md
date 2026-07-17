@@ -56,6 +56,38 @@ aoko client is a Windows utility client for Lunar Client.
 
 _It is generally recommended to inject while in a server/world, to ensure are modules initialize correctly_
 
+## Install and update with Scoop
+
+Aoko is distributed through this repository's Scoop bucket. After installing
+[Scoop](https://scoop.sh/), add the bucket and install Aoko:
+
+```powershell
+scoop bucket add aoko https://github.com/naczo5/aoko-client
+scoop install aoko
+```
+
+Close Aoko before updating, then run:
+
+```powershell
+scoop update aoko
+```
+
+To remove it, run `scoop uninstall aoko`. Scoop updates only the application
+files; your profiles and custom palettes stay in `%AppData%\Aoko`.
+
+### Maintainer setup
+
+Each published stable GitHub release must include exactly one root-level
+`Aoko.zip`. The `Update Scoop manifest` workflow downloads that asset, verifies
+its contents, calculates its SHA-256 hash, and updates `bucket/aoko.json`
+automatically.
+
+One time: in **Settings → Actions → General**, allow workflows to have
+**Read and write permissions**. If `main` has branch protection, allow this
+workflow's `github-actions[bot]` push (or add an equivalent branch-protection
+bypass). The workflow commits only `bucket/aoko.json`; no Scoop-specific
+release step is needed after that.
+
 ## Build
 
 Run from repository root unless noted.

@@ -58,6 +58,8 @@ public class Profile
     public bool PixelPartyAutoLookEnabled { get; set; } = false;
     public bool PixelPartyAutoWalkEnabled { get; set; } = false;
     public bool NametagsEnabled { get; set; } = false;
+    public bool NickHiderEnabled { get; set; } = false;
+    public string NickHiderAlias { get; set; } = string.Empty;
     public bool ShowModuleList { get; set; } = true;
     public bool ClosestPlayerInfoEnabled { get; set; } = false;
     public bool NametagShowHealth { get; set; } = true;
@@ -383,6 +385,8 @@ public static class ProfileManager
             PixelPartyAutoLookEnabled = clicker.PixelPartyAutoLookEnabled,
             PixelPartyAutoWalkEnabled = clicker.PixelPartyAutoWalkEnabled,
             NametagsEnabled = clicker.NametagsEnabled,
+            NickHiderEnabled = clicker.NickHiderEnabled,
+            NickHiderAlias = NickHiderConfig.NormalizeAlias(clicker.NickHiderAlias),
             ShowModuleList = clicker.ShowModuleList,
             ClosestPlayerInfoEnabled = clicker.ClosestPlayerInfoEnabled,
             NametagShowHealth = clicker.NametagShowHealth,
@@ -490,6 +494,8 @@ public static class ProfileManager
         clicker.PixelPartyAutoLookEnabled = profile.PixelPartyAutoLookEnabled;
         clicker.PixelPartyAutoWalkEnabled = profile.PixelPartyAutoWalkEnabled;
         clicker.NametagsEnabled = profile.NametagsEnabled;
+        clicker.NickHiderEnabled = profile.NickHiderEnabled;
+        clicker.NickHiderAlias = profile.NickHiderAlias;
         clicker.ShowModuleList = profile.ShowModuleList;
         clicker.ClosestPlayerInfoEnabled = profile.ClosestPlayerInfoEnabled;
         clicker.NametagShowHealth = profile.NametagShowHealth;

@@ -21,6 +21,8 @@
 #include "imgui_impl_opengl3.h"
 #include "json_config_reader.h"
 #include "bridge_capabilities.h"
+#include "nick_hider.h"
+#include "nick_hider_jvmti.h"
 #include "hud_layout.h"
 #include "block_esp_common.h"
 #include "jni_core/scoped_env.h"
@@ -137,6 +139,8 @@ struct Config {
     bool speedBridgeLookingDownOnly = true;
     bool gtbHelper = false;
     bool nametags = false;
+    bool nickHiderEnabled = false;
+    std::string nickHiderAlias;
     bool closestPlayerInfo = false;
     bool nametagShowHealth = true;
     bool nametagShowArmor = true;
@@ -314,6 +318,28 @@ static jmethodID g_getNameMethod = nullptr;
 static jmethodID g_getGameProfileMethod = nullptr;
 static jclass g_gameProfileClass = nullptr;
 static jmethodID g_gameProfileGetNameMethod = nullptr;
+static jfieldID g_gameProfileNameField = nullptr;
+static std::string g_nickHiderOriginalProfileName;
+static bool g_nickHiderProfileAliasApplied = false;
+static jmethodID g_legacyMcGetNetHandlerMethod = nullptr;
+static jmethodID g_legacyNetHandlerGetPlayerInfoByNameMethod = nullptr;
+static jmethodID g_legacyNetworkPlayerInfoGetProfileMethod = nullptr;
+static jfieldID g_legacyNetworkPlayerInfoDisplayNameField = nullptr;
+static jmethodID g_legacyGetChatGuiMethod = nullptr;
+static jfieldID g_legacyChatLinesField = nullptr;
+static jfieldID g_legacyDrawnChatLinesField = nullptr;
+static jfieldID g_legacyChatLineComponentField = nullptr;
+static jfieldID g_legacyChatTextField = nullptr;
+static jmethodID g_legacyComponentSiblingsMethod = nullptr;
+struct LegacyNickHiderTextMutation { jobject component = nullptr; std::string original; };
+static std::vector<LegacyNickHiderTextMutation> g_legacyNickHiderTextMutations;
+static bool g_loggedLegacyNickHiderFallback = false;
+static bool g_loggedLegacyNickHiderProfileReady = false;
+static bool g_loggedLegacyNickHiderTabReady = false;
+static bool g_loggedLegacyNickHiderTabDisplayReady = false;
+static bool g_loggedLegacyNickHiderChatReady = false;
+static bool g_loggedLegacyNickHiderProfileFailure = false;
+static bool g_loggedLegacyNickHiderChatFailure = false;
 static jmethodID g_worldGetScoreboardMethod = nullptr;
 static jclass g_scoreboardClassLegacy = nullptr;
 static jclass g_scorePlayerTeamClassLegacy = nullptr;
@@ -5689,6 +5715,354 @@ static std::string GetStablePlayerName(JNIEnv* env, jobject playerObj) {
     return "";
 }
 
+static std::string ReadNickHiderJavaString(JNIEnv* env, jstring value) {
+    if (!env || !value) return "";
+    const char* chars = env->GetStringUTFChars(value, nullptr);
+    if (!chars) { if (env->ExceptionCheck()) env->ExceptionClear(); return ""; }
+    std::string result(chars);
+    env->ReleaseStringUTFChars(value, chars);
+    return result;
+}
+
+static void RestoreLegacyNickHiderTextMutations(JNIEnv* env) {
+    if (!env || !g_legacyChatTextField) return;
+    for (size_t i = 0; i < g_legacyNickHiderTextMutations.size(); ++i) {
+        LegacyNickHiderTextMutation& entry = g_legacyNickHiderTextMutations[i];
+        if (!entry.component) continue;
+        jstring original = env->NewStringUTF(entry.original.c_str());
+        if (original) {
+            env->SetObjectField(entry.component, g_legacyChatTextField, original);
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            env->DeleteLocalRef(original);
+        }
+        env->DeleteGlobalRef(entry.component);
+    }
+    g_legacyNickHiderTextMutations.clear();
+}
+
+static LegacyNickHiderTextMutation* FindLegacyNickHiderTextMutation(JNIEnv* env, jobject component) {
+    for (size_t i = 0; i < g_legacyNickHiderTextMutations.size(); ++i)
+        if (env->IsSameObject(component, g_legacyNickHiderTextMutations[i].component) == JNI_TRUE)
+            return &g_legacyNickHiderTextMutations[i];
+    return nullptr;
+}
+
+static void ApplyLegacyNickHiderComponent(JNIEnv* env, jobject component, const Config& cfg, int depth) {
+    if (!env || !component || depth > 8) return;
+    jclass componentClass = env->GetObjectClass(component);
+    if (!componentClass || env->ExceptionCheck()) { env->ExceptionClear(); return; }
+
+    if (!g_legacyChatTextField) {
+        g_legacyChatTextField = env->GetFieldID(componentClass, "text", "Ljava/lang/String;");
+        if (env->ExceptionCheck()) { env->ExceptionClear(); g_legacyChatTextField = nullptr; }
+        if (!g_legacyChatTextField) {
+            g_legacyChatTextField = env->GetFieldID(componentClass, "field_150267_b", "Ljava/lang/String;");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_legacyChatTextField = nullptr; }
+        }
+    }
+
+    if (g_legacyChatTextField) {
+        jstring currentJava = (jstring)env->GetObjectField(component, g_legacyChatTextField);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); currentJava = nullptr; }
+        std::string current = ReadNickHiderJavaString(env, currentJava);
+        if (currentJava) env->DeleteLocalRef(currentJava);
+        const std::string replaced = lc::ReplaceNickHiderText(current, cfg.nickHiderEnabled,
+            g_nickHiderOriginalProfileName, cfg.nickHiderAlias);
+        if (replaced != current) {
+            if (!FindLegacyNickHiderTextMutation(env, component) && g_legacyNickHiderTextMutations.size() < 512) {
+                LegacyNickHiderTextMutation entry;
+                entry.component = env->NewGlobalRef(component);
+                entry.original = current;
+                if (entry.component) g_legacyNickHiderTextMutations.push_back(entry);
+            }
+            jstring next = env->NewStringUTF(replaced.c_str());
+            if (next) {
+                env->SetObjectField(component, g_legacyChatTextField, next);
+                if (env->ExceptionCheck()) env->ExceptionClear();
+                env->DeleteLocalRef(next);
+            }
+        }
+    }
+
+    if (!g_legacyComponentSiblingsMethod) {
+        g_legacyComponentSiblingsMethod = env->GetMethodID(componentClass, "getSiblings", "()Ljava/util/List;");
+        if (env->ExceptionCheck()) { env->ExceptionClear(); g_legacyComponentSiblingsMethod = nullptr; }
+        if (!g_legacyComponentSiblingsMethod) {
+            g_legacyComponentSiblingsMethod = env->GetMethodID(componentClass, "func_150253_a", "()Ljava/util/List;");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_legacyComponentSiblingsMethod = nullptr; }
+        }
+    }
+    if (g_legacyComponentSiblingsMethod && g_listSizeMethod && g_listGetMethod) {
+        jobject siblings = env->CallObjectMethod(component, g_legacyComponentSiblingsMethod);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); siblings = nullptr; }
+        if (siblings) {
+            const int count = (std::min)(16, (int)env->CallIntMethod(siblings, g_listSizeMethod));
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            for (int i = 0; i < count; ++i) {
+                jobject child = env->CallObjectMethod(siblings, g_listGetMethod, i);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); child = nullptr; }
+                if (child) { ApplyLegacyNickHiderComponent(env, child, cfg, depth + 1); env->DeleteLocalRef(child); }
+            }
+            env->DeleteLocalRef(siblings);
+        }
+    }
+    env->DeleteLocalRef(componentClass);
+}
+
+static bool SetLegacyNickHiderProfileName(JNIEnv* env, jobject profile, const std::string& desired) {
+    if (!env || !profile || !g_gameProfileNameField || desired.empty()) return false;
+    jstring replacement = env->NewStringUTF(desired.c_str());
+    if (!replacement) return false;
+    env->SetObjectField(profile, g_gameProfileNameField, replacement);
+    const bool ok = !env->ExceptionCheck();
+    if (!ok) env->ExceptionClear();
+    env->DeleteLocalRef(replacement);
+    return ok;
+}
+
+static jobject GetLegacyNickHiderTabProfile(JNIEnv* env, const std::string& originalName, const Config& cfg) {
+    if (!env || !g_mcInstance || !g_mcClass || originalName.empty()) return nullptr;
+    if (!g_legacyMcGetNetHandlerMethod) {
+        const char* names[] = { "getNetHandler", "func_147114_u", nullptr };
+        for (int i = 0; names[i] && !g_legacyMcGetNetHandlerMethod; ++i) {
+            g_legacyMcGetNetHandlerMethod = env->GetMethodID(g_mcClass, names[i],
+                "()Lnet/minecraft/client/network/NetHandlerPlayClient;");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_legacyMcGetNetHandlerMethod = nullptr; }
+        }
+    }
+    if (!g_legacyMcGetNetHandlerMethod) return nullptr;
+    jobject netHandler = env->CallObjectMethod(g_mcInstance, g_legacyMcGetNetHandlerMethod);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); netHandler = nullptr; }
+    if (!netHandler) return nullptr;
+    jclass netClass = env->GetObjectClass(netHandler);
+    if (netClass && !g_legacyNetHandlerGetPlayerInfoByNameMethod) {
+        const char* names[] = { "getPlayerInfo", "func_175104_a", nullptr };
+        for (int i = 0; names[i] && !g_legacyNetHandlerGetPlayerInfoByNameMethod; ++i) {
+            g_legacyNetHandlerGetPlayerInfoByNameMethod = env->GetMethodID(netClass, names[i],
+                "(Ljava/lang/String;)Lnet/minecraft/client/network/NetworkPlayerInfo;");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_legacyNetHandlerGetPlayerInfoByNameMethod = nullptr; }
+        }
+    }
+    jstring nameJava = env->NewStringUTF(originalName.c_str());
+    jobject info = (g_legacyNetHandlerGetPlayerInfoByNameMethod && nameJava)
+        ? env->CallObjectMethod(netHandler, g_legacyNetHandlerGetPlayerInfoByNameMethod, nameJava) : nullptr;
+    if (env->ExceptionCheck()) { env->ExceptionClear(); info = nullptr; }
+    if (nameJava) env->DeleteLocalRef(nameJava);
+    if (netClass) env->DeleteLocalRef(netClass);
+    env->DeleteLocalRef(netHandler);
+    if (!info) return nullptr;
+    jclass infoClass = env->GetObjectClass(info);
+    if (infoClass && !g_legacyNetworkPlayerInfoGetProfileMethod) {
+        const char* names[] = { "getGameProfile", "func_178845_a", nullptr };
+        for (int i = 0; names[i] && !g_legacyNetworkPlayerInfoGetProfileMethod; ++i) {
+            g_legacyNetworkPlayerInfoGetProfileMethod = env->GetMethodID(infoClass, names[i],
+                "()Lcom/mojang/authlib/GameProfile;");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_legacyNetworkPlayerInfoGetProfileMethod = nullptr; }
+        }
+    }
+    if (infoClass && !g_legacyNetworkPlayerInfoDisplayNameField) {
+        const char* fieldNames[] = { "displayName", "field_178862_s", nullptr };
+        for (int i = 0; fieldNames[i] && !g_legacyNetworkPlayerInfoDisplayNameField; ++i) {
+            g_legacyNetworkPlayerInfoDisplayNameField = env->GetFieldID(infoClass, fieldNames[i],
+                "Lnet/minecraft/util/IChatComponent;");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_legacyNetworkPlayerInfoDisplayNameField = nullptr; }
+        }
+    }
+    if (g_legacyNetworkPlayerInfoDisplayNameField) {
+        jobject displayName = env->GetObjectField(info, g_legacyNetworkPlayerInfoDisplayNameField);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); displayName = nullptr; }
+        if (displayName) {
+            const size_t before = g_legacyNickHiderTextMutations.size();
+            ApplyLegacyNickHiderComponent(env, displayName, cfg, 0);
+            if (g_legacyNickHiderTextMutations.size() > before && !g_loggedLegacyNickHiderTabDisplayReady) {
+                g_loggedLegacyNickHiderTabDisplayReady = true;
+                Log("NickHider fallback: tab displayName component alias applied.");
+            }
+            env->DeleteLocalRef(displayName);
+        }
+    }
+    jobject profile = g_legacyNetworkPlayerInfoGetProfileMethod
+        ? env->CallObjectMethod(info, g_legacyNetworkPlayerInfoGetProfileMethod) : nullptr;
+    if (env->ExceptionCheck()) { env->ExceptionClear(); profile = nullptr; }
+    if (infoClass) env->DeleteLocalRef(infoClass);
+    env->DeleteLocalRef(info);
+    return profile;
+}
+
+static void ApplyLegacyNickHiderProfileFallback(JNIEnv* env, const Config& cfg) {
+    if (!env || !g_mcInstance || !g_thePlayerField) return;
+    jobject player = env->GetObjectField(g_mcInstance, g_thePlayerField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); player = nullptr; }
+    if (!player) return;
+    EnsureGameProfileCaches(env, player);
+    if (!g_gameProfileClass || !g_getGameProfileMethod || !g_gameProfileGetNameMethod) {
+        if (cfg.nickHiderEnabled && !g_loggedLegacyNickHiderProfileFailure) {
+            g_loggedLegacyNickHiderProfileFailure = true;
+            Log("NickHider fallback: local GameProfile methods unresolved.");
+        }
+        env->DeleteLocalRef(player);
+        return;
+    }
+    if (!g_gameProfileNameField) {
+        g_gameProfileNameField = env->GetFieldID(g_gameProfileClass, "name", "Ljava/lang/String;");
+        if (env->ExceptionCheck()) { env->ExceptionClear(); g_gameProfileNameField = nullptr; }
+    }
+    jobject profile = env->CallObjectMethod(player, g_getGameProfileMethod);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); profile = nullptr; }
+    if (!profile || !g_gameProfileNameField) {
+        if (cfg.nickHiderEnabled && !g_loggedLegacyNickHiderProfileFailure) {
+            g_loggedLegacyNickHiderProfileFailure = true;
+            Log("NickHider fallback: GameProfile.name field unresolved.");
+        }
+        if (profile) env->DeleteLocalRef(profile);
+        env->DeleteLocalRef(player);
+        return;
+    }
+    jstring currentJava = (jstring)env->CallObjectMethod(profile, g_gameProfileGetNameMethod);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); currentJava = nullptr; }
+    const std::string current = ReadNickHiderJavaString(env, currentJava);
+    if (currentJava) env->DeleteLocalRef(currentJava);
+    const bool applyAlias = cfg.nickHiderEnabled && !cfg.nickHiderAlias.empty();
+    if (applyAlias && !g_nickHiderProfileAliasApplied && !current.empty()) g_nickHiderOriginalProfileName = current;
+    const std::string desired = applyAlias ? cfg.nickHiderAlias : g_nickHiderOriginalProfileName;
+    bool localChanged = false;
+    if (!desired.empty() && current != desired) localChanged = SetLegacyNickHiderProfileName(env, profile, desired);
+    else localChanged = !desired.empty();
+
+    jobject tabProfile = GetLegacyNickHiderTabProfile(env, g_nickHiderOriginalProfileName, cfg);
+    bool tabChanged = false;
+    if (tabProfile && !desired.empty()) {
+        tabChanged = SetLegacyNickHiderProfileName(env, tabProfile, desired);
+        env->DeleteLocalRef(tabProfile);
+    }
+    if (applyAlias && localChanged && !g_loggedLegacyNickHiderProfileReady) {
+        g_loggedLegacyNickHiderProfileReady = true;
+        Log("NickHider fallback: local profile alias applied.");
+    }
+    if (applyAlias && tabChanged && !g_loggedLegacyNickHiderTabReady) {
+        g_loggedLegacyNickHiderTabReady = true;
+        Log("NickHider fallback: tab NetworkPlayerInfo alias applied.");
+    }
+    g_nickHiderProfileAliasApplied = applyAlias;
+    if (!applyAlias) g_nickHiderOriginalProfileName.clear();
+    env->DeleteLocalRef(profile);
+    env->DeleteLocalRef(player);
+}
+
+static void ApplyLegacyNickHiderChatFallback(JNIEnv* env, const Config& cfg) {
+    if (env && g_mcClass && !g_ingameGuiField) {
+        const char* fieldNames[] = { "ingameGUI", "field_71456_v", nullptr };
+        for (int i = 0; fieldNames[i] && !g_ingameGuiField; ++i) {
+            g_ingameGuiField = env->GetFieldID(g_mcClass, fieldNames[i], "Lnet/minecraft/client/gui/GuiIngame;");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_ingameGuiField = nullptr; }
+        }
+        if (g_ingameGuiField) Log("NickHider fallback: Minecraft.ingameGUI resolved.");
+    }
+    if (!env || !g_mcInstance || !g_ingameGuiField || !g_listSizeMethod || !g_listGetMethod) {
+        if (cfg.nickHiderEnabled && !g_loggedLegacyNickHiderChatFailure) {
+            g_loggedLegacyNickHiderChatFailure = true;
+            Log("NickHider fallback: GuiIngame/List mappings unavailable for chat.");
+        }
+        return;
+    }
+    if (!cfg.nickHiderEnabled) { RestoreLegacyNickHiderTextMutations(env); return; }
+    jobject ingameGui = env->GetObjectField(g_mcInstance, g_ingameGuiField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); ingameGui = nullptr; }
+    if (!ingameGui) return;
+    jclass guiClass = env->GetObjectClass(ingameGui);
+    if (!g_legacyGetChatGuiMethod && guiClass) {
+        g_legacyGetChatGuiMethod = env->GetMethodID(guiClass, "getChatGUI", "()Lnet/minecraft/client/gui/GuiNewChat;");
+        if (env->ExceptionCheck()) { env->ExceptionClear(); g_legacyGetChatGuiMethod = nullptr; }
+        if (!g_legacyGetChatGuiMethod) {
+            g_legacyGetChatGuiMethod = env->GetMethodID(guiClass, "func_146158_b", "()Lnet/minecraft/client/gui/GuiNewChat;");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_legacyGetChatGuiMethod = nullptr; }
+        }
+    }
+    jobject chatGui = g_legacyGetChatGuiMethod ? env->CallObjectMethod(ingameGui, g_legacyGetChatGuiMethod) : nullptr;
+    if (env->ExceptionCheck()) { env->ExceptionClear(); chatGui = nullptr; }
+    if (guiClass) env->DeleteLocalRef(guiClass);
+    env->DeleteLocalRef(ingameGui);
+    if (!chatGui) {
+        if (!g_loggedLegacyNickHiderChatFailure) {
+            g_loggedLegacyNickHiderChatFailure = true;
+            Log("NickHider fallback: GuiIngame.getChatGUI unresolved.");
+        }
+        return;
+    }
+    jclass chatClass = env->GetObjectClass(chatGui);
+    if (chatClass && !g_legacyChatLinesField) {
+        g_legacyChatLinesField = env->GetFieldID(chatClass, "chatLines", "Ljava/util/List;");
+        if (env->ExceptionCheck()) { env->ExceptionClear(); g_legacyChatLinesField = nullptr; }
+        if (!g_legacyChatLinesField) {
+            g_legacyChatLinesField = env->GetFieldID(chatClass, "field_146253_i", "Ljava/util/List;");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_legacyChatLinesField = nullptr; }
+        }
+        g_legacyDrawnChatLinesField = env->GetFieldID(chatClass, "drawnChatLines", "Ljava/util/List;");
+        if (env->ExceptionCheck()) { env->ExceptionClear(); g_legacyDrawnChatLinesField = nullptr; }
+        if (!g_legacyDrawnChatLinesField) {
+            g_legacyDrawnChatLinesField = env->GetFieldID(chatClass, "field_146252_h", "Ljava/util/List;");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_legacyDrawnChatLinesField = nullptr; }
+        }
+        if (!g_legacyChatLinesField && !g_legacyDrawnChatLinesField && !g_loggedLegacyNickHiderChatFailure) {
+            g_loggedLegacyNickHiderChatFailure = true;
+            Log("NickHider fallback: GuiNewChat line lists unresolved.");
+        }
+    }
+    jfieldID lists[] = { g_legacyChatLinesField, g_legacyDrawnChatLinesField };
+    for (int listIndex = 0; listIndex < 2; ++listIndex) {
+        if (!lists[listIndex]) continue;
+        jobject lines = env->GetObjectField(chatGui, lists[listIndex]);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); lines = nullptr; }
+        if (!lines) continue;
+        const int count = (std::min)(200, (int)env->CallIntMethod(lines, g_listSizeMethod));
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        for (int i = 0; i < count; ++i) {
+            jobject line = env->CallObjectMethod(lines, g_listGetMethod, i);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); line = nullptr; }
+            if (!line) continue;
+            jclass lineClass = env->GetObjectClass(line);
+            if (lineClass && !g_legacyChatLineComponentField) {
+                g_legacyChatLineComponentField = env->GetFieldID(lineClass, "lineString", "Lnet/minecraft/util/IChatComponent;");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_legacyChatLineComponentField = nullptr; }
+                if (!g_legacyChatLineComponentField) {
+                    g_legacyChatLineComponentField = env->GetFieldID(lineClass, "field_74541_b", "Lnet/minecraft/util/IChatComponent;");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_legacyChatLineComponentField = nullptr; }
+                }
+                if (!g_legacyChatLineComponentField && !g_loggedLegacyNickHiderChatFailure) {
+                    g_loggedLegacyNickHiderChatFailure = true;
+                    Log("NickHider fallback: ChatLine.lineString unresolved.");
+                }
+            }
+            jobject component = g_legacyChatLineComponentField ? env->GetObjectField(line, g_legacyChatLineComponentField) : nullptr;
+            if (env->ExceptionCheck()) { env->ExceptionClear(); component = nullptr; }
+            if (component) {
+                const size_t before = g_legacyNickHiderTextMutations.size();
+                ApplyLegacyNickHiderComponent(env, component, cfg, 0);
+                if (g_legacyNickHiderTextMutations.size() > before && !g_loggedLegacyNickHiderChatReady) {
+                    g_loggedLegacyNickHiderChatReady = true;
+                    Log("NickHider fallback: chat component alias applied.");
+                }
+                env->DeleteLocalRef(component);
+            }
+            if (lineClass) env->DeleteLocalRef(lineClass);
+            env->DeleteLocalRef(line);
+        }
+        env->DeleteLocalRef(lines);
+    }
+    if (chatClass) env->DeleteLocalRef(chatClass);
+    env->DeleteLocalRef(chatGui);
+}
+
+static void ApplyLegacyNickHiderFallback(JNIEnv* env, const Config& cfg) {
+    if (lc::IsNickHiderJvmtiInstalled()) return;
+    ApplyLegacyNickHiderProfileFallback(env, cfg);
+    ApplyLegacyNickHiderChatFallback(env, cfg);
+    if (!g_loggedLegacyNickHiderFallback) {
+        g_loggedLegacyNickHiderFallback = true;
+        Log("NickHider: Forge JVMTI fallback active (local tab profile + chat components).");
+    }
+}
+
 std::string ToLowerAscii(std::string s) {
     for (char& ch : s) ch = (char)std::tolower((unsigned char)ch);
     return s;
@@ -6363,6 +6737,7 @@ void RenderHUD(int winW, int winH) {
     if (cfg.blockEsp)          pushMod("Block ESP", ToImU32(theme.accentSecondary));
     if (cfg.chestStealer)      pushMod("Chest Stealer", ToImU32(theme.accentTertiary));
     if (cfg.nametags)          pushMod("Nametags", ToImU32(theme.accentPrimary));
+    if (cfg.nickHiderEnabled)  pushMod("Nick Hider", ToImU32(theme.accentTertiary));
     if (cfg.gtbHelper)         pushMod("GTB Helper", ToImU32(theme.accentTertiary));
     if (cfg.pixelPartyAssist)  pushMod("Pixel Party", ToImU32(theme.accentSecondary));
     if (cfg.jitter)            pushMod("Jitter", ToImU32(theme.accentSecondary));
@@ -6724,13 +7099,17 @@ void RenderNametags(int w, int h) {
     bool showArmor = true;
     bool hideVanillaTags = false;
     bool nametagsEnabled = false;
+    bool nickHiderEnabled = false;
     bool entityTelemetryNeeded = false;
     int nametagMaxCount = 8;
     std::string guiTheme = "Default";
+    std::string nickHiderAlias;
     {
          LockGuard lk(g_configMutex);
          nametagsEnabled = g_config.nametags;
-         entityTelemetryNeeded = g_config.nametags || g_config.closestPlayerInfo || g_config.aimAssist || g_config.nametagHideVanilla || g_legacyNametagSuppressionActive;
+         nickHiderEnabled = g_config.nickHiderEnabled;
+         nickHiderAlias = g_config.nickHiderAlias;
+         entityTelemetryNeeded = g_config.nametags || g_config.nickHiderEnabled || g_config.closestPlayerInfo || g_config.aimAssist || g_config.nametagHideVanilla || g_legacyNametagSuppressionActive;
          TRACE_BRANCH("entityTelemetryNeeded", entityTelemetryNeeded);
           if (!entityTelemetryNeeded) return;
          showHealth = g_config.nametagShowHealth;
@@ -6944,6 +7323,7 @@ void RenderNametags(int w, int h) {
     
     // Get Local Player for distance & health debug
     jobject player = env->GetObjectField(g_mcInstance, g_thePlayerField);
+    const std::string localAccountName = player ? GetStablePlayerName(env, player) : "";
     jobject hideScoreboardObj = nullptr;
     jobject hideTeamObj = nullptr;
     if ((hideVanillaTags || g_legacyNametagSuppressionActive) && !EnsureLegacyNametagTeamMappings(env, world) && !g_loggedLegacyNametagSuppressionUnavailable) {
@@ -7046,6 +7426,7 @@ void RenderNametags(int w, int h) {
 
         // Name with fake/bot line filtering parity
         std::string displayName = GetStablePlayerName(env, entity);
+        displayName = lc::ReplaceNickHiderText(displayName, nickHiderEnabled, localAccountName, nickHiderAlias);
         if (displayName.empty() || LooksLikeFakePlayerLine(displayName)) {
             env->DeleteLocalRef(entity);
             continue;
@@ -8771,6 +9152,18 @@ void ParseConfig(const std::string& line) {
         g_config.speedBridgeLookingDownOnly = reader.GetBool("speedBridgeLookingDownOnly");
         g_config.gtbHelper = reader.GetBool("gtbHelper");
         g_config.nametags = reader.GetBool("nametags");
+        g_config.nickHiderEnabled = reader.GetBool("nickHiderEnabled");
+        g_config.nickHiderAlias = lc::NormalizeNickHiderAlias(reader.GetString("nickHiderAlias"));
+        if (g_config.nickHiderAlias.empty()) g_config.nickHiderEnabled = false;
+        lc::ConfigureNickHiderJvmti(g_config.nickHiderEnabled, g_config.nickHiderAlias);
+        static bool lastNickHiderEnabled = false;
+        static std::string lastNickHiderAlias;
+        if (g_config.nickHiderEnabled != lastNickHiderEnabled || g_config.nickHiderAlias != lastNickHiderAlias) {
+            lastNickHiderEnabled = g_config.nickHiderEnabled;
+            lastNickHiderAlias = g_config.nickHiderAlias;
+            Log("NickHider config: enabled=" + std::string(g_config.nickHiderEnabled ? "true" : "false")
+                + " aliasLength=" + std::to_string(g_config.nickHiderAlias.size()));
+        }
         g_config.closestPlayerInfo = reader.GetBool("closestPlayerInfo");
         g_config.nametagShowHealth = reader.GetBool("nametagShowHealth");
         g_config.nametagShowArmor = reader.GetBool("nametagShowArmor");
@@ -8962,6 +9355,7 @@ void ServerLoop() {
     JNIEnv* env; JavaVMAttachArgs args;
     args.version = JNI_VERSION_1_8; args.name = (char*)"LegoBridge"; args.group = nullptr;
     g_jvm->AttachCurrentThread((void**)&env, &args);
+    lc::InstallNickHiderJvmti(g_jvm, lc::NickHiderJvmtiGeneration::Legacy189, Log);
 
     Log("Discovering classes...");
     bool mapped = DiscoverMappings(env);
@@ -9000,6 +9394,15 @@ void ServerLoop() {
             GameState state;
             {
                 LockGuard jniLk(g_stateJniMutex);
+                if (g_mcInstance && g_thePlayerField) {
+                    jobject localPlayer = env->GetObjectField(g_mcInstance, g_thePlayerField);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); localPlayer = nullptr; }
+                    if (localPlayer) {
+                        lc::SetNickHiderJvmtiLocalName(GetStablePlayerName(env, localPlayer));
+                        env->DeleteLocalRef(localPlayer);
+                    }
+                }
+                ApplyLegacyNickHiderFallback(env, cfgSnapshot);
                 state = ReadGameState(env);
                 if (cfgSnapshot.pixelPartyAssist)
                     UpdatePixelPartyAssistLegacy(env, cfgSnapshot, state);
@@ -9106,6 +9509,13 @@ void ServerLoop() {
             // 14ms (~71 Hz) avoids JNI mutex contention with the render thread
             // while staying well within the 220ms aim-assist freshness window.
             Sleep(14);
+            static DWORD lastNickHiderRefreshMs = 0;
+            const DWORD nickHiderNow = GetTickCount();
+            if (nickHiderNow - lastNickHiderRefreshMs >= 2000) {
+                lastNickHiderRefreshMs = nickHiderNow;
+                lc::RefreshNickHiderJvmtiTargets();
+                lc::FlushNickHiderJvmtiDiagnostics();
+            }
             // Read config from C# (non-blocking)
             char buf[2048];
             int r = recv(g_clientSocket, buf, sizeof(buf) - 1, 0);
@@ -9139,6 +9549,7 @@ void ServerLoop() {
         ReleaseSpeedBridgeSneak(env);
         ResetSpeedBridgeMovementTracking();
         HelperBridge::Unload(env);
+        lc::ShutdownNickHiderJvmti(env);
     }
     g_jvm->DetachCurrentThread();
     closesocket(g_serverSocket); WSACleanup();

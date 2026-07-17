@@ -848,6 +848,37 @@ public class Clicker : INotifyPropertyChanged
         }
     }
 
+    private bool _nickHiderEnabled;
+    public bool NickHiderEnabled
+    {
+        get => _nickHiderEnabled;
+        set
+        {
+            if (_nickHiderEnabled == value) return;
+            _nickHiderEnabled = value;
+            OnPropertyChanged(nameof(NickHiderEnabled));
+            OnPropertyChanged(nameof(IsNickHiderActive));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private string _nickHiderAlias = string.Empty;
+    public string NickHiderAlias
+    {
+        get => _nickHiderAlias;
+        set
+        {
+            string normalized = NickHiderConfig.NormalizeInput(value);
+            if (_nickHiderAlias == normalized) return;
+            _nickHiderAlias = normalized;
+            OnPropertyChanged(nameof(NickHiderAlias));
+            OnPropertyChanged(nameof(IsNickHiderActive));
+            StateChanged?.Invoke();
+        }
+    }
+
+    public bool IsNickHiderActive => NickHiderEnabled && !string.IsNullOrEmpty(NickHiderConfig.NormalizeAlias(NickHiderAlias));
+
     private bool _nametagShowHealth = true;
     public bool NametagShowHealth
     {

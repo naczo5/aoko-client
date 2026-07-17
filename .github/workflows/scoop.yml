@@ -1,0 +1,95 @@
+name: Update Scoop manifest
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: scoop-manifest-${{ github.event.repository.default_branch }}
+  cancel-in-progress: false
+
+jobs:
+  update-manifest:
+    if: github.event.release.draft == false && github.event.release.prerelease == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the bucket branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+
+      - name: Download and verify the release asset
+        id: release
+        env:
+          RELEASE_EVENT: ${{ toJson(github.event.release) }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          asset_count="$(jq '[.assets[] | select(.name == "Aoko.zip")] | length' <<< "$RELEASE_EVENT")"
+          if [[ "$asset_count" != "1" ]]; then
+            echo "::error title=Required release asset unavailable::Expected exactly one asset named Aoko.zip; found $asset_count."
+            exit 1
+          fi
+
+          tag_name="$(jq -r '.tag_name' <<< "$RELEASE_EVENT")"
+          version="${tag_name#v}"
+          if [[ ! "$version" =~ ^[0-9]+(\.[0-9]+){2,3}$ ]]; then
+            echo "::error title=Invalid release tag::Stable Scoop releases must use a numeric tag such as v0.10.1; found '$tag_name'."
+            exit 1
+          fi
+
+          asset_url="$(jq -r '.assets[] | select(.name == "Aoko.zip") | .browser_download_url' <<< "$RELEASE_EVENT")"
+          archive_path="$RUNNER_TEMP/Aoko.zip"
+          curl --fail --location --retry 3 --output "$archive_path" "$asset_url"
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "url=$asset_url" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(sha256sum "$archive_path" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+          echo "archive_path=$archive_path" >> "$GITHUB_OUTPUT"
+
+      - name: Update the manifest
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          URL: ${{ steps.release.outputs.url }}
+          SHA256: ${{ steps.release.outputs.sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          temp_manifest="$(mktemp)"
+          jq --arg version "$VERSION" --arg url "$URL" --arg sha256 "$SHA256" \
+            '.version = $version | .architecture."64bit".url = $url | .architecture."64bit".hash = $sha256' \
+            bucket/aoko.json > "$temp_manifest"
+          mv "$temp_manifest" bucket/aoko.json
+
+      - name: Validate the manifest and archive
+        shell: pwsh
+        run: >
+          ./scripts/Test-ScoopManifest.ps1
+          -ExpectedVersion '${{ steps.release.outputs.version }}'
+          -ExpectedUrl '${{ steps.release.outputs.url }}'
+          -ExpectedHash '${{ steps.release.outputs.sha256 }}'
+          -ArchivePath '${{ steps.release.outputs.archive_path }}'
+
+      - name: Commit the manifest update
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          VERSION: ${{ steps.release.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- bucket/aoko.json; then
+            echo "The Scoop manifest already matches v$VERSION."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bucket/aoko.json
+          git commit -m "aoko: update Scoop manifest to $VERSION [skip ci]"
+          git pull --rebase origin "$DEFAULT_BRANCH"
+          git push origin "HEAD:$DEFAULT_BRANCH"

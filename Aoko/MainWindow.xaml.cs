@@ -77,6 +77,7 @@ public partial class MainWindow : Window
         ["gtbhelper"] = "GTB Helper",
         ["pixelpartyassist"] = "Pixel Party Assist",
         ["nametags"] = "Nametags",
+        ["nickhider"] = "Nick Hider",
         ["chestesp"] = "Chest ESP",
         ["cheststealer"] = "Chest Stealer",
         ["blockesp"] = "Block ESP",

@@ -13,6 +13,8 @@ public class BridgeCapabilitiesTests
         Assert.True(caps.SupportsModule("triggerbot"));
         Assert.True(caps.SupportsModule("silentaura"));
         Assert.True(caps.SupportsModule("nametags"));
+        Assert.True(caps.SupportsModule("nickhider"));
+        Assert.True(caps.SupportsSetting("nickhiderenabled"));
     }
 
     [Fact]
@@ -22,6 +24,8 @@ public class BridgeCapabilitiesTests
 
         Assert.True(caps.SupportsModule("triggerbot"));
         Assert.True(caps.SupportsModule("pixelpartyassist"));
+        Assert.True(caps.SupportsModule("nickhider"));
+        Assert.True(caps.SupportsSetting("nickhideralias"));
         Assert.True(caps.SupportsModule("cheststealer"));
         Assert.True(caps.SupportsSetting("pixelpartyassist"));
         Assert.True(caps.SupportsStateField("pixelpartyyawdelta"));

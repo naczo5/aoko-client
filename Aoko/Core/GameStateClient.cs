@@ -7,6 +7,7 @@ using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Aoko;
@@ -259,12 +260,7 @@ public class GameStateClient : INotifyPropertyChanged
         }
         
         string baseDir = AppDomain.CurrentDomain.BaseDirectory;
-        string dllName = resolvedVersion switch
-        {
-            "26.1" => "bridge_261.dll",
-            "1.21" => "bridge_261.dll", // Modern bridge is shared by 26.1 and 1.21
-            _ => "bridge.dll"
-        };
+        string dllName = ResolveBridgeDllName(resolvedVersion);
         string dllPath = Path.Combine(baseDir, dllName);
         SetInjectionStage(20, $"Injecting {dllName}");
         
@@ -688,17 +684,46 @@ public class GameStateClient : INotifyPropertyChanged
                 return explicitVersion;
         }
 
+        // Prefer the selected process command line (Prism jar paths, --version, etc.).
+        // Do not use unrelated launcher history for a concrete PID target.
+        string? fromCommandLine = ProcessCommandLine.TryParseVersion(ProcessCommandLine.TryGet(process));
+        if (!string.IsNullOrEmpty(fromCommandLine))
+            return fromCommandLine;
+
         string title = process?.MainWindowTitle?.ToLowerInvariant() ?? string.Empty;
         string? fromTitle = NormalizeDetectedVersion(title);
         if (!string.IsNullOrEmpty(fromTitle))
             return fromTitle;
 
-        string? fromLunarSettings = TryResolveVersionFromLunarSettings();
-        if (!string.IsNullOrEmpty(fromLunarSettings))
-            return fromLunarSettings;
+        // Launcher-settings fallback only when there is no process to inspect
+        // (avoids Custom Inject into Prism/vanilla picking an unrelated Lunar history version).
+        if (process == null)
+        {
+            string? fromLunarSettings = TryResolveVersionFromLunarSettings();
+            if (!string.IsNullOrEmpty(fromLunarSettings))
+                return fromLunarSettings;
+        }
 
         // Preserve legacy behavior as safer fallback when auto-detection is inconclusive.
         return "1.8.9";
+    }
+
+    /// <summary>
+    /// Maps a resolved injection version to the native bridge DLL that must be loaded.
+    /// 26.x and 1.21.x share <c>bridge_261.dll</c>; everything else uses legacy <c>bridge.dll</c>.
+    /// </summary>
+    internal static string ResolveBridgeDllName(string resolvedVersion)
+    {
+        if (string.IsNullOrWhiteSpace(resolvedVersion))
+            return "bridge.dll";
+
+        if (resolvedVersion.StartsWith("26.", StringComparison.OrdinalIgnoreCase)
+            || resolvedVersion.StartsWith("1.21", StringComparison.OrdinalIgnoreCase))
+        {
+            return "bridge_261.dll";
+        }
+
+        return "bridge.dll";
     }
 
     private static string? TryResolveVersionFromLunarSettings()
@@ -771,14 +796,35 @@ public class GameStateClient : INotifyPropertyChanged
             return null;
 
         string value = raw.Trim().ToLowerInvariant();
-        if (value.Contains("26.1") || value.Contains("minecraft 26") || value.Contains("version 26") || value == "26" || value.StartsWith("26."))
+
+        // Use token boundaries so library versions like log4j "2.26.0" do not match "26.2".
+        if (ContainsVersionToken(value, "26.2"))
+            return "26.2";
+        if (ContainsVersionToken(value, "26.1")
+            || value == "26"
+            || value.Equals("minecraft 26", StringComparison.Ordinal)
+            || value.StartsWith("26.", StringComparison.Ordinal))
+        {
             return "26.1";
-        if (value.Contains("1.21") || value == "1.21")
+        }
+        if (ContainsVersionToken(value, "1.21") || value == "1.21")
             return "1.21";
-        if (value.Contains("1.8.9") || value == "1.8" || value.StartsWith("1.8."))
+        if (ContainsVersionToken(value, "1.8.9") || value == "1.8" || value.StartsWith("1.8.", StringComparison.Ordinal))
             return "1.8.9";
 
         return null;
+    }
+
+    /// <summary>
+    /// True when <paramref name="version"/> appears as a version token, not as a substring of another number.
+    /// </summary>
+    private static bool ContainsVersionToken(string value, string version)
+    {
+        string escaped = Regex.Escape(version);
+        return Regex.IsMatch(
+            value,
+            $@"(?<![\d.]){escaped}(?![\d])",
+            RegexOptions.CultureInvariant);
     }
 
 
@@ -918,6 +964,8 @@ public class GameStateClient : INotifyPropertyChanged
                     gtbCount = clicker.GtbMatchCount,
                     gtbPreview = clicker.GtbMatchesPreview,
                     nametags = clicker.NametagsEnabled,
+                    nickHiderEnabled = clicker.IsNickHiderActive,
+                    nickHiderAlias = NickHiderConfig.NormalizeAlias(clicker.NickHiderAlias),
                     showModuleList = clicker.ShowModuleList,
                     moduleListStyle = ModuleListStyleToIndex(clicker.ModuleListStyle),
                     showLogo = clicker.ShowLogo,
