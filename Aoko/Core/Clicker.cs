@@ -122,6 +122,7 @@ public class Clicker : INotifyPropertyChanged
     private readonly Random _random = new();
     private readonly object _sendInputLock = new();
     private readonly ChestStealerController _chestStealerController = new();
+    public KillAuraSettings KillAuraSettings { get; } = new();
     private readonly INPUT[] _leftClickInputs;
     private readonly INPUT[] _rightClickInputs;
     private readonly INPUT[] _aimAssistMoveInput;
@@ -148,6 +149,7 @@ public class Clicker : INotifyPropertyChanged
         _aimAssistMoveInput[0].Mi.DwFlags = MOUSEEVENTF_MOVE;
 
         AttachBlockEspTargets(_blockEspTargets);
+        KillAuraSettings.Changed += () => StateChanged?.Invoke();
     }
     
     
@@ -159,6 +161,30 @@ public class Clicker : INotifyPropertyChanged
 
     private bool _showLogo = true;
     public bool ShowLogo { get => _showLogo; set { _showLogo = value; OnPropertyChanged(nameof(ShowLogo)); } }
+
+    private bool _devMode = false;
+    /// <summary>Shows unfinished/dev-only modules (e.g. Kill Aura) in the external GUI.</summary>
+    public bool DevMode
+    {
+        get => _devMode;
+        set
+        {
+            if (_devMode == value) return;
+            _devMode = value;
+            OnPropertyChanged(nameof(DevMode));
+            if (!_devMode)
+                DisableDevOnlyModules();
+            StateChanged?.Invoke();
+        }
+    }
+
+    /// <summary>Force-off modules marked DevOnly in <see cref="ModuleCatalog"/> when Dev Mode is disabled.</summary>
+    public void DisableDevOnlyModules()
+    {
+        if (DevMode) return;
+        if (KillAuraEnabled)
+            KillAuraEnabled = false;
+    }
 
     private bool _discordRpcEnabled = true;
     public bool DiscordRpcEnabled
@@ -445,7 +471,7 @@ public class Clicker : INotifyPropertyChanged
 
             AimAssistEnabled = false;
             TriggerbotEnabled = false;
-            SilentAuraEnabled = false;
+            KillAuraEnabled = false;
             SpeedBridgeEnabled = false;
             GtbHelperEnabled = false;
             PixelPartyAssistEnabled = false;
@@ -1413,146 +1439,259 @@ public class Clicker : INotifyPropertyChanged
         }
     }
 
-    private bool _silentAuraEnabled = false;
-    public bool SilentAuraEnabled
+    private bool _killAuraEnabled = false;
+    public bool KillAuraEnabled
     {
-        get => _silentAuraEnabled;
+        get => _killAuraEnabled;
         set
         {
-            if (_silentAuraEnabled == value) return;
-            _silentAuraEnabled = value;
-            OnPropertyChanged(nameof(SilentAuraEnabled));
+            if (_killAuraEnabled == value) return;
+            _killAuraEnabled = value;
+            OnPropertyChanged(nameof(KillAuraEnabled));
+            OnPropertyChanged(nameof(KillAuraPacketRateControlsEnabled));
+            OnPropertyChanged(nameof(KillAuraCpsControlsEnabled));
+            OnPropertyChanged(nameof(KillAuraClickSilentNoteVisible));
             StateChanged?.Invoke();
         }
     }
 
-    private float _silentAuraRange = 3.0f;
-    public float SilentAuraRange
+    private float _killAuraRange = 2.9f;
+    public float KillAuraRange
     {
-        get => _silentAuraRange;
+        get => _killAuraRange;
         set
         {
             float clamped = Math.Clamp(value, 2.5f, 4.0f);
-            if (Math.Abs(_silentAuraRange - clamped) < 0.001f) return;
-            _silentAuraRange = clamped;
-            OnPropertyChanged(nameof(SilentAuraRange));
+            if (Math.Abs(_killAuraRange - clamped) < 0.001f) return;
+            _killAuraRange = clamped;
+            OnPropertyChanged(nameof(KillAuraRange));
             StateChanged?.Invoke();
         }
     }
 
-    private float _silentAuraAimRange = 4.0f;
-    public float SilentAuraAimRange
+    private float _killAuraAimRange = 3.5f;
+    public float KillAuraAimRange
     {
-        get => _silentAuraAimRange;
+        get => _killAuraAimRange;
         set
         {
             float clamped = Math.Clamp(value, 3.0f, 6.0f);
-            if (Math.Abs(_silentAuraAimRange - clamped) < 0.001f) return;
-            _silentAuraAimRange = clamped;
-            OnPropertyChanged(nameof(SilentAuraAimRange));
+            if (Math.Abs(_killAuraAimRange - clamped) < 0.001f) return;
+            _killAuraAimRange = clamped;
+            OnPropertyChanged(nameof(KillAuraAimRange));
             StateChanged?.Invoke();
         }
     }
 
-    private float _silentAuraRotSpeed = 35.0f;
-    public float SilentAuraRotSpeed
+    private float _killAuraMinTurnSpeed = 10.0f;
+    public float KillAuraMinTurnSpeed
     {
-        get => _silentAuraRotSpeed;
+        get => _killAuraMinTurnSpeed;
         set
         {
-            float clamped = Math.Clamp(value, 10.0f, 90.0f);
-            if (Math.Abs(_silentAuraRotSpeed - clamped) < 0.001f) return;
-            _silentAuraRotSpeed = clamped;
-            OnPropertyChanged(nameof(SilentAuraRotSpeed));
+            float clamped = Math.Clamp(value, 4.0f, 40.0f);
+            if (Math.Abs(_killAuraMinTurnSpeed - clamped) < 0.001f) return;
+            _killAuraMinTurnSpeed = clamped;
+            if (_killAuraMinTurnSpeed > _killAuraMaxTurnSpeed)
+                _killAuraMaxTurnSpeed = _killAuraMinTurnSpeed;
+            OnPropertyChanged(nameof(KillAuraMinTurnSpeed));
+            OnPropertyChanged(nameof(KillAuraMaxTurnSpeed));
             StateChanged?.Invoke();
         }
     }
 
-    private string _silentAuraTargetMode = "distance";
-    public string SilentAuraTargetMode
+    private float _killAuraMaxTurnSpeed = 20.0f;
+    public float KillAuraMaxTurnSpeed
     {
-        get => _silentAuraTargetMode;
+        get => _killAuraMaxTurnSpeed;
+        set
+        {
+            float clamped = Math.Clamp(value, 4.0f, 40.0f);
+            if (Math.Abs(_killAuraMaxTurnSpeed - clamped) < 0.001f) return;
+            _killAuraMaxTurnSpeed = clamped;
+            if (_killAuraMinTurnSpeed > _killAuraMaxTurnSpeed)
+                _killAuraMinTurnSpeed = _killAuraMaxTurnSpeed;
+            OnPropertyChanged(nameof(KillAuraMinTurnSpeed));
+            OnPropertyChanged(nameof(KillAuraMaxTurnSpeed));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private string _killAuraTargetMode = "distance";
+    public string KillAuraTargetMode
+    {
+        get => _killAuraTargetMode;
         set
         {
             string normalized = string.Equals(value, "health", StringComparison.OrdinalIgnoreCase) ? "health" : "distance";
-            if (_silentAuraTargetMode == normalized) return;
-            _silentAuraTargetMode = normalized;
-            OnPropertyChanged(nameof(SilentAuraTargetMode));
+            if (_killAuraTargetMode == normalized) return;
+            _killAuraTargetMode = normalized;
+            OnPropertyChanged(nameof(KillAuraTargetMode));
             StateChanged?.Invoke();
         }
     }
 
-    private int _silentAuraSwitchDelayMs = 400;
-    public int SilentAuraSwitchDelayMs
+    private int _killAuraSwitchDelayMs = 350;
+    public int KillAuraSwitchDelayMs
     {
-        get => _silentAuraSwitchDelayMs;
+        get => _killAuraSwitchDelayMs;
         set
         {
             int clamped = Math.Clamp(value, 0, 2000);
-            if (_silentAuraSwitchDelayMs == clamped) return;
-            _silentAuraSwitchDelayMs = clamped;
-            OnPropertyChanged(nameof(SilentAuraSwitchDelayMs));
+            if (_killAuraSwitchDelayMs == clamped) return;
+            _killAuraSwitchDelayMs = clamped;
+            OnPropertyChanged(nameof(KillAuraSwitchDelayMs));
             StateChanged?.Invoke();
         }
     }
 
-    private int _silentAuraAccuracy = 90;
-    public int SilentAuraAccuracy
+    private int _killAuraRandomization = 18;
+    public int KillAuraRandomization
     {
-        get => _silentAuraAccuracy;
+        get => _killAuraRandomization;
         set
         {
-            int clamped = Math.Clamp(value, 50, 100);
-            if (_silentAuraAccuracy == clamped) return;
-            _silentAuraAccuracy = clamped;
-            OnPropertyChanged(nameof(SilentAuraAccuracy));
+            int clamped = Math.Clamp(value, 0, 100);
+            if (_killAuraRandomization == clamped) return;
+            _killAuraRandomization = clamped;
+            OnPropertyChanged(nameof(KillAuraRandomization));
             StateChanged?.Invoke();
         }
     }
 
-    private bool _silentAuraSpamMode = true;
-    public bool SilentAuraSpamMode
+    private string _killAuraClickMode = "cooldown";
+    public string KillAuraClickMode
     {
-        get => _silentAuraSpamMode;
+        get => _killAuraClickMode;
         set
         {
-            if (_silentAuraSpamMode == value) return;
-            _silentAuraSpamMode = value;
-            OnPropertyChanged(nameof(SilentAuraSpamMode));
+            string normalized = NormalizeKillAuraClickMode(value);
+            if (_killAuraClickMode == normalized) return;
+            _killAuraClickMode = normalized;
+            OnPropertyChanged(nameof(KillAuraClickMode));
+            OnPropertyChanged(nameof(KillAuraUsePacketRate));
+            OnPropertyChanged(nameof(KillAuraPacketRateControlsEnabled));
+            OnPropertyChanged(nameof(KillAuraClickSilentNoteVisible));
             StateChanged?.Invoke();
         }
     }
 
-    private float _silentAuraSpamMinCps = 14.0f;
-    public float SilentAuraSpamMinCps
+    internal static string NormalizeKillAuraClickMode(string? value)
     {
-        get => _silentAuraSpamMinCps;
+        if (string.Equals(value, "click", StringComparison.OrdinalIgnoreCase))
+            return "click";
+        if (string.Equals(value, "packet", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(value, "cps", StringComparison.OrdinalIgnoreCase))
+            return "packet";
+        return "cooldown";
+    }
+
+    /// <summary>True when attack pacing uses Min/Max packet rate (packet or click modes).</summary>
+    public bool KillAuraUsePacketRate =>
+        string.Equals(_killAuraClickMode, "packet", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(_killAuraClickMode, "click", StringComparison.OrdinalIgnoreCase);
+
+    public bool KillAuraPacketRateControlsEnabled =>
+        KillAuraUsePacketRate;
+
+    /// <summary>OS click aims with the camera — incompatible with packet-silent rotations.</summary>
+    public bool KillAuraClickSilentNoteVisible =>
+        string.Equals(_killAuraClickMode, "click", StringComparison.OrdinalIgnoreCase);
+
+    // Legacy name kept for bindings that still reference KillAuraUseCps during migration.
+    public bool KillAuraUseCps => KillAuraUsePacketRate;
+    public bool KillAuraCpsControlsEnabled => KillAuraPacketRateControlsEnabled;
+
+    private float _killAuraMinCps = 10.0f;
+    public float KillAuraMinCps
+    {
+        get => _killAuraMinCps;
         set
         {
             float clamped = Math.Clamp(value, 8.0f, 20.0f);
-            if (Math.Abs(_silentAuraSpamMinCps - clamped) < 0.001f) return;
-            _silentAuraSpamMinCps = clamped;
-            if (_silentAuraSpamMinCps > _silentAuraSpamMaxCps)
-                _silentAuraSpamMaxCps = _silentAuraSpamMinCps;
-            OnPropertyChanged(nameof(SilentAuraSpamMinCps));
-            OnPropertyChanged(nameof(SilentAuraSpamMaxCps));
+            if (Math.Abs(_killAuraMinCps - clamped) < 0.001f) return;
+            _killAuraMinCps = clamped;
+            if (_killAuraMinCps > _killAuraMaxCps)
+                _killAuraMaxCps = _killAuraMinCps;
+            OnPropertyChanged(nameof(KillAuraMinCps));
+            OnPropertyChanged(nameof(KillAuraMaxCps));
             StateChanged?.Invoke();
         }
     }
 
-    private float _silentAuraSpamMaxCps = 18.0f;
-    public float SilentAuraSpamMaxCps
+    private float _killAuraMaxCps = 14.0f;
+    public float KillAuraMaxCps
     {
-        get => _silentAuraSpamMaxCps;
+        get => _killAuraMaxCps;
         set
         {
             float clamped = Math.Clamp(value, 8.0f, 20.0f);
-            if (Math.Abs(_silentAuraSpamMaxCps - clamped) < 0.001f) return;
-            _silentAuraSpamMaxCps = clamped;
-            if (_silentAuraSpamMinCps > _silentAuraSpamMaxCps)
-                _silentAuraSpamMinCps = _silentAuraSpamMaxCps;
-            OnPropertyChanged(nameof(SilentAuraSpamMinCps));
-            OnPropertyChanged(nameof(SilentAuraSpamMaxCps));
+            if (Math.Abs(_killAuraMaxCps - clamped) < 0.001f) return;
+            _killAuraMaxCps = clamped;
+            if (_killAuraMinCps > _killAuraMaxCps)
+                _killAuraMinCps = _killAuraMaxCps;
+            OnPropertyChanged(nameof(KillAuraMinCps));
+            OnPropertyChanged(nameof(KillAuraMaxCps));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private int _killAuraFov = 120;
+    public int KillAuraFov
+    {
+        get => _killAuraFov;
+        set
+        {
+            int clamped = Math.Clamp(value, 30, 360);
+            if (_killAuraFov == clamped) return;
+            _killAuraFov = clamped;
+            OnPropertyChanged(nameof(KillAuraFov));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private string _killAuraRotMode = "legit";
+    public string KillAuraRotMode
+    {
+        get => _killAuraRotMode;
+        set
+        {
+            string normalized = value?.Trim().ToLowerInvariant() switch
+            {
+                "legit" => "legit",
+                "lock" => "lock",
+                _ => "silent"
+            };
+            if (_killAuraRotMode == normalized) return;
+            _killAuraRotMode = normalized;
+            OnPropertyChanged(nameof(KillAuraRotMode));
+            OnPropertyChanged(nameof(KillAuraClickSilentNoteVisible));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _killAuraRequirePress = false;
+    public bool KillAuraRequirePress
+    {
+        get => _killAuraRequirePress;
+        set
+        {
+            if (_killAuraRequirePress == value) return;
+            _killAuraRequirePress = value;
+            OnPropertyChanged(nameof(KillAuraRequirePress));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _killAuraWeaponsOnly = true;
+    public bool KillAuraWeaponsOnly
+    {
+        get => _killAuraWeaponsOnly;
+        set
+        {
+            if (_killAuraWeaponsOnly == value) return;
+            _killAuraWeaponsOnly = value;
+            OnPropertyChanged(nameof(KillAuraWeaponsOnly));
             StateChanged?.Invoke();
         }
     }

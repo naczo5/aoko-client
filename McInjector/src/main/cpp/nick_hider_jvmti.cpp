@@ -43,6 +43,23 @@ static SurfaceEntry s_surfaces[kMaxSurfaces] = {};
 static RenderMethodEntry s_methods[kMaxMethods] = {};
 static ConfigSnapshot s_config = {};
 static volatile LONG s_loggedUnsupported = 0;
+static JvmtiBreakpointHandler s_extraBreakpoint = nullptr;
+static JvmtiFramePopHandler s_extraFramePop = nullptr;
+static volatile LONG s_framePopEnabled = 0;
+static volatile LONG s_hasBreakpoints = 0;
+static volatile LONG s_hasFramePop = 0;
+static volatile LONG s_hasLocalVars = 0;
+static volatile LONG s_hasGetBytecodes = 0;
+static volatile LONG s_hasRetransform = 0;
+static volatile LONG s_hasRetransformAny = 0;
+
+typedef void (*JvmtiClassFileLoadHookFn)(jvmtiEnv* jvmti, JNIEnv* env, jclass classBeingRedefined,
+                                         jobject loader, const char* name, jobject protectionDomain,
+                                         jint classDataLen, const unsigned char* classData,
+                                         jint* newClassDataLen, unsigned char** newClassData);
+const int kMaxClassFileHooks = 8;
+static JvmtiClassFileLoadHookFn s_classFileHooks[kMaxClassFileHooks] = {};
+static SRWLOCK s_classFileHookLock = SRWLOCK_INIT;
 
 static void Log(const std::string& message)
 {
@@ -195,8 +212,11 @@ static SurfaceEntry* FindCallingSurface(JNIEnv* env, jthread thread)
     return nullptr;
 }
 
-static void JNICALL OnBreakpoint(jvmtiEnv*, JNIEnv* env, jthread thread, jmethodID method, jlocation)
+static void JNICALL OnBreakpoint(jvmtiEnv* jvmti, JNIEnv* env, jthread thread, jmethodID method, jlocation location)
 {
+    if (s_extraBreakpoint)
+        s_extraBreakpoint(jvmti, env, thread, method, location);
+
     if (!env || !thread) return;
     RenderMethodEntry* renderer = FindRenderMethod(method);
     if (!renderer) return;
@@ -227,6 +247,48 @@ static void JNICALL OnBreakpoint(jvmtiEnv*, JNIEnv* env, jthread thread, jmethod
     }
 }
 
+static void JNICALL OnFramePop(jvmtiEnv* jvmti, JNIEnv* env, jthread thread, jmethodID method,
+                               jboolean wasPoppedByException)
+{
+    if (s_extraFramePop)
+        s_extraFramePop(jvmti, env, thread, method, wasPoppedByException);
+}
+
+static void JNICALL OnClassFileLoadHook(jvmtiEnv* jvmti, JNIEnv* env,
+                                        jclass classBeingRedefined, jobject loader,
+                                        const char* name, jobject protectionDomain,
+                                        jint classDataLen, const unsigned char* classData,
+                                        jint* newClassDataLen, unsigned char** newClassData)
+{
+    JvmtiClassFileLoadHookFn snapshot[kMaxClassFileHooks] = {};
+    AcquireSRWLockShared(&s_classFileHookLock);
+    for (int i = 0; i < kMaxClassFileHooks; ++i) snapshot[i] = s_classFileHooks[i];
+    ReleaseSRWLockShared(&s_classFileHookLock);
+
+    const unsigned char* currentData = classData;
+    jint currentLen = classDataLen;
+    unsigned char* ownedData = nullptr;
+    for (int i = 0; i < kMaxClassFileHooks; ++i) {
+        if (!snapshot[i]) continue;
+        jint nextLen = 0;
+        unsigned char* nextData = nullptr;
+        snapshot[i](jvmti, env, classBeingRedefined, loader, name, protectionDomain,
+                    currentLen, currentData, &nextLen, &nextData);
+        if (nextData && nextLen > 0) {
+            if (ownedData) jvmti->Deallocate(ownedData);
+            ownedData = nextData;
+            currentData = nextData;
+            currentLen = nextLen;
+        }
+    }
+    if (ownedData && newClassDataLen && newClassData) {
+        *newClassDataLen = currentLen;
+        *newClassData = ownedData;
+    } else if (ownedData) {
+        jvmti->Deallocate(ownedData);
+    }
+}
+
 } // namespace
 
 void ConfigureNickHiderJvmti(bool enabled, const std::string& alias)
@@ -248,6 +310,24 @@ void SetNickHiderJvmtiLocalName(const std::string& localName)
     InterlockedIncrement(&s_config.version);
 }
 
+static bool TryAddCapabilityBit(jvmtiCapabilities* pot, bool (*isSet)(const jvmtiCapabilities*),
+                                void (*setBit)(jvmtiCapabilities*), const char* name)
+{
+    if (!pot || !isSet(pot)) {
+        Log(std::string("JVMTI capability not potential: ") + name);
+        return false;
+    }
+    jvmtiCapabilities req = {};
+    setBit(&req);
+    const jvmtiError err = s_jvmti->AddCapabilities(&req);
+    if (err != JVMTI_ERROR_NONE) {
+        Log(std::string("JVMTI capability denied: ") + name + " (" + std::to_string((int)err) + ")");
+        return false;
+    }
+    Log(std::string("JVMTI capability acquired: ") + name);
+    return true;
+}
+
 bool InstallNickHiderJvmti(JavaVM* vm, NickHiderJvmtiGeneration generation, void (*logger)(const std::string&))
 {
     if (InterlockedCompareExchange(&s_installed, 0, 0)) return true;
@@ -256,25 +336,92 @@ bool InstallNickHiderJvmti(JavaVM* vm, NickHiderJvmtiGeneration generation, void
     s_generation = generation;
     s_log = logger;
     if (vm->GetEnv(reinterpret_cast<void**>(&s_jvmti), JVMTI_VERSION_1_2) != JNI_OK || !s_jvmti) {
-        Log("NickHider interceptor unavailable: JVMTI environment was not provided by this JVM.");
+        Log("JVMTI host unavailable: GetEnv(JVMTI) failed on this JVM.");
         return false;
     }
-    jvmtiCapabilities capabilities = {};
-    capabilities.can_access_local_variables = 1;
-    capabilities.can_generate_breakpoint_events = 1;
-    const jvmtiError capResult = s_jvmti->AddCapabilities(&capabilities);
-    if (capResult != JVMTI_ERROR_NONE) {
-        Log("NickHider interceptor unavailable: JVMTI breakpoint/local-variable capability denied (" + std::to_string((int)capResult) + ").");
+
+    // AddCapabilities is all-or-nothing per call. Request each bit separately so a
+    // denied local-vars/frame-pop bit cannot poison breakpoints (Premotion's need).
+    jvmtiCapabilities pot = {};
+    if (s_jvmti->GetPotentialCapabilities(&pot) != JVMTI_ERROR_NONE)
+        std::memset(&pot, 0, sizeof(pot));
+
+    InterlockedExchange(&s_hasBreakpoints, TryAddCapabilityBit(
+        &pot,
+        [](const jvmtiCapabilities* c) { return c->can_generate_breakpoint_events != 0; },
+        [](jvmtiCapabilities* c) { c->can_generate_breakpoint_events = 1; },
+        "can_generate_breakpoint_events") ? 1 : 0);
+    InterlockedExchange(&s_hasFramePop, TryAddCapabilityBit(
+        &pot,
+        [](const jvmtiCapabilities* c) { return c->can_generate_frame_pop_events != 0; },
+        [](jvmtiCapabilities* c) { c->can_generate_frame_pop_events = 1; },
+        "can_generate_frame_pop_events") ? 1 : 0);
+    InterlockedExchange(&s_hasLocalVars, TryAddCapabilityBit(
+        &pot,
+        [](const jvmtiCapabilities* c) { return c->can_access_local_variables != 0; },
+        [](jvmtiCapabilities* c) { c->can_access_local_variables = 1; },
+        "can_access_local_variables") ? 1 : 0);
+    InterlockedExchange(&s_hasGetBytecodes, TryAddCapabilityBit(
+        &pot,
+        [](const jvmtiCapabilities* c) { return c->can_get_bytecodes != 0; },
+        [](jvmtiCapabilities* c) { c->can_get_bytecodes = 1; },
+        "can_get_bytecodes") ? 1 : 0);
+    InterlockedExchange(&s_hasRetransform, TryAddCapabilityBit(
+        &pot,
+        [](const jvmtiCapabilities* c) { return c->can_retransform_classes != 0; },
+        [](jvmtiCapabilities* c) { c->can_retransform_classes = 1; },
+        "can_retransform_classes") ? 1 : 0);
+    InterlockedExchange(&s_hasRetransformAny, TryAddCapabilityBit(
+        &pot,
+        [](const jvmtiCapabilities* c) { return c->can_retransform_any_class != 0; },
+        [](jvmtiCapabilities* c) { c->can_retransform_any_class = 1; },
+        "can_retransform_any_class") ? 1 : 0);
+    // Diagnostic only — often solo like breakpoints.
+    TryAddCapabilityBit(
+        &pot,
+        [](const jvmtiCapabilities* c) { return c->can_generate_method_entry_events != 0; },
+        [](jvmtiCapabilities* c) { c->can_generate_method_entry_events = 1; },
+        "can_generate_method_entry_events");
+
+    const bool haveBreakpoints = InterlockedCompareExchange(&s_hasBreakpoints, 0, 0) != 0;
+    const bool haveRetransform = InterlockedCompareExchange(&s_hasRetransform, 0, 0) != 0;
+    if (!haveBreakpoints && !haveRetransform) {
+        Log("JVMTI host: neither breakpoints nor retransform available — Premotion disabled.");
         return false;
     }
+    if (!haveBreakpoints)
+        Log("JVMTI host: breakpoint events unavailable (solo/exclusive); using retransform Premotion path.");
+
     jvmtiEventCallbacks callbacks = {};
     callbacks.Breakpoint = OnBreakpoint;
-    if (s_jvmti->SetEventCallbacks(&callbacks, sizeof(callbacks)) != JVMTI_ERROR_NONE ||
-        s_jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_BREAKPOINT, nullptr) != JVMTI_ERROR_NONE) {
-        Log("NickHider interceptor unavailable: JVMTI breakpoint callback registration failed.");
+    callbacks.FramePop = OnFramePop;
+    callbacks.ClassFileLoadHook = OnClassFileLoadHook;
+    if (s_jvmti->SetEventCallbacks(&callbacks, sizeof(callbacks)) != JVMTI_ERROR_NONE) {
+        Log("JVMTI host: SetEventCallbacks failed.");
         return false;
     }
+    if (haveBreakpoints) {
+        if (s_jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_BREAKPOINT, nullptr) != JVMTI_ERROR_NONE) {
+            Log("JVMTI host: breakpoint event enable failed.");
+            InterlockedExchange(&s_hasBreakpoints, 0);
+        }
+    }
+    if (haveRetransform) {
+        if (s_jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_CLASS_FILE_LOAD_HOOK, nullptr) != JVMTI_ERROR_NONE) {
+            Log("JVMTI host: ClassFileLoadHook enable failed.");
+            InterlockedExchange(&s_hasRetransform, 0);
+            if (!InterlockedCompareExchange(&s_hasBreakpoints, 0, 0)) {
+                Log("JVMTI host: no usable Premotion capability after event setup.");
+                return false;
+            }
+        }
+    }
+
     InterlockedExchange(&s_installed, 1);
+    if (!InterlockedCompareExchange(&s_hasLocalVars, 0, 0))
+        Log("JVMTI host: local-variable access unavailable — NickHider text rewrite idle.");
+    if (haveBreakpoints && !InterlockedCompareExchange(&s_hasFramePop, 0, 0))
+        Log("JVMTI host: frame-pop unavailable — walking Premotion will use return-site breakpoints.");
     RefreshNickHiderJvmtiTargets();
     return true;
 }
@@ -284,12 +431,94 @@ bool IsNickHiderJvmtiInstalled()
     return InterlockedCompareExchange(&s_installed, 0, 0) != 0;
 }
 
+bool HasJvmtiBreakpoints()
+{
+    return InterlockedCompareExchange(&s_hasBreakpoints, 0, 0) != 0
+        && InterlockedCompareExchange(&s_installed, 0, 0) != 0;
+}
+
+bool HasJvmtiFramePop()
+{
+    return InterlockedCompareExchange(&s_hasFramePop, 0, 0) != 0
+        && InterlockedCompareExchange(&s_installed, 0, 0) != 0;
+}
+
+bool HasJvmtiLocalVariables()
+{
+    return InterlockedCompareExchange(&s_hasLocalVars, 0, 0) != 0
+        && InterlockedCompareExchange(&s_installed, 0, 0) != 0;
+}
+
+bool HasJvmtiGetBytecodes()
+{
+    return InterlockedCompareExchange(&s_hasGetBytecodes, 0, 0) != 0
+        && InterlockedCompareExchange(&s_installed, 0, 0) != 0;
+}
+
+bool HasJvmtiRetransform()
+{
+    return InterlockedCompareExchange(&s_hasRetransform, 0, 0) != 0
+        && InterlockedCompareExchange(&s_installed, 0, 0) != 0;
+}
+
+int RegisterClassFileLoadHook(ClassFileLoadHookFn handler)
+{
+    if (!handler) return 0;
+    const JvmtiClassFileLoadHookFn typed = reinterpret_cast<JvmtiClassFileLoadHookFn>(handler);
+    AcquireSRWLockExclusive(&s_classFileHookLock);
+    for (int i = 0; i < kMaxClassFileHooks; ++i) {
+        if (s_classFileHooks[i] == typed) {
+            ReleaseSRWLockExclusive(&s_classFileHookLock);
+            return i + 1;
+        }
+    }
+    for (int i = 0; i < kMaxClassFileHooks; ++i) {
+        if (!s_classFileHooks[i]) {
+            s_classFileHooks[i] = typed;
+            ReleaseSRWLockExclusive(&s_classFileHookLock);
+            return i + 1;
+        }
+    }
+    ReleaseSRWLockExclusive(&s_classFileHookLock);
+    Log("JVMTI host: class-file transformation subscriber limit reached.");
+    return 0;
+}
+
+void UnregisterClassFileLoadHook(int token)
+{
+    if (token <= 0 || token > kMaxClassFileHooks) return;
+    AcquireSRWLockExclusive(&s_classFileHookLock);
+    s_classFileHooks[token - 1] = nullptr;
+    ReleaseSRWLockExclusive(&s_classFileHookLock);
+}
+
+bool SharedJvmtiRetransformClasses(jclass* classes, jint count)
+{
+    if (!s_jvmti || !classes || count <= 0 || !InterlockedCompareExchange(&s_installed, 0, 0))
+        return false;
+    if (!InterlockedCompareExchange(&s_hasRetransform, 0, 0))
+        return false;
+    const jvmtiError err = s_jvmti->RetransformClasses(count, classes);
+    if (err != JVMTI_ERROR_NONE) {
+        Log("JVMTI RetransformClasses failed (" + std::to_string((int)err) + ")");
+        return false;
+    }
+    return true;
+}
+
+bool SharedJvmtiAllocate(jlong size, unsigned char** memPtr)
+{
+    if (!s_jvmti || !memPtr || size <= 0) return false;
+    return s_jvmti->Allocate(size, memPtr) == JVMTI_ERROR_NONE;
+}
+
 void RefreshNickHiderJvmtiTargets()
 {
     if (!s_jvmti || !InterlockedCompareExchange(&s_installed, 0, 0)) return;
     jint classCount = 0;
     jclass* classes = nullptr;
     if (s_jvmti->GetLoadedClasses(&classCount, &classes) != JVMTI_ERROR_NONE || !classes) return;
+    const bool canRewriteLocals = InterlockedCompareExchange(&s_hasLocalVars, 0, 0) != 0;
     for (jint i = 0; i < classCount; ++i) {
         char* signature = nullptr;
         if (s_jvmti->GetClassSignature(classes[i], &signature, nullptr) != JVMTI_ERROR_NONE || !signature) continue;
@@ -301,7 +530,8 @@ void RefreshNickHiderJvmtiTargets()
             if (s_vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_8) == JNI_OK && env)
                 AddSurface(env, classes[i], label);
         }
-        if (IsRendererClass(signature)) AddRendererMethods(classes[i]);
+        // Render breakpoints only help when we can rewrite String locals.
+        if (canRewriteLocals && IsRendererClass(signature)) AddRendererMethods(classes[i]);
         s_jvmti->Deallocate(reinterpret_cast<unsigned char*>(signature));
     }
     s_jvmti->Deallocate(reinterpret_cast<unsigned char*>(classes));
@@ -320,14 +550,60 @@ void FlushNickHiderJvmtiDiagnostics()
 
 void ShutdownNickHiderJvmti(JNIEnv* env)
 {
-    if (s_jvmti) s_jvmti->SetEventNotificationMode(JVMTI_DISABLE, JVMTI_EVENT_BREAKPOINT, nullptr);
+    if (s_jvmti) {
+        s_jvmti->SetEventNotificationMode(JVMTI_DISABLE, JVMTI_EVENT_BREAKPOINT, nullptr);
+        s_jvmti->SetEventNotificationMode(JVMTI_DISABLE, JVMTI_EVENT_FRAME_POP, nullptr);
+        s_jvmti->SetEventNotificationMode(JVMTI_DISABLE, JVMTI_EVENT_CLASS_FILE_LOAD_HOOK, nullptr);
+    }
     if (env) {
         for (LONG i = 0; i < InterlockedCompareExchange(&s_surfaceCount, 0, 0); ++i)
             if (s_surfaces[i].clazz) env->DeleteGlobalRef(s_surfaces[i].clazz);
     }
     InterlockedExchange(&s_surfaceCount, 0);
     InterlockedExchange(&s_methodCount, 0);
+    InterlockedExchange(&s_framePopEnabled, 0);
     InterlockedExchange(&s_installed, 0);
+    s_extraBreakpoint = nullptr;
+    s_extraFramePop = nullptr;
+}
+
+void RegisterJvmtiBreakpointHandler(JvmtiBreakpointHandler handler)
+{
+    s_extraBreakpoint = handler;
+}
+
+void RegisterJvmtiFramePopHandler(JvmtiFramePopHandler handler)
+{
+    s_extraFramePop = handler;
+    if (handler && s_jvmti && InterlockedCompareExchange(&s_installed, 0, 0) &&
+        InterlockedCompareExchange(&s_hasFramePop, 0, 0) &&
+        InterlockedCompareExchange(&s_framePopEnabled, 1, 0) == 0) {
+        s_jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_FRAME_POP, nullptr);
+    }
+}
+
+jvmtiEnv* SharedJvmtiEnv()
+{
+    return InterlockedCompareExchange(&s_installed, 0, 0) ? s_jvmti : nullptr;
+}
+
+bool SharedJvmtiSetBreakpoint(jmethodID method, jlocation location)
+{
+    if (!s_jvmti || !method || !InterlockedCompareExchange(&s_installed, 0, 0)) return false;
+    return s_jvmti->SetBreakpoint(method, location) == JVMTI_ERROR_NONE;
+}
+
+bool SharedJvmtiClearBreakpoint(jmethodID method, jlocation location)
+{
+    if (!s_jvmti || !method || !InterlockedCompareExchange(&s_installed, 0, 0)) return false;
+    return s_jvmti->ClearBreakpoint(method, location) == JVMTI_ERROR_NONE;
+}
+
+bool SharedJvmtiNotifyFramePop(jthread thread, jint depth)
+{
+    if (!s_jvmti || !thread || !InterlockedCompareExchange(&s_installed, 0, 0)) return false;
+    if (!InterlockedCompareExchange(&s_hasFramePop, 0, 0)) return false;
+    return s_jvmti->NotifyFramePop(thread, depth) == JVMTI_ERROR_NONE;
 }
 
 } // namespace lc

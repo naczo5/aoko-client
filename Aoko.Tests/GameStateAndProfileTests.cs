@@ -96,16 +96,21 @@ public class GameStateAndProfileTests
         Assert.Equal(12.0f, profile.MaxCPS);
         Assert.True(profile.LeftClickEnabled);
         Assert.False(profile.TriggerbotEnabled);
-        Assert.False(profile.SilentAuraEnabled);
-        Assert.Equal(3.0f, profile.SilentAuraRange);
-        Assert.Equal(4.0f, profile.SilentAuraAimRange);
-        Assert.Equal(35.0f, profile.SilentAuraRotSpeed);
-        Assert.Equal("distance", profile.SilentAuraTargetMode);
-        Assert.Equal(400, profile.SilentAuraSwitchDelayMs);
-        Assert.Equal(90, profile.SilentAuraAccuracy);
-        Assert.True(profile.SilentAuraSpamMode);
-        Assert.Equal(14.0f, profile.SilentAuraSpamMinCps);
-        Assert.Equal(18.0f, profile.SilentAuraSpamMaxCps);
+        Assert.False(profile.KillAuraEnabled);
+        Assert.Equal(2.9f, profile.KillAuraRange);
+        Assert.Equal(3.5f, profile.KillAuraAimRange);
+        Assert.Equal(10.0f, profile.KillAuraMinTurnSpeed);
+        Assert.Equal(20.0f, profile.KillAuraMaxTurnSpeed);
+        Assert.Equal("distance", profile.KillAuraTargetMode);
+        Assert.Equal(350, profile.KillAuraSwitchDelayMs);
+        Assert.Equal(18, profile.KillAuraRandomization);
+        Assert.Equal("cooldown", profile.KillAuraClickMode);
+        Assert.Equal(10.0f, profile.KillAuraMinCps);
+        Assert.Equal(14.0f, profile.KillAuraMaxCps);
+        Assert.Equal(120, profile.KillAuraFov);
+        Assert.Equal("legit", profile.KillAuraRotMode);
+        Assert.False(profile.KillAuraRequirePress);
+        Assert.True(profile.KillAuraWeaponsOnly);
         Assert.False(profile.ChestStealerEnabled);
         Assert.Equal(120, profile.ChestStealerDelayMs);
         Assert.Equal(100, profile.ReachChance);
@@ -121,7 +126,7 @@ public class GameStateAndProfileTests
             Name = "PvP",
             MinCPS = 9.5f,
             TriggerbotEnabled = true,
-            SilentAuraEnabled = true
+            KillAuraEnabled = true
         };
 
         var options = new JsonSerializerOptions
@@ -139,7 +144,7 @@ public class GameStateAndProfileTests
         Assert.Equal("PvP", node!["name"]?.GetValue<string>());
         Assert.Equal(9.5, node[minCpsKey!]!.GetValue<double>(), 3);
         Assert.True(node["triggerbotEnabled"]!.GetValue<bool>());
-        Assert.True(node["silentAuraEnabled"]!.GetValue<bool>());
+        Assert.True(node["killAuraEnabled"]!.GetValue<bool>());
     }
 
     [Fact]

@@ -21,9 +21,9 @@
  */
 window.AOKO_PREVIEW_DATA = {
   palettes: {
-    Slate:    { bg:'#0A0B0F', panel:'#12141A', line:'#181B22', accent:'#C7625A', text:'#E8EAEE' },
-    Ink:      { bg:'#08090B', panel:'#101115', line:'#16181C', accent:'#B0B6C0', text:'#E8EAEE' },
-    Graphite: { bg:'#0B0B0D', panel:'#131316', line:'#19191C', accent:'#B89B82', text:'#E8EAEE' },
+    Slate:    { bg:'#07131D', panel:'#0B1D2A', line:'#193246', accent:'#7F9EFF', text:'#EDF3F7' },
+    Ink:      { bg:'#071019', panel:'#0D1A26', line:'#172734', accent:'#A5B8E8', text:'#EDF3F7' },
+    Graphite: { bg:'#0A1119', panel:'#121F2B', line:'#1B3040', accent:'#9AA7C7', text:'#EDF3F7' },
     Steel:    { bg:'#08090C', panel:'#0F1218', line:'#161A21', accent:'#6B8DAB', text:'#E8EAEE' },
   },
   defaultPalette: 'Slate',

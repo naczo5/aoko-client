@@ -11,7 +11,7 @@ public class BridgeCapabilitiesTests
         BridgeCapabilities caps = BridgeCapabilities.ForVersionFallback("26.2");
 
         Assert.True(caps.SupportsModule("triggerbot"));
-        Assert.True(caps.SupportsModule("silentaura"));
+        Assert.True(caps.SupportsModule("killaura"));
         Assert.True(caps.SupportsModule("nametags"));
         Assert.True(caps.SupportsModule("nickhider"));
         Assert.True(caps.SupportsSetting("nickhiderenabled"));
@@ -30,15 +30,13 @@ public class BridgeCapabilitiesTests
         Assert.True(caps.SupportsSetting("pixelpartyassist"));
         Assert.True(caps.SupportsStateField("pixelpartyyawdelta"));
         Assert.True(caps.SupportsSetting("cheststealerenabled"));
-        Assert.True(caps.SupportsSetting("silentarange"));
-        Assert.True(caps.SupportsSetting("silentaurarotspeed"));
-        Assert.True(caps.SupportsSetting("silentauraaimrange"));
-        Assert.True(caps.SupportsSetting("silentauratargetmode"));
-        Assert.True(caps.SupportsSetting("silentauraswitchdelayms"));
-        Assert.True(caps.SupportsSetting("silentauraaccuracy"));
-        Assert.True(caps.SupportsSetting("silentauraspammode"));
-        Assert.True(caps.SupportsSetting("silentauraspammincps"));
-        Assert.True(caps.SupportsSetting("silentauraspammaxcps"));
+        Assert.False(caps.SupportsModule("silentaura"));
+        Assert.False(caps.SupportsSetting("silentaura"));
+        Assert.False(caps.SupportsSetting("silentarange"));
+        Assert.True(caps.SupportsModule("killaura"));
+        Assert.True(caps.SupportsSetting("killaurarotmode"));
+        Assert.True(caps.SupportsSetting("killaurafov"));
+        Assert.True(caps.SupportsSetting("killauraweaponsonly"));
         Assert.True(caps.SupportsStateField("cheststealerstate"));
         Assert.True(caps.SupportsSetting("nametagshowhelditem"));
         Assert.True(caps.SupportsStateField("attackcooldown"));
@@ -62,6 +60,19 @@ public class BridgeCapabilitiesTests
         Assert.False(caps.SupportsModule("triggerbot"));
         Assert.False(caps.SupportsSetting("triggerbot"));
         Assert.True(caps.SupportsStateField("holdingblock"));
+    }
+
+    [Fact]
+    public void LegacyFallback_ExposesKillAura_ButNotSilentAura()
+    {
+        BridgeCapabilities caps = BridgeCapabilities.ForVersionFallback("1.8.9");
+
+        Assert.True(caps.SupportsModule("killaura"));
+        Assert.True(caps.SupportsSetting("killaurarotmode"));
+        Assert.True(caps.SupportsSetting("killaurafov"));
+        Assert.True(caps.SupportsSetting("killauraweaponsonly"));
+        Assert.False(caps.SupportsModule("silentaura"));
+        Assert.False(caps.SupportsSetting("silentaura"));
     }
 
     [Fact]

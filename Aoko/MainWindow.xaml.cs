@@ -72,7 +72,7 @@ public partial class MainWindow : Window
         ["breakblocks"] = "Break Blocks",
         ["aimassist"] = "Aim Assist",
         ["triggerbot"] = "Triggerbot",
-        ["silentaura"] = "Silent Aura",
+        ["killaura"] = "Kill Aura",
         ["speedbridge"] = "SpeedBridge",
         ["gtbhelper"] = "GTB Helper",
         ["pixelpartyassist"] = "Pixel Party Assist",
@@ -84,6 +84,8 @@ public partial class MainWindow : Window
         ["closestplayer"] = "Closest Player",
         ["reach"] = "Reach",
         ["velocity"] = "Velocity",
+        ["autototem"] = "AutoTotem",
+        ["antidebuff"] = "AntiDebuff",
         ["hitdelayfix"] = "Hit Delay Fix",
         ["panic"] = "Panic"
     };
@@ -164,6 +166,7 @@ public partial class MainWindow : Window
         };
 
         DataContext = Clicker.Instance;
+        Clicker.Instance.PropertyChanged += OnClickerPropertyChanged;
         
         // Subscribe to connection state changes
         GameStateClient.Instance.StateUpdated += OnGameStateUpdated;
@@ -294,17 +297,16 @@ public partial class MainWindow : Window
     {
         if (string.Equals(moduleId, "triggerbot", StringComparison.OrdinalIgnoreCase))
             return "Unavailable on 1.8.9 (cooldown-era PvP only)";
-        if (string.Equals(moduleId, "silentaura", StringComparison.OrdinalIgnoreCase))
-            return "Unavailable on 1.8.9 (modern interaction API only)";
 
         return "Unavailable on current bridge";
     }
 
     private void UpdateVersionAvailabilityUi()
     {
+        var clicker = Clicker.Instance;
         bool aimAssistSupported = IsModuleSupported("aimassist");
         bool triggerbotSupported = IsModuleSupported("triggerbot");
-        bool silentAuraSupported = IsModuleSupported("silentaura");
+        bool killAuraSupported = IsModuleSupported("killaura") && clicker.DevMode;
         bool speedBridgeSupported = IsModuleSupported("speedbridge");
         bool gtbSupported = IsModuleSupported("gtbhelper");
         bool pixelPartySupported = IsModuleSupported("pixelpartyassist");
@@ -318,7 +320,7 @@ public partial class MainWindow : Window
 
         AimAssistCard.IsEnabled = aimAssistSupported;
         TriggerbotCard.IsEnabled = triggerbotSupported;
-        SilentAuraCard.IsEnabled = silentAuraSupported;
+        KillAuraCard.IsEnabled = killAuraSupported;
         SpeedBridgeCard.IsEnabled = speedBridgeSupported;
         GtbHelperCard.IsEnabled = gtbSupported;
         PixelPartyAssistCard.IsEnabled = pixelPartySupported;
@@ -329,10 +331,9 @@ public partial class MainWindow : Window
         AntiDebuffCard.IsEnabled = antiDebuffSupported;
         HitDelayFixCard.IsEnabled = hitDelayFixSupported;
 
-        var clicker = Clicker.Instance;
         if (!aimAssistSupported && clicker.AimAssistEnabled) clicker.AimAssistEnabled = false;
         if (!triggerbotSupported && clicker.TriggerbotEnabled) clicker.TriggerbotEnabled = false;
-        if (!silentAuraSupported && clicker.SilentAuraEnabled) clicker.SilentAuraEnabled = false;
+        if (!killAuraSupported && clicker.KillAuraEnabled) clicker.KillAuraEnabled = false;
         if (!speedBridgeSupported && clicker.SpeedBridgeEnabled) clicker.SpeedBridgeEnabled = false;
         if (!gtbSupported && clicker.GtbHelperEnabled) clicker.GtbHelperEnabled = false;
         if (!pixelPartySupported && clicker.PixelPartyAssistEnabled) clicker.PixelPartyAssistEnabled = false;
@@ -346,7 +347,10 @@ public partial class MainWindow : Window
         // Update availability text - only show unavailable message for Triggerbot (intentionally 1.21-only)
         AimAssistAvailabilityText.Text = aimAssistSupported ? "Available" : "Unavailable on current bridge";
         TriggerbotAvailabilityText.Text = triggerbotSupported ? "Available" : "Unavailable on 1.8.9 (cooldown-era PvP only)";
-        SilentAuraAvailabilityText.Text = silentAuraSupported ? "Available" : "Unavailable on 1.8.9 (modern interaction API only)";
+        string killAuraRuntimeReason = GameStateClient.Instance.CurrentState.KillAuraUnavailableReason;
+        KillAuraAvailabilityText.Text = !killAuraSupported
+            ? GetUnavailableModuleReason("killaura")
+            : string.IsNullOrWhiteSpace(killAuraRuntimeReason) ? "Available" : killAuraRuntimeReason;
         SpeedBridgeAvailabilityText.Text = speedBridgeSupported ? "Available" : "Unavailable on current bridge";
         ReachAvailabilityText.Text = reachSupported ? "Available" : "Unavailable on current bridge";
         VelocityAvailabilityText.Text = velocitySupported ? "Available" : "Unavailable on current bridge";
@@ -363,7 +367,7 @@ public partial class MainWindow : Window
 
         KeybindAimAssistButton.IsEnabled = aimAssistSupported;
         KeybindTriggerbotButton.IsEnabled = triggerbotSupported;
-        KeybindSilentAuraButton.IsEnabled = silentAuraSupported;
+        KeybindKillAuraButton.IsEnabled = killAuraSupported;
         KeybindSpeedBridgeButton.IsEnabled = speedBridgeSupported;
         KeybindGtbHelperButton.IsEnabled = gtbSupported;
         KeybindPixelPartyAssistButton.IsEnabled = pixelPartySupported;
@@ -1154,6 +1158,12 @@ public partial class MainWindow : Window
         UpdateGameStateUI();
     }
 
+    private void OnClickerPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(Clicker.DevMode))
+            UpdateVersionAvailabilityUi();
+    }
+
     private void OnGameStateClientPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (e.PropertyName == nameof(GameStateClient.IsConnected) ||
@@ -1182,6 +1192,7 @@ public partial class MainWindow : Window
         InputHooks.OnKeyCaptured -= InputHooks_OnKeyCaptured;
         GameStateClient.Instance.StateUpdated -= OnGameStateUpdated;
         GameStateClient.Instance.PropertyChanged -= OnGameStateClientPropertyChanged;
+        Clicker.Instance.PropertyChanged -= OnClickerPropertyChanged;
         base.OnClosed(e);
     }
 
@@ -1347,11 +1358,12 @@ public partial class MainWindow : Window
         SetKeybindButtonContent(KeybindBreakBlocksButton, "breakblocks");
         SetKeybindButtonContent(KeybindAimAssistButton, "aimassist");
         SetKeybindButtonContent(KeybindTriggerbotButton, "triggerbot");
-        SetKeybindButtonContent(KeybindSilentAuraButton, "silentaura");
+        SetKeybindButtonContent(KeybindKillAuraButton, "killaura");
         SetKeybindButtonContent(KeybindSpeedBridgeButton, "speedbridge");
         SetKeybindButtonContent(KeybindGtbHelperButton, "gtbhelper");
         SetKeybindButtonContent(KeybindPixelPartyAssistButton, "pixelpartyassist");
         SetKeybindButtonContent(KeybindNametagsButton, "nametags");
+        SetKeybindButtonContent(KeybindNickHiderButton, "nickhider");
         SetKeybindButtonContent(KeybindChestEspButton, "chestesp");
         SetKeybindButtonContent(KeybindChestStealerButton, "cheststealer");
         SetKeybindButtonContent(KeybindBlockEspButton, "blockesp");
@@ -1360,6 +1372,7 @@ public partial class MainWindow : Window
         SetKeybindButtonContent(KeybindVelocityButton, "velocity");
         SetKeybindButtonContent(KeybindAutoTotemButton, "autototem");
         SetKeybindButtonContent(KeybindAntiDebuffButton, "antidebuff");
+        SetKeybindButtonContent(KeybindHitDelayFixButton, "hitdelayfix");
         SetKeybindButtonContent(KeybindPanicButton, "panic");
     }
 
