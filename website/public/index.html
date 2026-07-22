@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="description" content="aoko client is a foss, injectable utility client for Lunar. Built for 1.8.9, 1.21.x, and 26.1." />
+  <meta name="description" content="aoko client is an open-source utility client and external overlay for Lunar Client and standalone Minecraft instances (1.8.9 Forge, modern Fabric)." />
   <meta name="robots" content="index,follow" />
   <meta name="theme-color" content="#07131d" />
 
@@ -15,18 +15,18 @@
   <link rel="manifest" href="site.webmanifest">
   <meta property="og:type" content="website" />
   <meta property="og:site_name" content="aoko client" />
-  <meta property="og:title" content="aoko — a foss, injectable utility client for Lunar" />
-  <meta property="og:description" content="Built for 1.8.9, 1.21.x, and 26.1." />
+  <meta property="og:title" content="aoko — open-source utility client for Minecraft" />
+  <meta property="og:description" content="Supports Lunar Client and standalone Minecraft instances across 1.8.9 (Forge), 1.21.x, 26.1, and 26.2 (Fabric)." />
   <meta property="og:url" content="https://naczo5.github.io/aoko-client/" />
   <meta property="og:image" content="https://naczo5.github.io/aoko-client/screenshots/gameplay.jpg" />
   <meta property="og:image:alt" content="aoko client gameplay HUD preview" />
 
   <meta name="twitter:card" content="summary_large_image" />
-  <meta name="twitter:title" content="aoko — a foss, injectable utility client for Lunar" />
-  <meta name="twitter:description" content="Built for 1.8.9, 1.21.x, and 26.1." />
+  <meta name="twitter:title" content="aoko — open-source utility client for Minecraft" />
+  <meta name="twitter:description" content="Supports Lunar Client and standalone Minecraft instances across 1.8.9 (Forge), 1.21.x, 26.1, and 26.2 (Fabric)." />
   <meta name="twitter:image" content="https://naczo5.github.io/aoko-client/screenshots/gameplay.jpg" />
-  <title>aoko — a foss, injectable utility client for Lunar</title>
-  <link rel="stylesheet" href="style.css?v=4" />
+  <title>aoko — open-source utility client for Minecraft (Lunar & Standalone 1.8.9, 1.21.x, 26.1, 26.2)</title>
+  <link rel="stylesheet" href="style.css?v=6" />
   <link rel="stylesheet" href="preview.css?v=2" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -52,13 +52,39 @@
   <section class="hero" id="top">
     <div class="hero-grid">
       <div class="hero-left">
-        <div class="kicker"><span class="kick-dot"></span>open source · lunar client</div>
         <h1 class="hero-logo"><span>aoko</span> client</h1>
-        <p class="tagline">A free, open-source utility client that brings one calm, capable control surface to Lunar across <b>1.8.9</b>, <b>1.21.x</b>, and <b>26.1</b>.</p>
+        <p class="tagline">A free, open-source utility client and external overlay supporting <b>1.8.9</b> (Forge), <b>1.21.x</b>, <b>26.1</b>, and <b>26.2</b> (Fabric) — on both <b>Lunar Client</b> and <b>standalone Minecraft instances</b>.</p>
         <div class="hero-btns">
           <a href="https://github.com/naczo5/aoko-client/releases" class="btn-primary">download aoko <span aria-hidden="true">↗</span></a>
-          <a href="#registry" class="btn-text">explore the client <span class="arrow">↓</span></a>
+          <a href="#registry" class="btn-text">explore modules <span class="arrow">↓</span></a>
         </div>
+
+        <!-- TERMINAL PREVIEW FOR SCOOP INSTALL -->
+        <div class="terminal-preview">
+          <div class="terminal-bar">
+            <div class="terminal-dots">
+              <span class="t-dot red"></span>
+              <span class="t-dot yellow"></span>
+              <span class="t-dot green"></span>
+            </div>
+            <span class="terminal-title">powershell — scoop installation</span>
+            <button type="button" class="btn-copy-scoop" id="copy-scoop-cmd" title="Copy commands">copy</button>
+          </div>
+          <div class="terminal-body" id="scoop-cmd-text">
+            <div class="terminal-line">
+              <span class="t-prompt">PS C:\&gt;</span>
+              <span class="t-cmd">scoop bucket add aoko https://github.com/naczo5/aoko-client</span>
+            </div>
+            <div class="terminal-line">
+              <span class="t-prompt">PS C:\&gt;</span>
+              <span class="t-cmd">scoop install aoko</span>
+            </div>
+          </div>
+          <div class="terminal-footer">
+            <button type="button" class="scoop-help-btn" id="scoop-help-toggle">What is Scoop? <span class="help-badge">?</span></button>
+          </div>
+        </div>
+
         <div class="hero-meta">
           <span><i>built with</i> c# · c++</span>
           <span><i>license</i> gpl-3</span>
@@ -96,8 +122,12 @@
     </div>
 
     <div class="reg-group" data-group="combat">
-      <div class="reg-label">combat<span class="reg-count">7</span></div>
+      <div class="reg-label">combat<span class="reg-count">8</span></div>
       <div class="reg-rows">
+        <details class="mod">
+          <summary><span class="mod-i">▸</span><span class="mod-name">killaura</span><span class="mod-tag">combat</span></summary>
+          <p>Automated targeting with configurable CPS, swing & attack ranges, FOV, auto-block, and smooth rotation noise.</p>
+        </details>
         <details class="mod">
           <summary><span class="mod-i">▸</span><span class="mod-name">autoclicker</span><span class="mod-tag">input</span></summary>
           <p>LMB/RMB with configurable CPS range, jitter, block-only mode, and GUI/chest safety checks.</p>
@@ -170,8 +200,16 @@
     </div>
 
     <div class="reg-group" data-group="utility">
-      <div class="reg-label">utility<span class="reg-count">3</span></div>
+      <div class="reg-label">utility<span class="reg-count">5</span></div>
       <div class="reg-rows">
+        <details class="mod">
+          <summary><span class="mod-i">▸</span><span class="mod-name">nick hider</span><span class="mod-tag">stealth</span></summary>
+          <p>Replaces your in-game username with a custom alias locally via native JVMTI string filtering.</p>
+        </details>
+        <details class="mod">
+          <summary><span class="mod-i">▸</span><span class="mod-name">hit delay fix</span><span class="mod-tag">combat</span></summary>
+          <p>Removes 1.8.9 attack cooldown delays for responsive hits.</p>
+        </details>
         <details class="mod">
           <summary><span class="mod-i">▸</span><span class="mod-name">chest stealer</span><span class="mod-tag">inventory</span></summary>
           <p>External cursor-based stealer that empties containers fast, safely off the game thread.</p>
@@ -232,11 +270,11 @@
 
       <div class="node node-jvm">
         <div class="node-head">jvm</div>
-        <div class="node-sub">lunar client</div>
+        <div class="node-sub">lunar &amp; standalone</div>
         <ul>
-          <li>1.8.9 · obf</li>
-          <li>1.21.x · yarn</li>
-          <li>26.1 · mojmap</li>
+          <li>1.8.9 · Forge / OptiFine</li>
+          <li>1.21.x · Fabric (Yarn)</li>
+          <li>26.1 &amp; 26.2 · Fabric (Mojmap &amp; Vulkan)</li>
         </ul>
       </div>
     </div>
@@ -253,7 +291,7 @@
         <div class="col-num">requirements</div>
         <ul class="req">
           <li>windows 10/11 x64</li>
-          <li>lunar client (1.8.9, 1.21.x, 26.1)</li>
+          <li>lunar client or standalone minecraft (1.8.9 forge, modern fabric)</li>
           <li>release exe is self-contained — no .net install</li>
           <li>mingw-w64 + jdk 17 headers (build only)</li>
         </ul>
@@ -261,7 +299,7 @@
       <div class="col">
         <div class="col-num">usage</div>
         <ol class="steps">
-          <li>launch lunar client, join a world.</li>
+          <li>launch minecraft / lunar client, join a world.</li>
           <li>run <code>Aoko.exe</code>.</li>
           <li>click <b>inject</b>.</li>
           <li>drive everything from the external gui.</li>
@@ -280,7 +318,7 @@
     <div class="dl-block">
       <div class="dl-meta">
         <div><span>version</span><span class="v">latest (main)</span></div>
-        <div><span>target</span><span class="v">lunar 1.8.9 · 1.21.x · 26.1</span></div>
+        <div><span>target</span><span class="v">lunar &amp; standalone (1.8.9 forge · modern fabric)</span></div>
         <div><span>platform</span><span class="v">windows x64</span></div>
         <div><span>license</span><span class="v">gpl-3</span></div>
       </div>
@@ -301,8 +339,44 @@
   <!-- FAUX WINDOWS DESKTOP OVERLAY (populated by preview.js) -->
   <div class="aoko-desktop" id="aoko-desktop" role="dialog" aria-modal="true" aria-label="aoko client live preview" hidden></div>
 
-  <script src="main.js?v=3"></script>
-  <script src="preview-data.js?v=1"></script>
+  <!-- SCOOP HELP MODAL -->
+  <div class="scoop-modal" id="scoop-modal" role="dialog" aria-modal="true" aria-labelledby="scoop-modal-title" hidden>
+    <div class="scoop-modal-backdrop" id="scoop-modal-close-bg"></div>
+    <div class="scoop-modal-content">
+      <div class="scoop-modal-header">
+        <h3 id="scoop-modal-title">What is Scoop?</h3>
+        <button type="button" class="scoop-modal-close" id="scoop-modal-close-btn" aria-label="Close modal">×</button>
+      </div>
+      <div class="scoop-modal-body">
+        <p><b>Scoop</b> is a command-line package installer for Windows. It downloads and updates applications cleanly without elevated admin prompts or setup wizards.</p>
+        
+        <h4>How to install Scoop:</h4>
+        <p>Open PowerShell and run:</p>
+        <div class="terminal-preview modal-terminal">
+          <div class="terminal-bar">
+            <span class="terminal-title">powershell — install scoop</span>
+            <button type="button" class="btn-copy-scoop" id="copy-scoop-install-cmd" title="Copy commands">copy</button>
+          </div>
+          <div class="terminal-body" id="scoop-install-cmd-text">
+            <div class="terminal-line">
+              <span class="t-prompt">PS C:\&gt;</span>
+              <span class="t-cmd">Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser</span>
+            </div>
+            <div class="terminal-line">
+              <span class="t-prompt">PS C:\&gt;</span>
+              <span class="t-cmd">Invoke-RestMethod -Uri https://get.scoop.sh | Invoke-Expression</span>
+            </div>
+          </div>
+        </div>
+
+        <h4>Official Scoop Website:</h4>
+        <p>For more details, visit <a href="https://scoop.sh/" target="_blank" rel="noopener">scoop.sh ↗</a></p>
+      </div>
+    </div>
+  </div>
+
+  <script src="main.js?v=4"></script>
+  <script src="preview-data.js?v=2"></script>
   <script src="preview.js?v=1"></script>
 </body>
 </html>

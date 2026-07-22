@@ -1,6 +1,6 @@
 # aoko client
 
-aoko client is a Windows utility client for Lunar Client.
+aoko client is an open-source Windows utility client and external overlay for Lunar Client and standalone Minecraft instances.
 
 # Showcase
 [![Watch the showcase video](website/public/screenshots/thumbnail.png)](https://www.youtube.com/watch?v=eR7QKAWw8D4)
@@ -14,22 +14,25 @@ aoko client is a Windows utility client for Lunar Client.
 ## Current status
 
 - Supported versions: **26.2**, **26.1**, **1.21.x**, and **1.8.9**.
-- All supported versions are used through the external GUI in `Aoko/`.
-- On **Lunar 26.2** the game can present via the new **Vulkan** renderer; `bridge_261.dll` auto-detects OpenGL vs Vulkan at runtime and renders the overlay natively on either (kill-switch: set `AOKO_BRIDGE261_VULKAN=0` to force-disable the Vulkan path).
+- Supported environments: **Lunar Client** as well as **standalone Minecraft instances** (1.8.9 on Forge, modern versions on Fabric).
+- On **modern 26.2** the game can present via OpenGL or the new **Vulkan** renderer; `bridge_261.dll` auto-detects OpenGL vs Vulkan at runtime and renders the overlay natively on either (kill-switch: set `AOKO_BRIDGE261_VULKAN=0` to force-disable the Vulkan path).
 
 ## Features (current)
 
+- Kill Aura (configurable CPS, attack/swing ranges, FOV, auto-block, smooth rotations)
 - Autoclicker (left/right, CPS range, jitter, block-only options)
 - Aim Assist
 - Triggerbot
 - SpeedBridge 
 - Reach and Velocity controls
-- AutoTotem (inventory only and anarchy mode)
+- AutoTotem (inventory-only and anarchy modes)
 - AntiDebuff (hides Blindness/Nausea client-side, plus Darkness on 1.21/26.1)
+- Nick Hider (JVMTI-based local name spoofing)
+- Hit Delay Fix (removes 1.8.9 attack cooldown delays)
 - Chest Stealer (external cursor-based)
 - GTB Helper
 - Discord Rich Presence
-- Nametags, Closest Player panel, Chest ESP
+- Nametags, Closest Player panel, Chest ESP, Block ESP
 - Per-module keybinds (all unbound by default)
 - Profiles saved in `%AppData%\Aoko\profiles\`
 - GUI customization (slate palettes, module list style, show logo)

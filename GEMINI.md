@@ -1,14 +1,18 @@
 # aoko-client Project Instructions
 
 This `GEMINI.md` file serves as a comprehensive guide for AI agents and developers working on the aoko-client project. It provides an overview of the architecture, build instructions, and core development conventions.
+# aoko-client Project Instructions
+
+This `GEMINI.md` file serves as a comprehensive guide for AI agents and developers working on the aoko-client project. It provides an overview of the architecture, build instructions, and core development conventions.
 
 Primary reference: see `GUIDE.md` for the deeper architecture/mapping notes and implementation constraints used across this repository.
 
 ## Project Overview
 
-**aoko-client** is a Windows utility client for Lunar Client (Minecraft).
-- **Supported versions:** **26.1**, **1.21.x**, and **1.8.9**.
-- **Features:** Autoclicker, Aim Assist, Triggerbot, SpeedBridge, Reach and Velocity controls, GTB Helper, Nametags, Closest Player panel, Chest ESP, and customizable GUI with per-module keybinds.
+**aoko-client** is a Windows utility client and external overlay for Lunar Client and standalone Minecraft instances.
+- **Supported versions:** **26.2**, **26.1**, **1.21.x**, and **1.8.9**.
+- **Supported environments:** **Lunar Client** as well as **standalone Minecraft instances** (1.8.9 on Forge, modern versions on Fabric).
+- **Features:** Kill Aura, Autoclicker, Aim Assist, Triggerbot, SpeedBridge, Reach and Velocity controls, AutoTotem, AntiDebuff, Nick Hider, Hit Delay Fix, GTB Helper, Pixel Party Assist, Nametags, Closest Player panel, Chest ESP, Block ESP, Chest Stealer, and customizable GUI with per-module keybinds.
 
 ### Architecture
 

@@ -106,14 +106,12 @@ nav {
 
 .logo-mini::before {
   content: '';
-  width: 18px;
-  height: 18px;
-  margin-right: 0.25rem;
-  border: 2px solid var(--accent-bright);
-  border-right-color: transparent;
-  border-radius: 50%;
-  transform: translateY(3px) rotate(-28deg);
-  opacity: 0.9;
+  width: 20px;
+  height: 20px;
+  margin-right: 0.35rem;
+  background: url('favicon-32x32.png') no-repeat center / contain;
+  display: inline-block;
+  align-self: center;
 }
 
 .dot { color: var(--accent-bright); }
@@ -451,4 +449,208 @@ footer p { color: var(--muted); font-size: 0.82rem; }
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; scroll-behavior: auto; }
   .reveal { opacity: 1; transform: none; }
+}
+/* TERMINAL PREVIEW FOR SCOOP */
+.terminal-preview {
+  margin: 1.5rem 0;
+  background: #060e17;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
+}
+.terminal-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.6rem 1rem;
+  background: rgba(15, 30, 44, 0.9);
+  border-bottom: 1px solid var(--line);
+}
+.terminal-dots {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.t-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+.t-dot.red { background: #ff5f56; }
+.t-dot.yellow { background: #ffbd2e; }
+.t-dot.green { background: #27c93f; }
+
+.terminal-title {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.76rem;
+  color: var(--dim);
+  letter-spacing: 0.03em;
+}
+.btn-copy-scoop {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--line);
+  color: var(--text);
+  font-family: var(--font-mono, monospace);
+  font-size: 0.75rem;
+  padding: 4px 12px;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+.btn-copy-scoop:hover {
+  background: var(--accent);
+  color: #07131d;
+  border-color: var(--accent);
+}
+.btn-copy-scoop.copied {
+  background: #38ef7d;
+  color: #07131d;
+  border-color: #38ef7d;
+  font-weight: 700;
+}
+.terminal-body {
+  padding: 0.85rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  background: #040c13;
+}
+.terminal-line {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.45rem 0.75rem;
+  background: rgba(11, 29, 42, 0.5);
+  border-left: 3px solid var(--accent);
+  border-radius: 0 4px 4px 0;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.84rem;
+  overflow-x: auto;
+}
+.t-prompt {
+  color: #64ffda;
+  font-weight: 700;
+  user-select: none;
+  white-space: nowrap;
+}
+.t-cmd {
+  color: #edf3f7;
+  white-space: nowrap;
+}
+.terminal-footer {
+  padding: 0.5rem 1rem;
+  background: rgba(10, 24, 38, 0.6);
+  border-top: 1px solid rgba(255, 255, 255, 0.04);
+  display: flex;
+  justify-content: flex-end;
+}
+.scoop-help-btn {
+  background: transparent;
+  border: none;
+  color: var(--dim);
+  font-size: 0.78rem;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  transition: color 0.2s ease;
+}
+.scoop-help-btn:hover {
+  color: var(--accent);
+}
+.help-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.1);
+  font-size: 0.7rem;
+  font-weight: bold;
+}
+
+/* SCOOP MODAL */
+.scoop-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+}
+.scoop-modal[hidden] {
+  display: none !important;
+}
+.scoop-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(4, 12, 19, 0.8);
+  backdrop-filter: blur(8px);
+}
+.scoop-modal-content {
+  position: relative;
+  width: 100%;
+  max-width: 520px;
+  background: #0b1a28;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 1.5rem;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6);
+  z-index: 10;
+}
+.scoop-modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid var(--line);
+}
+.scoop-modal-header h3 {
+  margin: 0;
+  font-size: 1.2rem;
+  color: var(--text);
+}
+.scoop-modal-close {
+  background: transparent;
+  border: none;
+  color: var(--dim);
+  font-size: 1.5rem;
+  cursor: pointer;
+  line-height: 1;
+}
+.scoop-modal-close:hover {
+  color: var(--text);
+}
+.scoop-modal-body p {
+  color: var(--dim);
+  font-size: 0.88rem;
+  line-height: 1.6;
+  margin-bottom: 0.8rem;
+}
+.scoop-modal-body h4 {
+  color: var(--text);
+  font-size: 0.95rem;
+  margin: 1.2rem 0 0.5rem;
+}
+.scoop-modal-code {
+  background: rgba(4, 12, 19, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  padding: 0.75rem 1rem;
+  overflow-x: auto;
+}
+.scoop-modal-code code {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.8rem;
+  color: #64ffda;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.scoop-modal-body a {
+  color: var(--accent);
+  text-decoration: underline;
 }
