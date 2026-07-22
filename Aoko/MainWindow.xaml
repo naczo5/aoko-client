@@ -77,24 +77,91 @@
                                 Background="{DynamicResource SliderBgBrush}"
                                 BorderBrush="{DynamicResource SliderFgBrush}"
                                 BorderThickness="1"
-                                CornerRadius="8"
+                                CornerRadius="10"
                                 Padding="{TemplateBinding Padding}"
-                                Margin="0,0,0,8"
-                                MinHeight="50">
-                            <ContentPresenter HorizontalAlignment="Center"
-                                              VerticalAlignment="Center"
-                                              ContentSource="Header"/>
+                                Margin="0,0,0,9"
+                                MinHeight="50"
+                                RenderTransformOrigin="0.5,0.5">
+                            <Border.RenderTransform>
+                                <TransformGroup>
+                                    <ScaleTransform x:Name="tabScale" ScaleX="1" ScaleY="1"/>
+                                    <TranslateTransform x:Name="tabTranslate" X="0"/>
+                                </TransformGroup>
+                            </Border.RenderTransform>
+                            <Border.Effect>
+                                <DropShadowEffect x:Name="tabShadow" Color="#000000" BlurRadius="10"
+                                                  ShadowDepth="3" Direction="270" Opacity="0"/>
+                            </Border.Effect>
+                            <Grid>
+                                <!-- Subtle accent wash that fades in on hover/select -->
+                                <Border x:Name="tabGlow" CornerRadius="10" Background="{DynamicResource AccentBrush}" Opacity="0"/>
+                                <!-- Left accent indicator bar for the selected tab -->
+                                <Border x:Name="accentBar" Width="4" Height="24" HorizontalAlignment="Left"
+                                        Margin="5,0,0,0" CornerRadius="2" Background="{DynamicResource AccentBrush}"
+                                        Opacity="0" RenderTransformOrigin="0.5,0.5">
+                                    <Border.RenderTransform>
+                                        <ScaleTransform x:Name="accentBarScale" ScaleY="0"/>
+                                    </Border.RenderTransform>
+                                </Border>
+                                <ContentPresenter HorizontalAlignment="Center"
+                                                  VerticalAlignment="Center"
+                                                  ContentSource="Header"/>
+                            </Grid>
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="tabBorder" Property="Background" Value="{DynamicResource ControlCenterTabHoverBrush}"/>
+                                <Trigger.EnterActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="tabScale" Storyboard.TargetProperty="ScaleX" To="1.035" Duration="0:0:0.15"/>
+                                            <DoubleAnimation Storyboard.TargetName="tabScale" Storyboard.TargetProperty="ScaleY" To="1.035" Duration="0:0:0.15"/>
+                                            <DoubleAnimation Storyboard.TargetName="tabGlow" Storyboard.TargetProperty="Opacity" To="0.12" Duration="0:0:0.15"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.EnterActions>
+                                <Trigger.ExitActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="tabScale" Storyboard.TargetProperty="ScaleX" To="1" Duration="0:0:0.2"/>
+                                            <DoubleAnimation Storyboard.TargetName="tabScale" Storyboard.TargetProperty="ScaleY" To="1" Duration="0:0:0.2"/>
+                                            <DoubleAnimation Storyboard.TargetName="tabGlow" Storyboard.TargetProperty="Opacity" To="0" Duration="0:0:0.2"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.ExitActions>
                                 <Setter TargetName="tabBorder" Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
                                 <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
                             </Trigger>
                             <Trigger Property="IsSelected" Value="True">
+                                <Trigger.EnterActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="accentBarScale" Storyboard.TargetProperty="ScaleY" To="1" Duration="0:0:0.22">
+                                                <DoubleAnimation.EasingFunction><BackEase EasingMode="EaseOut" Amplitude="0.6"/></DoubleAnimation.EasingFunction>
+                                            </DoubleAnimation>
+                                            <DoubleAnimation Storyboard.TargetName="accentBar" Storyboard.TargetProperty="Opacity" To="1" Duration="0:0:0.18"/>
+                                            <DoubleAnimation Storyboard.TargetName="tabShadow" Storyboard.TargetProperty="Opacity" To="0.55" Duration="0:0:0.22"/>
+                                            <DoubleAnimation Storyboard.TargetName="tabShadow" Storyboard.TargetProperty="BlurRadius" To="16" Duration="0:0:0.22"/>
+                                            <DoubleAnimation Storyboard.TargetName="tabTranslate" Storyboard.TargetProperty="X" To="2" Duration="0:0:0.2"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.EnterActions>
+                                <Trigger.ExitActions>
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="accentBarScale" Storyboard.TargetProperty="ScaleY" To="0" Duration="0:0:0.15"/>
+                                            <DoubleAnimation Storyboard.TargetName="accentBar" Storyboard.TargetProperty="Opacity" To="0" Duration="0:0:0.15"/>
+                                            <DoubleAnimation Storyboard.TargetName="tabShadow" Storyboard.TargetProperty="Opacity" To="0" Duration="0:0:0.18"/>
+                                            <DoubleAnimation Storyboard.TargetName="tabShadow" Storyboard.TargetProperty="BlurRadius" To="10" Duration="0:0:0.18"/>
+                                            <DoubleAnimation Storyboard.TargetName="tabTranslate" Storyboard.TargetProperty="X" To="0" Duration="0:0:0.18"/>
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </Trigger.ExitActions>
                                 <Setter TargetName="tabBorder" Property="Background" Value="{DynamicResource ControlCenterTabSelectedBrush}"/>
                                 <Setter TargetName="tabBorder" Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
                                 <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.5"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -281,29 +348,29 @@
                                 <CheckBox Content="Aim Assist" IsChecked="{Binding AimAssistEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
                                 <TextBlock x:Name="AimAssistAvailabilityText" Text="Available" Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,6,0,0"/>
 
-                                <DockPanel Margin="0,10,0,0" IsEnabled="{Binding AimAssistEnabled}">
+                                <DockPanel Margin="0,10,0,0">
                                     <TextBlock Text="FOV" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left" />
                                     <TextBlock Text="{Binding AimAssistFov, StringFormat={}{0:0}}" Foreground="{DynamicResource DimTextBrush}" FontSize="12" HorizontalAlignment="Right" DockPanel.Dock="Right" />
                                 </DockPanel>
                                 <Slider Minimum="1" Maximum="180"
                                         Value="{Binding AimAssistFov, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                        Style="{StaticResource DarkSlider}" IsEnabled="{Binding AimAssistEnabled}"/>
+                                        Style="{StaticResource DarkSlider}"/>
 
-                                <DockPanel Margin="0,8,0,0" IsEnabled="{Binding AimAssistEnabled}">
+                                <DockPanel Margin="0,8,0,0">
                                     <TextBlock Text="Range" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left" />
                                     <TextBlock Text="{Binding AimAssistRange, StringFormat={}{0:0.0}}" Foreground="{DynamicResource DimTextBrush}" FontSize="12" HorizontalAlignment="Right" DockPanel.Dock="Right" />
                                 </DockPanel>
                                 <Slider Minimum="1" Maximum="12"
                                         Value="{Binding AimAssistRange, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                        Style="{StaticResource DarkSlider}" IsEnabled="{Binding AimAssistEnabled}"/>
+                                        Style="{StaticResource DarkSlider}"/>
 
-                                <DockPanel Margin="0,8,0,0" IsEnabled="{Binding AimAssistEnabled}">
+                                <DockPanel Margin="0,8,0,0">
                                     <TextBlock Text="Strength (%)" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left" />
                                     <TextBlock Text="{Binding AimAssistStrength}" Foreground="{DynamicResource DimTextBrush}" FontSize="12" HorizontalAlignment="Right" DockPanel.Dock="Right" />
                                 </DockPanel>
                                 <Slider Minimum="1" Maximum="100" TickFrequency="1" IsSnapToTickEnabled="True"
                                         Value="{Binding AimAssistStrength, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                        Style="{StaticResource DarkSlider}" IsEnabled="{Binding AimAssistEnabled}"/>
+                                        Style="{StaticResource DarkSlider}"/>
                             </StackPanel>
                         </Border>
 
@@ -312,39 +379,39 @@
                                 <CheckBox Content="Triggerbot" IsChecked="{Binding TriggerbotEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
                                 <TextBlock x:Name="TriggerbotAvailabilityText" Text="Available" Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,6,0,0"/>
 
-                                <DockPanel Margin="0,10,0,0" IsEnabled="{Binding TriggerbotEnabled}">
+                                <DockPanel Margin="0,10,0,0">
                                     <TextBlock Text="Cooldown Threshold (%)" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left" />
                                     <TextBlock Text="{Binding TriggerbotCooldownThreshold}" Foreground="{DynamicResource DimTextBrush}" FontSize="12" HorizontalAlignment="Right" DockPanel.Dock="Right" />
                                 </DockPanel>
                                 <Slider Minimum="1" Maximum="100" TickFrequency="1" IsSnapToTickEnabled="True"
                                         Value="{Binding TriggerbotCooldownThreshold, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                        Style="{StaticResource DarkSlider}" IsEnabled="{Binding TriggerbotEnabled}"/>
+                                        Style="{StaticResource DarkSlider}"/>
 
                                 <CheckBox Content="Only attack when crosshair is on entity"
                                           IsChecked="{Binding TriggerbotOnlyCrosshair, Mode=TwoWay}"
                                           Style="{StaticResource DarkCheckBox}"
                                           Margin="0,10,0,0"
-                                          IsEnabled="{Binding TriggerbotEnabled}"/>
+                                         />
 
                                 <CheckBox Content="Only attack if target is in real hit range"
                                           IsChecked="{Binding TriggerbotOnlyIfCanAttack, Mode=TwoWay}"
                                           Style="{StaticResource DarkCheckBox}"
                                           Margin="0,6,0,0"
-                                          IsEnabled="{Binding TriggerbotEnabled}"/>
+                                         />
 
-                                <DockPanel Margin="0,8,0,0" IsEnabled="{Binding TriggerbotEnabled}">
+                                <DockPanel Margin="0,8,0,0">
                                     <TextBlock Text="Hit Chance (%)" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left" />
                                     <TextBlock Text="{Binding TriggerbotHitChance}" Foreground="{DynamicResource DimTextBrush}" FontSize="12" HorizontalAlignment="Right" DockPanel.Dock="Right" />
                                 </DockPanel>
                                 <Slider Minimum="1" Maximum="100" TickFrequency="1" IsSnapToTickEnabled="True"
                                         Value="{Binding TriggerbotHitChance, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                        Style="{StaticResource DarkSlider}" IsEnabled="{Binding TriggerbotEnabled}"/>
+                                        Style="{StaticResource DarkSlider}"/>
 
                                 <CheckBox Content="Only while holding left click"
                                           IsChecked="{Binding TriggerbotRequireClick, Mode=TwoWay}"
                                           Style="{StaticResource DarkCheckBox}"
                                           Margin="0,10,0,0"
-                                          IsEnabled="{Binding TriggerbotEnabled}"/>
+                                         />
                             </StackPanel>
                         </Border>
 
@@ -368,19 +435,19 @@
                         <Border Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
                             <StackPanel>
                                 <CheckBox Content="Nametags" IsChecked="{Binding NametagsEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
-                                <WrapPanel Margin="0,10,0,0" IsEnabled="{Binding NametagsEnabled}">
+                                <WrapPanel Margin="0,10,0,0">
                                     <CheckBox Content="Show Health" IsChecked="{Binding NametagShowHealth, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,0,14,0"/>
                                     <CheckBox Content="Show Armor" IsChecked="{Binding NametagShowArmor, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,0,14,0"/>
                                     <CheckBox Content="Hide Vanilla Tags" IsChecked="{Binding NametagHideVanilla, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,0,14,0"/>
                                     <CheckBox Content="Show Item" IsChecked="{Binding NametagShowHeldItem, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" />
                                 </WrapPanel>
-                                <DockPanel Margin="0,10,0,0" IsEnabled="{Binding NametagsEnabled}">
+                                <DockPanel Margin="0,10,0,0">
                                     <TextBlock Text="Nametag Count" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left" />
                                     <TextBlock Text="{Binding NametagMaxCount}" Foreground="{DynamicResource DimTextBrush}" FontSize="12" HorizontalAlignment="Right" DockPanel.Dock="Right" />
                                 </DockPanel>
                                 <Slider Minimum="1" Maximum="20" TickFrequency="1" IsSnapToTickEnabled="True"
                                         Value="{Binding NametagMaxCount, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                        Style="{StaticResource DarkSlider}" IsEnabled="{Binding NametagsEnabled}"/>
+                                        Style="{StaticResource DarkSlider}"/>
                             </StackPanel>
                         </Border>
 
@@ -389,7 +456,7 @@
                                 <CheckBox Content="Nick Hider" IsChecked="{Binding NickHiderEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
                                 <TextBlock Text="Replaces your local account name in supported client HUD text only."
                                            Foreground="{DynamicResource DimTextBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,8,0,0"/>
-                                <DockPanel Margin="0,10,0,0" IsEnabled="{Binding NickHiderEnabled}">
+                                <DockPanel Margin="0,10,0,0">
                                     <TextBlock Text="Shown as" Foreground="{DynamicResource TextBrush}" FontSize="12" Width="80" VerticalAlignment="Center"/>
                                     <TextBox Text="{Binding NickHiderAlias, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                              VerticalContentAlignment="Center" Padding="8,5" FontSize="12" MaxLength="32" ToolTip="1–32 plain-text characters"/>
@@ -400,42 +467,42 @@
                         <Border Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
                             <StackPanel>
                                 <CheckBox Content="Chest ESP" IsChecked="{Binding ChestEspEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
-                                <DockPanel Margin="0,10,0,0" IsEnabled="{Binding ChestEspEnabled}">
+                                <DockPanel Margin="0,10,0,0">
                                     <TextBlock Text="Chest Count" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left" />
                                     <TextBlock Text="{Binding ChestEspMaxCount}" Foreground="{DynamicResource DimTextBrush}" FontSize="12" HorizontalAlignment="Right" DockPanel.Dock="Right" />
                                 </DockPanel>
                                 <Slider Minimum="1" Maximum="20" TickFrequency="1" IsSnapToTickEnabled="True"
                                         Value="{Binding ChestEspMaxCount, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                        Style="{StaticResource DarkSlider}" IsEnabled="{Binding ChestEspEnabled}"/>
+                                        Style="{StaticResource DarkSlider}"/>
                             </StackPanel>
                         </Border>
 
                         <Border Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
                             <StackPanel>
                                 <CheckBox Content="Block ESP (X-ray)" IsChecked="{Binding BlockEspEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
-                                <WrapPanel Margin="0,10,0,0" IsEnabled="{Binding BlockEspEnabled}">
+                                <WrapPanel Margin="0,10,0,0">
                                     <CheckBox Content="Boxes" IsChecked="{Binding BlockEspBoxes, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,0,14,0"/>
                                     <CheckBox Content="Tracers" IsChecked="{Binding BlockEspTracers, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,0,14,0"/>
                                     <CheckBox Content="HUD List" IsChecked="{Binding BlockEspHud, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}"/>
                                 </WrapPanel>
-                                <DockPanel Margin="0,10,0,0" IsEnabled="{Binding BlockEspEnabled}">
+                                <DockPanel Margin="0,10,0,0">
                                     <TextBlock Text="Max Blocks" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left" />
                                     <TextBlock Text="{Binding BlockEspMaxCount}" Foreground="{DynamicResource DimTextBrush}" FontSize="12" HorizontalAlignment="Right" DockPanel.Dock="Right" />
                                 </DockPanel>
                                 <Slider Minimum="1" Maximum="512" TickFrequency="1" IsSnapToTickEnabled="True"
                                         Value="{Binding BlockEspMaxCount, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                        Style="{StaticResource DarkSlider}" IsEnabled="{Binding BlockEspEnabled}"/>
-                                <DockPanel Margin="0,6,0,0" IsEnabled="{Binding BlockEspEnabled}">
+                                        Style="{StaticResource DarkSlider}"/>
+                                <DockPanel Margin="0,6,0,0">
                                     <TextBlock Text="Scan Range (chunks)" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left" />
                                     <TextBlock Text="{Binding BlockEspRange}" Foreground="{DynamicResource DimTextBrush}" FontSize="12" HorizontalAlignment="Right" DockPanel.Dock="Right" />
                                 </DockPanel>
                                 <Slider Minimum="1" Maximum="8" TickFrequency="1" IsSnapToTickEnabled="True"
                                         Value="{Binding BlockEspRange, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                        Style="{StaticResource DarkSlider}" IsEnabled="{Binding BlockEspEnabled}"/>
+                                        Style="{StaticResource DarkSlider}"/>
 
                                 <TextBlock Text="Tracked Blocks" Foreground="{DynamicResource TextBrush}" FontSize="12" Margin="0,12,0,4"/>
                                 <Border BorderBrush="{DynamicResource SliderBgBrush}" BorderThickness="1" CornerRadius="4"
-                                        IsEnabled="{Binding BlockEspEnabled}">
+                                       >
                                     <ScrollViewer VerticalScrollBarVisibility="Auto" MaxHeight="170">
                                         <ItemsControl ItemsSource="{Binding BlockEspTargets}">
                                             <ItemsControl.ItemTemplate>
@@ -458,7 +525,7 @@
                                         </ItemsControl>
                                     </ScrollViewer>
                                 </Border>
-                                <DockPanel Margin="0,8,0,0" IsEnabled="{Binding BlockEspEnabled}">
+                                <DockPanel Margin="0,8,0,0">
                                     <Button Content="Add" DockPanel.Dock="Right" Click="BlockEspAdd_Click" Style="{StaticResource DarkButton}"
                                             Padding="14,4" Margin="8,0,0,0" Cursor="Hand"/>
                                     <TextBox x:Name="BlockEspAddBox" VerticalContentAlignment="Center" Padding="8,5" FontSize="12"
@@ -513,15 +580,15 @@
                                 <CheckBox Content="SpeedBridge" IsChecked="{Binding SpeedBridgeEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
                                 <TextBlock x:Name="SpeedBridgeAvailabilityText" Text="Available" Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,6,0,0"/>
 
-                                <DockPanel Margin="0,10,0,0" IsEnabled="{Binding SpeedBridgeEnabled}">
+                                <DockPanel Margin="0,10,0,0">
                                     <TextBlock Text="Safety" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left" />
                                     <TextBlock Text="{Binding SpeedBridgeDelayMs}" Foreground="{DynamicResource DimTextBrush}" FontSize="12" HorizontalAlignment="Right" DockPanel.Dock="Right" />
                                 </DockPanel>
                                 <Slider Minimum="20" Maximum="250" TickFrequency="1" IsSnapToTickEnabled="True"
                                         Value="{Binding SpeedBridgeDelayMs, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                        Style="{StaticResource DarkSlider}" IsEnabled="{Binding SpeedBridgeEnabled}"/>
+                                        Style="{StaticResource DarkSlider}"/>
 
-                                <WrapPanel Margin="0,10,0,0" IsEnabled="{Binding SpeedBridgeEnabled}">
+                                <WrapPanel Margin="0,10,0,0">
                                     <CheckBox Content="Block only" IsChecked="{Binding SpeedBridgeBlockOnly, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,0,14,6"/>
                                     <CheckBox Content="Holding sneak only" IsChecked="{Binding SpeedBridgeHoldingShiftOnly, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,0,14,6"/>
                                     <CheckBox Content="Looking down only" IsChecked="{Binding SpeedBridgeLookingDownOnly, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,0,14,6"/>
@@ -567,25 +634,25 @@
                                            TextWrapping="Wrap"
                                            Margin="0,8,0,10"/>
 
-                                <DockPanel IsEnabled="{Binding PixelPartyAssistEnabled}">
+                                <DockPanel>
                                     <TextBlock Text="Scan radius (blocks)" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left"/>
                                     <TextBlock Text="{Binding PixelPartyScanRadius}" Foreground="{DynamicResource DimTextBrush}" FontSize="12" HorizontalAlignment="Right" DockPanel.Dock="Right"/>
                                 </DockPanel>
                                 <Slider Minimum="8" Maximum="48" TickFrequency="1" IsSnapToTickEnabled="True"
                                         Value="{Binding PixelPartyScanRadius, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                         Style="{StaticResource DarkSlider}"
-                                        IsEnabled="{Binding PixelPartyAssistEnabled}"/>
+                                       />
 
                                 <CheckBox Content="Auto-look toward target"
                                           IsChecked="{Binding PixelPartyAutoLookEnabled, Mode=TwoWay}"
                                           Style="{StaticResource DarkCheckBox}"
                                           Margin="0,10,0,0"
-                                          IsEnabled="{Binding PixelPartyAssistEnabled}"/>
+                                         />
                                 <CheckBox Content="Auto-walk toward target (W + jump far, walk close)"
                                           IsChecked="{Binding PixelPartyAutoWalkEnabled, Mode=TwoWay}"
                                           Style="{StaticResource DarkCheckBox}"
                                           Margin="0,6,0,0"
-                                          IsEnabled="{Binding PixelPartyAssistEnabled}"/>
+                                         />
                             </StackPanel>
                         </Border>
 
@@ -624,36 +691,6 @@
                                            TextWrapping="Wrap"/>
                             </StackPanel>
                         </Border>
-
-                        <Border Style="{StaticResource ControlCardStyle}">
-                            <StackPanel>
-                                <TextBlock Text="Module Keybinds" Foreground="{DynamicResource TextBrush}" FontSize="16" FontWeight="Bold"/>
-                                <TextBlock Text="Click a button, then press a key (Esc = unbind)." Foreground="{DynamicResource DimTextBrush}" FontSize="12" Margin="0,4,0,10"/>
-                                <WrapPanel>
-                                    <Button x:Name="KeybindAutoclickerButton" Tag="autoclicker" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindRightClickButton" Tag="rightclick" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindJitterButton" Tag="jitter" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindClickInChestsButton" Tag="clickinchests" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindBreakBlocksButton" Tag="breakblocks" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindAimAssistButton" Tag="aimassist" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindTriggerbotButton" Tag="triggerbot" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindSilentAuraButton" Tag="silentaura" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindSpeedBridgeButton" Tag="speedbridge" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindGtbHelperButton" Tag="gtbhelper" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindPixelPartyAssistButton" Tag="pixelpartyassist" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindNametagsButton" Tag="nametags" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindChestEspButton" Tag="chestesp" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindChestStealerButton" Tag="cheststealer" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindBlockEspButton" Tag="blockesp" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindClosestPlayerButton" Tag="closestplayer" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindReachButton" Tag="reach" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindVelocityButton" Tag="velocity" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindAutoTotemButton" Tag="autototem" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindAntiDebuffButton" Tag="antidebuff" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindPanicButton" Tag="panic" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                </WrapPanel>
-                            </StackPanel>
-                        </Border>
                     </StackPanel>
                 </ScrollViewer>
             </TabItem>
@@ -661,99 +698,84 @@
             <TabItem Header="Risky">
                 <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" HorizontalContentAlignment="Stretch">
                     <StackPanel Margin="12">
-                        <Border x:Name="SilentAuraCard" Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
+                        <Border x:Name="KillAuraCard" Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12"
+                                Visibility="{Binding DevMode, Converter={StaticResource BooleanToVisibilityConverter}}">
                             <StackPanel>
-                                <CheckBox Content="Silent Aura" IsChecked="{Binding SilentAuraEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
-                                <TextBlock x:Name="SilentAuraAvailabilityText" Text="Available" Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,6,0,0"/>
+                                <StackPanel.Resources>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
+                                    </Style>
+                                    <Style TargetType="Expander">
+                                        <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
+                                    </Style>
+                                </StackPanel.Resources>
+                                <CheckBox Content="Kill Aura" IsChecked="{Binding KillAuraEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                <TextBlock x:Name="KillAuraAvailabilityText" Text="Available" Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,6,0,0"/>
                                 <Border Background="#33E0533D" BorderBrush="#E0533D" BorderThickness="1" CornerRadius="4" Padding="8,6" Margin="0,8,0,0">
                                     <TextBlock Foreground="#F0A090" FontSize="11" FontWeight="SemiBold" TextWrapping="Wrap"
-                                               Text="⚠ Warning: the rotations are pretty blatant and easily visible to other players and anti-cheats. Not recommended on popular / well-moderated servers — use only on private or anarchy servers, at your own risk."/>
+                                               Text="OpenMyau-Plus behavior port. Native game calls and packet ordering; no OS-click fallback. Modern auto-block requires a genuinely block-capable sword."/>
                                 </Border>
-                                <TextBlock Text="Autonomously locks onto players with smooth, closest-point aiming and clicks like the autoclicker (no attack packets)."
-                                           Foreground="{DynamicResource DimTextBrush}"
-                                           FontSize="11"
-                                           TextWrapping="Wrap"
-                                           Margin="0,8,0,0"/>
-                                <DockPanel Margin="0,10,0,0" IsEnabled="{Binding SilentAuraEnabled}">
-                                    <TextBlock Text="Target priority" Foreground="{DynamicResource TextBrush}" FontSize="12" VerticalAlignment="Center" DockPanel.Dock="Left" />
-                                    <ComboBox SelectedValue="{Binding SilentAuraTargetMode, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                              SelectedValuePath="Tag"
-                                              Style="{StaticResource DarkComboBox}"
-                                              HorizontalAlignment="Right" MinWidth="150">
-                                        <ComboBoxItem Content="Closest" Tag="distance"/>
-                                        <ComboBoxItem Content="Lowest health" Tag="health"/>
-                                    </ComboBox>
-                                </DockPanel>
-                                <CheckBox Content="Spam PvP (ignore cooldown)" IsChecked="{Binding SilentAuraSpamMode, Mode=TwoWay}"
-                                          Style="{StaticResource DarkCheckBox}" Margin="0,10,0,0"
-                                          IsEnabled="{Binding SilentAuraEnabled}"/>
-                                <TextBlock Text="On: rapid attacks for 1.8-style spam servers. Off: waits for the attack cooldown bar (1.9+)."
-                                           Foreground="{DynamicResource DimTextBrush}"
-                                           FontSize="11"
-                                           TextWrapping="Wrap"
-                                           Margin="0,6,0,0"/>
-                                <StackPanel Margin="0,10,0,0" IsEnabled="{Binding SilentAuraSpamMode}">
-                                    <DockPanel>
-                                        <TextBlock Text="Spam min CPS" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left" />
-                                        <TextBlock Text="{Binding SilentAuraSpamMinCps, StringFormat={}{0:0}}" Foreground="{DynamicResource DimTextBrush}" FontSize="12" HorizontalAlignment="Right" DockPanel.Dock="Right" />
-                                    </DockPanel>
-                                    <Slider Minimum="8" Maximum="20" TickFrequency="1" IsSnapToTickEnabled="True"
-                                            Value="{Binding SilentAuraSpamMinCps, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                            Style="{StaticResource DarkSlider}"/>
-                                    <DockPanel Margin="0,10,0,0">
-                                        <TextBlock Text="Spam max CPS" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left" />
-                                        <TextBlock Text="{Binding SilentAuraSpamMaxCps, StringFormat={}{0:0}}" Foreground="{DynamicResource DimTextBrush}" FontSize="12" HorizontalAlignment="Right" DockPanel.Dock="Right" />
-                                    </DockPanel>
-                                    <Slider Minimum="8" Maximum="20" TickFrequency="1" IsSnapToTickEnabled="True"
-                                            Value="{Binding SilentAuraSpamMaxCps, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                            Style="{StaticResource DarkSlider}"/>
-                                </StackPanel>
-                                <DockPanel Margin="0,10,0,0" IsEnabled="{Binding SilentAuraEnabled}">
-                                    <TextBlock Text="Attack range" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left" />
-                                    <TextBlock Text="{Binding SilentAuraRange, StringFormat={}{0:0.0}}" Foreground="{DynamicResource DimTextBrush}" FontSize="12" HorizontalAlignment="Right" DockPanel.Dock="Right" />
-                                </DockPanel>
-                                <Slider Minimum="2.5" Maximum="4.0" TickFrequency="0.1" IsSnapToTickEnabled="True"
-                                        Value="{Binding SilentAuraRange, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                        Style="{StaticResource DarkSlider}" IsEnabled="{Binding SilentAuraEnabled}"/>
-                                <DockPanel Margin="0,10,0,0" IsEnabled="{Binding SilentAuraEnabled}">
-                                    <TextBlock Text="Aim range" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left" />
-                                    <TextBlock Text="{Binding SilentAuraAimRange, StringFormat={}{0:0.0}}" Foreground="{DynamicResource DimTextBrush}" FontSize="12" HorizontalAlignment="Right" DockPanel.Dock="Right" />
-                                </DockPanel>
-                                <Slider Minimum="3.0" Maximum="6.0" TickFrequency="0.1" IsSnapToTickEnabled="True"
-                                        Value="{Binding SilentAuraAimRange, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                        Style="{StaticResource DarkSlider}" IsEnabled="{Binding SilentAuraEnabled}"/>
-                                <TextBlock Text="Locks rotation onto players within aim range; only attacks when they are inside attack range."
-                                           Foreground="{DynamicResource DimTextBrush}"
-                                           FontSize="11"
-                                           TextWrapping="Wrap"
-                                           Margin="0,6,0,0"/>
-                                <DockPanel Margin="0,10,0,0" IsEnabled="{Binding SilentAuraEnabled}">
-                                    <TextBlock Text="Aim speed" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left" />
-                                    <TextBlock Text="{Binding SilentAuraRotSpeed, StringFormat={}{0:0}}" Foreground="{DynamicResource DimTextBrush}" FontSize="12" HorizontalAlignment="Right" DockPanel.Dock="Right" />
-                                </DockPanel>
-                                <Slider Minimum="10" Maximum="90" TickFrequency="5" IsSnapToTickEnabled="True"
-                                        Value="{Binding SilentAuraRotSpeed, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                        Style="{StaticResource DarkSlider}" IsEnabled="{Binding SilentAuraEnabled}"/>
-                                <TextBlock Text="Lower = smoother, slower lock-on. Higher = snappier."
-                                           Foreground="{DynamicResource DimTextBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,6,0,0"/>
-                                <DockPanel Margin="0,10,0,0" IsEnabled="{Binding SilentAuraEnabled}">
-                                    <TextBlock Text="Accuracy" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left" />
-                                    <TextBlock Text="{Binding SilentAuraAccuracy, StringFormat={}{0:0}%}" Foreground="{DynamicResource DimTextBrush}" FontSize="12" HorizontalAlignment="Right" DockPanel.Dock="Right" />
-                                </DockPanel>
-                                <Slider Minimum="50" Maximum="100" TickFrequency="5" IsSnapToTickEnabled="True"
-                                        Value="{Binding SilentAuraAccuracy, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                        Style="{StaticResource DarkSlider}" IsEnabled="{Binding SilentAuraEnabled}"/>
-                                <TextBlock Text="100% = perfect lock. Lower adds aim error so some clicks miss."
-                                           Foreground="{DynamicResource DimTextBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,6,0,0"/>
-                                <DockPanel Margin="0,10,0,0" IsEnabled="{Binding SilentAuraEnabled}">
-                                    <TextBlock Text="Switch delay" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left" />
-                                    <TextBlock Text="{Binding SilentAuraSwitchDelayMs, StringFormat={}{0} ms}" Foreground="{DynamicResource DimTextBrush}" FontSize="12" HorizontalAlignment="Right" DockPanel.Dock="Right" />
-                                </DockPanel>
-                                <Slider Minimum="0" Maximum="2000" TickFrequency="50" IsSnapToTickEnabled="True"
-                                        Value="{Binding SilentAuraSwitchDelayMs, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                        Style="{StaticResource DarkSlider}" IsEnabled="{Binding SilentAuraEnabled}"/>
-                                <TextBlock Text="Minimum time locked on a target before it may switch to another - prevents flicking between nearby players."
-                                           Foreground="{DynamicResource DimTextBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,6,0,0"/>
+
+                                <Expander Header="Combat and targeting" IsExpanded="True" Margin="0,10,0,0">
+                                    <StackPanel Margin="8,6,0,0">
+                                        <DockPanel><TextBlock Text="CPS mode"/><ComboBox SelectedValue="{Binding KillAuraSettings.CpsMode, Mode=TwoWay}" SelectedValuePath="Tag" Style="{StaticResource DarkComboBox}" MinWidth="145" HorizontalAlignment="Right"><ComboBoxItem Content="Normal" Tag="normal"/><ComboBoxItem Content="Record" Tag="record"/></ComboBox></DockPanel>
+                                        <DockPanel Margin="0,8,0,0"><TextBlock Text="Target mode"/><ComboBox SelectedValue="{Binding KillAuraSettings.Mode, Mode=TwoWay}" SelectedValuePath="Tag" Style="{StaticResource DarkComboBox}" MinWidth="145" HorizontalAlignment="Right"><ComboBoxItem Content="Single" Tag="single"/><ComboBoxItem Content="Switch" Tag="switch"/></ComboBox></DockPanel>
+                                        <DockPanel Margin="0,8,0,0"><TextBlock Text="Sort"/><ComboBox SelectedValue="{Binding KillAuraSettings.Sort, Mode=TwoWay}" SelectedValuePath="Tag" Style="{StaticResource DarkComboBox}" MinWidth="145" HorizontalAlignment="Right"><ComboBoxItem Content="Distance" Tag="distance"/><ComboBoxItem Content="Health" Tag="health"/><ComboBoxItem Content="Hurt time" Tag="hurttime"/><ComboBoxItem Content="FOV" Tag="fov"/></ComboBox></DockPanel>
+                                        <DockPanel Margin="0,8,0,0"><TextBlock Text="Min CPS"/><TextBlock Text="{Binding KillAuraSettings.MinCps}" HorizontalAlignment="Right"/></DockPanel><Slider Minimum="1" Maximum="20" TickFrequency="1" IsSnapToTickEnabled="True" Value="{Binding KillAuraSettings.MinCps, Mode=TwoWay}" Style="{StaticResource DarkSlider}"/>
+                                        <DockPanel Margin="0,8,0,0"><TextBlock Text="Max CPS"/><TextBlock Text="{Binding KillAuraSettings.MaxCps}" HorizontalAlignment="Right"/></DockPanel><Slider Minimum="1" Maximum="20" TickFrequency="1" IsSnapToTickEnabled="True" Value="{Binding KillAuraSettings.MaxCps, Mode=TwoWay}" Style="{StaticResource DarkSlider}"/>
+                                        <DockPanel Margin="0,8,0,0"><TextBlock Text="Attack range"/><TextBlock Text="{Binding KillAuraSettings.AttackRange, StringFormat={}{0:0.0}}" HorizontalAlignment="Right"/></DockPanel><Slider Minimum="3" Maximum="6" TickFrequency="0.1" IsSnapToTickEnabled="True" Value="{Binding KillAuraSettings.AttackRange, Mode=TwoWay}" Style="{StaticResource DarkSlider}"/>
+                                        <DockPanel Margin="0,8,0,0"><TextBlock Text="Swing range"/><TextBlock Text="{Binding KillAuraSettings.SwingRange, StringFormat={}{0:0.0}}" HorizontalAlignment="Right"/></DockPanel><Slider Minimum="3" Maximum="6" TickFrequency="0.1" IsSnapToTickEnabled="True" Value="{Binding KillAuraSettings.SwingRange, Mode=TwoWay}" Style="{StaticResource DarkSlider}"/>
+                                        <DockPanel Margin="0,8,0,0"><TextBlock Text="FOV"/><TextBlock Text="{Binding KillAuraSettings.Fov, StringFormat={}{0}°}" HorizontalAlignment="Right"/></DockPanel><Slider Minimum="30" Maximum="360" TickFrequency="10" IsSnapToTickEnabled="True" Value="{Binding KillAuraSettings.Fov, Mode=TwoWay}" Style="{StaticResource DarkSlider}"/>
+                                        <DockPanel Margin="0,8,0,0"><TextBlock Text="Switch delay"/><TextBlock Text="{Binding KillAuraSettings.SwitchDelay, StringFormat={}{0} ms}" HorizontalAlignment="Right"/></DockPanel><Slider Minimum="0" Maximum="1000" TickFrequency="50" IsSnapToTickEnabled="True" Value="{Binding KillAuraSettings.SwitchDelay, Mode=TwoWay}" Style="{StaticResource DarkSlider}"/>
+                                    </StackPanel>
+                                </Expander>
+
+                                <Expander Header="Auto block" Margin="0,8,0,0">
+                                    <StackPanel Margin="8,6,0,0">
+                                        <DockPanel><TextBlock Text="Mode"/><ComboBox SelectedValue="{Binding KillAuraSettings.AutoBlock, Mode=TwoWay}" SelectedValuePath="Tag" Style="{StaticResource DarkComboBox}" MinWidth="145" HorizontalAlignment="Right"><ComboBoxItem Content="None" Tag="none"/><ComboBoxItem Content="Vanilla" Tag="vanilla"/><ComboBoxItem Content="Spoof" Tag="spoof"/><ComboBoxItem Content="Hypixel" Tag="hypixel"/><ComboBoxItem Content="Blink" Tag="blink"/><ComboBoxItem Content="Interact" Tag="interact"/><ComboBoxItem Content="Swap" Tag="swap"/><ComboBoxItem Content="Legit" Tag="legit"/><ComboBoxItem Content="Fake" Tag="fake"/><ComboBoxItem Content="Morden" Tag="morden"/></ComboBox></DockPanel>
+                                        <CheckBox Content="Require use-item held" IsChecked="{Binding KillAuraSettings.AutoBlockRequirePress, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,8,0,0"/>
+                                        <DockPanel Margin="0,8,0,0"><TextBlock Text="Auto-block CPS"/><TextBlock Text="{Binding KillAuraSettings.AutoBlockCps, StringFormat={}{0:0.0}}" HorizontalAlignment="Right"/></DockPanel><Slider Minimum="1" Maximum="10" TickFrequency="0.5" IsSnapToTickEnabled="True" Value="{Binding KillAuraSettings.AutoBlockCps, Mode=TwoWay}" Style="{StaticResource DarkSlider}"/>
+                                        <DockPanel Margin="0,8,0,0"><TextBlock Text="Block range"/><TextBlock Text="{Binding KillAuraSettings.AutoBlockRange, StringFormat={}{0:0.0}}" HorizontalAlignment="Right"/></DockPanel><Slider Minimum="3" Maximum="8" TickFrequency="0.1" IsSnapToTickEnabled="True" Value="{Binding KillAuraSettings.AutoBlockRange, Mode=TwoWay}" Style="{StaticResource DarkSlider}"/>
+                                        <StackPanel Visibility="{Binding KillAuraSettings.IsSwapAutoBlock, Converter={StaticResource BooleanToVisibilityConverter}}"><DockPanel Margin="0,8,0,0"><TextBlock Text="Attack tick"/><TextBlock Text="{Binding KillAuraSettings.AttackTick}" HorizontalAlignment="Right"/></DockPanel><Slider Minimum="0" Maximum="5" TickFrequency="1" IsSnapToTickEnabled="True" Value="{Binding KillAuraSettings.AttackTick, Mode=TwoWay}" Style="{StaticResource DarkSlider}"/></StackPanel>
+                                    </StackPanel>
+                                </Expander>
+
+                                <Expander Header="Rotations" Margin="0,8,0,0">
+                                    <StackPanel Margin="8,6,0,0">
+                                        <DockPanel><TextBlock Text="Mode"/><ComboBox SelectedValue="{Binding KillAuraSettings.Rotations, Mode=TwoWay}" SelectedValuePath="Tag" Style="{StaticResource DarkComboBox}" MinWidth="145" HorizontalAlignment="Right"><ComboBoxItem Content="None" Tag="none"/><ComboBoxItem Content="Legit" Tag="legit"/><ComboBoxItem Content="Silent" Tag="silent"/><ComboBoxItem Content="LockView" Tag="lockview"/><ComboBoxItem Content="LiquidBounce" Tag="liquidbounce"/><ComboBoxItem Content="Hypixel" Tag="hypixel"/></ComboBox></DockPanel>
+                                        <DockPanel Margin="0,8,0,0"><TextBlock Text="Move fix"/><ComboBox SelectedValue="{Binding KillAuraSettings.MoveFix, Mode=TwoWay}" SelectedValuePath="Tag" Style="{StaticResource DarkComboBox}" MinWidth="145" HorizontalAlignment="Right"><ComboBoxItem Content="None" Tag="none"/><ComboBoxItem Content="Silent" Tag="silent"/><ComboBoxItem Content="Strict" Tag="strict"/></ComboBox></DockPanel>
+                                        <DockPanel Margin="0,8,0,0"><TextBlock Text="Angle step"/><TextBlock Text="{Binding KillAuraSettings.AngleStep, StringFormat={}{0}°}" HorizontalAlignment="Right"/></DockPanel><Slider Minimum="30" Maximum="180" TickFrequency="5" IsSnapToTickEnabled="True" Value="{Binding KillAuraSettings.AngleStep, Mode=TwoWay}" Style="{StaticResource DarkSlider}"/>
+                                        <DockPanel Margin="0,8,0,0"><TextBlock Text="Smoothing"/><TextBlock Text="{Binding KillAuraSettings.Smoothing, StringFormat={}{0}%}" HorizontalAlignment="Right"/></DockPanel><Slider Minimum="0" Maximum="100" TickFrequency="5" IsSnapToTickEnabled="True" Value="{Binding KillAuraSettings.Smoothing, Mode=TwoWay}" Style="{StaticResource DarkSlider}"/>
+                                        <StackPanel Visibility="{Binding KillAuraSettings.IsHypixelRotation, Converter={StaticResource BooleanToVisibilityConverter}}"><DockPanel Margin="0,8,0,0"><TextBlock Text="Hypixel smoothing"/><TextBlock Text="{Binding KillAuraSettings.RavenSmoothing}" HorizontalAlignment="Right"/></DockPanel><Slider Minimum="0" Maximum="10" TickFrequency="1" IsSnapToTickEnabled="True" Value="{Binding KillAuraSettings.RavenSmoothing, Mode=TwoWay}" Style="{StaticResource DarkSlider}"/><DockPanel Margin="0,8,0,0"><TextBlock Text="Predict ticks"/><TextBlock Text="{Binding KillAuraSettings.RavenPredictTicks}" HorizontalAlignment="Right"/></DockPanel><Slider Minimum="0" Maximum="5" TickFrequency="1" IsSnapToTickEnabled="True" Value="{Binding KillAuraSettings.RavenPredictTicks, Mode=TwoWay}" Style="{StaticResource DarkSlider}"/><DockPanel Margin="0,8,0,0"><TextBlock Text="Yaw random"/><TextBlock Text="{Binding KillAuraSettings.RavenYawRandom}" HorizontalAlignment="Right"/></DockPanel><Slider Minimum="0" Maximum="5" TickFrequency="1" IsSnapToTickEnabled="True" Value="{Binding KillAuraSettings.RavenYawRandom, Mode=TwoWay}" Style="{StaticResource DarkSlider}"/></StackPanel>
+                                    </StackPanel>
+                                </Expander>
+
+                                <Expander Header="LiquidBounce controls" Margin="0,8,0,0">
+                                    <StackPanel Margin="8,6,0,0" Visibility="{Binding KillAuraSettings.IsLiquidBounce, Converter={StaticResource BooleanToVisibilityConverter}}">
+                                        <DockPanel><TextBlock Text="Dead zone"/><TextBlock Text="{Binding KillAuraSettings.DeadZoneSize, StringFormat={}{0:0.00}}" HorizontalAlignment="Right"/></DockPanel><Slider Minimum="0" Maximum="2" TickFrequency="0.1" Value="{Binding KillAuraSettings.DeadZoneSize, Mode=TwoWay}" Style="{StaticResource DarkSlider}"/>
+                                        <DockPanel Margin="0,8,0,0"><TextBlock Text="Min / max speed"/><TextBlock><Run Text="{Binding KillAuraSettings.MinTurnSpeed}"/><Run Text=" / "/><Run Text="{Binding KillAuraSettings.MaxTurnSpeed}"/></TextBlock></DockPanel><Slider Minimum="1" Maximum="90" Value="{Binding KillAuraSettings.MinTurnSpeed, Mode=TwoWay}" Style="{StaticResource DarkSlider}"/><Slider Minimum="5" Maximum="180" Value="{Binding KillAuraSettings.MaxTurnSpeed, Mode=TwoWay}" Style="{StaticResource DarkSlider}"/>
+                                        <DockPanel Margin="0,8,0,0"><TextBlock Text="Acceleration / deceleration"/><TextBlock><Run Text="{Binding KillAuraSettings.Acceleration}"/><Run Text=" / "/><Run Text="{Binding KillAuraSettings.Deceleration}"/></TextBlock></DockPanel><Slider Minimum="0.1" Maximum="10" Value="{Binding KillAuraSettings.Acceleration, Mode=TwoWay}" Style="{StaticResource DarkSlider}"/><Slider Minimum="0.1" Maximum="10" Value="{Binding KillAuraSettings.Deceleration, Mode=TwoWay}" Style="{StaticResource DarkSlider}"/>
+                                        <CheckBox Content="Overshoot" IsChecked="{Binding KillAuraSettings.UseOvershoot, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,8,0,0"/><StackPanel IsEnabled="{Binding KillAuraSettings.OvershootControlsEnabled}"><DockPanel><TextBlock Text="Strength / recovery"/><TextBlock><Run Text="{Binding KillAuraSettings.OvershootStrength}"/><Run Text=" / "/><Run Text="{Binding KillAuraSettings.OvershootRecovery}"/></TextBlock></DockPanel><Slider Minimum="0" Maximum="20" Value="{Binding KillAuraSettings.OvershootStrength, Mode=TwoWay}" Style="{StaticResource DarkSlider}"/><Slider Minimum="0.01" Maximum="1" Value="{Binding KillAuraSettings.OvershootRecovery, Mode=TwoWay}" Style="{StaticResource DarkSlider}"/></StackPanel>
+                                        <DockPanel Margin="0,8,0,0"><TextBlock Text="Noise"/><TextBlock Text="{Binding KillAuraSettings.NoiseStrength}" HorizontalAlignment="Right"/></DockPanel><Slider Minimum="0" Maximum="2" Value="{Binding KillAuraSettings.NoiseStrength, Mode=TwoWay}" Style="{StaticResource DarkSlider}"/>
+                                        <CheckBox Content="Randomize" IsChecked="{Binding KillAuraSettings.Randomize, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}"/><StackPanel IsEnabled="{Binding KillAuraSettings.RandomizeControlsEnabled}"><DockPanel><TextBlock Text="Random / Y range"/><TextBlock><Run Text="{Binding KillAuraSettings.RandomizeRange}"/><Run Text=" / "/><Run Text="{Binding KillAuraSettings.YRandomizeStrength}"/></TextBlock></DockPanel><Slider Minimum="0" Maximum="1" Value="{Binding KillAuraSettings.RandomizeRange, Mode=TwoWay}" Style="{StaticResource DarkSlider}"/><Slider Minimum="0" Maximum="1" Value="{Binding KillAuraSettings.YRandomizeStrength, Mode=TwoWay}" Style="{StaticResource DarkSlider}"/></StackPanel>
+                                        <DockPanel Margin="0,8,0,0"><TextBlock Text="LB horizontal / vertical"/><TextBlock><Run Text="{Binding KillAuraSettings.LiquidBounceHorizontalSpeed}"/><Run Text=" / "/><Run Text="{Binding KillAuraSettings.LiquidBounceVerticalSpeed}"/></TextBlock></DockPanel><Slider Minimum="1" Maximum="180" Value="{Binding KillAuraSettings.LiquidBounceHorizontalSpeed, Mode=TwoWay}" Style="{StaticResource DarkSlider}"/><Slider Minimum="1" Maximum="180" Value="{Binding KillAuraSettings.LiquidBounceVerticalSpeed, Mode=TwoWay}" Style="{StaticResource DarkSlider}"/>
+                                        <DockPanel Margin="0,8,0,0"><TextBlock Text="LB smooth"/><TextBlock Text="{Binding KillAuraSettings.LiquidBounceSmoothFactor}" HorizontalAlignment="Right"/></DockPanel><Slider Minimum="0.1" Maximum="1" Value="{Binding KillAuraSettings.LiquidBounceSmoothFactor, Mode=TwoWay}" Style="{StaticResource DarkSlider}"/>
+                                        <CheckBox Content="LB prediction" IsChecked="{Binding KillAuraSettings.LiquidBouncePredict, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}"/><Slider IsEnabled="{Binding KillAuraSettings.PredictControlsEnabled}" Minimum="0" Maximum="3" Value="{Binding KillAuraSettings.LiquidBouncePredictSize, Mode=TwoWay}" Style="{StaticResource DarkSlider}"/>
+                                        <CheckBox Content="LB randomize" IsChecked="{Binding KillAuraSettings.LiquidBounceRandomize, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}"/><Slider IsEnabled="{Binding KillAuraSettings.LiquidRandomizeControlsEnabled}" Minimum="0" Maximum="1" Value="{Binding KillAuraSettings.LiquidBounceRandomizeRange, Mode=TwoWay}" Style="{StaticResource DarkSlider}"/>
+                                        <DockPanel Margin="0,8,0,0"><TextBlock Text="Horizontal search"/><TextBlock Text="{Binding KillAuraSettings.LiquidBounceHorizontalSearch}" HorizontalAlignment="Right"/></DockPanel><Slider Minimum="0" Maximum="1" Value="{Binding KillAuraSettings.LiquidBounceHorizontalSearch, Mode=TwoWay}" Style="{StaticResource DarkSlider}"/>
+                                        <DockPanel Margin="0,8,0,0"><TextBlock Text="Body min / max"/><TextBlock><Run Text="{Binding KillAuraSettings.LiquidBounceBodyPointMin}"/><Run Text=" / "/><Run Text="{Binding KillAuraSettings.LiquidBounceBodyPointMax}"/></TextBlock></DockPanel><Slider Minimum="0" Maximum="1" Value="{Binding KillAuraSettings.LiquidBounceBodyPointMin, Mode=TwoWay}" Style="{StaticResource DarkSlider}"/><Slider Minimum="0" Maximum="1" Value="{Binding KillAuraSettings.LiquidBounceBodyPointMax, Mode=TwoWay}" Style="{StaticResource DarkSlider}"/>
+                                    </StackPanel>
+                                </Expander>
+
+                                <Expander Header="Filters and display" Margin="0,8,0,0">
+                                    <StackPanel Margin="8,6,0,0">
+                                        <CheckBox Content="Through walls" IsChecked="{Binding KillAuraSettings.ThroughWalls, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}"/><CheckBox Content="Require attack held" IsChecked="{Binding KillAuraSettings.RequirePress, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}"/><CheckBox Content="Allow mining" IsChecked="{Binding KillAuraSettings.AllowMining, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}"/><CheckBox Content="Weapons only" IsChecked="{Binding KillAuraSettings.WeaponsOnly, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}"/><CheckBox Content="Allow tools" IsEnabled="{Binding KillAuraSettings.AllowToolsEnabled}" IsChecked="{Binding KillAuraSettings.AllowTools, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}"/><CheckBox Content="Inventory check" IsChecked="{Binding KillAuraSettings.InventoryCheck, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}"/><CheckBox Content="Bot check" IsChecked="{Binding KillAuraSettings.BotCheck, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}"/><CheckBox Content="Teams" IsChecked="{Binding KillAuraSettings.Teams, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}"/>
+                                        <WrapPanel Margin="0,8,0,0"><CheckBox Content="Players" IsChecked="{Binding KillAuraSettings.Players, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,0,12,0"/><CheckBox Content="Bosses" IsChecked="{Binding KillAuraSettings.Bosses, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,0,12,0"/><CheckBox Content="Mobs" IsChecked="{Binding KillAuraSettings.Mobs, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,0,12,0"/><CheckBox Content="Animals" IsChecked="{Binding KillAuraSettings.Animals, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,0,12,0"/><CheckBox Content="Golems" IsChecked="{Binding KillAuraSettings.Golems, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,0,12,0"/><CheckBox Content="Silverfish" IsChecked="{Binding KillAuraSettings.Silverfish, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}"/></WrapPanel>
+                                        <CheckBox Content="Visualize aim" IsChecked="{Binding KillAuraSettings.VisualizeAim, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}"/><CheckBox Content="Smooth back" IsChecked="{Binding KillAuraSettings.SmoothBack, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}"/>
+                                        <DockPanel Margin="0,8,0,0"><TextBlock Text="Show target"/><ComboBox SelectedValue="{Binding KillAuraSettings.ShowTarget, Mode=TwoWay}" SelectedValuePath="Tag" Style="{StaticResource DarkComboBox}" MinWidth="145" HorizontalAlignment="Right"><ComboBoxItem Content="None" Tag="none"/><ComboBoxItem Content="Default" Tag="default"/></ComboBox></DockPanel>
+                                        <DockPanel Margin="0,8,0,0"><TextBlock Text="Debug"/><ComboBox SelectedValue="{Binding KillAuraSettings.DebugLog, Mode=TwoWay}" SelectedValuePath="Tag" Style="{StaticResource DarkComboBox}" MinWidth="145" HorizontalAlignment="Right"><ComboBoxItem Content="None" Tag="none"/><ComboBoxItem Content="Health" Tag="health"/></ComboBox></DockPanel>
+                                    </StackPanel>
+                                </Expander>
                             </StackPanel>
                         </Border>
 
@@ -1258,6 +1280,42 @@
                                 </TextBlock>
 
                                 <CheckBox Content="Show 'aoko' Logo" IsChecked="{Binding ShowLogo, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}" Margin="0,10,0,0"/>
+                                <CheckBox Content="Dev Mode" IsChecked="{Binding DevMode, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}" Margin="0,8,0,0"/>
+                                <TextBlock Text="Shows unfinished modules (Kill Aura, …) in the GUI. Off by default."
+                                           Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,4,0,0" TextWrapping="Wrap"/>
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
+                            <StackPanel>
+                                <TextBlock Text="Module Keybinds" Foreground="{DynamicResource TextBrush}" FontSize="16" FontWeight="Bold"/>
+                                <TextBlock Text="Click a button, then press a key (Esc = unbind)." Foreground="{DynamicResource DimTextBrush}" FontSize="12" Margin="0,4,0,10"/>
+                                <WrapPanel>
+                                    <Button x:Name="KeybindAutoclickerButton" Tag="autoclicker" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
+                                    <Button x:Name="KeybindRightClickButton" Tag="rightclick" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
+                                    <Button x:Name="KeybindJitterButton" Tag="jitter" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
+                                    <Button x:Name="KeybindClickInChestsButton" Tag="clickinchests" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
+                                    <Button x:Name="KeybindBreakBlocksButton" Tag="breakblocks" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
+                                    <Button x:Name="KeybindAimAssistButton" Tag="aimassist" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
+                                    <Button x:Name="KeybindTriggerbotButton" Tag="triggerbot" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
+                                    <Button x:Name="KeybindKillAuraButton" Tag="killaura" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"
+                                            Visibility="{Binding DevMode, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+                                    <Button x:Name="KeybindSpeedBridgeButton" Tag="speedbridge" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
+                                    <Button x:Name="KeybindGtbHelperButton" Tag="gtbhelper" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
+                                    <Button x:Name="KeybindPixelPartyAssistButton" Tag="pixelpartyassist" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
+                                    <Button x:Name="KeybindNametagsButton" Tag="nametags" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
+                                    <Button x:Name="KeybindNickHiderButton" Tag="nickhider" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
+                                    <Button x:Name="KeybindChestEspButton" Tag="chestesp" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
+                                    <Button x:Name="KeybindChestStealerButton" Tag="cheststealer" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
+                                    <Button x:Name="KeybindBlockEspButton" Tag="blockesp" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
+                                    <Button x:Name="KeybindClosestPlayerButton" Tag="closestplayer" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
+                                    <Button x:Name="KeybindReachButton" Tag="reach" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
+                                    <Button x:Name="KeybindVelocityButton" Tag="velocity" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
+                                    <Button x:Name="KeybindAutoTotemButton" Tag="autototem" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
+                                    <Button x:Name="KeybindAntiDebuffButton" Tag="antidebuff" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
+                                    <Button x:Name="KeybindHitDelayFixButton" Tag="hitdelayfix" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
+                                    <Button x:Name="KeybindPanicButton" Tag="panic" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
+                                </WrapPanel>
                             </StackPanel>
                         </Border>
                     </StackPanel>

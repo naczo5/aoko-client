@@ -28,7 +28,7 @@ body.aoko-noscroll { overflow: hidden; }
   inset: -20%;
   background:
     radial-gradient(closest-side, rgba(107,141,171,0.28), transparent 70%) 70% 22%/48% 48% no-repeat,
-    radial-gradient(closest-side, rgba(224,87,75,0.16), transparent 70%) 22% 78%/42% 42% no-repeat;
+    radial-gradient(closest-side, rgba(43,58,134,0.22), transparent 70%) 22% 78%/42% 42% no-repeat;
   filter: blur(8px);
 }
 .aoko-wallpaper::after {
@@ -58,7 +58,7 @@ body.aoko-noscroll { overflow: hidden; }
   backdrop-filter: blur(6px);
   transition: background 0.15s ease, border-color 0.15s ease;
 }
-.aoko-exit:hover { background: rgba(224,87,75,0.25); border-color: rgba(224,87,75,0.6); }
+.aoko-exit:hover { background: rgba(43,58,134,0.36); border-color: rgba(157,176,255,0.72); }
 .aoko-exit:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
 
 /* =====================================================================
@@ -69,11 +69,11 @@ body.aoko-noscroll { overflow: hidden; }
   --w-bg: #0A0B0F;
   --w-panel: #12141A;
   --w-line: #181B22;
-  --w-accent: #C7625A;
+  --w-accent: #7F9EFF;
   --w-text: #E8EAEE;
   --w-muted: rgba(232,234,238,0.60);
   --w-dim: rgba(232,234,238,0.40);
-  --w-accent-soft: rgba(199,98,90,0.16);
+  --w-accent-soft: rgba(127,158,255,0.16);
   --w-hover: rgba(232,234,238,0.05);
 
   position: absolute;
@@ -486,7 +486,7 @@ body.aoko-noscroll { overflow: hidden; }
   background: #6b8dab;
   border-radius: 2px;
 }
-.aoko-taskapp-icon { color: #c7625a; }
+.aoko-taskapp-icon { color: #9db0ff; }
 .aoko-tray { margin-left: auto; }
 .aoko-clock {
   display: flex;

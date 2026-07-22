@@ -25,6 +25,9 @@
 #include "nick_hider_jvmti.h"
 #include "hud_layout.h"
 #include "block_esp_common.h"
+#include "silent_aura_aim.h"
+#include "kill_aura_core.h"
+#include "kill_aura_premotion.h"
 #include "jni_core/scoped_env.h"
 #include "jni_core/local_frame.h"
 #include "jni_core/matrix_reader.h"
@@ -190,6 +193,68 @@ struct Config {
     bool pixelPartyAutoLook = false;
     bool pixelPartyAutoWalk = false;
     bool hudEditor = false;
+    bool  killAura = false;
+    bool  killAuraRecordCps = false;
+    int   killAuraMode = killaura::TARGET_SWITCH;
+    int   killAuraSort = killaura::SORT_HEALTH;
+    int   killAuraAutoBlock = killaura::BLOCK_HYPIXEL;
+    int   killAuraAttackTick = 0;
+    bool  killAuraAutoBlockRequirePress = false;
+    float killAuraAutoBlockCps = 8.0f;
+    float killAuraAutoBlockRange = 6.0f;
+    float killAuraSwingRange = 3.5f;
+    float killAuraAttackRange = 3.0f;
+    int   killAuraFov = 360;
+    int   killAuraMinCps = 14;
+    int   killAuraMaxCps = 14;
+    int   killAuraSwitchDelayMs = 150;
+    int   killAuraRotMode = killaura::ROT_SILENT;
+    float killAuraDeadZone = 0.5f;
+    float killAuraMaxTurnSpeed = 25.0f;
+    float killAuraMinTurnSpeed = 5.0f;
+    float killAuraAcceleration = 2.5f;
+    float killAuraDeceleration = 1.5f;
+    bool  killAuraUseOvershoot = true;
+    float killAuraOvershootStrength = 5.0f;
+    float killAuraOvershootRecovery = 0.2f;
+    float killAuraNoiseStrength = 0.2f;
+    bool  killAuraVisualizeAim = true;
+    bool  killAuraSmoothBack = true;
+    int   killAuraMoveFix = killaura::MOVE_FIX_SILENT;
+    int   killAuraSmoothing = 0;
+    int   killAuraRavenSmoothing = 0;
+    int   killAuraRavenPredictTicks = 0;
+    int   killAuraRavenYawRandom = 0;
+    int   killAuraAngleStep = 90;
+    bool  killAuraThroughWalls = true;
+    bool  killAuraRequirePress = false;
+    bool  killAuraAllowMining = true;
+    bool  killAuraWeaponsOnly = true;
+    bool  killAuraAllowTools = false;
+    bool  killAuraInventoryCheck = true;
+    bool  killAuraBotCheck = true;
+    bool  killAuraPlayers = true;
+    bool  killAuraBosses = false;
+    bool  killAuraMobs = false;
+    bool  killAuraAnimals = false;
+    bool  killAuraGolems = false;
+    bool  killAuraSilverfish = false;
+    bool  killAuraTeams = true;
+    bool  killAuraShowTarget = false;
+    bool  killAuraDebugHealth = false;
+    bool  killAuraRandomize = true;
+    float killAuraRandomizeRange = 0.4f;
+    float killAuraYRandomize = 0.3f;
+    float killAuraLbHorizontalSpeed = 180.0f;
+    float killAuraLbVerticalSpeed = 180.0f;
+    float killAuraLbSmooth = 0.5f;
+    bool  killAuraLbPredict = true;
+    float killAuraLbPredictSize = 1.0f;
+    bool  killAuraLbRandomize = true;
+    float killAuraLbRandomRange = 0.5f;
+    float killAuraLbHorizontalSearch = 0.5f;
+    float killAuraLbBodyMin = 0.1f;
+    float killAuraLbBodyMax = 0.9f;
 };
 static Config g_config;
 static Mutex g_configMutex;
@@ -224,6 +289,9 @@ struct GameState {
     float attackCooldownPerTick = 0.08f;
     unsigned long long stateMs = 0;
     std::string chestStealerStateJson;
+    std::string killAuraUnavailableReason;
+    bool killAuraHasTarget = false;
+    bool killAuraBlocking = false;
 };
 static GameState g_gameState;
 static Mutex g_stateMutex;
@@ -437,6 +505,82 @@ static jfieldID g_motionXField = nullptr;
 static jfieldID g_motionYField = nullptr;
 static jfieldID g_motionZField = nullptr;
 static jfieldID g_hurtTimeField = nullptr;
+
+// KillAura (legacy 1.8.9) — OpenMyau-Plus aligned packet order:
+// Credit: https://github.com/IamNespola/OpenMyau-Plus
+// swingItem (C0A) → syncCurrentPlayItem → C02 ATTACK → local hit, fired pre-C03 via Premotion.
+static jmethodID g_killAuraSwingMethod = nullptr;          // EntityPlayer.swingItem
+static jmethodID g_killAuraSyncItemMethod = nullptr;       // PlayerControllerMP.syncCurrentPlayItem
+static jmethodID g_killAuraAttackLocalMethod = nullptr;    // EntityPlayer.attackTargetEntityWithCurrentItem
+static jmethodID g_killAuraAddToSendQueue = nullptr;       // NetHandlerPlayClient.addToSendQueue
+static jclass    g_killAuraUseEntityClass = nullptr;       // C02PacketUseEntity
+static jmethodID g_killAuraUseEntityCtor = nullptr;        // (Entity, Action)
+static jobject   g_killAuraAttackAction = nullptr;         // Action.ATTACK global ref
+static jclass    g_killAuraC07Class = nullptr;
+static jmethodID g_killAuraC07Ctor = nullptr;
+static jobject   g_killAuraReleaseAction = nullptr;
+static jobject   g_killAuraOriginPos = nullptr;
+static jobject   g_killAuraFacingDown = nullptr;
+static jclass    g_killAuraC08Class = nullptr;
+static jmethodID g_killAuraC08Ctor = nullptr;
+static jclass    g_killAuraC09Class = nullptr;
+static jmethodID g_killAuraC09Ctor = nullptr;
+static jmethodID g_killAuraSetItemInUse = nullptr;
+static jmethodID g_killAuraStopUsingItem = nullptr;
+static jmethodID g_killAuraIsUsingItem = nullptr;
+static jfieldID  g_killAuraCurrentItemField = nullptr;
+static jmethodID g_killAuraGetStackInSlot = nullptr;
+static jfieldID  g_killAuraAttackKeyField = nullptr;
+static jfieldID  g_killAuraUseKeyField = nullptr;
+static jmethodID g_killAuraKeyIsDown = nullptr;
+static jmethodID g_killAuraCanSeeEntity = nullptr;
+static jmethodID g_killAuraIsSameTeam = nullptr;
+static killaura::AutoBlockState g_killAuraAutoBlockState;
+static std::string g_killAuraUnavailableReason;
+static Mutex g_killAuraUnavailableMutex;
+static bool g_killAuraHasTarget = false;
+static bool g_killAuraBlocking = false;
+static jclass    g_killAuraC03Class = nullptr;             // C03PacketPlayer (global)
+static jfieldID  g_killAuraC03Yaw = nullptr;
+static jfieldID  g_killAuraC03Pitch = nullptr;
+static jfieldID  g_killAuraC03Rotating = nullptr;
+static bool      g_killAuraSendQueueArmed = false;
+static jfieldID  g_rotationYawHeadField = nullptr;
+static jfieldID  g_renderYawOffsetField = nullptr;
+static jfieldID  g_mouseSensitivityField = nullptr;
+static jfieldID  g_onGroundField = nullptr;
+static float     g_killAuraMouseSens = 0.5f;
+static bool      g_killAuraSensResolved = false;
+static bool      g_loggedKillAuraAttackFail = false;
+static bool      g_loggedKillAuraSilentNoPremotion = false;
+static bool      g_loggedKillAuraClickSilentIncompat = false;
+static DWORD     g_killAuraLastScanMs = 0;
+static DWORD     g_killAuraLastAttackMs = 0;
+static DWORD     g_killAuraNextIntervalMs = 0;
+static int       g_killAuraAttackDelayMs = 0;
+static size_t    g_killAuraPatternIndex = 0;
+static std::string g_killAuraCurrentTarget;
+static DWORD     g_killAuraLastSwitchMs = 0;
+static float     g_killAuraCombatYaw = 0.0f;
+static float     g_killAuraCombatPitch = 0.0f;
+static bool      g_killAuraCombatValid = false;
+static float     g_killAuraYawVel = 0.0f;
+static float     g_killAuraPitchVel = 0.0f;
+static float     g_killAuraBodyYaw = 0.0f;
+static bool      g_killAuraBodyValid = false;
+static bool      g_killAuraOvershootActive = false;
+static float     g_killAuraOvershootYaw = 0.0f;
+static float     g_killAuraOvershootPitch = 0.0f;
+static float     g_killAuraAimFracX = 0.5f;
+static float     g_killAuraAimFracY = 0.55f;
+static float     g_killAuraAimFracZ = 0.5f;
+static DWORD     g_killAuraNextAimPointMs = 0;
+static double    g_killAuraPrevTX = 0.0;
+static double    g_killAuraPrevTY = 0.0;
+static double    g_killAuraPrevTZ = 0.0;
+static bool      g_killAuraPrevValid = false;
+static DWORD     g_killAuraNextResolveMs = 0;
+static DWORD     g_killAuraNextPremotionRefreshMs = 0;
 static int g_lastHurtTime = 0;
 
 // ---- AntiDebuff (module-owned; removes debuff visuals client-side) ----
@@ -1081,6 +1225,8 @@ bool DiscoverMappings(JNIEnv* env) {
 
     g_mcClass = (jclass)env->NewGlobalRef(mcClass);
     g_mcInstance = env->NewGlobalRef(mcInst);
+    if (g_mcInstance && g_thePlayerField)
+        ka_premotion::BindMcPlayerLookup(g_mcInstance, g_thePlayerField);
     
     // Nametags Discovery
     if (g_mcClass) {
@@ -1769,6 +1915,8 @@ bool DiscoverMappings(JNIEnv* env) {
     Log("Inventory: " + std::string(g_inventoryField ? "YES" : "NO"));
     Log("ItemBlock: " + std::string(g_itemBlockClass ? "YES" : "NO"));
     Log("=== End Report ===");
+    if (g_mcInstance && g_thePlayerField)
+        ka_premotion::BindMcPlayerLookup(g_mcInstance, g_thePlayerField);
     jvmti->Deallocate((unsigned char*)classes);
     return g_mapped;
 }
@@ -3208,6 +3356,1393 @@ static void UpdateVelocity(JNIEnv* env, const Config& cfg) {
     }
 
     g_lastHurtTime = hurtTime;
+    env->DeleteLocalRef(selfObj);
+}
+
+// ---- KillAura (legacy 1.8.9: OpenMyau C0A→C02 pre-C03 via Premotion) ----
+static float KillAuraRand01() {
+    return (float)(rand() % 10001) / 10000.0f;
+}
+static float KillAuraRandSigned01() {
+    return KillAuraRand01() * 2.0f - 1.0f;
+}
+
+static void KillAuraResetState() {
+    g_killAuraCombatValid = false;
+    g_killAuraYawVel = 0.0f;
+    g_killAuraPitchVel = 0.0f;
+    g_killAuraBodyValid = false;
+    g_killAuraOvershootActive = false;
+    g_killAuraOvershootYaw = 0.0f;
+    g_killAuraOvershootPitch = 0.0f;
+    g_killAuraAimFracX = 0.5f;
+    g_killAuraAimFracY = 0.55f;
+    g_killAuraAimFracZ = 0.5f;
+    g_killAuraNextAimPointMs = 0;
+    g_killAuraPrevValid = false;
+    ka_premotion::SetSilentCombatAngles(false, 0.0f, 0.0f, 0.0f, false);
+}
+
+static bool KillAuraPacketAttackReady() {
+    return g_killAuraSwingMethod && g_killAuraSyncItemMethod && g_killAuraAttackLocalMethod
+        && g_killAuraAddToSendQueue && g_killAuraUseEntityClass && g_killAuraUseEntityCtor
+        && g_killAuraAttackAction && g_playerControllerField;
+}
+
+static void KillAuraTryArmSendQueue(JNIEnv* env, jclass nhCls) {
+    if (!env || !nhCls || g_killAuraSendQueueArmed) return;
+    if (!g_killAuraC03Class || !g_killAuraC03Yaw || !g_killAuraC03Pitch) return;
+    ka_premotion::BindC03LookFields(
+        g_killAuraC03Class, g_killAuraC03Yaw, g_killAuraC03Pitch, g_killAuraC03Rotating);
+    if (ka_premotion::ArmSendQueueHook(env, nhCls))
+        g_killAuraSendQueueArmed = true;
+}
+
+static void EnsureKillAuraJniLegacy(JNIEnv* env) {
+    if (!env || !g_mcInstance || !g_mcClass) return;
+    if (KillAuraPacketAttackReady() && g_rotationYawField && g_rotationPitchField && g_killAuraSensResolved
+        && g_killAuraSendQueueArmed) {
+        ka_premotion::BindRotationFields(
+            g_rotationYawField, g_rotationPitchField,
+            g_rotationYawHeadField, g_renderYawOffsetField);
+        if (g_mcInstance && g_thePlayerField)
+            ka_premotion::BindMcPlayerLookup(g_mcInstance, g_thePlayerField);
+        return;
+    }
+
+    DWORD now = GetTickCount();
+    if (now < g_killAuraNextResolveMs) return;
+    g_killAuraNextResolveMs = now + 1000;
+
+    if (!g_playerControllerField) {
+        g_playerControllerField = env->GetFieldID(g_mcClass, "playerController",
+            "Lnet/minecraft/client/multiplayer/PlayerControllerMP;");
+        if (env->ExceptionCheck() || !g_playerControllerField) {
+            env->ExceptionClear();
+            g_playerControllerField = env->GetFieldID(g_mcClass, "field_71442_b",
+                "Lnet/minecraft/client/multiplayer/PlayerControllerMP;");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_playerControllerField = nullptr; }
+        }
+    }
+
+    jobject gcl = EnsureGameClassLoader(env);
+
+    // PlayerControllerMP.syncCurrentPlayItem
+    if (!g_killAuraSyncItemMethod && g_playerControllerField) {
+        jclass modeCls = nullptr;
+        if (gcl) {
+            modeCls = LoadClassWithLoader(env, gcl, "net.minecraft.client.multiplayer.PlayerControllerMP");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); modeCls = nullptr; }
+        }
+        if (!modeCls) {
+            jobject controller = env->GetObjectField(g_mcInstance, g_playerControllerField);
+            if (!env->ExceptionCheck() && controller) {
+                modeCls = env->GetObjectClass(controller);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); modeCls = nullptr; }
+                env->DeleteLocalRef(controller);
+            } else if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+            }
+        }
+        if (modeCls) {
+            g_killAuraSyncItemMethod = env->GetMethodID(modeCls, "syncCurrentPlayItem", "()V");
+            if (env->ExceptionCheck() || !g_killAuraSyncItemMethod) {
+                env->ExceptionClear();
+                g_killAuraSyncItemMethod = env->GetMethodID(modeCls, "func_78765_e", "()V");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_killAuraSyncItemMethod = nullptr; }
+            }
+            env->DeleteLocalRef(modeCls);
+            if (g_killAuraSyncItemMethod)
+                Log("KillAura: resolved PlayerControllerMP.syncCurrentPlayItem");
+        }
+    }
+
+    // EntityPlayer.swingItem + attackTargetEntityWithCurrentItem
+    if ((!g_killAuraSwingMethod || !g_killAuraAttackLocalMethod) && g_thePlayerField) {
+        jobject player = env->GetObjectField(g_mcInstance, g_thePlayerField);
+        if (!env->ExceptionCheck() && player) {
+            jclass walk = env->GetObjectClass(player);
+            for (int d = 0; walk && d < 8; d++) {
+                if (!g_killAuraSwingMethod) {
+                    g_killAuraSwingMethod = env->GetMethodID(walk, "swingItem", "()V");
+                    if (env->ExceptionCheck() || !g_killAuraSwingMethod) {
+                        env->ExceptionClear();
+                        g_killAuraSwingMethod = env->GetMethodID(walk, "func_71038_i", "()V");
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); g_killAuraSwingMethod = nullptr; }
+                    }
+                }
+                if (!g_killAuraAttackLocalMethod) {
+                    g_killAuraAttackLocalMethod = env->GetMethodID(walk, "attackTargetEntityWithCurrentItem",
+                        "(Lnet/minecraft/entity/Entity;)V");
+                    if (env->ExceptionCheck() || !g_killAuraAttackLocalMethod) {
+                        env->ExceptionClear();
+                        g_killAuraAttackLocalMethod = env->GetMethodID(walk, "func_71059_n",
+                            "(Lnet/minecraft/entity/Entity;)V");
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); g_killAuraAttackLocalMethod = nullptr; }
+                    }
+                }
+                jclass superCls = (jclass)env->GetSuperclass(walk);
+                env->DeleteLocalRef(walk);
+                walk = superCls;
+                if (g_killAuraSwingMethod && g_killAuraAttackLocalMethod) break;
+            }
+            if (walk) env->DeleteLocalRef(walk);
+            env->DeleteLocalRef(player);
+            if (g_killAuraSwingMethod && g_killAuraAttackLocalMethod)
+                Log("KillAura: resolved swingItem + attackTargetEntityWithCurrentItem");
+        } else if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        }
+    }
+
+    // C02PacketUseEntity(Entity, Action.ATTACK)
+    if (!g_killAuraUseEntityClass || !g_killAuraUseEntityCtor || !g_killAuraAttackAction) {
+        jclass useCls = nullptr;
+        if (gcl) {
+            useCls = LoadClassWithLoader(env, gcl, "net.minecraft.network.play.client.C02PacketUseEntity");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); useCls = nullptr; }
+        }
+        if (!useCls) {
+            useCls = env->FindClass("net/minecraft/network/play/client/C02PacketUseEntity");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); useCls = nullptr; }
+        }
+        jclass actionCls = nullptr;
+        if (gcl) {
+            actionCls = LoadClassWithLoader(env, gcl, "net.minecraft.network.play.client.C02PacketUseEntity$Action");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); actionCls = nullptr; }
+        }
+        if (!actionCls) {
+            actionCls = env->FindClass("net/minecraft/network/play/client/C02PacketUseEntity$Action");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); actionCls = nullptr; }
+        }
+        if (useCls && actionCls) {
+            jmethodID ctor = env->GetMethodID(useCls, "<init>",
+                "(Lnet/minecraft/entity/Entity;Lnet/minecraft/network/play/client/C02PacketUseEntity$Action;)V");
+            if (env->ExceptionCheck() || !ctor) {
+                env->ExceptionClear();
+                ctor = nullptr;
+            }
+            jfieldID attackField = env->GetStaticFieldID(actionCls, "ATTACK",
+                "Lnet/minecraft/network/play/client/C02PacketUseEntity$Action;");
+            if (env->ExceptionCheck() || !attackField) {
+                env->ExceptionClear();
+                // SRG enum constants vary; try common obfuscated ordinal field names via values().
+                attackField = nullptr;
+                jmethodID values = env->GetStaticMethodID(actionCls, "values",
+                    "()[Lnet/minecraft/network/play/client/C02PacketUseEntity$Action;");
+                if (env->ExceptionCheck() || !values) {
+                    env->ExceptionClear();
+                    values = nullptr;
+                }
+                if (values) {
+                    jobjectArray arr = (jobjectArray)env->CallStaticObjectMethod(actionCls, values);
+                    if (!env->ExceptionCheck() && arr) {
+                        // Action order in 1.8.9: INTERACT=0, ATTACK=1, INTERACT_AT=2
+                        const jsize len = env->GetArrayLength(arr);
+                        if (len > 1) {
+                            jobject attack = env->GetObjectArrayElement(arr, 1);
+                            if (attack) {
+                                if (g_killAuraAttackAction) env->DeleteGlobalRef(g_killAuraAttackAction);
+                                g_killAuraAttackAction = env->NewGlobalRef(attack);
+                                env->DeleteLocalRef(attack);
+                            }
+                        }
+                        env->DeleteLocalRef(arr);
+                    } else if (env->ExceptionCheck()) {
+                        env->ExceptionClear();
+                    }
+                }
+            } else {
+                jobject attack = env->GetStaticObjectField(actionCls, attackField);
+                if (!env->ExceptionCheck() && attack) {
+                    if (g_killAuraAttackAction) env->DeleteGlobalRef(g_killAuraAttackAction);
+                    g_killAuraAttackAction = env->NewGlobalRef(attack);
+                    env->DeleteLocalRef(attack);
+                } else if (env->ExceptionCheck()) {
+                    env->ExceptionClear();
+                }
+            }
+            if (ctor && g_killAuraAttackAction) {
+                if (g_killAuraUseEntityClass) env->DeleteGlobalRef(g_killAuraUseEntityClass);
+                g_killAuraUseEntityClass = (jclass)env->NewGlobalRef(useCls);
+                g_killAuraUseEntityCtor = ctor;
+                Log("KillAura: resolved C02PacketUseEntity ATTACK");
+            }
+        }
+        if (useCls) env->DeleteLocalRef(useCls);
+        if (actionCls) env->DeleteLocalRef(actionCls);
+    }
+
+    if (!g_killAuraAddToSendQueue) {
+        jobject netHandler = nullptr;
+        if (g_legacyMcGetNetHandlerMethod) {
+            netHandler = env->CallObjectMethod(g_mcInstance, g_legacyMcGetNetHandlerMethod);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); netHandler = nullptr; }
+        }
+        if (!netHandler && g_mcClass) {
+            jmethodID getNh = env->GetMethodID(g_mcClass, "getNetHandler",
+                "()Lnet/minecraft/client/network/NetHandlerPlayClient;");
+            if (env->ExceptionCheck() || !getNh) {
+                env->ExceptionClear();
+                getNh = env->GetMethodID(g_mcClass, "func_147114_u",
+                    "()Lnet/minecraft/client/network/NetHandlerPlayClient;");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); getNh = nullptr; }
+            }
+            if (getNh) {
+                g_legacyMcGetNetHandlerMethod = getNh;
+                netHandler = env->CallObjectMethod(g_mcInstance, getNh);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); netHandler = nullptr; }
+            }
+        }
+        if (netHandler) {
+            jclass nhCls = env->GetObjectClass(netHandler);
+            if (nhCls) {
+                g_killAuraAddToSendQueue = env->GetMethodID(nhCls, "addToSendQueue",
+                    "(Lnet/minecraft/network/Packet;)V");
+                if (env->ExceptionCheck() || !g_killAuraAddToSendQueue) {
+                    env->ExceptionClear();
+                    g_killAuraAddToSendQueue = env->GetMethodID(nhCls, "func_147297_a",
+                        "(Lnet/minecraft/network/Packet;)V");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_killAuraAddToSendQueue = nullptr; }
+                }
+                if (g_killAuraAddToSendQueue)
+                    Log("KillAura: resolved NetHandlerPlayClient.addToSendQueue");
+                KillAuraTryArmSendQueue(env, nhCls);
+                env->DeleteLocalRef(nhCls);
+            }
+            env->DeleteLocalRef(netHandler);
+        }
+    }
+
+    // C03PacketPlayer yaw/pitch for Silent look patch in send-queue Premotion.
+    if (!g_killAuraC03Class || !g_killAuraC03Yaw || !g_killAuraC03Pitch) {
+        jobject gclC03 = EnsureGameClassLoader(env);
+        jclass c03 = nullptr;
+        if (gclC03) {
+            c03 = LoadClassWithLoader(env, gclC03, "net.minecraft.network.play.client.C03PacketPlayer");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); c03 = nullptr; }
+        }
+        if (!c03) {
+            c03 = env->FindClass("net/minecraft/network/play/client/C03PacketPlayer");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); c03 = nullptr; }
+        }
+        if (c03) {
+            if (!g_killAuraC03Yaw) {
+                g_killAuraC03Yaw = env->GetFieldID(c03, "yaw", "F");
+                if (env->ExceptionCheck() || !g_killAuraC03Yaw) {
+                    env->ExceptionClear();
+                    g_killAuraC03Yaw = env->GetFieldID(c03, "field_149476_e", "F");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_killAuraC03Yaw = nullptr; }
+                }
+            }
+            if (!g_killAuraC03Pitch) {
+                g_killAuraC03Pitch = env->GetFieldID(c03, "pitch", "F");
+                if (env->ExceptionCheck() || !g_killAuraC03Pitch) {
+                    env->ExceptionClear();
+                    g_killAuraC03Pitch = env->GetFieldID(c03, "field_149473_f", "F");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_killAuraC03Pitch = nullptr; }
+                }
+            }
+            if (!g_killAuraC03Rotating) {
+                g_killAuraC03Rotating = env->GetFieldID(c03, "rotating", "Z");
+                if (env->ExceptionCheck() || !g_killAuraC03Rotating) {
+                    env->ExceptionClear();
+                    g_killAuraC03Rotating = env->GetFieldID(c03, "field_149481_i", "Z");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_killAuraC03Rotating = nullptr; }
+                }
+            }
+            if (g_killAuraC03Yaw && g_killAuraC03Pitch) {
+                if (!g_killAuraC03Class)
+                    g_killAuraC03Class = (jclass)env->NewGlobalRef(c03);
+                Log("KillAura: resolved C03PacketPlayer look fields");
+            }
+            env->DeleteLocalRef(c03);
+        }
+    }
+
+    // Retry arm if addToSendQueue was resolved earlier but C03/retransform lagged.
+    if (!g_killAuraSendQueueArmed && g_killAuraAddToSendQueue && g_killAuraC03Class) {
+        jobject netHandlerArm = nullptr;
+        if (g_legacyMcGetNetHandlerMethod) {
+            netHandlerArm = env->CallObjectMethod(g_mcInstance, g_legacyMcGetNetHandlerMethod);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); netHandlerArm = nullptr; }
+        }
+        if (netHandlerArm) {
+            jclass nhClsArm = env->GetObjectClass(netHandlerArm);
+            if (nhClsArm) {
+                KillAuraTryArmSendQueue(env, nhClsArm);
+                env->DeleteLocalRef(nhClsArm);
+            }
+            env->DeleteLocalRef(netHandlerArm);
+        }
+    }
+
+    if ((!g_rotationYawHeadField || !g_renderYawOffsetField || !g_onGroundField) && g_thePlayerField) {
+        jobject player = env->GetObjectField(g_mcInstance, g_thePlayerField);
+        if (!env->ExceptionCheck() && player) {
+            jclass walk = env->GetObjectClass(player);
+            for (int d = 0; walk && d < 8; d++) {
+                if (!g_rotationYawHeadField) {
+                    g_rotationYawHeadField = env->GetFieldID(walk, "rotationYawHead", "F");
+                    if (env->ExceptionCheck() || !g_rotationYawHeadField) {
+                        env->ExceptionClear();
+                        g_rotationYawHeadField = env->GetFieldID(walk, "field_70759_as", "F");
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); g_rotationYawHeadField = nullptr; }
+                    }
+                }
+                if (!g_renderYawOffsetField) {
+                    g_renderYawOffsetField = env->GetFieldID(walk, "renderYawOffset", "F");
+                    if (env->ExceptionCheck() || !g_renderYawOffsetField) {
+                        env->ExceptionClear();
+                        g_renderYawOffsetField = env->GetFieldID(walk, "field_70761_aq", "F");
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); g_renderYawOffsetField = nullptr; }
+                    }
+                }
+                if (!g_onGroundField) {
+                    g_onGroundField = env->GetFieldID(walk, "onGround", "Z");
+                    if (env->ExceptionCheck() || !g_onGroundField) {
+                        env->ExceptionClear();
+                        g_onGroundField = env->GetFieldID(walk, "field_70122_E", "Z");
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); g_onGroundField = nullptr; }
+                    }
+                }
+                jclass superCls = (jclass)env->GetSuperclass(walk);
+                env->DeleteLocalRef(walk);
+                walk = superCls;
+                if (g_rotationYawHeadField && g_renderYawOffsetField && g_onGroundField) break;
+            }
+            if (walk) env->DeleteLocalRef(walk);
+            env->DeleteLocalRef(player);
+        } else if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        }
+    }
+
+    if (!g_killAuraSensResolved && g_gameSettingsField) {
+        g_killAuraSensResolved = true;
+        jobject gs = env->GetObjectField(g_mcInstance, g_gameSettingsField);
+        if (!env->ExceptionCheck() && gs) {
+            jclass gsCls = env->GetObjectClass(gs);
+            if (gsCls) {
+                if (!g_mouseSensitivityField) {
+                    g_mouseSensitivityField = env->GetFieldID(gsCls, "mouseSensitivity", "F");
+                    if (env->ExceptionCheck() || !g_mouseSensitivityField) {
+                        env->ExceptionClear();
+                        g_mouseSensitivityField = env->GetFieldID(gsCls, "field_74341_c", "F");
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); g_mouseSensitivityField = nullptr; }
+                    }
+                }
+                env->DeleteLocalRef(gsCls);
+            }
+            if (g_mouseSensitivityField) {
+                float sens = env->GetFloatField(gs, g_mouseSensitivityField);
+                if (!env->ExceptionCheck() && std::isfinite(sens) && sens > 0.0f && sens <= 1.0f)
+                    g_killAuraMouseSens = sens;
+                else
+                    env->ExceptionClear();
+            }
+            env->DeleteLocalRef(gs);
+        } else if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        }
+    }
+
+    ka_premotion::BindRotationFields(
+        g_rotationYawField, g_rotationPitchField,
+        g_rotationYawHeadField, g_renderYawOffsetField);
+    if (g_mcInstance && g_thePlayerField)
+        ka_premotion::BindMcPlayerLookup(g_mcInstance, g_thePlayerField);
+}
+
+static void SetKillAuraPlayerLookLegacy(JNIEnv* env, jobject player, float yaw, float pitch, float bodyYaw) {
+    if (!env || !player) return;
+    float writeYaw = saaim::NormalizeAngle(yaw);
+    float writePitch = saaim::Clamp(pitch, -90.0f, 90.0f);
+    float writeBody = saaim::NormalizeAngle(bodyYaw);
+    if (g_rotationYawField) {
+        env->SetFloatField(player, g_rotationYawField, writeYaw);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+    if (g_rotationPitchField) {
+        env->SetFloatField(player, g_rotationPitchField, writePitch);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+    if (g_rotationYawHeadField) {
+        env->SetFloatField(player, g_rotationYawHeadField, writeYaw);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+    if (g_renderYawOffsetField) {
+        env->SetFloatField(player, g_renderYawOffsetField, writeBody);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+}
+
+static void EnsureKillAuraAutoBlockLegacy(JNIEnv* env, jobject player) {
+    if (!env || !player) return;
+    jobject gcl = g_gameClassLoader;
+    if (!gcl) gcl = EnsureGameClassLoader(env);
+    if (!g_killAuraC08Class) {
+        jclass cls = gcl ? LoadClassWithLoader(env, gcl, "net.minecraft.network.play.client.C08PacketPlayerBlockPlacement") : nullptr;
+        if (cls) {
+            g_killAuraC08Ctor = env->GetMethodID(cls, "<init>", "(Lnet/minecraft/item/ItemStack;)V");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_killAuraC08Ctor = nullptr; }
+            if (g_killAuraC08Ctor) g_killAuraC08Class = (jclass)env->NewGlobalRef(cls);
+            env->DeleteLocalRef(cls);
+        }
+    }
+    if (!g_killAuraC09Class) {
+        jclass cls = gcl ? LoadClassWithLoader(env, gcl, "net.minecraft.network.play.client.C09PacketHeldItemChange") : nullptr;
+        if (cls) {
+            g_killAuraC09Ctor = env->GetMethodID(cls, "<init>", "(I)V");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_killAuraC09Ctor = nullptr; }
+            if (g_killAuraC09Ctor) g_killAuraC09Class = (jclass)env->NewGlobalRef(cls);
+            env->DeleteLocalRef(cls);
+        }
+    }
+    if (!g_killAuraC07Class) {
+        jclass packetCls = gcl ? LoadClassWithLoader(env, gcl, "net.minecraft.network.play.client.C07PacketPlayerDigging") : nullptr;
+        jclass actionCls = gcl ? LoadClassWithLoader(env, gcl, "net.minecraft.network.play.client.C07PacketPlayerDigging$Action") : nullptr;
+        jclass posCls = gcl ? LoadClassWithLoader(env, gcl, "net.minecraft.util.BlockPos") : nullptr;
+        jclass facingCls = gcl ? LoadClassWithLoader(env, gcl, "net.minecraft.util.EnumFacing") : nullptr;
+        if (packetCls && actionCls && posCls && facingCls) {
+            g_killAuraC07Ctor = env->GetMethodID(packetCls, "<init>",
+                "(Lnet/minecraft/network/play/client/C07PacketPlayerDigging$Action;Lnet/minecraft/util/BlockPos;Lnet/minecraft/util/EnumFacing;)V");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_killAuraC07Ctor = nullptr; }
+            jfieldID release = env->GetStaticFieldID(actionCls, "RELEASE_USE_ITEM",
+                "Lnet/minecraft/network/play/client/C07PacketPlayerDigging$Action;");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); release = nullptr; }
+            const char* originNames[] = { "ORIGIN", "field_177992_a", nullptr };
+            jfieldID origin = nullptr;
+            for (int i = 0; originNames[i] && !origin; ++i) {
+                origin = env->GetStaticFieldID(posCls, originNames[i], "Lnet/minecraft/util/BlockPos;");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); origin = nullptr; }
+            }
+            jfieldID down = env->GetStaticFieldID(facingCls, "DOWN", "Lnet/minecraft/util/EnumFacing;");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); down = nullptr; }
+            jobject releaseObj = release ? env->GetStaticObjectField(actionCls, release) : nullptr;
+            jobject originObj = origin ? env->GetStaticObjectField(posCls, origin) : nullptr;
+            jobject downObj = down ? env->GetStaticObjectField(facingCls, down) : nullptr;
+            if (g_killAuraC07Ctor && releaseObj && originObj && downObj) {
+                g_killAuraC07Class = (jclass)env->NewGlobalRef(packetCls);
+                g_killAuraReleaseAction = env->NewGlobalRef(releaseObj);
+                g_killAuraOriginPos = env->NewGlobalRef(originObj);
+                g_killAuraFacingDown = env->NewGlobalRef(downObj);
+            }
+            if (releaseObj) env->DeleteLocalRef(releaseObj);
+            if (originObj) env->DeleteLocalRef(originObj);
+            if (downObj) env->DeleteLocalRef(downObj);
+        }
+        if (packetCls) env->DeleteLocalRef(packetCls);
+        if (actionCls) env->DeleteLocalRef(actionCls);
+        if (posCls) env->DeleteLocalRef(posCls);
+        if (facingCls) env->DeleteLocalRef(facingCls);
+    }
+    jclass playerCls = env->GetObjectClass(player);
+    if (playerCls) {
+        if (!g_killAuraSetItemInUse) {
+            const char* names[] = { "setItemInUse", "func_71008_a", nullptr };
+            for (int i = 0; names[i] && !g_killAuraSetItemInUse; ++i) {
+                g_killAuraSetItemInUse = env->GetMethodID(playerCls, names[i], "(Lnet/minecraft/item/ItemStack;I)V");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_killAuraSetItemInUse = nullptr; }
+            }
+        }
+        if (!g_killAuraStopUsingItem) {
+            const char* names[] = { "stopUsingItem", "func_71034_by", nullptr };
+            for (int i = 0; names[i] && !g_killAuraStopUsingItem; ++i) {
+                g_killAuraStopUsingItem = env->GetMethodID(playerCls, names[i], "()V");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_killAuraStopUsingItem = nullptr; }
+            }
+        }
+        if (!g_killAuraIsUsingItem) {
+            const char* names[] = { "isUsingItem", "func_71039_bw", nullptr };
+            for (int i = 0; names[i] && !g_killAuraIsUsingItem; ++i) {
+                g_killAuraIsUsingItem = env->GetMethodID(playerCls, names[i], "()Z");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_killAuraIsUsingItem = nullptr; }
+            }
+        }
+        env->DeleteLocalRef(playerCls);
+    }
+    if (g_inventoryField && (!g_killAuraCurrentItemField || !g_killAuraGetStackInSlot)) {
+        jobject inventory = env->GetObjectField(player, g_inventoryField);
+        if (!env->ExceptionCheck() && inventory) {
+            jclass invCls = env->GetObjectClass(inventory);
+            if (invCls && !g_killAuraCurrentItemField) {
+                const char* names[] = { "currentItem", "field_70461_c", nullptr };
+                for (int i = 0; names[i] && !g_killAuraCurrentItemField; ++i) {
+                    g_killAuraCurrentItemField = env->GetFieldID(invCls, names[i], "I");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_killAuraCurrentItemField = nullptr; }
+                }
+            }
+            if (invCls && !g_killAuraGetStackInSlot) {
+                const char* names[] = { "getStackInSlot", "func_70301_a", nullptr };
+                for (int i = 0; names[i] && !g_killAuraGetStackInSlot; ++i) {
+                    g_killAuraGetStackInSlot = env->GetMethodID(invCls, names[i], "(I)Lnet/minecraft/item/ItemStack;");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_killAuraGetStackInSlot = nullptr; }
+                }
+            }
+            if (invCls) env->DeleteLocalRef(invCls);
+            env->DeleteLocalRef(inventory);
+        } else env->ExceptionClear();
+    }
+}
+
+static bool KillAuraSendPacketLegacy(JNIEnv* env, jobject packet) {
+    if (!env || !packet || !g_killAuraAddToSendQueue || !g_legacyMcGetNetHandlerMethod) return false;
+    jobject netHandler = env->CallObjectMethod(g_mcInstance, g_legacyMcGetNetHandlerMethod);
+    if (env->ExceptionCheck() || !netHandler) { env->ExceptionClear(); return false; }
+    env->CallVoidMethod(netHandler, g_killAuraAddToSendQueue, packet);
+    bool ok = !env->ExceptionCheck();
+    if (!ok) env->ExceptionClear();
+    env->DeleteLocalRef(netHandler);
+    return ok;
+}
+
+static jobject KillAuraHeldStackLegacy(JNIEnv* env, jobject player) {
+    if (!env || !player) return nullptr;
+    if (g_getHeldItemMethod) {
+        jobject stack = env->CallObjectMethod(player, g_getHeldItemMethod);
+        if (!env->ExceptionCheck()) return stack;
+        env->ExceptionClear();
+    }
+    if (g_inventoryField && g_getCurrentItemMethod) {
+        jobject inventory = env->GetObjectField(player, g_inventoryField);
+        if (!env->ExceptionCheck() && inventory) {
+            jobject stack = env->CallObjectMethod(inventory, g_getCurrentItemMethod);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); stack = nullptr; }
+            env->DeleteLocalRef(inventory);
+            return stack;
+        }
+        env->ExceptionClear();
+    }
+    return nullptr;
+}
+
+static bool KillAuraStartBlockLegacy(JNIEnv* env, jobject player) {
+    jobject stack = KillAuraHeldStackLegacy(env, player);
+    if (!stack || !g_killAuraC08Class || !g_killAuraC08Ctor || !g_killAuraSetItemInUse) {
+        if (stack) env->DeleteLocalRef(stack);
+        return false;
+    }
+    jobject controller = env->GetObjectField(g_mcInstance, g_playerControllerField);
+    if (!env->ExceptionCheck() && controller) {
+        env->CallVoidMethod(controller, g_killAuraSyncItemMethod);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        env->DeleteLocalRef(controller);
+    } else env->ExceptionClear();
+    jobject packet = env->NewObject(g_killAuraC08Class, g_killAuraC08Ctor, stack);
+    bool ok = packet && !env->ExceptionCheck() && KillAuraSendPacketLegacy(env, packet);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    if (packet) env->DeleteLocalRef(packet);
+    if (ok) {
+        env->CallVoidMethod(player, g_killAuraSetItemInUse, stack, (jint)72000);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); ok = false; }
+    }
+    env->DeleteLocalRef(stack);
+    return ok;
+}
+
+static bool KillAuraStopBlockLegacy(JNIEnv* env, jobject player) {
+    if (!g_killAuraC07Class || !g_killAuraC07Ctor || !g_killAuraReleaseAction ||
+        !g_killAuraOriginPos || !g_killAuraFacingDown || !g_killAuraStopUsingItem) return false;
+    jobject packet = env->NewObject(g_killAuraC07Class, g_killAuraC07Ctor,
+        g_killAuraReleaseAction, g_killAuraOriginPos, g_killAuraFacingDown);
+    bool ok = packet && !env->ExceptionCheck() && KillAuraSendPacketLegacy(env, packet);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    if (packet) env->DeleteLocalRef(packet);
+    if (ok) {
+        env->CallVoidMethod(player, g_killAuraStopUsingItem);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); ok = false; }
+    }
+    return ok;
+}
+
+static bool KillAuraSendSlotLegacy(JNIEnv* env, int slot) {
+    if (!g_killAuraC09Class || !g_killAuraC09Ctor) return false;
+    jobject packet = env->NewObject(g_killAuraC09Class, g_killAuraC09Ctor, (jint)slot);
+    bool ok = packet && !env->ExceptionCheck() && KillAuraSendPacketLegacy(env, packet);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    if (packet) env->DeleteLocalRef(packet);
+    return ok;
+}
+
+static int KillAuraCurrentSlotLegacy(JNIEnv* env, jobject player) {
+    if (!g_inventoryField || !g_killAuraCurrentItemField) return -1;
+    jobject inv = env->GetObjectField(player, g_inventoryField);
+    if (env->ExceptionCheck() || !inv) { env->ExceptionClear(); return -1; }
+    int slot = env->GetIntField(inv, g_killAuraCurrentItemField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); slot = -1; }
+    env->DeleteLocalRef(inv);
+    return slot;
+}
+
+static int KillAuraFindSlotLegacy(JNIEnv* env, jobject player, int current, bool swordOnly) {
+    if (!g_inventoryField || !g_killAuraGetStackInSlot) return -1;
+    jobject inv = env->GetObjectField(player, g_inventoryField);
+    if (env->ExceptionCheck() || !inv) { env->ExceptionClear(); return -1; }
+    int fallback = -1;
+    for (int slot = 0; slot < 9; ++slot) {
+        if (slot == current) continue;
+        jobject stack = env->CallObjectMethod(inv, g_killAuraGetStackInSlot, (jint)slot);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); stack = nullptr; }
+        if (!stack && !swordOnly) { env->DeleteLocalRef(inv); return slot; }
+        if (stack && swordOnly) {
+            jclass stackCls = env->GetObjectClass(stack);
+            jmethodID getItem = stackCls ? env->GetMethodID(stackCls, "getItem", "()Lnet/minecraft/item/Item;") : nullptr;
+            if (env->ExceptionCheck() || !getItem) {
+                env->ExceptionClear();
+                getItem = stackCls ? env->GetMethodID(stackCls, "func_77973_b", "()Lnet/minecraft/item/Item;") : nullptr;
+                if (env->ExceptionCheck()) { env->ExceptionClear(); getItem = nullptr; }
+            }
+            jobject item = getItem ? env->CallObjectMethod(stack, getItem) : nullptr;
+            bool sword = item && g_itemSwordClass && env->IsInstanceOf(item, g_itemSwordClass) == JNI_TRUE;
+            if (item) env->DeleteLocalRef(item);
+            if (stackCls) env->DeleteLocalRef(stackCls);
+            if (sword) { env->DeleteLocalRef(stack); env->DeleteLocalRef(inv); return slot; }
+        } else if (stack && fallback < 0) fallback = slot;
+        if (stack) env->DeleteLocalRef(stack);
+    }
+    env->DeleteLocalRef(inv);
+    return swordOnly ? -1 : (fallback >= 0 ? fallback : ((current + 8) % 9));
+}
+
+static void KillAuraSendClickLegacy() {
+    INPUT in[2] = {};
+    in[0].type = INPUT_MOUSE;
+    in[0].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+    in[1].type = INPUT_MOUSE;
+    in[1].mi.dwFlags = MOUSEEVENTF_LEFTUP;
+    SendInput(2, in, sizeof(INPUT));
+}
+
+// OpenMyau performAttack packet order: C0A → sync → C02 → local hit (no attackEntity).
+static bool KillAuraPerformAttackLegacy(JNIEnv* env, jobject selfObj, jobject targetObj) {
+    if (!env || !selfObj || !targetObj || !g_mcInstance) return false;
+    if (!KillAuraPacketAttackReady()) return false;
+
+    env->CallVoidMethod(selfObj, g_killAuraSwingMethod);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return false;
+    }
+
+    jobject controller = env->GetObjectField(g_mcInstance, g_playerControllerField);
+    if (env->ExceptionCheck() || !controller) {
+        env->ExceptionClear();
+        return false;
+    }
+    env->CallVoidMethod(controller, g_killAuraSyncItemMethod);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        env->DeleteLocalRef(controller);
+        return false;
+    }
+    env->DeleteLocalRef(controller);
+
+    jobject packet = env->NewObject(
+        g_killAuraUseEntityClass, g_killAuraUseEntityCtor, targetObj, g_killAuraAttackAction);
+    if (env->ExceptionCheck() || !packet) {
+        env->ExceptionClear();
+        return false;
+    }
+
+    jobject netHandler = nullptr;
+    if (g_legacyMcGetNetHandlerMethod) {
+        netHandler = env->CallObjectMethod(g_mcInstance, g_legacyMcGetNetHandlerMethod);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); netHandler = nullptr; }
+    }
+    if (!netHandler) {
+        env->DeleteLocalRef(packet);
+        return false;
+    }
+
+    env->CallVoidMethod(netHandler, g_killAuraAddToSendQueue, packet);
+    bool ok = !env->ExceptionCheck();
+    if (!ok) env->ExceptionClear();
+    env->DeleteLocalRef(netHandler);
+    env->DeleteLocalRef(packet);
+    if (!ok) return false;
+
+    env->CallVoidMethod(selfObj, g_killAuraAttackLocalMethod, targetObj);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        // Network attack already sent; local hit failure is non-fatal.
+    }
+    return true;
+}
+
+static bool KillAuraPremotionAttackHandler(JNIEnv* env, jobject selfPlayer, jobject target) {
+    return KillAuraPerformAttackLegacy(env, selfPlayer, target);
+}
+
+static bool KillAuraHoldingWeaponLegacy(JNIEnv* env, jobject player) {
+    if (!env || !player) return false;
+
+    jobject stack = nullptr;
+    if (g_inventoryField && g_getCurrentItemMethod) {
+        jobject inv = env->GetObjectField(player, g_inventoryField);
+        if (!env->ExceptionCheck() && inv) {
+            stack = env->CallObjectMethod(inv, g_getCurrentItemMethod);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); stack = nullptr; }
+            env->DeleteLocalRef(inv);
+        } else if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        }
+    }
+    if (!stack && g_getHeldItemMethod) {
+        stack = env->CallObjectMethod(player, g_getHeldItemMethod);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); stack = nullptr; }
+    }
+    if (!stack) return false;
+
+    bool ok = false;
+    jclass stCls = env->GetObjectClass(stack);
+    jmethodID getItem = nullptr;
+    if (stCls) {
+        getItem = env->GetMethodID(stCls, "getItem", "()Lnet/minecraft/item/Item;");
+        if (env->ExceptionCheck() || !getItem) {
+            env->ExceptionClear();
+            getItem = env->GetMethodID(stCls, "func_77973_b", "()Lnet/minecraft/item/Item;");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); getItem = nullptr; }
+        }
+        env->DeleteLocalRef(stCls);
+    }
+    if (getItem) {
+        jobject item = env->CallObjectMethod(stack, getItem);
+        if (!env->ExceptionCheck() && item) {
+            if (g_itemSwordClass && env->IsInstanceOf(item, g_itemSwordClass) == JNI_TRUE) {
+                ok = true;
+            } else {
+                jclass itemCls = env->GetObjectClass(item);
+                std::string cn = itemCls ? GetClassNameFromClass(env, itemCls) : "";
+                if (itemCls) env->DeleteLocalRef(itemCls);
+                for (size_t i = 0; i < cn.size(); i++)
+                    cn[i] = (char)std::tolower((unsigned char)cn[i]);
+                ok = cn.find("sword") != std::string::npos || cn.find("axe") != std::string::npos;
+            }
+            env->DeleteLocalRef(item);
+        } else {
+            env->ExceptionClear();
+        }
+    }
+    env->DeleteLocalRef(stack);
+    return ok;
+}
+
+static void SetKillAuraUnavailableReasonLegacy(const std::string& reason) {
+    LockGuard lk(g_killAuraUnavailableMutex);
+    if (g_killAuraUnavailableReason != reason) {
+        g_killAuraUnavailableReason = reason;
+        if (!reason.empty()) Log("KillAura unavailable: " + reason);
+    }
+    if (!reason.empty()) { g_killAuraHasTarget = false; g_killAuraBlocking = false; }
+}
+
+static bool KillAuraReadKeyLegacy(JNIEnv* env, bool useKey, bool* mapped) {
+    if (mapped) *mapped = false;
+    if (!env || !g_mcInstance || !g_gameSettingsField) return false;
+    jobject settings = env->GetObjectField(g_mcInstance, g_gameSettingsField);
+    if (env->ExceptionCheck() || !settings) { env->ExceptionClear(); return false; }
+    jclass settingsCls = env->GetObjectClass(settings);
+    if (settingsCls && !(useKey ? g_killAuraUseKeyField : g_killAuraAttackKeyField)) {
+        const char* names[] = {
+            useKey ? "keyBindUseItem" : "keyBindAttack",
+            useKey ? "field_74313_G" : "field_74312_F",
+            nullptr
+        };
+        for (int i = 0; names[i]; ++i) {
+            jfieldID field = env->GetFieldID(settingsCls, names[i], "Lnet/minecraft/client/settings/KeyBinding;");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); field = nullptr; }
+            if (field) {
+                if (useKey) g_killAuraUseKeyField = field; else g_killAuraAttackKeyField = field;
+                break;
+            }
+        }
+    }
+    jfieldID field = useKey ? g_killAuraUseKeyField : g_killAuraAttackKeyField;
+    jobject key = field ? env->GetObjectField(settings, field) : nullptr;
+    if (env->ExceptionCheck()) { env->ExceptionClear(); key = nullptr; }
+    if (settingsCls) env->DeleteLocalRef(settingsCls);
+    env->DeleteLocalRef(settings);
+    if (!key) return false;
+    jclass keyCls = env->GetObjectClass(key);
+    if (keyCls && !g_killAuraKeyIsDown) {
+        const char* names[] = { "isKeyDown", "func_151470_d", nullptr };
+        for (int i = 0; names[i] && !g_killAuraKeyIsDown; ++i) {
+            g_killAuraKeyIsDown = env->GetMethodID(keyCls, names[i], "()Z");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_killAuraKeyIsDown = nullptr; }
+        }
+    }
+    bool down = false;
+    if (g_killAuraKeyIsDown) {
+        down = env->CallBooleanMethod(key, g_killAuraKeyIsDown) == JNI_TRUE;
+        if (env->ExceptionCheck()) { env->ExceptionClear(); down = false; }
+        else if (mapped) *mapped = true;
+    }
+    if (keyCls) env->DeleteLocalRef(keyCls);
+    env->DeleteLocalRef(key);
+    return down;
+}
+
+static bool KillAuraLookingAtBlockLegacy(JNIEnv* env) {
+    if (!env || !g_mcInstance || !g_objectMouseOverField || !g_typeOfHitField || !g_enumNameMethod) return false;
+    jobject hit = env->GetObjectField(g_mcInstance, g_objectMouseOverField);
+    if (env->ExceptionCheck() || !hit) { env->ExceptionClear(); return false; }
+    jobject type = env->GetObjectField(hit, g_typeOfHitField);
+    if (env->ExceptionCheck() || !type) { env->ExceptionClear(); type = nullptr; }
+    bool block = false;
+    if (type) {
+        jstring name = (jstring)env->CallObjectMethod(type, g_enumNameMethod);
+        if (!env->ExceptionCheck() && name) {
+            const char* chars = env->GetStringUTFChars(name, nullptr);
+            block = chars && std::strcmp(chars, "BLOCK") == 0;
+            if (chars) env->ReleaseStringUTFChars(name, chars);
+            env->DeleteLocalRef(name);
+        } else env->ExceptionClear();
+        env->DeleteLocalRef(type);
+    }
+    env->DeleteLocalRef(hit);
+    return block;
+}
+
+static void ResolveKillAuraCandidateFiltersLegacy(JNIEnv* env, jobject selfObj) {
+    if (!env || !selfObj || (g_killAuraCanSeeEntity && g_killAuraIsSameTeam)) return;
+    jclass walk = env->GetObjectClass(selfObj);
+    for (int depth = 0; walk && depth < 10; ++depth) {
+        if (!g_killAuraCanSeeEntity) {
+            g_killAuraCanSeeEntity = env->GetMethodID(walk, "canEntityBeSeen",
+                "(Lnet/minecraft/entity/Entity;)Z");
+            if (env->ExceptionCheck() || !g_killAuraCanSeeEntity) {
+                env->ExceptionClear();
+                g_killAuraCanSeeEntity = env->GetMethodID(walk, "func_70685_l",
+                    "(Lnet/minecraft/entity/Entity;)Z");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_killAuraCanSeeEntity = nullptr; }
+            }
+        }
+        if (!g_killAuraIsSameTeam) {
+            g_killAuraIsSameTeam = env->GetMethodID(walk, "isOnSameTeam",
+                "(Lnet/minecraft/entity/EntityLivingBase;)Z");
+            if (env->ExceptionCheck() || !g_killAuraIsSameTeam) {
+                env->ExceptionClear();
+                g_killAuraIsSameTeam = env->GetMethodID(walk, "func_142014_c",
+                    "(Lnet/minecraft/entity/EntityLivingBase;)Z");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_killAuraIsSameTeam = nullptr; }
+            }
+        }
+        jclass parent = (jclass)env->GetSuperclass(walk);
+        env->DeleteLocalRef(walk);
+        walk = parent;
+    }
+    if (walk) env->DeleteLocalRef(walk);
+}
+
+static void UpdateKillAuraLegacy(JNIEnv* env, const Config& cfg) {
+    if (!cfg.killAura) {
+        g_killAuraLastScanMs = 0;
+        g_killAuraLastAttackMs = 0;
+        g_killAuraCurrentTarget.clear();
+        g_killAuraLastSwitchMs = 0;
+        g_killAuraPatternIndex = 0;
+        g_killAuraNextIntervalMs = 0;
+        g_killAuraAttackDelayMs = 0;
+        SetKillAuraUnavailableReasonLegacy("");
+        { LockGuard lk(g_killAuraUnavailableMutex); g_killAuraHasTarget = false; g_killAuraBlocking = false; }
+        KillAuraResetState();
+        ka_premotion::ClearPendingAttack(env);
+        return;
+    }
+    if (!env || !g_mcInstance) return;
+
+    DWORD now = GetTickCount();
+    if (now - g_killAuraLastScanMs < 50) return;
+    g_killAuraLastScanMs = now;
+    if (g_killAuraAttackDelayMs > 0) g_killAuraAttackDelayMs -= 50;
+
+    static std::string s_lastKillAuraConfigSummary;
+    std::ostringstream kaSummary;
+    kaSummary << "rot=" << cfg.killAuraRotMode
+              << " pre=" << (int)ka_premotion::GetBackend()
+              << " block=" << cfg.killAuraAutoBlock
+              << " players=" << cfg.killAuraPlayers
+              << " mobs=" << cfg.killAuraMobs
+              << " animals=" << cfg.killAuraAnimals
+              << " bosses=" << cfg.killAuraBosses
+              << " require=" << cfg.killAuraRequirePress
+              << " useRequire=" << cfg.killAuraAutoBlockRequirePress
+              << " allowMining=" << cfg.killAuraAllowMining;
+    if (kaSummary.str() != s_lastKillAuraConfigSummary) {
+        s_lastKillAuraConfigSummary = kaSummary.str();
+        Log("KillAura config: " + s_lastKillAuraConfigSummary);
+    }
+
+    if (!cfg.killAuraPlayers) {
+        SetKillAuraUnavailableReasonLegacy("Player targeting is disabled; selected non-player categories are not mapped on this legacy runtime.");
+        return;
+    }
+    if (cfg.killAuraWeaponsOnly && cfg.killAuraAllowTools) {
+        SetKillAuraUnavailableReasonLegacy("Allow-tools class mappings are not validated on this legacy runtime.");
+        return;
+    }
+    std::string premotionReasonLegacy;
+    if ((cfg.killAuraRotMode == killaura::ROT_SILENT ||
+         cfg.killAuraRotMode == killaura::ROT_LIQUID_BOUNCE ||
+         cfg.killAuraRotMode == killaura::ROT_HYPIXEL) &&
+        !ka_premotion::IsOperational()) {
+        premotionReasonLegacy = ka_premotion::GetBackend() == ka_premotion::HOOK_PACKET_RETRANSFORM
+            ? "PRE packet hook is armed but no movement callback heartbeat was observed."
+            : "Selected server-side rotation requires PRE motion hooks unavailable on this JVM; None, Legit, and LockView remain available.";
+    }
+    if (!premotionReasonLegacy.empty()) {
+        SetKillAuraUnavailableReasonLegacy(premotionReasonLegacy);
+        return;
+    }
+
+    bool attackKeyMapped = false, useKeyMapped = false;
+    const bool attackHeld = KillAuraReadKeyLegacy(env, false, &attackKeyMapped);
+    const bool useHeld = KillAuraReadKeyLegacy(env, true, &useKeyMapped);
+    if (cfg.killAuraRequirePress && !attackKeyMapped) {
+        SetKillAuraUnavailableReasonLegacy("Missing legacy attack KeyBinding.isKeyDown mapping.");
+        return;
+    }
+    if (cfg.killAuraAutoBlockRequirePress && !useKeyMapped) {
+        SetKillAuraUnavailableReasonLegacy("Missing legacy use-item KeyBinding.isKeyDown mapping.");
+        return;
+    }
+    if ((cfg.killAuraRequirePress && !attackHeld) ||
+        (cfg.killAuraAutoBlockRequirePress && !useHeld) ||
+        (!cfg.killAuraAllowMining && attackHeld && KillAuraLookingAtBlockLegacy(env))) {
+        ka_premotion::ClearPendingAttack(env);
+        return;
+    }
+
+    if (cfg.killAuraInventoryCheck && g_currentScreenField) {
+        jobject screen = env->GetObjectField(g_mcInstance, g_currentScreenField);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); screen = nullptr; }
+        if (screen) {
+            env->DeleteLocalRef(screen);
+            ka_premotion::SetSilentCombatAngles(false, 0.0f, 0.0f, 0.0f, false);
+            ka_premotion::ClearPendingAttack(env);
+            return;
+        }
+    }
+
+    EnsureKillAuraJniLegacy(env);
+    TryResolvePlayerCoreMappings(env);
+    if (now >= g_killAuraNextPremotionRefreshMs) {
+        g_killAuraNextPremotionRefreshMs = now + 1500;
+        ka_premotion::RefreshTargets(env);
+    }
+    if (!KillAuraPacketAttackReady() || !g_rotationYawField || !g_rotationPitchField ||
+        !g_theWorldField || !g_thePlayerField || !g_playerEntitiesField ||
+        !g_posXField || !g_posYField || !g_posZField || !g_getHealthMethod ||
+        !g_listSizeMethod || !g_listGetMethod) {
+        if (!g_loggedKillAuraAttackFail && !KillAuraPacketAttackReady()) {
+            g_loggedKillAuraAttackFail = true;
+            Log("KillAura: OpenMyau attack JNI unresolved (swing/C02/sync/local)");
+        }
+        ka_premotion::SetSilentCombatAngles(false, 0.0f, 0.0f, 0.0f, false);
+        return;
+    }
+
+    jobject worldObj = env->GetObjectField(g_mcInstance, g_theWorldField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); worldObj = nullptr; }
+    jobject selfObj = env->GetObjectField(g_mcInstance, g_thePlayerField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); selfObj = nullptr; }
+    if (!worldObj || !selfObj) {
+        if (worldObj) env->DeleteLocalRef(worldObj);
+        if (selfObj) env->DeleteLocalRef(selfObj);
+        ka_premotion::SetSilentCombatAngles(false, 0.0f, 0.0f, 0.0f, false);
+        return;
+    }
+    ResolveKillAuraCandidateFiltersLegacy(env, selfObj);
+    if (!cfg.killAuraThroughWalls && !g_killAuraCanSeeEntity) {
+        SetKillAuraUnavailableReasonLegacy("Missing EntityLivingBase.canEntityBeSeen(Entity) mapping required by Through Walls=false.");
+        env->DeleteLocalRef(worldObj); env->DeleteLocalRef(selfObj); return;
+    }
+    if (cfg.killAuraTeams && !g_killAuraIsSameTeam) {
+        SetKillAuraUnavailableReasonLegacy("Missing EntityPlayer.isOnSameTeam(EntityLivingBase) mapping required by Teams filter.");
+        env->DeleteLocalRef(worldObj); env->DeleteLocalRef(selfObj); return;
+    }
+    SetKillAuraUnavailableReasonLegacy("");
+    EnsureKillAuraAutoBlockLegacy(env, selfObj);
+
+    if (cfg.killAuraWeaponsOnly && !KillAuraHoldingWeaponLegacy(env, selfObj)) {
+        env->DeleteLocalRef(worldObj);
+        env->DeleteLocalRef(selfObj);
+        ka_premotion::SetSilentCombatAngles(false, 0.0f, 0.0f, 0.0f, false);
+        return;
+    }
+
+    jobject listObj = env->GetObjectField(worldObj, g_playerEntitiesField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); listObj = nullptr; }
+    if (!listObj) {
+        env->DeleteLocalRef(worldObj);
+        env->DeleteLocalRef(selfObj);
+        ka_premotion::SetSilentCombatAngles(false, 0.0f, 0.0f, 0.0f, false);
+        return;
+    }
+
+    double selfX = env->GetDoubleField(selfObj, g_posXField);
+    double selfY = env->GetDoubleField(selfObj, g_posYField);
+    double selfZ = env->GetDoubleField(selfObj, g_posZField);
+    float clientYaw = env->GetFloatField(selfObj, g_rotationYawField);
+    float clientPitch = env->GetFloatField(selfObj, g_rotationPitchField);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        clientYaw = 0.0f;
+        clientPitch = 0.0f;
+    }
+
+    int count = env->CallIntMethod(listObj, g_listSizeMethod);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); count = 0; }
+
+    double attackRange = (double)cfg.killAuraAttackRange;
+    double aimRange = (double)(std::max)(cfg.killAuraAutoBlockRange,
+        (std::max)(cfg.killAuraSwingRange, cfg.killAuraAttackRange));
+    if (aimRange < attackRange) aimRange = attackRange;
+    double aimRangeSq = aimRange * aimRange;
+    float fovHalf = (float)lc::ClampInt(cfg.killAuraFov, 30, 360) * 0.5f;
+
+    double bestScore = 1e18;
+    std::string bestName;
+    double bestX = 0, bestY = 0, bestZ = 0, bestDistSq = 0;
+    bool haveBest = false;
+    int bestRangeTier = 3;
+    bool haveCur = false;
+    int curRangeTier = 3;
+    double curX = 0, curY = 0, curZ = 0, curDistSq = 0;
+
+    for (int i = 0; i < count; i++) {
+        jobject candidate = env->CallObjectMethod(listObj, g_listGetMethod, (jint)i);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); break; }
+        if (!candidate) continue;
+        if (env->IsSameObject(candidate, selfObj) == JNI_TRUE) {
+            env->DeleteLocalRef(candidate);
+            continue;
+        }
+        if (!cfg.killAuraThroughWalls) {
+            jboolean visible = env->CallBooleanMethod(selfObj, g_killAuraCanSeeEntity, candidate);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); visible = JNI_FALSE; }
+            if (visible != JNI_TRUE) { env->DeleteLocalRef(candidate); continue; }
+        }
+        if (cfg.killAuraTeams) {
+            jboolean teammate = env->CallBooleanMethod(selfObj, g_killAuraIsSameTeam, candidate);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); teammate = JNI_FALSE; }
+            if (teammate == JNI_TRUE) { env->DeleteLocalRef(candidate); continue; }
+        }
+
+        float health = env->CallFloatMethod(candidate, g_getHealthMethod);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); health = 0.0f; }
+        if (!std::isfinite(health) || health <= 0.1f) {
+            env->DeleteLocalRef(candidate);
+            continue;
+        }
+
+        double x = env->GetDoubleField(candidate, g_posXField);
+        double y = env->GetDoubleField(candidate, g_posYField);
+        double z = env->GetDoubleField(candidate, g_posZField);
+        double dx = x - selfX, dy = y - selfY, dz = z - selfZ;
+        double distSq = dx * dx + dy * dy + dz * dz;
+        if (!std::isfinite(distSq) || distSq > aimRangeSq) {
+            env->DeleteLocalRef(candidate);
+            continue;
+        }
+
+        double horiz = std::sqrt(dx * dx + dz * dz);
+        if (horiz > 1e-6) {
+            float yawTo = (float)(std::atan2(-dx, dz) * 57.29577951308232);
+            if (std::abs(saaim::ShortestYawDelta(clientYaw, yawTo)) > fovHalf) {
+                env->DeleteLocalRef(candidate);
+                continue;
+            }
+        }
+
+        std::string stableName = GetStablePlayerName(env, candidate);
+        if (stableName.empty() || (cfg.killAuraBotCheck && LooksLikeFakePlayerLine(stableName))) {
+            env->DeleteLocalRef(candidate);
+            continue;
+        }
+
+        int armor = g_getTotalArmorValueMethod
+            ? env->CallIntMethod(candidate, g_getTotalArmorValueMethod) : 0;
+        if (env->ExceptionCheck()) { env->ExceptionClear(); armor = 0; }
+        float healthScore = armor == 0 ? INFINITY : health * (20.0f / (float)armor);
+        int hurtTime = g_hurtTimeField ? env->GetIntField(candidate, g_hurtTimeField) : 0;
+        if (env->ExceptionCheck()) { env->ExceptionClear(); hurtTime = 0; }
+        float fovScore = horiz > 1e-6
+            ? std::abs(killaura::Shortest(clientYaw,
+                (float)(std::atan2(-dx, dz) * 57.29577951308232))) : 0.0f;
+        double distance = std::sqrt(distSq);
+        int rangeTier = distance <= cfg.killAuraAttackRange ? 0
+            : distance <= cfg.killAuraSwingRange ? 1 : 2;
+        double sortScore = distSq;
+        if (cfg.killAuraSort == killaura::SORT_HEALTH) sortScore = std::isfinite(healthScore)
+            ? (double)healthScore * 10000.0 + distSq : 1.0e15 + distSq;
+        else if (cfg.killAuraSort == killaura::SORT_HURT_TIME) sortScore = (double)hurtTime * 10000.0 + distSq;
+        else if (cfg.killAuraSort == killaura::SORT_FOV) sortScore = (double)fovScore * 10000.0 + distSq;
+        double score = (double)rangeTier * 1.0e12 + sortScore;
+        if (score < bestScore) {
+            bestScore = score;
+            bestName = stableName;
+            bestX = x; bestY = y; bestZ = z; bestDistSq = distSq;
+            bestRangeTier = rangeTier;
+            haveBest = true;
+        }
+        if (!g_killAuraCurrentTarget.empty() && stableName == g_killAuraCurrentTarget) {
+            haveCur = true;
+            curX = x; curY = y; curZ = z; curDistSq = distSq;
+            curRangeTier = rangeTier;
+        }
+        env->DeleteLocalRef(candidate);
+    }
+
+    bool haveChosen = false;
+    double chX = 0, chY = 0, chZ = 0, chDistSq = 0;
+    std::string chosenName;
+    if (haveCur) {
+        DWORD switchDelay = (DWORD)std::max(0, cfg.killAuraSwitchDelayMs);
+        bool switchAllowed = cfg.killAuraMode == killaura::TARGET_SWITCH &&
+            haveBest && bestName != g_killAuraCurrentTarget &&
+            (g_killAuraLastSwitchMs == 0 || now - g_killAuraLastSwitchMs >= switchDelay);
+        if (switchAllowed) {
+            g_killAuraCurrentTarget = bestName;
+            g_killAuraLastSwitchMs = now;
+            chX = bestX; chY = bestY; chZ = bestZ; chDistSq = bestDistSq;
+            chosenName = bestName;
+            KillAuraResetState();
+        } else {
+            chX = curX; chY = curY; chZ = curZ; chDistSq = curDistSq;
+            chosenName = g_killAuraCurrentTarget;
+        }
+        haveChosen = true;
+    } else if (haveBest) {
+        if (bestName != g_killAuraCurrentTarget) {
+            g_killAuraCurrentTarget = bestName;
+            g_killAuraLastSwitchMs = now;
+            KillAuraResetState();
+        }
+        chX = bestX; chY = bestY; chZ = bestZ; chDistSq = bestDistSq;
+        chosenName = bestName;
+        haveChosen = true;
+    } else {
+        g_killAuraCurrentTarget.clear();
+        KillAuraResetState();
+    }
+
+    jobject chosenEnt = nullptr;
+    if (haveChosen && !chosenName.empty()) {
+        for (int i = 0; i < count && !chosenEnt; i++) {
+            jobject candidate = env->CallObjectMethod(listObj, g_listGetMethod, (jint)i);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); break; }
+            if (!candidate) continue;
+            std::string n = GetStablePlayerName(env, candidate);
+            if (n == chosenName)
+                chosenEnt = candidate;
+            else
+                env->DeleteLocalRef(candidate);
+        }
+    }
+    static std::string s_loggedKillAuraTarget;
+    if (chosenEnt && chosenName != s_loggedKillAuraTarget) {
+        s_loggedKillAuraTarget = chosenName;
+        Log("KillAura: target acquired: " + chosenName);
+    } else if (!chosenEnt) {
+        s_loggedKillAuraTarget.clear();
+    }
+    { LockGuard lk(g_killAuraUnavailableMutex);
+        g_killAuraHasTarget = haveChosen && chosenEnt;
+        g_killAuraBlocking = g_killAuraAutoBlockState.isBlocking;
+    }
+    if (haveCur && haveBest && curRangeTier > bestRangeTier) haveCur = false;
+
+    bool autoBlockAllowAttack = true;
+    if (haveChosen && chosenEnt && cfg.killAuraAutoBlock != killaura::BLOCK_NONE) {
+        bool usingItem = false;
+        if (g_killAuraIsUsingItem) {
+            usingItem = env->CallBooleanMethod(selfObj, g_killAuraIsUsingItem) == JNI_TRUE;
+            if (env->ExceptionCheck()) { env->ExceptionClear(); usingItem = false; }
+        }
+        int currentSlot = KillAuraCurrentSlotLegacy(env, selfObj);
+        int emptySlot = KillAuraFindSlotLegacy(env, selfObj, currentSlot, false);
+        int swordSlot = KillAuraFindSlotLegacy(env, selfObj, currentSlot, true);
+        int attackDelayMs = g_killAuraAttackDelayMs;
+        killaura::AutoBlockInput input;
+        input.mode = (killaura::AutoBlockMode)cfg.killAuraAutoBlock;
+        input.hasTarget = chDistSq <= (double)cfg.killAuraAutoBlockRange * cfg.killAuraAutoBlockRange;
+        input.canBlock = KillAuraHoldingWeaponLegacy(env, selfObj);
+        input.playerBlocking = usingItem;
+        input.usingItem = usingItem;
+        input.diggingOrPlacing = false;
+        input.slotsSynced = currentSlot >= 0;
+        input.hasSecondSword = swordSlot >= 0;
+        input.attackDelayMs = attackDelayMs;
+        killaura::AutoBlockResult result = killaura::StepAutoBlock(g_killAuraAutoBlockState, input);
+        { LockGuard lk(g_killAuraUnavailableMutex); g_killAuraBlocking = g_killAuraAutoBlockState.isBlocking; }
+        autoBlockAllowAttack = result.allowAttack;
+        if ((result.actions & killaura::ACTION_BLINK_ON) != 0) {
+            SetKillAuraUnavailableReasonLegacy(
+                "Selected legacy mode requires ordered Blink packet buffering; broker is not armed.");
+            autoBlockAllowAttack = false;
+        } else {
+            if ((result.actions & killaura::ACTION_STOP_BLOCK) != 0)
+                autoBlockAllowAttack = KillAuraStopBlockLegacy(env, selfObj) && autoBlockAllowAttack;
+            if ((result.actions & killaura::ACTION_SWAP_EMPTY) != 0 && emptySlot >= 0) {
+                bool slotsOk = KillAuraSendSlotLegacy(env, emptySlot);
+                if (cfg.killAuraAutoBlock == killaura::BLOCK_SPOOF)
+                    slotsOk = KillAuraSendSlotLegacy(env, currentSlot) && slotsOk;
+                autoBlockAllowAttack = slotsOk && autoBlockAllowAttack;
+            }
+            if ((result.actions & killaura::ACTION_SWAP_SWORD) != 0 && swordSlot >= 0)
+                autoBlockAllowAttack = KillAuraSendSlotLegacy(env, swordSlot) && autoBlockAllowAttack;
+            if ((result.actions & killaura::ACTION_START_BLOCK) != 0)
+                autoBlockAllowAttack = KillAuraStartBlockLegacy(env, selfObj) && autoBlockAllowAttack;
+        }
+    }
+
+    if (haveChosen && chosenEnt) {
+        const double eyeHeight = 1.62;
+        double eyeX = selfX, eyeY = selfY + eyeHeight, eyeZ = selfZ;
+        float randomization = cfg.killAuraRandomize ? cfg.killAuraRandomizeRange * 100.0f : 0.0f;
+        float wander = saaim::AimWanderStrength(randomization);
+
+        if (now >= g_killAuraNextAimPointMs) {
+            saaim::AimPointFracs fracs;
+            if (saaim::SelectAimPointFracs(
+                    eyeX, eyeY, eyeZ, chX, chY, chZ, attackRange, wander,
+                    KillAuraRand01, &fracs)) {
+                g_killAuraAimFracX = fracs.x;
+                g_killAuraAimFracY = fracs.y;
+                g_killAuraAimFracZ = fracs.z;
+            }
+            g_killAuraNextAimPointMs = now + 180 + (DWORD)(rand() % 220);
+        }
+
+        double aimFeetX = chX, aimFeetY = chY, aimFeetZ = chZ;
+        killaura::Vec3 lastEntity = { g_killAuraPrevValid ? g_killAuraPrevTX : chX,
+                                     g_killAuraPrevValid ? g_killAuraPrevTY : chY,
+                                     g_killAuraPrevValid ? g_killAuraPrevTZ : chZ };
+        if (g_killAuraPrevValid) {
+            aimFeetX += (chX - g_killAuraPrevTX) * 0.55;
+            aimFeetY += (chY - g_killAuraPrevTY) * 0.25;
+            aimFeetZ += (chZ - g_killAuraPrevTZ) * 0.55;
+        }
+        g_killAuraPrevTX = chX;
+        g_killAuraPrevTY = chY;
+        g_killAuraPrevTZ = chZ;
+        g_killAuraPrevValid = true;
+
+        double minX, minY, minZ, maxX, maxY, maxZ;
+        saaim::PlayerAabb(aimFeetX, aimFeetY, aimFeetZ, &minX, &minY, &minZ, &maxX, &maxY, &maxZ);
+        saaim::Vec3 aimPoint = saaim::PointFromFracs(
+            minX, minY, minZ, maxX, maxY, maxZ,
+            g_killAuraAimFracX, g_killAuraAimFracY, g_killAuraAimFracZ);
+        saaim::Angles targetAng = saaim::AnglesToPoint(eyeX, eyeY, eyeZ, aimPoint.x, aimPoint.y, aimPoint.z);
+
+        if (std::isfinite(targetAng.yaw) && std::isfinite(targetAng.pitch)) {
+            int rotMode = cfg.killAuraRotMode;
+            float fromYaw = g_killAuraCombatValid ? g_killAuraCombatYaw : clientYaw;
+            float fromPitch = g_killAuraCombatValid ? g_killAuraCombatPitch : clientPitch;
+            killaura::Angles current = { fromYaw, fromPitch };
+            killaura::Angles desired = { targetAng.yaw, targetAng.pitch };
+            killaura::Vec3 eyes = { eyeX, eyeY, eyeZ };
+            killaura::Box targetBox = { minX, minY, minZ, maxX, maxY, maxZ };
+            if (rotMode == killaura::ROT_NONE) {
+                desired.yaw = clientYaw;
+                desired.pitch = clientPitch;
+            } else if (rotMode == killaura::ROT_HYPIXEL) {
+                killaura::Vec3 entity = { chX, chY, chZ };
+                desired = killaura::RavenRaw(eyes, 0.0f, current.yaw, current.pitch,
+                    entity, lastEntity, 1.62f, cfg.killAuraRavenPredictTicks);
+                desired.yaw += KillAuraRandSigned01() * cfg.killAuraRavenYawRandom;
+                desired = killaura::RavenSmooth(desired, current,
+                    cfg.killAuraRavenSmoothing, 0.0f, 0.0f);
+            } else if (rotMode == killaura::ROT_LIQUID_BOUNCE) {
+                desired = killaura::LimitAngleChange(current, desired,
+                    cfg.killAuraLbHorizontalSpeed, cfg.killAuraLbVerticalSpeed,
+                    cfg.killAuraLbSmooth);
+            } else {
+                float smooth = (float)cfg.killAuraSmoothing / 100.0f;
+                desired = killaura::StandardRotation(eyes, targetBox, current,
+                    (float)cfg.killAuraAngleStep + KillAuraRandSigned01() * 5.0f, smooth,
+                    KillAuraRandSigned01() * 0.1f, KillAuraRandSigned01() * 0.1f);
+                desired.yaw += KillAuraRandSigned01() * 2.5f;
+                desired.pitch += KillAuraRandSigned01() * 1.5f;
+            }
+            desired = killaura::GcdPatch(desired, current, g_killAuraMouseSens);
+
+            saaim::StepResult step = {};
+            step.yaw = desired.yaw;
+            step.pitch = desired.pitch;
+            step.bodyYaw = desired.yaw;
+
+            g_killAuraCombatYaw = step.yaw;
+            g_killAuraCombatPitch = step.pitch;
+            g_killAuraCombatValid = true;
+            g_killAuraYawVel = step.yawVel;
+            g_killAuraPitchVel = step.pitchVel;
+            g_killAuraBodyYaw = step.bodyYaw;
+            g_killAuraBodyValid = true;
+            g_killAuraOvershootActive = step.overshootActive;
+            g_killAuraOvershootYaw = step.overshootYaw;
+            g_killAuraOvershootPitch = step.overshootPitch;
+
+            // None has no rotation; Legit and LockView are visible. Only the
+            // server-side modes depend on the PRE movement hook.
+            const bool silentMode = rotMode == killaura::ROT_SILENT ||
+                rotMode == killaura::ROT_LIQUID_BOUNCE ||
+                rotMode == killaura::ROT_HYPIXEL;
+            if (silentMode) {
+                ka_premotion::SetSilentCombatAngles(
+                    true, step.yaw, step.pitch, step.bodyYaw, true);
+            } else {
+                ka_premotion::SetSilentCombatAngles(false, 0.0f, 0.0f, 0.0f, false);
+                SetKillAuraPlayerLookLegacy(env, selfObj, step.yaw, step.pitch, step.bodyYaw);
+            }
+
+            float gateRand = (rotMode == 2) ? randomization : (std::min)(randomization, 12.0f);
+            bool onTarget = saaim::IsOnTarget(
+                eyeX, eyeY, eyeZ, chX, chY, chZ, step.yaw, step.pitch, gateRand);
+            if (rotMode == killaura::ROT_NONE) onTarget = true;
+            double hitRange = attackRange * 0.92;
+            bool inAttackRange = chDistSq <= hitRange * hitRange;
+            if (rotMode == 2)
+                onTarget = onTarget || (std::abs(saaim::ShortestYawDelta(step.yaw, targetAng.yaw)) < 8.0f);
+
+            if (onTarget && inAttackRange && autoBlockAllowAttack) {
+                    const bool cpsReady = g_killAuraAttackDelayMs <= 0;
+
+                    if (cpsReady) {
+                        // Packet/Cooldown: queue C0A→C02 for Premotion (send-queue hook fires pre-C03).
+                        // Prefer queue whenever Premotion is ready (Silent or Legit/Lock).
+                        // Without Premotion: Silent waits; Legit/Lock fires immediately (degraded).
+                        bool queuedOrFired = false;
+                        if (ka_premotion::IsOperational()) {
+                            queuedOrFired = ka_premotion::QueueAttack(env, chosenEnt);
+                        } else if (!silentMode) {
+                            queuedOrFired = KillAuraPerformAttackLegacy(env, selfObj, chosenEnt);
+                        } else if (!g_loggedKillAuraSilentNoPremotion) {
+                            g_loggedKillAuraSilentNoPremotion = true;
+                            Log("KillAura: Premotion not armed yet; Silent packet attacks waiting for send-queue hook");
+                        }
+                        if (queuedOrFired) {
+                            g_killAuraLastAttackMs = now;
+                            g_killAuraAttackDelayMs = (int)killaura::AttackDelayMs(
+                                g_killAuraAutoBlockState.isBlocking, cfg.killAuraAutoBlockCps,
+                                cfg.killAuraRecordCps, g_killAuraPatternIndex,
+                                cfg.killAuraMinCps, cfg.killAuraMaxCps, KillAuraRand01());
+                            if (cfg.killAuraRecordCps) ++g_killAuraPatternIndex;
+                            g_killAuraNextIntervalMs = (DWORD)g_killAuraAttackDelayMs;
+                        }
+                    }
+            }
+        }
+    } else {
+        ka_premotion::SetSilentCombatAngles(false, 0.0f, 0.0f, 0.0f, false);
+        ka_premotion::ClearPendingAttack(env);
+    }
+
+    if (chosenEnt) env->DeleteLocalRef(chosenEnt);
+    env->DeleteLocalRef(listObj);
+    env->DeleteLocalRef(worldObj);
     env->DeleteLocalRef(selfObj);
 }
 
@@ -5199,6 +6734,11 @@ GameState ReadGameState(JNIEnv* env) {
     s.attackCooldownPerTick = 0.08f;
     s.stateMs = (unsigned long long)GetTickCount64();
     s.chestStealerStateJson = BuildChestStealerStateJson(env, chestStealerEnabled);
+    { LockGuard lk(g_killAuraUnavailableMutex);
+        s.killAuraUnavailableReason = g_killAuraUnavailableReason;
+        s.killAuraHasTarget = g_killAuraHasTarget;
+        s.killAuraBlocking = g_killAuraBlocking;
+    }
     s.actionBar.clear();
     if (g_objectMouseOverField && g_typeOfHitField && g_enumNameMethod) {
         jobject mop = env->GetObjectField(g_mcInstance, g_objectMouseOverField);
@@ -6732,6 +8272,7 @@ void RenderHUD(int winW, int winH) {
     if (cfg.rightClick)        pushMod("Rightclick", ToImU32(theme.accentTertiary));
     if (cfg.aimAssist)         pushMod("Aim Assist", ToImU32(theme.accentPrimary));
     if (cfg.triggerbot)        pushMod("Triggerbot", ToImU32(theme.accentSecondary));
+    if (cfg.killAura)          pushMod("Kill Aura", ToImU32(theme.accentSecondary));
     if (cfg.speedBridge)       pushMod("SpeedBridge", ToImU32(theme.accentPrimary));
     if (cfg.chestEsp)          pushMod("Chest ESP", ToImU32(theme.accentSecondary));
     if (cfg.blockEsp)          pushMod("Block ESP", ToImU32(theme.accentSecondary));
@@ -9146,6 +10687,73 @@ void ParseConfig(const std::string& line) {
         g_config.clickInChests = reader.GetBool("clickInChests");
         g_config.aimAssist = reader.GetBool("aimAssist");
         g_config.triggerbot = reader.GetBool("triggerbot");
+        g_config.killAura = reader.GetBool("killAura");
+        g_config.killAuraRecordCps = reader.GetString("killAuraCpsMode") == "record";
+        g_config.killAuraMode = reader.GetString("killAuraMode") == "single" ? killaura::TARGET_SINGLE : killaura::TARGET_SWITCH;
+        { std::string v = reader.GetString("killAuraSort"); g_config.killAuraSort = v == "distance" ? 0 : v == "hurttime" ? 2 : v == "fov" ? 3 : 1; }
+        {
+            static const char* modes[] = {"none","vanilla","spoof","hypixel","blink","interact","swap","legit","fake","morden"};
+            std::string v = reader.GetString("killAuraAutoBlock"); g_config.killAuraAutoBlock = killaura::BLOCK_HYPIXEL;
+            for (int i = 0; i < 10; ++i) if (v == modes[i]) { g_config.killAuraAutoBlock = i; break; }
+        }
+        g_config.killAuraAttackTick = lc::ClampInt(reader.GetInt("killAuraAttackTick", 0), 0, 5);
+        g_config.killAuraAutoBlockRequirePress = reader.GetBool("killAuraAutoBlockRequirePress");
+        g_config.killAuraAutoBlockCps = lc::ClampFloat(reader.GetFloat("killAuraAutoBlockCps", 8), 1, 10);
+        g_config.killAuraAutoBlockRange = lc::ClampFloat(reader.GetFloat("killAuraAutoBlockRange", 6), 3, 8);
+        g_config.killAuraSwingRange = lc::ClampFloat(reader.GetFloat("killAuraSwingRange", 3.5f), 3, 6);
+        g_config.killAuraAttackRange = lc::ClampFloat(reader.GetFloat("killAuraAttackRange", 3), 3, 6);
+        g_config.killAuraFov = lc::ClampInt(reader.GetInt("killAuraFov", 360), 30, 360);
+        g_config.killAuraMinCps = lc::ClampInt(reader.GetInt("killAuraMinCps", 14), 1, 20);
+        g_config.killAuraMaxCps = lc::ClampInt(reader.GetInt("killAuraMaxCps", 14), 1, 20);
+        if (g_config.killAuraMinCps > g_config.killAuraMaxCps) g_config.killAuraMinCps = g_config.killAuraMaxCps;
+        g_config.killAuraSwitchDelayMs = lc::ClampInt(reader.GetInt("killAuraSwitchDelay", 150), 0, 1000);
+        { std::string v = reader.GetString("killAuraRotations"); g_config.killAuraRotMode = v == "none" ? 0 : v == "legit" ? 1 : v == "lockview" ? 3 : v == "liquidbounce" ? 4 : v == "hypixel" ? 5 : 2; }
+        g_config.killAuraDeadZone = lc::ClampFloat(reader.GetFloat("killAuraDeadZone", .5f), 0, 2);
+        g_config.killAuraMaxTurnSpeed = lc::ClampFloat(reader.GetFloat("killAuraMaxTurnSpeed", 25), 5, 180);
+        g_config.killAuraMinTurnSpeed = lc::ClampFloat(reader.GetFloat("killAuraMinTurnSpeed", 5), 1, 90);
+        g_config.killAuraAcceleration = lc::ClampFloat(reader.GetFloat("killAuraAcceleration", 2.5f), .1f, 10);
+        g_config.killAuraDeceleration = lc::ClampFloat(reader.GetFloat("killAuraDeceleration", 1.5f), .1f, 10);
+        g_config.killAuraUseOvershoot = reader.GetBool("killAuraUseOvershoot", true);
+        g_config.killAuraOvershootStrength = lc::ClampFloat(reader.GetFloat("killAuraOvershootStrength", 5), 0, 20);
+        g_config.killAuraOvershootRecovery = lc::ClampFloat(reader.GetFloat("killAuraOvershootRecovery", .2f), .01f, 1);
+        g_config.killAuraNoiseStrength = lc::ClampFloat(reader.GetFloat("killAuraNoiseStrength", .2f), 0, 2);
+        g_config.killAuraVisualizeAim = reader.GetBool("killAuraVisualizeAim", true);
+        g_config.killAuraSmoothBack = reader.GetBool("killAuraSmoothBack", true);
+        { std::string v = reader.GetString("killAuraMoveFix"); g_config.killAuraMoveFix = v == "none" ? 0 : v == "strict" ? 2 : 1; }
+        g_config.killAuraSmoothing = lc::ClampInt(reader.GetInt("killAuraSmoothing", 0), 0, 100);
+        g_config.killAuraRavenSmoothing = lc::ClampInt(reader.GetInt("killAuraRavenSmoothing", 0), 0, 10);
+        g_config.killAuraRavenPredictTicks = lc::ClampInt(reader.GetInt("killAuraRavenPredictTicks", 0), 0, 5);
+        g_config.killAuraRavenYawRandom = lc::ClampInt(reader.GetInt("killAuraRavenYawRandom", 0), 0, 5);
+        g_config.killAuraAngleStep = lc::ClampInt(reader.GetInt("killAuraAngleStep", 90), 30, 180);
+        g_config.killAuraThroughWalls = reader.GetBool("killAuraThroughWalls", true);
+        g_config.killAuraRequirePress = reader.GetBool("killAuraRequirePress");
+        g_config.killAuraAllowMining = reader.GetBool("killAuraAllowMining", true);
+        g_config.killAuraWeaponsOnly = reader.GetBool("killAuraWeaponsOnly", true);
+        g_config.killAuraAllowTools = reader.GetBool("killAuraAllowTools");
+        g_config.killAuraInventoryCheck = reader.GetBool("killAuraInventoryCheck", true);
+        g_config.killAuraBotCheck = reader.GetBool("killAuraBotCheck", true);
+        g_config.killAuraPlayers = reader.GetBool("killAuraPlayers", true);
+        g_config.killAuraBosses = reader.GetBool("killAuraBosses");
+        g_config.killAuraMobs = reader.GetBool("killAuraMobs");
+        g_config.killAuraAnimals = reader.GetBool("killAuraAnimals");
+        g_config.killAuraGolems = reader.GetBool("killAuraGolems");
+        g_config.killAuraSilverfish = reader.GetBool("killAuraSilverfish");
+        g_config.killAuraTeams = reader.GetBool("killAuraTeams", true);
+        g_config.killAuraShowTarget = reader.GetString("killAuraShowTarget") == "default";
+        g_config.killAuraDebugHealth = reader.GetString("killAuraDebug") == "health";
+        g_config.killAuraRandomize = reader.GetBool("killAuraRandomize", true);
+        g_config.killAuraRandomizeRange = lc::ClampFloat(reader.GetFloat("killAuraRandomizeRange", .4f), 0, 1);
+        g_config.killAuraYRandomize = lc::ClampFloat(reader.GetFloat("killAuraYRandomize", .3f), 0, 1);
+        g_config.killAuraLbHorizontalSpeed = lc::ClampFloat(reader.GetFloat("killAuraLbHorizontalSpeed", 180), 1, 180);
+        g_config.killAuraLbVerticalSpeed = lc::ClampFloat(reader.GetFloat("killAuraLbVerticalSpeed", 180), 1, 180);
+        g_config.killAuraLbSmooth = lc::ClampFloat(reader.GetFloat("killAuraLbSmooth", .5f), .1f, 1);
+        g_config.killAuraLbPredict = reader.GetBool("killAuraLbPredict", true);
+        g_config.killAuraLbPredictSize = lc::ClampFloat(reader.GetFloat("killAuraLbPredictSize", 1), 0, 3);
+        g_config.killAuraLbRandomize = reader.GetBool("killAuraLbRandomize", true);
+        g_config.killAuraLbRandomRange = lc::ClampFloat(reader.GetFloat("killAuraLbRandomRange", .5f), 0, 1);
+        g_config.killAuraLbHorizontalSearch = lc::ClampFloat(reader.GetFloat("killAuraLbHorizontalSearch", .5f), 0, 1);
+        g_config.killAuraLbBodyMin = lc::ClampFloat(reader.GetFloat("killAuraLbBodyMin", .1f), 0, 1);
+        g_config.killAuraLbBodyMax = lc::ClampFloat(reader.GetFloat("killAuraLbBodyMax", .9f), 0, 1);
         g_config.speedBridge = reader.GetBool("speedBridge");
         g_config.speedBridgeBlockOnly = reader.GetBool("speedBridgeBlockOnly");
         g_config.speedBridgeHoldingShiftOnly = reader.GetBool("speedBridgeHoldingShiftOnly");
@@ -9356,6 +10964,8 @@ void ServerLoop() {
     args.version = JNI_VERSION_1_8; args.name = (char*)"LegoBridge"; args.group = nullptr;
     g_jvm->AttachCurrentThread((void**)&env, &args);
     lc::InstallNickHiderJvmti(g_jvm, lc::NickHiderJvmtiGeneration::Legacy189, Log);
+    ka_premotion::Install(g_jvm, Log);
+    ka_premotion::SetAttackHandler(KillAuraPremotionAttackHandler);
 
     Log("Discovering classes...");
     bool mapped = DiscoverMappings(env);
@@ -9413,6 +11023,9 @@ void ServerLoop() {
                 if (cfgSnapshot.velocityEnabled || g_lastHurtTime > 0) {
                     UpdateVelocity(env, cfgSnapshot);
                 }
+                if (cfgSnapshot.killAura) {
+                    UpdateKillAuraLegacy(env, cfgSnapshot);
+                }
                 if (cfgSnapshot.antiDebuffEnabled) {
                     UpdateAntiDebuffLegacy(env, cfgSnapshot);
                 }
@@ -9453,6 +11066,9 @@ void ServerLoop() {
             jsonToSend += "\"breakingBlock\":" + std::string(state.breakingBlock ? "true" : "false") + ",";
             jsonToSend += "\"attackCooldown\":" + std::to_string(state.attackCooldown) + ",";
             jsonToSend += "\"attackCooldownPerTick\":" + std::to_string(state.attackCooldownPerTick) + ",";
+            jsonToSend += "\"killAuraUnavailableReason\":\"" + JsonEscape(state.killAuraUnavailableReason) + "\",";
+            jsonToSend += "\"killAuraHasTarget\":" + std::string(state.killAuraHasTarget ? "true" : "false") + ",";
+            jsonToSend += "\"killAuraBlocking\":" + std::string(state.killAuraBlocking ? "true" : "false") + ",";
             jsonToSend += "\"stateMs\":" + std::to_string(state.stateMs) + ",";
             jsonToSend += "\"chestStealerState\":";
             jsonToSend += state.chestStealerStateJson.empty() ? "null" : state.chestStealerStateJson;
@@ -9515,6 +11131,7 @@ void ServerLoop() {
                 lastNickHiderRefreshMs = nickHiderNow;
                 lc::RefreshNickHiderJvmtiTargets();
                 lc::FlushNickHiderJvmtiDiagnostics();
+                ka_premotion::RefreshTargets(env);
             }
             // Read config from C# (non-blocking)
             char buf[2048];
@@ -9550,6 +11167,7 @@ void ServerLoop() {
         ResetSpeedBridgeMovementTracking();
         HelperBridge::Unload(env);
         lc::ShutdownNickHiderJvmti(env);
+        ka_premotion::Shutdown(env);
     }
     g_jvm->DetachCurrentThread();
     closesocket(g_serverSocket); WSACleanup();

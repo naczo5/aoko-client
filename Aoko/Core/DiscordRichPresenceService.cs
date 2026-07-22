@@ -353,31 +353,7 @@ public sealed class DiscordRichPresenceService
     }
 
     private static int CountEnabledModules(Clicker clicker)
-    {
-        int count = 0;
-
-        if (clicker.LeftClickEnabled) count++;
-        if (clicker.RightClickEnabled) count++;
-        if (clicker.JitterEnabled) count++;
-        if (clicker.ClickInChests) count++;
-        if (clicker.BreakBlocksEnabled) count++;
-        if (clicker.AimAssistEnabled) count++;
-        if (clicker.TriggerbotEnabled) count++;
-        if (clicker.SilentAuraEnabled) count++;
-        if (clicker.GtbHelperEnabled) count++;
-        if (clicker.PixelPartyAssistEnabled) count++;
-        if (clicker.NametagsEnabled) count++;
-        if (clicker.ClosestPlayerInfoEnabled) count++;
-        if (clicker.ChestEspEnabled) count++;
-        if (clicker.ChestStealerEnabled) count++;
-        if (clicker.ReachEnabled) count++;
-        if (clicker.VelocityEnabled) count++;
-        if (clicker.AutoTotemEnabled) count++;
-        if (clicker.AntiDebuffEnabled) count++;
-        if (clicker.HitDelayFixEnabled) count++;
-
-        return count;
-    }
+        => ModuleCatalog.CountEnabledForDiscord(clicker);
 
     private static string NormalizeVersionLabel(string? version)
     {

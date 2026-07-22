@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta name="description" content="aoko client is a foss, injectable utility client for Lunar. Built for 1.8.9, 1.21.x, and 26.1." />
   <meta name="robots" content="index,follow" />
-  <meta name="theme-color" content="#08090C" />
+  <meta name="theme-color" content="#07131d" />
 
   <link rel="canonical" href="https://naczo5.github.io/aoko-client/" />
   <link rel="icon" type="image/x-icon" href="favicon.ico">
@@ -26,25 +26,24 @@
   <meta name="twitter:description" content="Built for 1.8.9, 1.21.x, and 26.1." />
   <meta name="twitter:image" content="https://naczo5.github.io/aoko-client/screenshots/gameplay.jpg" />
   <title>aoko — a foss, injectable utility client for Lunar</title>
-  <link rel="stylesheet" href="style.css?v=3" />
-  <link rel="stylesheet" href="preview.css?v=1" />
+  <link rel="stylesheet" href="style.css?v=4" />
+  <link rel="stylesheet" href="preview.css?v=2" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
 </head>
 <body>
 
   <!-- NAV -->
   <nav>
     <div class="nav-inner">
-      <a href="#top" class="logo-mini">aoko<span class="dot">_</span></a>
+      <a href="#top" class="logo-mini">aoko</a>
       <ul>
-        <li><a href="#registry">registry</a></li>
-        <li><a href="#status">status</a></li>
-        <li><a href="#arch">arch</a></li>
+        <li><a href="#registry">modules</a></li>
+        <li><a href="#arch">architecture</a></li>
         <li><a href="#setup">setup</a></li>
         <li><a href="getting-started/">docs</a></li>
-        <li><a href="https://github.com/naczo5/aoko-client/releases" class="nav-dl">get&nbsp;binary</a></li>
+        <li><a href="https://github.com/naczo5/aoko-client/releases" class="nav-dl">download</a></li>
       </ul>
     </div>
   </nav>
@@ -53,17 +52,17 @@
   <section class="hero" id="top">
     <div class="hero-grid">
       <div class="hero-left">
-        <div class="kicker"><span class="kick-dot"></span>foss · injectable · lunar client</div>
-        <h1 class="hero-logo">aoko<span class="cursor-block">_</span></h1>
-        <p class="tagline">A free, open-source utility client that injects straight into Lunar. One bridge, three versions: <b>1.8.9</b>, <b>1.21.x</b>, and <b>26.1</b>.</p>
+        <div class="kicker"><span class="kick-dot"></span>open source · lunar client</div>
+        <h1 class="hero-logo"><span>aoko</span> client</h1>
+        <p class="tagline">A free, open-source utility client that brings one calm, capable control surface to Lunar across <b>1.8.9</b>, <b>1.21.x</b>, and <b>26.1</b>.</p>
         <div class="hero-btns">
-          <a href="https://github.com/naczo5/aoko-client/releases" class="btn-primary">./download</a>
-          <a href="#registry" class="btn-text">browse modules <span class="arrow">→</span></a>
+          <a href="https://github.com/naczo5/aoko-client/releases" class="btn-primary">download aoko <span aria-hidden="true">↗</span></a>
+          <a href="#registry" class="btn-text">explore the client <span class="arrow">↓</span></a>
         </div>
         <div class="hero-meta">
-          <span><i>lang</i> c# · c++</span>
+          <span><i>built with</i> c# · c++</span>
           <span><i>license</i> gpl-3</span>
-          <span><i>platform</i> win x64</span>
+          <span><i>for</i> windows x64</span>
         </div>
       </div>
 
@@ -71,40 +70,29 @@
       <div class="launcher" id="launcher">
         <div class="launcher-bar">
           <span class="tl-dot"></span><span class="tl-dot"></span><span class="tl-dot"></span>
-          <span class="launcher-title">aoko — live preview</span>
+          <span class="launcher-title">aoko client · interactive preview</span>
         </div>
         <div class="launcher-screen">
           <div class="launcher-glow" aria-hidden="true"></div>
           <div class="launcher-copy">
-            <div class="launcher-kicker">interactive demo</div>
-            <p class="launcher-lead">Try the external GUI in your browser — no download.</p>
+            <div class="launcher-kicker">a closer look</div>
+            <p class="launcher-lead">Explore the control surface in your browser — no download needed.</p>
           </div>
           <button type="button" class="launcher-btn" id="preview-open" aria-haspopup="dialog" aria-controls="aoko-desktop">
             <span class="launcher-btn-icon" aria-hidden="true">▶</span> preview
           </button>
-          <div class="launcher-hint">opens a simulated desktop · esc to close</div>
+          <div class="launcher-hint">opens a simulated desktop · press esc to close</div>
         </div>
       </div>
     </div>
 
-    <figure class="hero-preview">
-      <img src="screenshots/121_gui.png" alt="aoko external gui" loading="eager" width="880" />
-      <figcaption>[ external gui — 1.21.x ]</figcaption>
-    </figure>
   </section>
-
-  <div class="ticker" aria-hidden="true">
-    <div class="ticker-track">
-      <span>autoclicker</span><span>·</span><span>aim assist</span><span>·</span><span>triggerbot</span><span>·</span><span>speedbridge</span><span>·</span><span>reach</span><span>·</span><span>velocity</span><span>·</span><span>autototem</span><span>·</span><span>antidebuff</span><span>·</span><span>chest stealer</span><span>·</span><span>gtb helper</span><span>·</span><span>nametags</span><span>·</span><span>chest esp</span><span>·</span><span>block esp</span><span>·</span><span>closest player</span><span>·</span><span>discord rpc</span><span>·</span>
-      <span>autoclicker</span><span>·</span><span>aim assist</span><span>·</span><span>triggerbot</span><span>·</span><span>speedbridge</span><span>·</span><span>reach</span><span>·</span><span>velocity</span><span>·</span><span>autototem</span><span>·</span><span>antidebuff</span><span>·</span><span>chest stealer</span><span>·</span><span>gtb helper</span><span>·</span><span>nametags</span><span>·</span><span>chest esp</span><span>·</span><span>block esp</span><span>·</span><span>closest player</span><span>·</span><span>discord rpc</span><span>·</span>
-    </div>
-  </div>
 
   <!-- REGISTRY -->
   <section id="registry" class="section">
     <div class="section-head">
-      <h2><span class="idx">01</span> module registry</h2>
-      <p>Everything aoko ships, grouped by subsystem. Expand a row for details.</p>
+      <h2><span class="eyebrow">01 / modules</span> Everything in one place</h2>
+      <p>Every module aoko ships, grouped by subsystem. Expand a row for details.</p>
     </div>
 
     <div class="reg-group" data-group="combat">
@@ -200,35 +188,10 @@
     </div>
   </section>
 
-  <!-- STATUS -->
-  <section id="status" class="section">
-    <div class="section-head">
-      <h2><span class="idx">02</span> build status</h2>
-      <p>last checked <span id="status-date"></span> · session <span id="uptime">00:00:00</span></p>
-    </div>
-    <div class="status-grid">
-      <div class="stat">
-        <div class="stat-top"><span class="led ok"></span>online</div>
-        <div class="stat-ver">lunar 1.8.9</div>
-        <div class="stat-note">legacy bridge · bridge.dll</div>
-      </div>
-      <div class="stat">
-        <div class="stat-top"><span class="led ok"></span>online</div>
-        <div class="stat-ver">lunar 1.21.x</div>
-        <div class="stat-note">modern bridge · bridge_261.dll</div>
-      </div>
-      <div class="stat">
-        <div class="stat-top"><span class="led ok"></span>online</div>
-        <div class="stat-ver">lunar 26.1</div>
-        <div class="stat-note">modern bridge · bridge_261.dll</div>
-      </div>
-    </div>
-  </section>
-
   <!-- ARCHITECTURE -->
   <section id="arch" class="section">
     <div class="section-head">
-      <h2><span class="idx">03</span> architecture</h2>
+      <h2><span class="eyebrow">02 / architecture</span> How aoko connects</h2>
       <p>How the loader and native bridge talk to the game.</p>
     </div>
 
@@ -282,7 +245,7 @@
   <!-- SETUP -->
   <section id="setup" class="section">
     <div class="section-head">
-      <h2><span class="idx">04</span> setup</h2>
+      <h2><span class="eyebrow">03 / setup</span> Start simply</h2>
       <p>Injecting into a running world is recommended so every module initializes.</p>
     </div>
     <div class="cols">
@@ -311,7 +274,7 @@
   <!-- DOWNLOAD -->
   <section id="download" class="section">
     <div class="section-head">
-      <h2><span class="idx">05</span> download</h2>
+      <h2><span class="eyebrow">04 / download</span> Make it yours</h2>
       <p>Open-source build for Windows x64.</p>
     </div>
     <div class="dl-block">
@@ -329,7 +292,7 @@
   <!-- FOOTER -->
   <footer>
     <div class="footer-inner">
-      <span class="logo-mini">aoko<span class="dot">_</span></span>
+      <span class="logo-mini">aoko</span>
       <p>use at your own risk.</p>
       <p class="footer-small">not affiliated with mojang, microsoft, or lunar client. for educational purposes only.</p>
     </div>

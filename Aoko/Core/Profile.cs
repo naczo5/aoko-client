@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using System.Text.Json.Serialization;
 
 namespace Aoko.Core;
 
@@ -13,6 +12,7 @@ public class Profile
     public string GuiTheme { get; set; } = "Slate";
     public string ModuleListStyle { get; set; } = "Default";
     public bool ShowLogo { get; set; } = true;
+    public bool DevMode { get; set; } = false;
     public bool DiscordRpcEnabled { get; set; } = true;
     public bool IsArmed { get; set; } = false;
     public float MinCPS { get; set; } = 8.0f;
@@ -37,16 +37,23 @@ public class Profile
     public int TriggerbotCooldownThreshold { get; set; } = 92;
     public int TriggerbotHitChance { get; set; } = 100;
     public bool TriggerbotRequireClick { get; set; } = true;
-    public bool SilentAuraEnabled { get; set; } = false;
-    public float SilentAuraRange { get; set; } = 3.0f;
-    public float SilentAuraAimRange { get; set; } = 4.0f;
-    public float SilentAuraRotSpeed { get; set; } = 35.0f;
-    public string SilentAuraTargetMode { get; set; } = "distance";
-    public int SilentAuraSwitchDelayMs { get; set; } = 400;
-    public int SilentAuraAccuracy { get; set; } = 90;
-    public bool SilentAuraSpamMode { get; set; } = true;
-    public float SilentAuraSpamMinCps { get; set; } = 14.0f;
-    public float SilentAuraSpamMaxCps { get; set; } = 18.0f;
+    public bool KillAuraEnabled { get; set; } = false;
+    public KillAuraSettings KillAuraSettings { get; set; } = new();
+    // Legacy flat KillAura fields are read for one-way migration only.
+    public float KillAuraRange { get; set; } = 2.9f;
+    public float KillAuraAimRange { get; set; } = 3.5f;
+    public float KillAuraMinTurnSpeed { get; set; } = 10.0f;
+    public float KillAuraMaxTurnSpeed { get; set; } = 20.0f;
+    public string KillAuraTargetMode { get; set; } = "distance";
+    public int KillAuraSwitchDelayMs { get; set; } = 350;
+    public int KillAuraRandomization { get; set; } = 18;
+    public string KillAuraClickMode { get; set; } = "cooldown";
+    public float KillAuraMinCps { get; set; } = 10.0f;
+    public float KillAuraMaxCps { get; set; } = 14.0f;
+    public int KillAuraFov { get; set; } = 120;
+    public string KillAuraRotMode { get; set; } = "legit";
+    public bool KillAuraRequirePress { get; set; } = false;
+    public bool KillAuraWeaponsOnly { get; set; } = true;
     public bool SpeedBridgeEnabled { get; set; } = false;
     public bool SpeedBridgeBlockOnly { get; set; } = true;
     public int SpeedBridgeDelayMs { get; set; } = 85;
@@ -107,27 +114,30 @@ public class Profile
 
     public Dictionary<string, int> ModuleKeys { get; set; } = new()
     {
-        ["autoclicker"]   = 0xC0,
-        ["rightclick"]    = 0,
-        ["jitter"]        = 0,
-        ["clickinchests"] = 0,
-        ["breakblocks"]   = 0,
-        ["aimassist"]     = 0,
-        ["triggerbot"]    = 0,
-        ["silentaura"]    = 0,
-        ["speedbridge"]   = 0,
-        ["gtbhelper"]     = 0,
+        ["autoclicker"]      = 0xC0,
+        ["rightclick"]       = 0,
+        ["jitter"]           = 0,
+        ["clickinchests"]    = 0,
+        ["breakblocks"]      = 0,
+        ["aimassist"]        = 0,
+        ["triggerbot"]       = 0,
+        ["killaura"]         = 0,
+        ["speedbridge"]      = 0,
+        ["gtbhelper"]        = 0,
         ["pixelpartyassist"] = 0,
-        ["nametags"]      = 0,
-        ["closestplayer"] = 0,
-        ["chestesp"]      = 0,
-        ["cheststealer"]  = 0,
-        ["blockesp"]      = 0,
-        ["reach"]         = 0,
-        ["velocity"]      = 0,
-        ["autototem"]     = 0,
-        ["panic"]         = 0,
-        ["hudeditor"]     = 0,
+        ["nametags"]         = 0,
+        ["nickhider"]        = 0,
+        ["closestplayer"]    = 0,
+        ["chestesp"]         = 0,
+        ["cheststealer"]     = 0,
+        ["blockesp"]         = 0,
+        ["reach"]            = 0,
+        ["velocity"]         = 0,
+        ["autototem"]        = 0,
+        ["antidebuff"]       = 0,
+        ["hitdelayfix"]     = 0,
+        ["panic"]            = 0,
+        ["hudeditor"]        = 0,
     };
     public string Theme { get; set; } = "Slate";
 }
@@ -317,12 +327,66 @@ public static class ProfileManager
         try
         {
             string json = File.ReadAllText(filePath);
-            return JsonSerializer.Deserialize<Profile>(json, JsonOptions);
+            Profile? profile = JsonSerializer.Deserialize<Profile>(json, JsonOptions);
+            if (profile != null)
+            {
+                using JsonDocument doc = JsonDocument.Parse(json);
+                MigrateSilentAuraToKillAura(doc.RootElement, profile);
+                MigrateFlatKillAuraSettings(doc.RootElement, profile);
+            }
+            return profile;
         }
         catch
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// Carries forward only SilentAura values with identical OpenMyau semantics.
+    /// </summary>
+    internal static void MigrateSilentAuraToKillAura(JsonElement root, Profile profile)
+    {
+        profile.ModuleKeys.Remove("silentaura");
+
+        bool silentEnabled = root.TryGetProperty("silentAuraEnabled", out JsonElement enabledEl)
+            && enabledEl.ValueKind == JsonValueKind.True;
+
+        if (silentEnabled && !profile.KillAuraEnabled)
+        {
+            profile.KillAuraEnabled = true;
+
+            if (root.TryGetProperty("silentAuraRange", out JsonElement rangeEl)
+                && rangeEl.TryGetSingle(out float range))
+                profile.KillAuraSettings.AttackRange = range;
+            if (root.TryGetProperty("silentAuraMinCps", out JsonElement minCpsEl)
+                && minCpsEl.TryGetSingle(out float minCps))
+                profile.KillAuraSettings.MinCps = (int)MathF.Round(minCps);
+            if (root.TryGetProperty("silentAuraMaxCps", out JsonElement maxCpsEl)
+                && maxCpsEl.TryGetSingle(out float maxCps))
+                profile.KillAuraSettings.MaxCps = (int)MathF.Round(maxCps);
+        }
+    }
+
+    internal static void MigrateFlatKillAuraSettings(JsonElement root, Profile profile)
+    {
+        if (root.TryGetProperty("killAuraSettings", out _)) return;
+
+        var settings = profile.KillAuraSettings;
+        settings.AttackRange = profile.KillAuraRange;
+        settings.Sort = profile.KillAuraTargetMode;
+        settings.SwitchDelay = profile.KillAuraSwitchDelayMs;
+        settings.MinCps = (int)MathF.Round(profile.KillAuraMinCps);
+        settings.MaxCps = (int)MathF.Round(profile.KillAuraMaxCps);
+        settings.Fov = profile.KillAuraFov;
+        settings.Rotations = profile.KillAuraRotMode switch
+        {
+            "legit" => "legit",
+            "lock" => "lockview",
+            _ => "silent"
+        };
+        settings.RequirePress = profile.KillAuraRequirePress;
+        settings.WeaponsOnly = profile.KillAuraWeaponsOnly;
     }
     
     public static void DeleteProfile(string name)
@@ -344,6 +408,7 @@ public static class ProfileManager
             GuiTheme = clicker.GuiTheme,
             ModuleListStyle = clicker.ModuleListStyle,
             ShowLogo = clicker.ShowLogo,
+            DevMode = clicker.DevMode,
             DiscordRpcEnabled = clicker.DiscordRpcEnabled,
             
             RightClickEnabled = clicker.RightClickEnabled,
@@ -364,16 +429,22 @@ public static class ProfileManager
             TriggerbotCooldownThreshold = clicker.TriggerbotCooldownThreshold,
             TriggerbotHitChance = clicker.TriggerbotHitChance,
             TriggerbotRequireClick = clicker.TriggerbotRequireClick,
-            SilentAuraEnabled = clicker.SilentAuraEnabled,
-            SilentAuraRange = clicker.SilentAuraRange,
-            SilentAuraAimRange = clicker.SilentAuraAimRange,
-            SilentAuraRotSpeed = clicker.SilentAuraRotSpeed,
-            SilentAuraTargetMode = clicker.SilentAuraTargetMode,
-            SilentAuraSwitchDelayMs = clicker.SilentAuraSwitchDelayMs,
-            SilentAuraAccuracy = clicker.SilentAuraAccuracy,
-            SilentAuraSpamMode = clicker.SilentAuraSpamMode,
-            SilentAuraSpamMinCps = clicker.SilentAuraSpamMinCps,
-            SilentAuraSpamMaxCps = clicker.SilentAuraSpamMaxCps,
+            KillAuraEnabled = clicker.KillAuraEnabled,
+            KillAuraSettings = clicker.KillAuraSettings.Clone(),
+            KillAuraRange = clicker.KillAuraRange,
+            KillAuraAimRange = clicker.KillAuraAimRange,
+            KillAuraMinTurnSpeed = clicker.KillAuraMinTurnSpeed,
+            KillAuraMaxTurnSpeed = clicker.KillAuraMaxTurnSpeed,
+            KillAuraTargetMode = clicker.KillAuraTargetMode,
+            KillAuraSwitchDelayMs = clicker.KillAuraSwitchDelayMs,
+            KillAuraRandomization = clicker.KillAuraRandomization,
+            KillAuraClickMode = clicker.KillAuraClickMode,
+            KillAuraMinCps = clicker.KillAuraMinCps,
+            KillAuraMaxCps = clicker.KillAuraMaxCps,
+            KillAuraFov = clicker.KillAuraFov,
+            KillAuraRotMode = clicker.KillAuraRotMode,
+            KillAuraRequirePress = clicker.KillAuraRequirePress,
+            KillAuraWeaponsOnly = clicker.KillAuraWeaponsOnly,
             SpeedBridgeEnabled = clicker.SpeedBridgeEnabled,
             SpeedBridgeBlockOnly = clicker.SpeedBridgeBlockOnly,
             SpeedBridgeDelayMs = clicker.SpeedBridgeDelayMs,
@@ -453,6 +524,7 @@ public static class ProfileManager
         if (profile.GuiTheme != null) clicker.GuiTheme = profile.GuiTheme;
         if (profile.ModuleListStyle != null) clicker.ModuleListStyle = profile.ModuleListStyle;
         clicker.ShowLogo = profile.ShowLogo;
+        clicker.DevMode = profile.DevMode;
         clicker.DiscordRpcEnabled = profile.DiscordRpcEnabled;
         
         clicker.RightClickEnabled = profile.RightClickEnabled;
@@ -473,16 +545,22 @@ public static class ProfileManager
         clicker.TriggerbotCooldownThreshold = profile.TriggerbotCooldownThreshold;
         clicker.TriggerbotHitChance = profile.TriggerbotHitChance;
         clicker.TriggerbotRequireClick = profile.TriggerbotRequireClick;
-        clicker.SilentAuraEnabled = profile.SilentAuraEnabled;
-        clicker.SilentAuraRange = profile.SilentAuraRange;
-        clicker.SilentAuraAimRange = profile.SilentAuraAimRange;
-        clicker.SilentAuraRotSpeed = profile.SilentAuraRotSpeed;
-        clicker.SilentAuraTargetMode = profile.SilentAuraTargetMode;
-        clicker.SilentAuraSwitchDelayMs = profile.SilentAuraSwitchDelayMs;
-        clicker.SilentAuraAccuracy = profile.SilentAuraAccuracy;
-        clicker.SilentAuraSpamMode = profile.SilentAuraSpamMode;
-        clicker.SilentAuraSpamMinCps = profile.SilentAuraSpamMinCps;
-        clicker.SilentAuraSpamMaxCps = profile.SilentAuraSpamMaxCps;
+        clicker.KillAuraEnabled = profile.KillAuraEnabled;
+        clicker.KillAuraSettings.CopyFrom(profile.KillAuraSettings);
+        clicker.KillAuraRange = profile.KillAuraRange;
+        clicker.KillAuraAimRange = profile.KillAuraAimRange;
+        clicker.KillAuraMinTurnSpeed = profile.KillAuraMinTurnSpeed;
+        clicker.KillAuraMaxTurnSpeed = profile.KillAuraMaxTurnSpeed;
+        clicker.KillAuraTargetMode = profile.KillAuraTargetMode;
+        clicker.KillAuraSwitchDelayMs = profile.KillAuraSwitchDelayMs;
+        clicker.KillAuraRandomization = profile.KillAuraRandomization;
+        clicker.KillAuraClickMode = profile.KillAuraClickMode;
+        clicker.KillAuraMinCps = profile.KillAuraMinCps;
+        clicker.KillAuraMaxCps = profile.KillAuraMaxCps;
+        clicker.KillAuraFov = profile.KillAuraFov;
+        clicker.KillAuraRotMode = profile.KillAuraRotMode;
+        clicker.KillAuraRequirePress = profile.KillAuraRequirePress;
+        clicker.KillAuraWeaponsOnly = profile.KillAuraWeaponsOnly;
         clicker.SpeedBridgeEnabled = profile.SpeedBridgeEnabled;
         clicker.SpeedBridgeBlockOnly = profile.SpeedBridgeBlockOnly;
         clicker.SpeedBridgeDelayMs = profile.SpeedBridgeDelayMs;
@@ -541,6 +619,9 @@ public static class ProfileManager
         foreach (var kvp in profile.ModuleKeys)
             InputHooks.SetModuleKey(kvp.Key, kvp.Value);
         ThemeManager.ApplyTheme(profile.Theme);
+
+        // Profiles may still store unfinished-module state; keep it off unless Dev Mode is on.
+        clicker.DisableDevOnlyModules();
     }
 
     private static List<BlockEspTargetData> BuildBlockEspTargetData(

@@ -920,6 +920,7 @@ public class GameStateClient : INotifyPropertyChanged
                 }
 
                 var clicker = Clicker.Instance;
+                var ka = clicker.KillAuraSettings;
                 var config = new
                 {
                     type = "config",
@@ -940,16 +941,68 @@ public class GameStateClient : INotifyPropertyChanged
                     aimAssistRange = clicker.AimAssistRange,
                     aimAssistStrength = clicker.AimAssistStrength,
                     triggerbot = clicker.TriggerbotEnabled,
-                    silentAura = clicker.SilentAuraEnabled,
-                    silentAuraRange = clicker.SilentAuraRange,
-                    silentAuraAimRange = clicker.SilentAuraAimRange,
-                    silentAuraRotSpeed = clicker.SilentAuraRotSpeed,
-                    silentAuraTargetMode = clicker.SilentAuraTargetMode,
-                    silentAuraSwitchDelayMs = clicker.SilentAuraSwitchDelayMs,
-                    silentAuraAccuracy = clicker.SilentAuraAccuracy,
-                    silentAuraSpamMode = clicker.SilentAuraSpamMode,
-                    silentAuraSpamMinCps = clicker.SilentAuraSpamMinCps,
-                    silentAuraSpamMaxCps = clicker.SilentAuraSpamMaxCps,
+                    killAura = clicker.KillAuraEnabled,
+                    killAuraCpsMode = ka.CpsMode,
+                    killAuraMode = ka.Mode,
+                    killAuraSort = ka.Sort,
+                    killAuraAutoBlock = ka.AutoBlock,
+                    killAuraAttackTick = ka.AttackTick,
+                    killAuraAutoBlockRequirePress = ka.AutoBlockRequirePress,
+                    killAuraAutoBlockCps = ka.AutoBlockCps,
+                    killAuraAutoBlockRange = ka.AutoBlockRange,
+                    killAuraSwingRange = ka.SwingRange,
+                    killAuraAttackRange = ka.AttackRange,
+                    killAuraFov = ka.Fov,
+                    killAuraMinCps = ka.MinCps,
+                    killAuraMaxCps = ka.MaxCps,
+                    killAuraSwitchDelay = ka.SwitchDelay,
+                    killAuraRotations = ka.Rotations,
+                    killAuraDeadZone = ka.DeadZoneSize,
+                    killAuraMaxTurnSpeed = ka.MaxTurnSpeed,
+                    killAuraMinTurnSpeed = ka.MinTurnSpeed,
+                    killAuraAcceleration = ka.Acceleration,
+                    killAuraDeceleration = ka.Deceleration,
+                    killAuraUseOvershoot = ka.UseOvershoot,
+                    killAuraOvershootStrength = ka.OvershootStrength,
+                    killAuraOvershootRecovery = ka.OvershootRecovery,
+                    killAuraNoiseStrength = ka.NoiseStrength,
+                    killAuraVisualizeAim = ka.VisualizeAim,
+                    killAuraSmoothBack = ka.SmoothBack,
+                    killAuraMoveFix = ka.MoveFix,
+                    killAuraSmoothing = ka.Smoothing,
+                    killAuraRavenSmoothing = ka.RavenSmoothing,
+                    killAuraRavenPredictTicks = ka.RavenPredictTicks,
+                    killAuraRavenYawRandom = ka.RavenYawRandom,
+                    killAuraAngleStep = ka.AngleStep,
+                    killAuraThroughWalls = ka.ThroughWalls,
+                    killAuraRequirePress = ka.RequirePress,
+                    killAuraAllowMining = ka.AllowMining,
+                    killAuraWeaponsOnly = ka.WeaponsOnly,
+                    killAuraAllowTools = ka.AllowTools,
+                    killAuraInventoryCheck = ka.InventoryCheck,
+                    killAuraBotCheck = ka.BotCheck,
+                    killAuraPlayers = ka.Players,
+                    killAuraBosses = ka.Bosses,
+                    killAuraMobs = ka.Mobs,
+                    killAuraAnimals = ka.Animals,
+                    killAuraGolems = ka.Golems,
+                    killAuraSilverfish = ka.Silverfish,
+                    killAuraTeams = ka.Teams,
+                    killAuraShowTarget = ka.ShowTarget,
+                    killAuraDebug = ka.DebugLog,
+                    killAuraRandomize = ka.Randomize,
+                    killAuraRandomizeRange = ka.RandomizeRange,
+                    killAuraYRandomize = ka.YRandomizeStrength,
+                    killAuraLbHorizontalSpeed = ka.LiquidBounceHorizontalSpeed,
+                    killAuraLbVerticalSpeed = ka.LiquidBounceVerticalSpeed,
+                    killAuraLbSmooth = ka.LiquidBounceSmoothFactor,
+                    killAuraLbPredict = ka.LiquidBouncePredict,
+                    killAuraLbPredictSize = ka.LiquidBouncePredictSize,
+                    killAuraLbRandomize = ka.LiquidBounceRandomize,
+                    killAuraLbRandomRange = ka.LiquidBounceRandomizeRange,
+                    killAuraLbHorizontalSearch = ka.LiquidBounceHorizontalSearch,
+                    killAuraLbBodyMin = ka.LiquidBounceBodyPointMin,
+                    killAuraLbBodyMax = ka.LiquidBounceBodyPointMax,
                     speedBridge = clicker.SpeedBridgeEnabled,
                     speedBridgeBlockOnly = clicker.SpeedBridgeBlockOnly,
                     speedBridgeDelayMs = clicker.SpeedBridgeDelayMs,
@@ -1012,7 +1065,7 @@ public class GameStateClient : INotifyPropertyChanged
                     keybindBreakBlocks   = InputHooks.GetModuleKey("breakblocks"),
                     keybindAimAssist     = InputHooks.GetModuleKey("aimassist"),
                     keybindTriggerbot    = InputHooks.GetModuleKey("triggerbot"),
-                    keybindSilentAura    = InputHooks.GetModuleKey("silentaura"),
+                    keybindKillAura      = InputHooks.GetModuleKey("killaura"),
                     keybindSpeedBridge   = InputHooks.GetModuleKey("speedbridge"),
                     keybindGtbHelper     = InputHooks.GetModuleKey("gtbhelper"),
                     keybindNametags      = InputHooks.GetModuleKey("nametags"),
@@ -1109,8 +1162,9 @@ public class GameStateClient : INotifyPropertyChanged
                 case "toggleTriggerbot":
                     clicker.TriggerbotEnabled = !clicker.TriggerbotEnabled;
                     break;
-                case "toggleSilentAura":
-                    clicker.SilentAuraEnabled = !clicker.SilentAuraEnabled;
+                case "toggleKillAura":
+                    if (clicker.DevMode)
+                        clicker.KillAuraEnabled = !clicker.KillAuraEnabled;
                     break;
                 case "toggleSpeedBridge":
                     clicker.SpeedBridgeEnabled = !clicker.SpeedBridgeEnabled;

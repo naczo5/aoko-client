@@ -55,6 +55,15 @@ public class GameState
     [JsonPropertyName("attackCooldownPerTick")]
     public float AttackCooldownPerTick { get; set; } = 0.08f;
 
+    [JsonPropertyName("killAuraUnavailableReason")]
+    public string KillAuraUnavailableReason { get; set; } = "";
+
+    [JsonPropertyName("killAuraHasTarget")]
+    public bool KillAuraHasTarget { get; set; }
+
+    [JsonPropertyName("killAuraBlocking")]
+    public bool KillAuraBlocking { get; set; }
+
     [JsonPropertyName("stateMs")]
     public ulong StateMs { get; set; }
 
