@@ -79,6 +79,18 @@ window.AOKO_PREVIEW_DATA = {
             { type: 'check', label: 'Only while holding left click', checked: false, gate: true },
           ],
         },
+        {
+          title: 'Kill Aura',
+          toggle: { on: false, main: true },
+          status: 'Available',
+          controls: [
+            { type: 'slider', label: 'Min CPS', min: 1, max: 25, value: 10, step: 1, decimals: 0, gate: true },
+            { type: 'slider', label: 'Max CPS', min: 1, max: 25, value: 14, step: 1, decimals: 0, gate: true },
+            { type: 'slider', label: 'Attack Range', min: 1, max: 6, value: 3.5, step: 0.1, decimals: 1, gate: true },
+            { type: 'slider', label: 'FOV', min: 1, max: 360, value: 180, step: 1, decimals: 0, gate: true },
+            { type: 'check', label: 'Auto Block', checked: true, gate: true },
+          ],
+        },
       ],
     },
 
@@ -202,6 +214,22 @@ window.AOKO_PREVIEW_DATA = {
           ],
         },
         {
+          title: 'Nick Hider',
+          status: 'Available',
+          controls: [
+            { type: 'switch', label: 'Enable Nick Hider', on: false, main: true },
+            { type: 'note', text: 'Spoofs player username in rendered text and chat locally using JVMTI string filters.' },
+          ],
+        },
+        {
+          title: 'Hit Delay Fix',
+          status: 'Available',
+          controls: [
+            { type: 'switch', label: 'Enable Hit Delay Fix', on: false, main: true },
+            { type: 'note', text: 'Removes the 1.8.9 attack cooldown delay for faster hit registration.' },
+          ],
+        },
+        {
           title: 'Panic',
           controls: [
             { type: 'note', text: 'Immediately disables modules, hides UI/overlay settings, disconnects, and closes the loader. Best-effort only.' },
@@ -215,9 +243,9 @@ window.AOKO_PREVIEW_DATA = {
             { type: 'note', text: 'Click a button, then press a key (Esc = unbind).' },
             { type: 'keybinds', items: [
               'Autoclicker', 'Right Click', 'Jitter', 'Click in Chests', 'Break Blocks',
-              'Aim Assist', 'Triggerbot', 'SpeedBridge', 'GTB Helper', 'Pixel Party',
+              'Aim Assist', 'Triggerbot', 'Kill Aura', 'SpeedBridge', 'GTB Helper', 'Pixel Party',
               'Nametags', 'Chest ESP', 'Chest Stealer', 'Block ESP', 'Closest Player',
-              'Reach', 'Velocity', 'AutoTotem', 'AntiDebuff', 'Panic',
+              'Reach', 'Velocity', 'AutoTotem', 'AntiDebuff', 'Nick Hider', 'Hit Delay Fix', 'Panic',
             ] },
           ],
         },

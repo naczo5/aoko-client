@@ -246,7 +246,7 @@
         <StackPanel x:Name="LoaderPanel" VerticalAlignment="Center">
             <TextBlock Text="Injection Control" Foreground="{DynamicResource TextBrush}"
                        FontSize="16" FontWeight="Bold" Margin="0,0,0,10" HorizontalAlignment="Center"/>
-            <TextBlock Text="Supported versions: 1.8.9, 1.21.x, and 26.1 (auto-detected)"
+            <TextBlock Text="Supported versions: 1.8.9, 1.21.x, 26.1, and 26.2 (auto-detected)"
                         Foreground="{DynamicResource DimTextBrush}"
                         FontSize="11"
                         HorizontalAlignment="Center"

@@ -13,10 +13,9 @@ export default defineConfig({
     starlight({
       title: 'aoko docs',
       description:
-        'Documentation for aoko client — a foss, injectable utility client for Lunar (1.8.9, 1.21.x, 26.1).',
-      tagline: 'a foss, injectable utility client for Lunar.',
+        'Documentation for aoko client — an open-source utility client for Lunar Client and standalone Minecraft instances (1.8.9 Forge, modern Fabric).',
+      tagline: 'Open-source utility client for Lunar Client & standalone Minecraft instances (1.8.9, 1.21.x, 26.1, 26.2).',
       // Link the docs back to the landing page (served at the site root).
-      logo: { src: './src/assets/logo.svg', replacesTitle: false },
       social: [
         {
           icon: 'github',
@@ -41,6 +40,7 @@ export default defineConfig({
             {
               label: 'Combat',
               items: [
+                { label: 'Kill Aura', slug: 'modules/combat/killaura' },
                 { label: 'Autoclicker', slug: 'modules/combat/autoclicker' },
                 { label: 'Aim Assist', slug: 'modules/combat/aim-assist' },
                 { label: 'Triggerbot', slug: 'modules/combat/triggerbot' },
@@ -70,6 +70,8 @@ export default defineConfig({
             {
               label: 'Utility',
               items: [
+                { label: 'Nick Hider', slug: 'modules/utility/nick-hider' },
+                { label: 'Hit Delay Fix', slug: 'modules/utility/hit-delay-fix' },
                 { label: 'Chest Stealer', slug: 'modules/utility/chest-stealer' },
                 { label: 'GTB Helper', slug: 'modules/utility/gtb-helper' },
                 { label: 'AntiDebuff', slug: 'modules/utility/antidebuff' },
