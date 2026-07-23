@@ -56,6 +56,13 @@ void SetSilentCombatAngles(bool silentEngaged, float yaw, float pitch, float bod
 bool QueueAttack(JNIEnv* env, jobject target);
 void ClearPendingAttack(JNIEnv* env);
 
+// World/server switches (config phase, loading screens) tear down player/C03 JNI
+// while the send-queue hook can still fire. Suspend no-ops NativeOnPacket and
+// clears pending/silent state before the bridge deletes C03 globals.
+void SuspendForWorldChange(JNIEnv* env);
+void ResumeAfterWorldChange();
+bool IsSuspended();
+
 bool IsReady();
 bool IsOperational();
 HookBackend GetBackend();

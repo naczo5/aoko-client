@@ -39,6 +39,50 @@ public class GameStateAndProfileTests
         Assert.Equal(3.25, state.Entities[0].Distance, 3);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void GameState_JsonNodeDeserialization_MatchesStringDeserialization(bool includeHudLayout)
+    {
+        string hudLayout = includeHudLayout
+            ? """, "hudLayout": { "moduleList": { "x": 14, "y": 28 } }"""
+            : string.Empty;
+        string json = $$"""
+            {
+              "mapped": true,
+              "guiOpen": false,
+              "screenName": "HUD",
+              "actionBar": "The theme is C_T",
+              "health": 18.5,
+              "viewportWidth": 1920,
+              "viewportHeight": 1001,
+              "entities": [
+                { "sx": 120.5, "sy": 44.2, "dist": 3.25, "name": "Steve", "hp": 20.0 }
+              ]
+              {{hudLayout}}
+            }
+            """;
+
+        GameState? fromString = JsonSerializer.Deserialize<GameState>(json);
+        JsonNode? node = JsonNode.Parse(json);
+        GameState? fromNode = node?.Deserialize<GameState>();
+
+        Assert.NotNull(fromString);
+        Assert.NotNull(fromNode);
+        Assert.Equal(fromString.Mapped, fromNode.Mapped);
+        Assert.Equal(fromString.GuiOpen, fromNode.GuiOpen);
+        Assert.Equal(fromString.ScreenName, fromNode.ScreenName);
+        Assert.Equal(fromString.ActionBar, fromNode.ActionBar);
+        Assert.Equal(fromString.Health, fromNode.Health);
+        Assert.Equal(fromString.ViewportWidth, fromNode.ViewportWidth);
+        Assert.Equal(fromString.ViewportHeight, fromNode.ViewportHeight);
+        Assert.Equal(fromString.Entities.Count, fromNode.Entities.Count);
+        Assert.Equal(fromString.Entities[0].Name, fromNode.Entities[0].Name);
+        Assert.Equal(fromString.Entities[0].Distance, fromNode.Entities[0].Distance);
+        Assert.Equal(includeHudLayout, node?["hudLayout"] != null);
+    }
+
+
     [Fact]
     public void GameState_DeserializesChestStealerState()
     {
@@ -145,6 +189,25 @@ public class GameStateAndProfileTests
         Assert.Equal(9.5, node[minCpsKey!]!.GetValue<double>(), 3);
         Assert.True(node["triggerbotEnabled"]!.GetValue<bool>());
         Assert.True(node["killAuraEnabled"]!.GetValue<bool>());
+    }
+
+    [Fact]
+    public void Profile_FightStatus_DefaultsDisabledAndSerializesRoundTrip()
+    {
+        var defaults = new Profile();
+        Assert.False(defaults.FightStatusEnabled);
+        Assert.Equal(0, defaults.ModuleKeys["fightstatus"]);
+
+        var profile = new Profile { FightStatusEnabled = true };
+        var options = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+
+        string json = JsonSerializer.Serialize(profile, options);
+        JsonNode? node = JsonNode.Parse(json);
+        Profile? roundTripped = JsonSerializer.Deserialize<Profile>(json, options);
+
+        Assert.True(node!["fightStatusEnabled"]!.GetValue<bool>());
+        Assert.NotNull(roundTripped);
+        Assert.True(roundTripped!.FightStatusEnabled);
     }
 
     [Fact]

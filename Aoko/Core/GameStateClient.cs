@@ -460,18 +460,18 @@ public class GameStateClient : INotifyPropertyChanged
                         continue;
                     }
 
-                    var state = JsonSerializer.Deserialize<GameState>(line);
+                    JsonNode? rawNode = JsonNode.Parse(line);
+                    var state = rawNode?.Deserialize<GameState>();
                     if (state != null)
                     {
-                        // Check raw JSON for hudLayout before handing off to GameState.
+                        // Apply hudLayout from the same parsed document used for GameState.
                         try
                         {
-                            JsonNode? rawNode = JsonNode.Parse(line);
                             JsonNode? hudLayoutNode = rawNode?["hudLayout"];
                             if (hudLayoutNode != null)
                                 ApplyInboundHudLayout(hudLayoutNode);
                         }
-                        catch { /* ignore JSON parse failures for hudLayout */ }
+                        catch { /* ignore JSON failures for hudLayout */ }
 
                         state.IsConnected = true;
                         state.LastUpdate = DateTime.Now;
@@ -973,6 +973,7 @@ public class GameStateClient : INotifyPropertyChanged
                     killAuraRavenSmoothing = ka.RavenSmoothing,
                     killAuraRavenPredictTicks = ka.RavenPredictTicks,
                     killAuraRavenYawRandom = ka.RavenYawRandom,
+                    killAuraGrokMaxSkew = ka.GrokMaxSkew,
                     killAuraAngleStep = ka.AngleStep,
                     killAuraThroughWalls = ka.ThroughWalls,
                     killAuraRequirePress = ka.RequirePress,
@@ -1024,6 +1025,7 @@ public class GameStateClient : INotifyPropertyChanged
                     showLogo = clicker.ShowLogo,
                     guiTheme = clicker.GuiTheme,
                     closestPlayerInfo = clicker.ClosestPlayerInfoEnabled,
+                    fightStatus = clicker.FightStatusEnabled,
                     nametagShowHealth = clicker.NametagShowHealth,
                     nametagShowArmor = clicker.NametagShowArmor,
                     nametagShowHeldItem = clicker.NametagShowHeldItem,
@@ -1070,6 +1072,7 @@ public class GameStateClient : INotifyPropertyChanged
                     keybindGtbHelper     = InputHooks.GetModuleKey("gtbhelper"),
                     keybindNametags      = InputHooks.GetModuleKey("nametags"),
                     keybindClosestPlayer = InputHooks.GetModuleKey("closestplayer"),
+                    keybindFightStatus   = InputHooks.GetModuleKey("fightstatus"),
                     keybindChestEsp      = InputHooks.GetModuleKey("chestesp"),
                     keybindChestStealer  = InputHooks.GetModuleKey("cheststealer"),
                     keybindBlockEsp      = InputHooks.GetModuleKey("blockesp"),
@@ -1189,6 +1192,9 @@ public class GameStateClient : INotifyPropertyChanged
                     break;
                 case "toggleClosestPlayerInfo":
                     clicker.ClosestPlayerInfoEnabled = !clicker.ClosestPlayerInfoEnabled;
+                    break;
+                case "toggleFightStatus":
+                    clicker.FightStatusEnabled = !clicker.FightStatusEnabled;
                     break;
                 case "toggleNametagHealth":
                     clicker.NametagShowHealth = !clicker.NametagShowHealth;

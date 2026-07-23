@@ -56,6 +56,7 @@ public static class ModuleCatalog
         new("nametags", "Nametags", "cfg.nametags", c => c.NametagsEnabled),
         new("nickhider", "Nick Hider", "cfg.nickHiderEnabled", c => c.NickHiderEnabled),
         new("closestplayer", "Closest Player", "cfg.closestPlayer", c => c.ClosestPlayerInfoEnabled),
+        new("fightstatus", "Fight Status", "cfg.fightStatus", c => c.FightStatusEnabled),
         new("chestesp", "Chest ESP", "cfg.chestEsp", c => c.ChestEspEnabled),
         new("cheststealer", "Chest Stealer", "cfg.chestStealer", c => c.ChestStealerEnabled),
         new("blockesp", "Block ESP", "cfg.blockEsp", c => c.BlockEspEnabled),

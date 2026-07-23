@@ -19,7 +19,7 @@ Saving a config captures the current state of the loader (CPS values, enabled mo
 Every module can be bound to a key under the **Keybinds** tab. Bindings are stored per config in the `moduleKeys` map.
 
 - Keybinds are **unbound by default**, with one exception: the **Autoclicker** toggle defaults to the backtick / grave key (`` ` ``).
-- Bindable actions include: autoclicker, right-click, jitter, click-in-chests, break-blocks, aim assist, triggerbot, speedbridge, GTB helper, PixelParty assist, nametags, closest player, chest ESP, chest stealer, block ESP, reach, velocity, autototem, HUD editor, and **panic**.
+- Bindable actions include: autoclicker, right-click, jitter, click-in-chests, break-blocks, aim assist, triggerbot, speedbridge, GTB helper, PixelParty assist, nametags, closest player, fight status, chest ESP, chest stealer, block ESP, reach, velocity, autototem, HUD editor, and **panic**.
 - A key toggles its module on/off while the Minecraft window is focused.
 
 :::tip

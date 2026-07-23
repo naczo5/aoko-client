@@ -69,6 +69,7 @@ public class Profile
     public string NickHiderAlias { get; set; } = string.Empty;
     public bool ShowModuleList { get; set; } = true;
     public bool ClosestPlayerInfoEnabled { get; set; } = false;
+    public bool FightStatusEnabled { get; set; } = false;
     public bool NametagShowHealth { get; set; } = true;
     public bool NametagShowArmor { get; set; } = true;
     public bool NametagShowHeldItem { get; set; } = true;
@@ -128,6 +129,7 @@ public class Profile
         ["nametags"]         = 0,
         ["nickhider"]        = 0,
         ["closestplayer"]    = 0,
+        ["fightstatus"]      = 0,
         ["chestesp"]         = 0,
         ["cheststealer"]     = 0,
         ["blockesp"]         = 0,
@@ -460,6 +462,7 @@ public static class ProfileManager
             NickHiderAlias = NickHiderConfig.NormalizeAlias(clicker.NickHiderAlias),
             ShowModuleList = clicker.ShowModuleList,
             ClosestPlayerInfoEnabled = clicker.ClosestPlayerInfoEnabled,
+            FightStatusEnabled = clicker.FightStatusEnabled,
             NametagShowHealth = clicker.NametagShowHealth,
             NametagShowArmor = clicker.NametagShowArmor,
             NametagShowHeldItem = clicker.NametagShowHeldItem,
@@ -576,6 +579,7 @@ public static class ProfileManager
         clicker.NickHiderAlias = profile.NickHiderAlias;
         clicker.ShowModuleList = profile.ShowModuleList;
         clicker.ClosestPlayerInfoEnabled = profile.ClosestPlayerInfoEnabled;
+        clicker.FightStatusEnabled = profile.FightStatusEnabled;
         clicker.NametagShowHealth = profile.NametagShowHealth;
         clicker.NametagShowArmor = profile.NametagShowArmor;
         clicker.NametagShowHeldItem = profile.NametagShowHeldItem;

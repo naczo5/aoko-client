@@ -82,6 +82,7 @@ public partial class MainWindow : Window
         ["cheststealer"] = "Chest Stealer",
         ["blockesp"] = "Block ESP",
         ["closestplayer"] = "Closest Player",
+        ["fightstatus"] = "Fight Status",
         ["reach"] = "Reach",
         ["velocity"] = "Velocity",
         ["autototem"] = "AutoTotem",
@@ -1368,6 +1369,7 @@ public partial class MainWindow : Window
         SetKeybindButtonContent(KeybindChestStealerButton, "cheststealer");
         SetKeybindButtonContent(KeybindBlockEspButton, "blockesp");
         SetKeybindButtonContent(KeybindClosestPlayerButton, "closestplayer");
+        SetKeybindButtonContent(KeybindFightStatusButton, "fightstatus");
         SetKeybindButtonContent(KeybindReachButton, "reach");
         SetKeybindButtonContent(KeybindVelocityButton, "velocity");
         SetKeybindButtonContent(KeybindAutoTotemButton, "autototem");

@@ -32,7 +32,7 @@ aoko client is an open-source Windows utility client and external overlay for Lu
 - Chest Stealer (external cursor-based)
 - GTB Helper
 - Discord Rich Presence
-- Nametags, Closest Player panel, Chest ESP, Block ESP
+- Nametags, Closest Player panel, Fight Status, Chest ESP, Block ESP
 - Per-module keybinds (all unbound by default)
 - Profiles saved in `%AppData%\Aoko\profiles\`
 - GUI customization (slate palettes, module list style, show logo)

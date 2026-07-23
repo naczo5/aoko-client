@@ -99,6 +99,37 @@ public class BridgeCapabilitiesTests
         Assert.True(legacy.SupportsSetting("antidebuffenabled"));
     }
 
+    [Theory]
+    [InlineData("1.8.9")]
+    [InlineData("1.21.4")]
+    [InlineData("26.1")]
+    [InlineData("26.2")]
+    public void FightStatus_FallbackSupportsModuleSettingAndKeybind(string version)
+    {
+        BridgeCapabilities caps = BridgeCapabilities.ForVersionFallback(version);
+
+        Assert.True(caps.SupportsModule("fightstatus"));
+        Assert.True(caps.SupportsSetting("fightstatus"));
+        Assert.True(caps.SupportsSetting("keybindfightstatus"));
+    }
+
+    [Fact]
+    public void FightStatus_FromPayloadNormalizesModuleSettingAndKeybind()
+    {
+        BridgeCapabilities fallback = BridgeCapabilities.ForVersionFallback("1.8.9");
+        var payload = new JsonObject
+        {
+            ["modules"] = new JsonArray("FIGHTSTATUS"),
+            ["settings"] = new JsonArray("FightStatus", "KeybindFightStatus")
+        };
+
+        BridgeCapabilities parsed = BridgeCapabilities.FromPayload(payload, fallback);
+
+        Assert.True(parsed.SupportsModule("fightstatus"));
+        Assert.True(parsed.SupportsSetting("fightstatus"));
+        Assert.True(parsed.SupportsSetting("keybindfightstatus"));
+    }
+
     [Fact]
     public void FromPayload_UsesFallbackWhenArraysMissing()
     {

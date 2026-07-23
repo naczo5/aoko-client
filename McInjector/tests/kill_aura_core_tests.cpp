@@ -51,6 +51,59 @@ static void TestRotations()
     Check(raven.yaw < -80 && raven.yaw > -100, "Raven predicted yaw");
 }
 
+static void TestGrok()
+{
+    killaura::Angles client = { 0.0f, 0.0f };
+    killaura::Angles farDesired = { 90.0f, 40.0f };
+    killaura::Angles clamped = killaura::ClampAnglesToCone(farDesired, client, 12.0f, 8.0f);
+    Near(12.0, clamped.yaw, 0.001, "cone clamps yaw to skew");
+    Near(8.0, clamped.pitch, 0.001, "cone clamps pitch to skew");
+    Check(killaura::AnglesWithinCone(clamped, client, 12.0f, 8.0f), "clamped angles stay in cone");
+    Check(!killaura::AnglesWithinCone(farDesired, client, 12.0f, 8.0f), "far angles outside cone");
+
+    killaura::Angles wrapClient = { 170.0f, 0.0f };
+    killaura::Angles wrapDesired = { -170.0f, 0.0f };
+    killaura::Angles wrapClamped = killaura::ClampAnglesToCone(wrapDesired, wrapClient, 12.0f, 8.0f);
+    Near(12.0, std::abs(killaura::Shortest(wrapClient.yaw, wrapClamped.yaw)), 0.01,
+         "cone uses shortest yaw path");
+    Check(killaura::AnglesWithinCone(wrapClamped, wrapClient, 12.0f, 8.0f),
+          "wrapped clamp stays within skew");
+
+    killaura::GrokState state;
+    killaura::GrokParams params = {};
+    params.maxSkewYaw = 12.0f;
+    params.maxSkewPitch = 8.0f;
+    params.deadZone = 0.5f;
+    params.minTurnSpeed = 5.0f;
+    params.maxTurnSpeed = 25.0f;
+    params.acceleration = 2.5f;
+    params.deceleration = 1.5f;
+    params.noiseStrength = 0.0f;
+    params.clientFovHalf = 180.0f;
+
+    killaura::Angles target = { 10.0f, 2.0f };
+    killaura::GrokResult first = killaura::GrokStep(client, target, client, state, params, 0.5f, 0.0f);
+    Check(killaura::AnglesWithinCone(first.desired, client, 14.0f, 10.0f), "Grok step stays near client cone");
+    Check(first.engage, "near target engages silent stamp");
+    Check(std::abs(first.yawVel - state.yawVel) <= params.maxTurnSpeed * 0.35f + 0.01f, "jerk limited yaw");
+
+    // Dead zone: from already on intent with zero vel should barely move.
+    state.yawVel = 0.0f;
+    state.pitchVel = 0.0f;
+    state.orbitPhase = 0.0f;
+    killaura::Angles onTarget = { 0.1f, 0.0f };
+    killaura::GrokResult settled = killaura::GrokStep(onTarget, onTarget, client, state, params, 0.4f, 0.0f);
+    Check(std::abs(settled.desired.yaw - onTarget.yaw) < 3.0f, "dead zone leaves residual without snap");
+
+    // Target far outside FOV must not engage.
+    params.clientFovHalf = 30.0f;
+    killaura::Angles behind = { 120.0f, 0.0f };
+    killaura::GrokResult noEngage = killaura::GrokStep(client, behind, client, state, params, 0.5f, 0.0f);
+    Check(!noEngage.engage, "out-of-FOV target disengages");
+    Check(killaura::AnglesWithinCone(noEngage.desired, client, 14.0f, 10.0f),
+          "disengaged step still cone-clamped");
+}
+
 static void TestCps()
 {
     Check(killaura::RecordedPatternSize() > 1000, "full recorded trace retained");
@@ -83,7 +136,7 @@ static void TestAutoBlock()
 
 int main()
 {
-    TestGeometry(); TestTargets(); TestRotations(); TestCps(); TestAutoBlock();
+    TestGeometry(); TestTargets(); TestRotations(); TestGrok(); TestCps(); TestAutoBlock();
     if (failures) return 1;
     std::cout << "kill_aura_core_tests: all passed" << std::endl;
     return 0;

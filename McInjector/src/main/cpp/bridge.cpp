@@ -25,6 +25,8 @@
 #include "nick_hider_jvmti.h"
 #include "hud_layout.h"
 #include "block_esp_common.h"
+#include "fight_status_core.h"
+#include "aim_assist_projection.h"
 #include "silent_aura_aim.h"
 #include "kill_aura_core.h"
 #include "kill_aura_premotion.h"
@@ -145,6 +147,7 @@ struct Config {
     bool nickHiderEnabled = false;
     std::string nickHiderAlias;
     bool closestPlayerInfo = false;
+    bool fightStatus = false;
     bool nametagShowHealth = true;
     bool nametagShowArmor = true;
     bool nametagHideVanilla = false;
@@ -185,6 +188,7 @@ struct Config {
     int keybindSpeedBridge = 0;
     int keybindNametags = 0;
     int keybindClosestPlayer = 0;
+    int keybindFightStatus = 0;
     int keybindChestEsp = 0;
     int keybindChestStealer = 0;
     int keybindBlockEsp = 0;
@@ -225,6 +229,7 @@ struct Config {
     int   killAuraRavenSmoothing = 0;
     int   killAuraRavenPredictTicks = 0;
     int   killAuraRavenYawRandom = 0;
+    float killAuraGrokMaxSkew = 12.0f;
     int   killAuraAngleStep = 90;
     bool  killAuraThroughWalls = true;
     bool  killAuraRequirePress = false;
@@ -370,6 +375,8 @@ static jobject g_gameClassLoader = nullptr;
 static jfieldID g_thePlayerField = nullptr;
 static jfieldID g_currentScreenField = nullptr;
 static jmethodID g_getHealthMethod = nullptr;
+static jmethodID g_getAbsorptionAmountMethod = nullptr;
+static bool g_absorptionMethodResolved = false;
 static jfieldID g_posXField = nullptr, g_posYField = nullptr, g_posZField = nullptr;
 static bool g_mapped = false;
 
@@ -571,6 +578,8 @@ static bool      g_killAuraBodyValid = false;
 static bool      g_killAuraOvershootActive = false;
 static float     g_killAuraOvershootYaw = 0.0f;
 static float     g_killAuraOvershootPitch = 0.0f;
+static float     g_killAuraGrokOrbitPhase = 0.0f;
+static bool      g_killAuraGrokEngaged = false;
 static float     g_killAuraAimFracX = 0.5f;
 static float     g_killAuraAimFracY = 0.55f;
 static float     g_killAuraAimFracZ = 0.5f;
@@ -656,6 +665,179 @@ struct TagSmoothingState {
 };
 static std::unordered_map<int, TagSmoothingState> g_tagSmoothing;
 static int g_tagFrameCounter = 0;
+
+struct FightStatusLocalSample18 {
+    fightstatus::CombatantTelemetry telemetry;
+    int hurtTime = 0;
+    bool hurtTimeAvailable = false;
+};
+
+struct FightStatusCandidate18 {
+    std::uint64_t stableId = 0;
+    std::string stableName;
+    std::string displayName;
+    fightstatus::CombatantTelemetry telemetry;
+    int hurtTime = 0;
+    bool hurtTimeAvailable = false;
+    double currentX = 0.0, currentY = 0.0, currentZ = 0.0;
+    double x = 0.0, y = 0.0, z = 0.0;
+    float distance = 0.0f;
+    float feetX = 0.0f, feetY = 0.0f;
+    float headX = 0.0f, headY = 0.0f;
+    bool hasProjectedAnchors = false;
+};
+
+struct FightStatusTargetObservation18 {
+    float resource = 0.0f;
+    int hurtTime = 0;
+    bool hasResource = false;
+    bool hurtTimeAvailable = false;
+    DWORD lastSeenMs = 0;
+    DWORD lastDamagedMs = 0;
+};
+
+struct FightStatusDrawSnapshot18 {
+    bool valid = false;
+    std::uint64_t stableId = 0;
+    std::string targetName;
+    float distance = 0.0f;
+    float feetX = 0.0f, feetY = 0.0f;
+    float headX = 0.0f, headY = 0.0f;
+    bool hasProjectedAnchors = false;
+    fightstatus::FightStatusResult result;
+    float normalizedAdvantage = 0.0f;
+};
+
+static fightstatus::FightStatusTracker g_fightStatusTracker18;
+static std::unordered_map<std::uint64_t, FightStatusTargetObservation18> g_fightStatusObservations18;
+static FightStatusDrawSnapshot18 g_fightStatusDrawSnapshot18;
+static Mutex g_fightStatusMutex18;
+
+static std::uint64_t StableFightStatusId18(const std::string& name) {
+    std::uint64_t hash = 1469598103934665603ULL;
+    for (unsigned char ch : name) {
+        hash ^= (std::uint64_t)ch;
+        hash *= 1099511628211ULL;
+    }
+    return hash == 0 ? 1 : hash;
+}
+
+static void ResetFightStatusStateLocked18() {
+    g_fightStatusTracker18.Reset();
+    g_fightStatusObservations18.clear();
+    g_fightStatusDrawSnapshot18 = FightStatusDrawSnapshot18();
+}
+
+static void ResetFightStatusState18() {
+    LockGuard lk(g_fightStatusMutex18);
+    ResetFightStatusStateLocked18();
+}
+
+static bool FightStatusCandidateCloser18(const FightStatusCandidate18* a,
+                                         const FightStatusCandidate18* b) {
+    if (a->distance != b->distance) return a->distance < b->distance;
+    return a->stableId < b->stableId;
+}
+
+static void UpdateFightStatusState18(DWORD now, bool enabled, bool menuOpen,
+                                     const FightStatusLocalSample18& self,
+                                     const std::vector<FightStatusCandidate18>& candidates) {
+    LockGuard lk(g_fightStatusMutex18);
+    if (!enabled || menuOpen || !self.telemetry.healthAvailable ||
+        !fightstatus::IsFinite(self.telemetry.health) || self.telemetry.health <= 0.0f) {
+        ResetFightStatusStateLocked18();
+        return;
+    }
+
+    std::vector<const FightStatusCandidate18*> eligible;
+    eligible.reserve(candidates.size());
+    for (const FightStatusCandidate18& candidate : candidates) {
+        if (candidate.stableId == 0 || candidate.stableName.empty()) continue;
+        if (!candidate.telemetry.healthAvailable ||
+            !fightstatus::IsFinite(candidate.telemetry.health) ||
+            candidate.telemetry.health <= 0.0f) continue;
+        if (!fightstatus::IsWithinRange(candidate.distance, 16.0f)) continue;
+        eligible.push_back(&candidate);
+    }
+    if (eligible.empty()) {
+        ResetFightStatusStateLocked18();
+        return;
+    }
+
+    if (g_fightStatusDrawSnapshot18.valid) {
+        bool previousStillEligible = false;
+        for (const FightStatusCandidate18* candidate : eligible) {
+            if (candidate->stableId == g_fightStatusDrawSnapshot18.stableId) {
+                previousStillEligible = true;
+                break;
+            }
+        }
+        if (!previousStillEligible) ResetFightStatusStateLocked18();
+    }
+
+    for (auto it = g_fightStatusObservations18.begin();
+         it != g_fightStatusObservations18.end();) {
+        if (now - it->second.lastSeenMs > 10000) it = g_fightStatusObservations18.erase(it);
+        else ++it;
+    }
+
+    const FightStatusCandidate18* selected = eligible.front();
+    for (const FightStatusCandidate18* candidate : eligible) {
+        if (FightStatusCandidateCloser18(candidate, selected)) selected = candidate;
+    }
+
+    bool selectedRecentDamage = false;
+    DWORD selectedDamageMs = 0;
+    for (const FightStatusCandidate18* candidate : eligible) {
+        FightStatusTargetObservation18& observation =
+            g_fightStatusObservations18[candidate->stableId];
+        const float resource = fightstatus::TotalHealth(candidate->telemetry);
+        const bool resourceDecreased = observation.hasResource &&
+            observation.resource - resource > 0.05f;
+        const bool hurtEdge = candidate->hurtTimeAvailable && candidate->hurtTime > 0 &&
+            (!observation.hurtTimeAvailable || observation.hurtTime <= 0 ||
+             candidate->hurtTime > observation.hurtTime);
+        const bool plausibleFallback = !candidate->hurtTimeAvailable &&
+            candidate->distance <= 6.0f;
+        if (resourceDecreased && (hurtEdge || plausibleFallback))
+            observation.lastDamagedMs = now;
+        observation.resource = resource;
+        observation.hurtTime = candidate->hurtTime;
+        observation.hasResource = true;
+        observation.hurtTimeAvailable = candidate->hurtTimeAvailable;
+        observation.lastSeenMs = now;
+
+        const bool recentDamage = observation.lastDamagedMs != 0 &&
+            now - observation.lastDamagedMs <= 5000;
+        if (recentDamage && (!selectedRecentDamage ||
+            observation.lastDamagedMs > selectedDamageMs ||
+            (observation.lastDamagedMs == selectedDamageMs &&
+             FightStatusCandidateCloser18(candidate, selected)))) {
+            selected = candidate;
+            selectedDamageMs = observation.lastDamagedMs;
+            selectedRecentDamage = true;
+        }
+    }
+
+    fightstatus::FightStatusResult result = g_fightStatusTracker18.Observe(
+        (std::uint64_t)now, self.telemetry, selected->telemetry,
+        selected->stableId, selected->distance);
+
+    FightStatusDrawSnapshot18 snapshot;
+    snapshot.valid = result.telemetryValid && result.targetRecent;
+    snapshot.stableId = selected->stableId;
+    snapshot.targetName = selected->displayName;
+    snapshot.distance = selected->distance;
+    snapshot.feetX = selected->feetX;
+    snapshot.feetY = selected->feetY;
+    snapshot.headX = selected->headX;
+    snapshot.headY = selected->headY;
+    snapshot.hasProjectedAnchors = selected->hasProjectedAnchors;
+    snapshot.result = result;
+    snapshot.normalizedAdvantage = fightstatus::NormalizedLead(
+        result.selfSurvivability, result.targetSurvivability);
+    g_fightStatusDrawSnapshot18 = snapshot;
+}
 
 
 static std::string g_logPath = "bridge_debug.log";
@@ -865,6 +1047,7 @@ jclass LoadClassWithLoader(JNIEnv* env, jobject cl, const char* name) {
 // ===================== CLASS DISCOVERY =====================
 bool DiscoverMappings(JNIEnv* env) {
     TRACE_PATH("enter");
+    ResetFightStatusState18();
     Log("Starting dynamic class discovery...");
     jvmtiEnv* jvmti = nullptr;
     bool jvmtiReady = TRACE_IF("jvmtiReady", (g_jvm->GetEnv((void**)&jvmti, JVMTI_VERSION_1_2) == JNI_OK && jvmti));
@@ -1097,6 +1280,14 @@ bool DiscoverMappings(JNIEnv* env) {
             }
             if (!g_posXField || !g_posYField || !g_posZField) {
                 // Prefer canonical field names (including inherited Entity fields) over reflection-order fallbacks.
+                if (!g_absorptionMethodResolved && !g_getAbsorptionAmountMethod) {
+                    g_getAbsorptionAmountMethod = env->GetMethodID(wc, "getAbsorptionAmount", "()F");
+                    if (!g_getAbsorptionAmountMethod) {
+                        env->ExceptionClear();
+                        g_getAbsorptionAmountMethod = env->GetMethodID(wc, "func_110139_bj", "()F");
+                    }
+                    if (!g_getAbsorptionAmountMethod) env->ExceptionClear();
+                }
                 if (!g_posXField) {
                     g_posXField = env->GetFieldID(wc, "posX", "D");
                     TRACE_BRANCH("posXDirectCanonicalHit", g_posXField != nullptr);
@@ -2357,6 +2548,7 @@ static bool NeedsCoreMappingRefresh() {
 
 static bool RunHeavyDiscovery(JNIEnv* env, const char* reason) {
     TRACE_PATH("enter");
+    ResetFightStatusState18();
     if (!env) return false;
     DWORD startedAt = GetTickCount();
     InterlockedExchange(&g_heavyDiscoveryInProgress, 1);
@@ -2571,7 +2763,7 @@ static void TryResolvePlayerCoreMappings(JNIEnv* env) {
     if (!prerequisites) return;
 
     const bool needPlayerCore =
-        !g_getHealthMethod ||
+        !g_getHealthMethod || !g_absorptionMethodResolved ||
         !g_posXField || !g_posYField || !g_posZField ||
         !g_rotationYawField || !g_rotationPitchField ||
         !g_getNameMethod || !g_getHeldItemMethod || !g_getTotalArmorValueMethod ||
@@ -2604,6 +2796,14 @@ static void TryResolvePlayerCoreMappings(JNIEnv* env) {
                 TRACE_BRANCH("playerCoreGetHealthObfHit", g_getHealthMethod != nullptr);
             }
             if (!g_getHealthMethod) env->ExceptionClear();
+        }
+        if (!g_absorptionMethodResolved && !g_getAbsorptionAmountMethod) {
+            g_getAbsorptionAmountMethod = env->GetMethodID(walk, "getAbsorptionAmount", "()F");
+            if (!g_getAbsorptionAmountMethod) {
+                env->ExceptionClear();
+                g_getAbsorptionAmountMethod = env->GetMethodID(walk, "func_110139_bj", "()F");
+            }
+            if (!g_getAbsorptionAmountMethod) env->ExceptionClear();
         }
         if (!g_posXField) {
             g_posXField = env->GetFieldID(walk, "posX", "D");
@@ -2729,6 +2929,7 @@ static void TryResolvePlayerCoreMappings(JNIEnv* env) {
         walk = nextWalk;
         depth++;
     }
+    g_absorptionMethodResolved = true;
     if (classClass) env->DeleteLocalRef(classClass);
     if (walk && walk != startClass) env->DeleteLocalRef(walk);
     if (startClass) env->DeleteLocalRef(startClass);
@@ -2774,6 +2975,7 @@ static void TrackLegacySuppressionWorldContext(JNIEnv* env, jobject worldObj) {
             g_lastLegacyNametagSuppressionWorld = nullptr;
         }
         g_lastLegacyNametagSuppressionWorld = env->NewGlobalRef(worldObj);
+        ResetFightStatusState18();
         if (g_legacyNametagSuppressionActive || !g_hiddenNametagOriginalTeamByPlayerLegacy.empty()) {
             g_hiddenNametagOriginalTeamByPlayerLegacy.clear();
             g_legacyNametagSuppressionActive = false;
@@ -3375,6 +3577,8 @@ static void KillAuraResetState() {
     g_killAuraOvershootActive = false;
     g_killAuraOvershootYaw = 0.0f;
     g_killAuraOvershootPitch = 0.0f;
+    g_killAuraGrokOrbitPhase = 0.0f;
+    g_killAuraGrokEngaged = false;
     g_killAuraAimFracX = 0.5f;
     g_killAuraAimFracY = 0.55f;
     g_killAuraAimFracZ = 0.5f;
@@ -3394,8 +3598,10 @@ static void KillAuraTryArmSendQueue(JNIEnv* env, jclass nhCls) {
     if (!g_killAuraC03Class || !g_killAuraC03Yaw || !g_killAuraC03Pitch) return;
     ka_premotion::BindC03LookFields(
         g_killAuraC03Class, g_killAuraC03Yaw, g_killAuraC03Pitch, g_killAuraC03Rotating);
-    if (ka_premotion::ArmSendQueueHook(env, nhCls))
+    if (ka_premotion::ArmSendQueueHook(env, nhCls)) {
         g_killAuraSendQueueArmed = true;
+        ka_premotion::ResumeAfterWorldChange();
+    }
 }
 
 static void EnsureKillAuraJniLegacy(JNIEnv* env) {
@@ -3407,6 +3613,11 @@ static void EnsureKillAuraJniLegacy(JNIEnv* env) {
             g_rotationYawHeadField, g_renderYawOffsetField);
         if (g_mcInstance && g_thePlayerField)
             ka_premotion::BindMcPlayerLookup(g_mcInstance, g_thePlayerField);
+        if (g_killAuraC03Class && g_killAuraC03Yaw && g_killAuraC03Pitch) {
+            ka_premotion::BindC03LookFields(
+                g_killAuraC03Class, g_killAuraC03Yaw, g_killAuraC03Pitch, g_killAuraC03Rotating);
+            ka_premotion::ResumeAfterWorldChange();
+        }
         return;
     }
 
@@ -4247,7 +4458,7 @@ static void UpdateKillAuraLegacy(JNIEnv* env, const Config& cfg) {
         SetKillAuraUnavailableReasonLegacy("");
         { LockGuard lk(g_killAuraUnavailableMutex); g_killAuraHasTarget = false; g_killAuraBlocking = false; }
         KillAuraResetState();
-        ka_premotion::ClearPendingAttack(env);
+        ka_premotion::SuspendForWorldChange(env);
         return;
     }
     if (!env || !g_mcInstance) return;
@@ -4285,7 +4496,8 @@ static void UpdateKillAuraLegacy(JNIEnv* env, const Config& cfg) {
     std::string premotionReasonLegacy;
     if ((cfg.killAuraRotMode == killaura::ROT_SILENT ||
          cfg.killAuraRotMode == killaura::ROT_LIQUID_BOUNCE ||
-         cfg.killAuraRotMode == killaura::ROT_HYPIXEL) &&
+         cfg.killAuraRotMode == killaura::ROT_HYPIXEL ||
+         cfg.killAuraRotMode == killaura::ROT_GROK) &&
         !ka_premotion::IsOperational()) {
         premotionReasonLegacy = ka_premotion::GetBackend() == ka_premotion::HOOK_PACKET_RETRANSFORM
             ? "PRE packet hook is armed but no movement callback heartbeat was observed."
@@ -4329,6 +4541,14 @@ static void UpdateKillAuraLegacy(JNIEnv* env, const Config& cfg) {
     TryResolvePlayerCoreMappings(env);
     if (now >= g_killAuraNextPremotionRefreshMs) {
         g_killAuraNextPremotionRefreshMs = now + 1500;
+        // EnsureKillAuraJniLegacy / KillAuraTryArmSendQueue rebind C03 then resume.
+        if (g_killAuraSendQueueArmed && g_killAuraC03Class && g_killAuraC03Yaw && g_killAuraC03Pitch) {
+            ka_premotion::BindC03LookFields(
+                g_killAuraC03Class, g_killAuraC03Yaw, g_killAuraC03Pitch, g_killAuraC03Rotating);
+            if (g_mcInstance && g_thePlayerField)
+                ka_premotion::BindMcPlayerLookup(g_mcInstance, g_thePlayerField);
+            ka_premotion::ResumeAfterWorldChange();
+        }
         ka_premotion::RefreshTargets(env);
     }
     if (!KillAuraPacketAttackReady() || !g_rotationYawField || !g_rotationPitchField ||
@@ -4350,7 +4570,8 @@ static void UpdateKillAuraLegacy(JNIEnv* env, const Config& cfg) {
     if (!worldObj || !selfObj) {
         if (worldObj) env->DeleteLocalRef(worldObj);
         if (selfObj) env->DeleteLocalRef(selfObj);
-        ka_premotion::SetSilentCombatAngles(false, 0.0f, 0.0f, 0.0f, false);
+        // Left world / dimension switch — disarm Premotion before C03/player go stale.
+        ka_premotion::SuspendForWorldChange(env);
         return;
     }
     ResolveKillAuraCandidateFiltersLegacy(env, selfObj);
@@ -4639,15 +4860,53 @@ static void UpdateKillAuraLegacy(JNIEnv* env, const Config& cfg) {
 
         if (std::isfinite(targetAng.yaw) && std::isfinite(targetAng.pitch)) {
             int rotMode = cfg.killAuraRotMode;
+            killaura::Angles clientLook = { clientYaw, clientPitch };
+            killaura::Angles targetLook = { targetAng.yaw, targetAng.pitch };
             float fromYaw = g_killAuraCombatValid ? g_killAuraCombatYaw : clientYaw;
             float fromPitch = g_killAuraCombatValid ? g_killAuraCombatPitch : clientPitch;
+            if (rotMode == killaura::ROT_GROK) {
+                const float skewYaw = cfg.killAuraGrokMaxSkew;
+                const float skewPitch = skewYaw * (8.0f / 12.0f);
+                killaura::Angles combat = { fromYaw, fromPitch };
+                if (!g_killAuraGrokEngaged || !g_killAuraCombatValid ||
+                    !killaura::AnglesWithinCone(combat, clientLook, skewYaw, skewPitch)) {
+                    fromYaw = clientYaw;
+                    fromPitch = clientPitch;
+                }
+            }
             killaura::Angles current = { fromYaw, fromPitch };
             killaura::Angles desired = { targetAng.yaw, targetAng.pitch };
             killaura::Vec3 eyes = { eyeX, eyeY, eyeZ };
             killaura::Box targetBox = { minX, minY, minZ, maxX, maxY, maxZ };
+            bool grokEngage = true;
             if (rotMode == killaura::ROT_NONE) {
                 desired.yaw = clientYaw;
                 desired.pitch = clientPitch;
+            } else if (rotMode == killaura::ROT_GROK) {
+                killaura::GrokState grokState;
+                grokState.yawVel = g_killAuraYawVel;
+                grokState.pitchVel = g_killAuraPitchVel;
+                grokState.orbitPhase = g_killAuraGrokOrbitPhase;
+                grokState.engaged = g_killAuraGrokEngaged;
+                killaura::GrokParams grokParams = {};
+                grokParams.maxSkewYaw = cfg.killAuraGrokMaxSkew;
+                grokParams.maxSkewPitch = cfg.killAuraGrokMaxSkew * (8.0f / 12.0f);
+                grokParams.deadZone = cfg.killAuraDeadZone;
+                grokParams.minTurnSpeed = cfg.killAuraMinTurnSpeed;
+                grokParams.maxTurnSpeed = cfg.killAuraMaxTurnSpeed;
+                grokParams.acceleration = cfg.killAuraAcceleration;
+                grokParams.deceleration = cfg.killAuraDeceleration;
+                grokParams.noiseStrength = cfg.killAuraNoiseStrength;
+                grokParams.clientFovHalf = (float)cfg.killAuraFov * 0.5f;
+                killaura::GrokResult grok = killaura::GrokStep(
+                    current, targetLook, clientLook, grokState, grokParams,
+                    KillAuraRand01(), KillAuraRandSigned01());
+                desired = grok.desired;
+                g_killAuraYawVel = grok.yawVel;
+                g_killAuraPitchVel = grok.pitchVel;
+                g_killAuraGrokOrbitPhase = grok.orbitPhase;
+                g_killAuraGrokEngaged = grok.engage;
+                grokEngage = grok.engage;
             } else if (rotMode == killaura::ROT_HYPIXEL) {
                 killaura::Vec3 entity = { chX, chY, chZ };
                 desired = killaura::RavenRaw(eyes, 0.0f, current.yaw, current.pitch,
@@ -4655,10 +4914,12 @@ static void UpdateKillAuraLegacy(JNIEnv* env, const Config& cfg) {
                 desired.yaw += KillAuraRandSigned01() * cfg.killAuraRavenYawRandom;
                 desired = killaura::RavenSmooth(desired, current,
                     cfg.killAuraRavenSmoothing, 0.0f, 0.0f);
+                g_killAuraGrokEngaged = false;
             } else if (rotMode == killaura::ROT_LIQUID_BOUNCE) {
                 desired = killaura::LimitAngleChange(current, desired,
                     cfg.killAuraLbHorizontalSpeed, cfg.killAuraLbVerticalSpeed,
                     cfg.killAuraLbSmooth);
+                g_killAuraGrokEngaged = false;
             } else {
                 float smooth = (float)cfg.killAuraSmoothing / 100.0f;
                 desired = killaura::StandardRotation(eyes, targetBox, current,
@@ -4666,6 +4927,7 @@ static void UpdateKillAuraLegacy(JNIEnv* env, const Config& cfg) {
                     KillAuraRandSigned01() * 0.1f, KillAuraRandSigned01() * 0.1f);
                 desired.yaw += KillAuraRandSigned01() * 2.5f;
                 desired.pitch += KillAuraRandSigned01() * 1.5f;
+                g_killAuraGrokEngaged = false;
             }
             desired = killaura::GcdPatch(desired, current, g_killAuraMouseSens);
 
@@ -4673,6 +4935,10 @@ static void UpdateKillAuraLegacy(JNIEnv* env, const Config& cfg) {
             step.yaw = desired.yaw;
             step.pitch = desired.pitch;
             step.bodyYaw = desired.yaw;
+            if (rotMode == killaura::ROT_GROK) {
+                step.yawVel = g_killAuraYawVel;
+                step.pitchVel = g_killAuraPitchVel;
+            }
 
             g_killAuraCombatYaw = step.yaw;
             g_killAuraCombatPitch = step.pitch;
@@ -4687,12 +4953,17 @@ static void UpdateKillAuraLegacy(JNIEnv* env, const Config& cfg) {
 
             // None has no rotation; Legit and LockView are visible. Only the
             // server-side modes depend on the PRE movement hook.
+            // Grok is silent but only stamps when the client-cone engage gate passes.
             const bool silentMode = rotMode == killaura::ROT_SILENT ||
                 rotMode == killaura::ROT_LIQUID_BOUNCE ||
-                rotMode == killaura::ROT_HYPIXEL;
-            if (silentMode) {
+                rotMode == killaura::ROT_HYPIXEL ||
+                rotMode == killaura::ROT_GROK;
+            const bool stampSilent = silentMode && (rotMode != killaura::ROT_GROK || grokEngage);
+            if (stampSilent) {
                 ka_premotion::SetSilentCombatAngles(
                     true, step.yaw, step.pitch, step.bodyYaw, true);
+            } else if (silentMode) {
+                ka_premotion::SetSilentCombatAngles(false, 0.0f, 0.0f, 0.0f, false);
             } else {
                 ka_premotion::SetSilentCombatAngles(false, 0.0f, 0.0f, 0.0f, false);
                 SetKillAuraPlayerLookLegacy(env, selfObj, step.yaw, step.pitch, step.bodyYaw);
@@ -4702,6 +4973,7 @@ static void UpdateKillAuraLegacy(JNIEnv* env, const Config& cfg) {
             bool onTarget = saaim::IsOnTarget(
                 eyeX, eyeY, eyeZ, chX, chY, chZ, step.yaw, step.pitch, gateRand);
             if (rotMode == killaura::ROT_NONE) onTarget = true;
+            if (rotMode == killaura::ROT_GROK && !grokEngage) onTarget = false;
             double hitRange = attackRange * 0.92;
             bool inAttackRange = chDistSq <= hitRange * hitRange;
             if (rotMode == 2)
@@ -6935,6 +7207,7 @@ static void ResetImGuiBackendsForReinit(const char* reason) {
 
 extern "C" __declspec(dllexport) void Detach() {
     Log("Detach requested");
+    ResetFightStatusState18();
     g_running = false;
 
     if (g_clientSocket != INVALID_SOCKET) {
@@ -8269,6 +8542,7 @@ void RenderHUD(int winW, int winH) {
     }
     if (cfg.clickInChests)     pushMod("Click in Chests", ToImU32(theme.accentTertiary));
     if (cfg.closestPlayerInfo) pushMod("Closest Player", ToImU32(theme.accentSecondary));
+    if (cfg.fightStatus)       pushMod("Fight Status", ToImU32(theme.accentPrimary));
     if (cfg.rightClick)        pushMod("Rightclick", ToImU32(theme.accentTertiary));
     if (cfg.aimAssist)         pushMod("Aim Assist", ToImU32(theme.accentPrimary));
     if (cfg.triggerbot)        pushMod("Triggerbot", ToImU32(theme.accentSecondary));
@@ -8641,6 +8915,7 @@ void RenderNametags(int w, int h) {
     bool hideVanillaTags = false;
     bool nametagsEnabled = false;
     bool nickHiderEnabled = false;
+    bool fightStatusEnabled = false;
     bool entityTelemetryNeeded = false;
     int nametagMaxCount = 8;
     std::string guiTheme = "Default";
@@ -8649,10 +8924,11 @@ void RenderNametags(int w, int h) {
          LockGuard lk(g_configMutex);
          nametagsEnabled = g_config.nametags;
          nickHiderEnabled = g_config.nickHiderEnabled;
+         fightStatusEnabled = g_config.fightStatus;
          nickHiderAlias = g_config.nickHiderAlias;
-         entityTelemetryNeeded = g_config.nametags || g_config.nickHiderEnabled || g_config.closestPlayerInfo || g_config.aimAssist || g_config.nametagHideVanilla || g_legacyNametagSuppressionActive;
+         entityTelemetryNeeded = g_config.nametags || g_config.nickHiderEnabled || g_config.closestPlayerInfo || g_config.aimAssist || g_config.fightStatus || g_config.nametagHideVanilla || g_legacyNametagSuppressionActive;
          TRACE_BRANCH("entityTelemetryNeeded", entityTelemetryNeeded);
-          if (!entityTelemetryNeeded) return;
+          if (!entityTelemetryNeeded) { ResetFightStatusState18(); return; }
          showHealth = g_config.nametagShowHealth;
          showArmor = g_config.nametagShowArmor;
          hideVanillaTags = g_config.nametagHideVanilla;
@@ -8668,11 +8944,11 @@ void RenderNametags(int w, int h) {
     }
    bool mappedReady = (g_mapped && g_mcInstance);
    TRACE_BRANCH("mappedReady", mappedReady);
-   if (!mappedReady) return;
+   if (!mappedReady) { if (fightStatusEnabled) ResetFightStatusState18(); return; }
 
     ScopedJNIEnv env(g_jvm);
     TRACE_BRANCH("jniEnvAvailable", env != nullptr);
-    if (!env) return;
+    if (!env) { if (fightStatusEnabled) ResetFightStatusState18(); return; }
 
     TryResolveScreenFieldDirect(env);
     TryResolvePlayerCoreMappings(env);
@@ -8686,6 +8962,7 @@ void RenderNametags(int w, int h) {
             warnedMissingMappings = true;
             Log("Nametags missing core/player mappings.");
         }
+        if (fightStatusEnabled) ResetFightStatusState18();
         return;
     }
 
@@ -8695,10 +8972,11 @@ void RenderNametags(int w, int h) {
             warnedMissingMappings = true;
             Log("Nametags waiting for JNI world mappings.");
         }
+        if (fightStatusEnabled) ResetFightStatusState18();
         return;
     }
 
-    if (!g_activeRenderInfoClass || !g_modelViewField || !g_projectionField) {
+    if ((!g_activeRenderInfoClass || !g_modelViewField || !g_projectionField) && !fightStatusEnabled) {
         TRACE_PATH("missing-render-mappings");
         if (!warnedMissingMappings) {
             warnedMissingMappings = true;
@@ -8793,6 +9071,7 @@ void RenderNametags(int w, int h) {
     // 4. Iterate Entities
     jobject world = env->GetObjectField(g_mcInstance, g_theWorldField);
     if (!world) {
+        if (fightStatusEnabled) ResetFightStatusState18();
         if (g_legacyNametagSuppressionActive || !g_hiddenNametagOriginalTeamByPlayerLegacy.empty() || g_lastLegacyNametagSuppressionWorld) {
             ResetLegacyNametagSuppressionState(env, "world-null");
         }
@@ -8804,6 +9083,7 @@ void RenderNametags(int w, int h) {
     
     jobject startList = env->GetObjectField(world, g_playerEntitiesField);
     if (!startList) {
+        if (fightStatusEnabled) ResetFightStatusState18();
         if (logctr % 600 == 0) Log("WARNING: playerEntities list is null");
         env->PopLocalFrame(nullptr);
         return;
@@ -8812,6 +9092,7 @@ void RenderNametags(int w, int h) {
     int size = env->CallIntMethod(startList, g_listSizeMethod);
     if (env->ExceptionCheck()) {
         env->ExceptionClear();
+        if (fightStatusEnabled) ResetFightStatusState18();
         env->PopLocalFrame(nullptr);
         return;
     }
@@ -8854,7 +9135,9 @@ void RenderNametags(int w, int h) {
     std::stringstream ss;
     ss << "[";
     constexpr int kEntityJsonCap = 20;
-    const int entityProcessCap = (hideVanillaTags || g_legacyNametagSuppressionActive)
+    const int entityProcessCap = fightStatusEnabled
+        ? (std::max)(1, size)
+        : (hideVanillaTags || g_legacyNametagSuppressionActive)
         ? (std::max)(1, size)
         : nametagsEnabled
             ? (std::max)(1, (std::min)(20, nametagMaxCount))
@@ -8864,6 +9147,7 @@ void RenderNametags(int w, int h) {
     
     // Get Local Player for distance & health debug
     jobject player = env->GetObjectField(g_mcInstance, g_thePlayerField);
+    if (fightStatusEnabled && player) EnsureVelocityMappings(env, player);
     const std::string localAccountName = player ? GetStablePlayerName(env, player) : "";
     jobject hideScoreboardObj = nullptr;
     jobject hideTeamObj = nullptr;
@@ -8900,13 +9184,45 @@ void RenderNametags(int w, int h) {
     
     double localPX = 0.0, localPY = 0.0, localPZ = 0.0;
     bool haveLocalPos = false;
+    FightStatusLocalSample18 fightSelf;
+    std::vector<FightStatusCandidate18> fightCandidates;
+    if (fightStatusEnabled) fightCandidates.reserve((size_t)(std::max)(0, size));
     if (player) {
         localPX = env->GetDoubleField(player, g_posXField);
         localPY = env->GetDoubleField(player, g_posYField);
         localPZ = env->GetDoubleField(player, g_posZField);
         haveLocalPos = true;
+        if (fightStatusEnabled && g_getHealthMethod) {
+            float selfHealth = env->CallFloatMethod(player, g_getHealthMethod);
+            if (!env->ExceptionCheck() && fightstatus::IsFinite(selfHealth)) {
+                float selfAbsorption = 0.0f;
+                if (g_getAbsorptionAmountMethod) {
+                    selfAbsorption = env->CallFloatMethod(player, g_getAbsorptionAmountMethod);
+                    if (env->ExceptionCheck() || !fightstatus::IsFinite(selfAbsorption)) {
+                        if (env->ExceptionCheck()) env->ExceptionClear();
+                        selfAbsorption = 0.0f;
+                    }
+                }
+                fightstatus::ArmorProfile selfArmor;
+                if (g_getTotalArmorValueMethod) {
+                    int armor = env->CallIntMethod(player, g_getTotalArmorValueMethod);
+                    if (env->ExceptionCheck()) env->ExceptionClear();
+                    else selfArmor = fightstatus::ArmorProfile::Legacy((float)armor);
+                }
+                fightSelf.telemetry = fightstatus::CombatantTelemetry(
+                    selfHealth, selfAbsorption, selfArmor, 20.0f);
+            } else if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+            }
+        }
+        if (fightStatusEnabled && g_hurtTimeField) {
+            fightSelf.hurtTime = env->GetIntField(player, g_hurtTimeField);
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            else fightSelf.hurtTimeAvailable = true;
+        }
     }
     if (!haveLocalPos) {
+        if (fightStatusEnabled) ResetFightStatusState18();
         env->DeleteLocalRef(startList);
         env->DeleteLocalRef(world);
         goto exit_frame;
@@ -8966,9 +9282,9 @@ void RenderNametags(int w, int h) {
         double rZ = iZ - vZ;
 
         // Name with fake/bot line filtering parity
-        std::string displayName = GetStablePlayerName(env, entity);
-        displayName = lc::ReplaceNickHiderText(displayName, nickHiderEnabled, localAccountName, nickHiderAlias);
-        if (displayName.empty() || LooksLikeFakePlayerLine(displayName)) {
+        std::string stableName = GetStablePlayerName(env, entity);
+        std::string displayName = lc::ReplaceNickHiderText(stableName, nickHiderEnabled, localAccountName, nickHiderAlias);
+        if (stableName.empty() || displayName.empty() || LooksLikeFakePlayerLine(stableName) || LooksLikeFakePlayerLine(displayName)) {
             env->DeleteLocalRef(entity);
             continue;
         }
@@ -8981,10 +9297,36 @@ void RenderNametags(int w, int h) {
         
         // Health
         float health = 20.0f;
+        bool healthAvailable = false;
         if (g_getHealthMethod) {
             health = env->CallFloatMethod(entity, g_getHealthMethod);
             if (env->ExceptionCheck()) env->ExceptionClear();
+            else healthAvailable = fightstatus::IsFinite(health);
         }
+        float absorption = 0.0f;
+        if (fightStatusEnabled && g_getAbsorptionAmountMethod) {
+            absorption = env->CallFloatMethod(entity, g_getAbsorptionAmountMethod);
+            if (env->ExceptionCheck() || !fightstatus::IsFinite(absorption)) {
+                if (env->ExceptionCheck()) env->ExceptionClear();
+                absorption = 0.0f;
+            }
+        }
+        int armorPoints = -1;
+        if ((fightStatusEnabled || (nametagsEnabled && showArmor)) && g_getTotalArmorValueMethod) {
+            armorPoints = env->CallIntMethod(entity, g_getTotalArmorValueMethod);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); armorPoints = -1; }
+        }
+        int hurtTime = 0;
+        bool hurtTimeAvailable = false;
+        if (fightStatusEnabled && g_hurtTimeField) {
+            hurtTime = env->GetIntField(entity, g_hurtTimeField);
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            else hurtTimeAvailable = true;
+        }
+        double dx = iX - localPX;
+        double dy = iY - localPY;
+        double dz = iZ - localPZ;
+        double dist = sqrt(dx*dx + dy*dy + dz*dz);
 
         // Project (prefer matrix when stable, otherwise fallback to angle/FOV)
         float sX = 0, sY = 0;
@@ -8992,6 +9334,30 @@ void RenderNametags(int w, int h) {
         float matrixSX = 0, matrixSY = 0;
         if (matrixProjectionUsable) {
             matrixProjected = WorldToScreen(rX, rY + 2.3, rZ, view, proj, w, h, matrixSX, matrixSY);
+        }
+
+        if (fightStatusEnabled) {
+            FightStatusCandidate18 candidate;
+            candidate.stableId = StableFightStatusId18(stableName);
+            candidate.stableName = stableName;
+            candidate.displayName = displayName;
+            fightstatus::ArmorProfile armor;
+            if (armorPoints >= 0) armor = fightstatus::ArmorProfile::Legacy((float)armorPoints);
+            if (healthAvailable)
+                candidate.telemetry = fightstatus::CombatantTelemetry(health, absorption, armor, 20.0f);
+            candidate.hurtTime = hurtTime;
+            candidate.hurtTimeAvailable = hurtTimeAvailable;
+            candidate.currentX = ex; candidate.currentY = ey; candidate.currentZ = ez;
+            candidate.x = iX; candidate.y = iY; candidate.z = iZ;
+            candidate.distance = (float)dist;
+            if (matrixProjectionUsable) {
+                candidate.hasProjectedAnchors =
+                    WorldToScreen(rX, rY, rZ, view, proj, w, h,
+                                  candidate.feetX, candidate.feetY) &&
+                    WorldToScreen(rX, rY + 1.8, rZ, view, proj, w, h,
+                                  candidate.headX, candidate.headY);
+            }
+            fightCandidates.push_back(candidate);
         }
 
         LegoVec3 camPos = { localPX, localPY + 1.62, localPZ };
@@ -9009,69 +9375,34 @@ void RenderNametags(int w, int h) {
         float aimSX = sX;
         float aimSY = sY;
         bool aimProjected = projected;
-        {
-            const double halfW = 0.30;
-            const double xOffsets[3] = { -halfW, 0.0, halfW };
-            const double zOffsets[3] = { -halfW, 0.0, halfW };
-            const double yOffsets[5] = { 0.15, 0.55, 0.95, 1.35, 1.75 };
-            const double centerX = w * 0.5;
-            const double centerY = h * 0.5;
-
-            double bestScore = 1e30;
-            float bestSx = aimSX;
-            float bestSy = aimSY;
-            bool bestFound = false;
-
-            for (double yo : yOffsets) {
-                for (double xo : xOffsets) {
-                    for (double zo : zOffsets) {
-                        float tx = 0.0f;
-                        float ty = 0.0f;
-                        bool sampleProjected = false;
-
-                        if (matrixProjectionUsable) {
-                            sampleProjected = WorldToScreen(
-                                (iX + xo) - vX,
-                                (iY + yo) - vY,
-                                (iZ + zo) - vZ,
-                                view,
-                                proj,
-                                w,
-                                h,
-                                tx,
-                                ty);
-                        }
-
-                        if (!sampleProjected) continue;
-
-                        double dxCenter = tx - centerX;
-                        double dyCenter = ty - centerY;
-                        double score = dxCenter * dxCenter + dyCenter * dyCenter;
-                        if (score < bestScore) {
-                            bestScore = score;
-                            bestSx = tx;
-                            bestSy = ty;
-                            bestFound = true;
-                        }
-                    }
-                }
-            }
-
-            if (bestFound) {
-                aimSX = bestSx;
-                aimSY = bestSy;
-                aimProjected = true;
-            }
+        auto projectAimBodyPoint = [&](double worldX, double worldY, double worldZ,
+                                       float* outX, float* outY) -> bool {
+            if (!matrixProjectionUsable) return false;
+            return WorldToScreen(
+                worldX - vX,
+                worldY - vY,
+                worldZ - vZ,
+                view,
+                proj,
+                w,
+                h,
+                *outX,
+                *outY);
+        };
+        float selectedAimX = aimSX;
+        float selectedAimY = aimSY;
+        if (lc::aimassist::SelectClosestBodyPoint(
+                iX, iY, iZ, w, h, projectAimBodyPoint,
+                &selectedAimX, &selectedAimY)) {
+            aimSX = selectedAimX;
+            aimSY = selectedAimY;
+            aimProjected = true;
         }
 
         if (projected) {
              if (logctr % 600 == 0 && count == 0) {
                  Log("Tagged: " + displayName + " SX: " + std::to_string(sX) + " SY: " + std::to_string(sY));
              }
-             double dx = iX - localPX;
-             double dy = iY - localPY;
-             double dz = iZ - localPZ;
-             double dist = sqrt(dx*dx + dy*dy + dz*dz);
              if (dist > 48.0) {
                  env->DeleteLocalRef(entity);
                  continue;
@@ -9107,12 +9438,6 @@ void RenderNametags(int w, int h) {
                  float hpPct = hpBarValue / 20.0f;
                  if (hpPct < 0.0f) hpPct = 0.0f;
                  if (hpPct > 1.0f) hpPct = 1.0f;
-
-                 int armorPoints = -1;
-                 if (showArmor && g_getTotalArmorValueMethod) {
-                     armorPoints = env->CallIntMethod(entity, g_getTotalArmorValueMethod);
-                     if (env->ExceptionCheck()) { env->ExceptionClear(); armorPoints = -1; }
-                 }
 
                  std::string statsText;
                  if (showHealth) {
@@ -9250,6 +9575,7 @@ void RenderNametags(int w, int h) {
 
         env->DeleteLocalRef(entity);
     }
+    UpdateFightStatusState18(GetTickCount(), fightStatusEnabled, guiOpen, fightSelf, fightCandidates);
     if (hideTeamObj) env->DeleteLocalRef(hideTeamObj);
     if (hideScoreboardObj) env->DeleteLocalRef(hideScoreboardObj);
     if (hideVanillaTags && suppressionAppliedThisPass) {
@@ -9285,6 +9611,79 @@ void RenderNametags(int w, int h) {
     
 exit_frame:
     env->PopLocalFrame(nullptr);
+}
+
+static void RenderFightStatus(int w, int h) {
+    FightStatusDrawSnapshot18 snapshot;
+    { LockGuard lk(g_fightStatusMutex18); snapshot = g_fightStatusDrawSnapshot18; }
+    if (!snapshot.valid || snapshot.distance > 16.0f || !snapshot.hasProjectedAnchors) return;
+
+    const bool onScreen = snapshot.feetX >= 0.0f && snapshot.feetX <= w &&
+        snapshot.headX >= 0.0f && snapshot.headX <= w &&
+        snapshot.feetY >= 0.0f && snapshot.feetY <= h &&
+        snapshot.headY >= 0.0f && snapshot.headY <= h;
+    if (!onScreen) return;
+
+    ImDrawList* fg = ImGui::GetForegroundDrawList();
+    const float rawHeight = std::fabs(snapshot.feetY - snapshot.headY);
+    const float barHeight = (std::max)(48.0f, (std::min)(110.0f, rawHeight));
+    const float centerY = (snapshot.feetY + snapshot.headY) * 0.5f;
+    const float topY = centerY - barHeight * 0.5f;
+    const float bottomY = centerY + barHeight * 0.5f;
+    const float bodyX = (snapshot.feetX + snapshot.headX) * 0.5f;
+    const float bodyHalfWidth = (std::max)(10.0f, rawHeight * (0.6f / 1.8f) * 0.5f);
+    const float barWidth = 8.0f;
+    const float gap = 7.0f;
+    const bool drawRight = bodyX + bodyHalfWidth + gap + barWidth + 221.0f <= w;
+    const float barX0 = drawRight
+        ? bodyX + bodyHalfWidth + gap
+        : bodyX - bodyHalfWidth - gap - barWidth;
+    const float barX1 = barX0 + barWidth;
+    const float midY = (topY + bottomY) * 0.5f;
+    const float advantage = fightstatus::Clamp(snapshot.normalizedAdvantage, -1.0f, 1.0f);
+
+    fg->AddRectFilled(ImVec2(barX0, topY), ImVec2(barX1, bottomY),
+        IM_COL32(16, 18, 24, 210), 2.0f);
+    if (advantage > 0.0f) {
+        fg->AddRectFilled(ImVec2(barX0, midY - barHeight * 0.5f * advantage),
+            ImVec2(barX1, midY), IM_COL32(70, 220, 105, 245), 2.0f);
+    } else if (advantage < 0.0f) {
+        fg->AddRectFilled(ImVec2(barX0, midY),
+            ImVec2(barX1, midY + barHeight * 0.5f * -advantage),
+            IM_COL32(235, 75, 75, 245), 2.0f);
+    }
+    fg->AddLine(ImVec2(barX0 - 1.0f, midY), ImVec2(barX1 + 1.0f, midY),
+        IM_COL32(235, 235, 240, 225), 1.0f);
+    fg->AddRect(ImVec2(barX0, topY), ImVec2(barX1, bottomY),
+        IM_COL32(225, 225, 235, 210), 2.0f, 0, 1.0f);
+
+    const char* stateText = snapshot.result.state == fightstatus::FIGHT_WINNING
+        ? "WINNING" : snapshot.result.state == fightstatus::FIGHT_LOSING
+        ? "LOSING" : "EVEN";
+    char prediction[96];
+    if (!snapshot.result.ready) {
+        snprintf(prediction, sizeof(prediction), "Gathering data...");
+    } else {
+        snprintf(prediction, sizeof(prediction), "Predicted winner: %s (%d%%)",
+            snapshot.result.winner == fightstatus::WINNER_SELF ? "You" : "Opponent",
+            snapshot.result.confidence);
+    }
+    const ImU32 stateColor = snapshot.result.state == fightstatus::FIGHT_WINNING
+        ? IM_COL32(90, 235, 120, 250)
+        : snapshot.result.state == fightstatus::FIGHT_LOSING
+        ? IM_COL32(245, 90, 90, 250) : IM_COL32(235, 220, 120, 250);
+    const float smallFont = (std::max)(11.0f, ImGui::GetFontSize() * 0.82f);
+    auto drawText = [&](const char* value, float y, ImU32 color, float size) {
+        ImVec2 textSize = ImGui::CalcTextSize(value);
+        textSize.x *= size / ImGui::GetFontSize();
+        const float x = drawRight ? barX1 + 5.0f : barX0 - 5.0f - textSize.x;
+        fg->AddText(ImGui::GetFont(), size, ImVec2(x + 1.0f, y + 1.0f),
+            IM_COL32(0, 0, 0, 220), value);
+        fg->AddText(ImGui::GetFont(), size, ImVec2(x, y), color, value);
+    };
+    drawText(stateText, midY - ImGui::GetFontSize() - 2.0f,
+        stateColor, ImGui::GetFontSize());
+    drawText(prediction, midY + 3.0f, IM_COL32(235, 238, 245, 240), smallFont);
 }
 
 void RenderPixelPartyAssist(int w, int h) {
@@ -10453,6 +10852,7 @@ BOOL WINAPI HookedSwapBuffers(HDC hdc) {
     static bool s_wasNonChatMinecraftScreen = false;
     bool nonChatScreenOpen = ShouldHideWorldRenderModules(state);
     if (nonChatScreenOpen) {
+        if (!s_wasNonChatMinecraftScreen) ResetFightStatusState18();
         s_wasNonChatMinecraftScreen = true;
     } else if (s_wasNonChatMinecraftScreen && g_imguiInitialized) {
         s_wasNonChatMinecraftScreen = false;
@@ -10473,6 +10873,7 @@ BOOL WINAPI HookedSwapBuffers(HDC hdc) {
         TryLockGuard jniTry(g_renderJniMutex);
         if (jniTry.owns_lock()) {
             RenderNametags(w, h);
+            RenderFightStatus(w, h);
             RenderClosestPlayerInfo(w, h);
             RenderPixelPartyAssist(w, h);
             RenderChestESP(w, h);
@@ -10707,7 +11108,7 @@ void ParseConfig(const std::string& line) {
         g_config.killAuraMaxCps = lc::ClampInt(reader.GetInt("killAuraMaxCps", 14), 1, 20);
         if (g_config.killAuraMinCps > g_config.killAuraMaxCps) g_config.killAuraMinCps = g_config.killAuraMaxCps;
         g_config.killAuraSwitchDelayMs = lc::ClampInt(reader.GetInt("killAuraSwitchDelay", 150), 0, 1000);
-        { std::string v = reader.GetString("killAuraRotations"); g_config.killAuraRotMode = v == "none" ? 0 : v == "legit" ? 1 : v == "lockview" ? 3 : v == "liquidbounce" ? 4 : v == "hypixel" ? 5 : 2; }
+        { std::string v = reader.GetString("killAuraRotations"); g_config.killAuraRotMode = v == "none" ? 0 : v == "legit" ? 1 : v == "lockview" ? 3 : v == "liquidbounce" ? 4 : v == "hypixel" ? 5 : v == "grok" ? 6 : 2; }
         g_config.killAuraDeadZone = lc::ClampFloat(reader.GetFloat("killAuraDeadZone", .5f), 0, 2);
         g_config.killAuraMaxTurnSpeed = lc::ClampFloat(reader.GetFloat("killAuraMaxTurnSpeed", 25), 5, 180);
         g_config.killAuraMinTurnSpeed = lc::ClampFloat(reader.GetFloat("killAuraMinTurnSpeed", 5), 1, 90);
@@ -10724,6 +11125,7 @@ void ParseConfig(const std::string& line) {
         g_config.killAuraRavenSmoothing = lc::ClampInt(reader.GetInt("killAuraRavenSmoothing", 0), 0, 10);
         g_config.killAuraRavenPredictTicks = lc::ClampInt(reader.GetInt("killAuraRavenPredictTicks", 0), 0, 5);
         g_config.killAuraRavenYawRandom = lc::ClampInt(reader.GetInt("killAuraRavenYawRandom", 0), 0, 5);
+        g_config.killAuraGrokMaxSkew = lc::ClampFloat(reader.GetFloat("killAuraGrokMaxSkew", 12.0f), 6.0f, 25.0f);
         g_config.killAuraAngleStep = lc::ClampInt(reader.GetInt("killAuraAngleStep", 90), 30, 180);
         g_config.killAuraThroughWalls = reader.GetBool("killAuraThroughWalls", true);
         g_config.killAuraRequirePress = reader.GetBool("killAuraRequirePress");
@@ -10773,6 +11175,9 @@ void ParseConfig(const std::string& line) {
                 + " aliasLength=" + std::to_string(g_config.nickHiderAlias.size()));
         }
         g_config.closestPlayerInfo = reader.GetBool("closestPlayerInfo");
+        bool fightStatusWasEnabled = g_config.fightStatus;
+        g_config.fightStatus = reader.GetBool("fightStatus");
+        if (fightStatusWasEnabled && !g_config.fightStatus) ResetFightStatusState18();
         g_config.nametagShowHealth = reader.GetBool("nametagShowHealth");
         g_config.nametagShowArmor = reader.GetBool("nametagShowArmor");
         g_config.nametagHideVanilla = reader.GetBool("nametagHideVanilla");
@@ -10900,6 +11305,7 @@ void ParseConfig(const std::string& line) {
         { int v = reader.GetInt("keybindSpeedBridge", -1);  if (v >= 0) g_config.keybindSpeedBridge  = v; }
         { int v = reader.GetInt("keybindNametags", -1);      if (v >= 0) g_config.keybindNametags      = v; }
         { int v = reader.GetInt("keybindClosestPlayer", -1); if (v >= 0) g_config.keybindClosestPlayer = v; }
+        { int v = reader.GetInt("keybindFightStatus", -1);   if (v >= 0) g_config.keybindFightStatus   = v; }
         { int v = reader.GetInt("keybindChestEsp", -1);      if (v >= 0) g_config.keybindChestEsp      = v; }
         { int v = reader.GetInt("keybindChestStealer", -1);  if (v >= 0) g_config.keybindChestStealer  = v; }
         { int v = reader.GetInt("keybindBlockEsp", -1);      if (v >= 0) g_config.keybindBlockEsp      = v; }
@@ -10996,7 +11402,7 @@ void ServerLoop() {
             {
                 LockGuard lk(g_configMutex);
                 nametagsEnabled = g_config.nametags;
-                needEntityTelemetry = g_config.nametags || g_config.closestPlayerInfo || g_config.aimAssist;
+                needEntityTelemetry = g_config.nametags || g_config.closestPlayerInfo || g_config.aimAssist || g_config.fightStatus;
                 cfgSnapshot = g_config;
             }
 
@@ -11165,6 +11571,7 @@ void ServerLoop() {
         LockGuard jniLk(g_stateJniMutex);
         ReleaseSpeedBridgeSneak(env);
         ResetSpeedBridgeMovementTracking();
+        ResetFightStatusState18();
         HelperBridge::Unload(env);
         lc::ShutdownNickHiderJvmti(env);
         ka_premotion::Shutdown(env);
@@ -11205,6 +11612,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved) {
         Log("Log path: " + g_logPath);
         CreateThread(nullptr, 0, MainThread, nullptr, 0, nullptr);
     } else if (reason == DLL_PROCESS_DETACH) {
+        ResetFightStatusState18();
         CleanupImGuiAndHooks();
         UnloadMinecraftiaPrivateFont();
         Log("DLL_PROCESS_DETACH");
