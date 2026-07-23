@@ -1,12 +1,12 @@
 {
-  "version": "0.10.2",
+  "version": "0.10.3",
   "description": "Windows utility client for Lunar Client",
   "homepage": "https://github.com/naczo5/aoko-client",
   "license": "GPL-3.0-only",
   "architecture": {
     "64bit": {
-      "url": "https://github.com/naczo5/aoko-client/releases/download/v0.10.2/Aoko.zip",
-      "hash": "ef72f24623c458a2ac561d446aff4a5ed285a4ea57e99c25f891e40e77fb1e78"
+      "url": "https://github.com/naczo5/aoko-client/releases/download/v0.10.3/Aoko.zip",
+      "hash": "4052d3b47fd26ea4e1d52bfdfd926545b3193933b12ab5d9ee0201d42fc50865"
     }
   },
   "shortcuts": [
