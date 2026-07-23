@@ -2,6 +2,9 @@
 #include "nick_hider.h"
 #include "nick_hider_jvmti_targets.h"
 
+#include "jni_core/local_frame.h"
+#include "jni_core/scoped_env.h"
+
 #include <jvmti.h>
 #include <windows.h>
 #include <cstring>
@@ -218,6 +221,8 @@ static void JNICALL OnBreakpoint(jvmtiEnv* jvmti, JNIEnv* env, jthread thread, j
         s_extraBreakpoint(jvmti, env, thread, method, location);
 
     if (!env || !thread) return;
+    LocalFrame frame(env, 64);
+    if (!frame.ok()) return;
     RenderMethodEntry* renderer = FindRenderMethod(method);
     if (!renderer) return;
     ConfigSnapshot config = {};
@@ -526,8 +531,8 @@ void RefreshNickHiderJvmtiTargets()
         const bool surface = s_generation == NickHiderJvmtiGeneration::Legacy189
             ? IsLegacySurface(signature, label) : IsModernSurface(signature, label);
         if (surface) {
-            JNIEnv* env = nullptr;
-            if (s_vm->GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_8) == JNI_OK && env)
+            JNIEnv* env = JniEnv::Get(s_vm);
+            if (env)
                 AddSurface(env, classes[i], label);
         }
         // Render breakpoints only help when we can rewrite String locals.

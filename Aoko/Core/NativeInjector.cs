@@ -17,6 +17,9 @@ public static class NativeInjector
     private static extern IntPtr VirtualAllocEx(IntPtr hProcess, IntPtr lpAddress, uint dwSize, uint flAllocationType, uint flProtect);
 
     [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool VirtualFreeEx(IntPtr hProcess, IntPtr lpAddress, uint dwSize, uint dwFreeType);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool WriteProcessMemory(IntPtr hProcess, IntPtr lpBaseAddress, byte[] lpBuffer, uint nSize, out IntPtr lpNumberOfBytesWritten);
 
     [DllImport("kernel32.dll", SetLastError = true)]
@@ -44,6 +47,7 @@ public static class NativeInjector
     // Memory Allocation
     private const uint MEM_COMMIT = 0x1000;
     private const uint MEM_RESERVE = 0x2000;
+    private const uint MEM_RELEASE = 0x8000;
     private const uint PAGE_READWRITE = 0x04;
     private const uint WAIT_OBJECT_0 = 0x00000000;
     private const uint WAIT_TIMEOUT = 0x00000102;
@@ -84,11 +88,13 @@ public static class NativeInjector
         }
         ReportProgress(progress, 15, "Process handle opened.");
 
+        IntPtr pRemotePath = IntPtr.Zero;
+        IntPtr hThread = IntPtr.Zero;
         try
         {
             // 1. Allocate memory for DLL path
             byte[] pathBytes = Encoding.ASCII.GetBytes(dllPath + "\0");
-            IntPtr pRemotePath = VirtualAllocEx(hProcess, IntPtr.Zero, (uint)pathBytes.Length, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+            pRemotePath = VirtualAllocEx(hProcess, IntPtr.Zero, (uint)pathBytes.Length, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
 
             if (pRemotePath == IntPtr.Zero)
             {
@@ -117,7 +123,7 @@ public static class NativeInjector
             ReportProgress(progress, 65, $"Found LoadLibraryA: {pLoadLibrary}");
 
             // 4. Create Remote Thread
-            IntPtr hThread = CreateRemoteThread(hProcess, IntPtr.Zero, 0, pLoadLibrary, pRemotePath, 0, IntPtr.Zero);
+            hThread = CreateRemoteThread(hProcess, IntPtr.Zero, 0, pLoadLibrary, pRemotePath, 0, IntPtr.Zero);
 
             if (hThread == IntPtr.Zero)
             {
@@ -140,11 +146,15 @@ public static class NativeInjector
                 ReportProgress(progress, 95, $"WaitForSingleObject result: 0x{wait:X}");
             }
 
-            CloseHandle(hThread);
             return true;
         }
         finally
         {
+            if (hThread != IntPtr.Zero)
+                CloseHandle(hThread);
+            // Release the remote path buffer now that LoadLibraryA has consumed it.
+            if (pRemotePath != IntPtr.Zero)
+                VirtualFreeEx(hProcess, pRemotePath, 0, MEM_RELEASE);
             CloseHandle(hProcess);
         }
     }

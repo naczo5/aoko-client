@@ -61,6 +61,7 @@ export default defineConfig({
               items: [
                 { label: 'Nametags', slug: 'modules/visual/nametags' },
                 { label: 'Closest Player', slug: 'modules/visual/closest-player' },
+                { label: 'Fight Status', slug: 'modules/visual/fight-status' },
                 { label: 'Chest ESP', slug: 'modules/visual/chest-esp' },
                 { label: 'Block ESP', slug: 'modules/visual/block-esp' },
                 { label: 'Module List & Logo', slug: 'modules/visual/module-list' },

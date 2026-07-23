@@ -17,6 +17,7 @@ static volatile LONG s_handlersRegistered = 0;
 static volatile LONG s_ready = 0; // walking-player breakpoint path
 static volatile LONG s_sendQueueReady = 0;
 static volatile LONG s_sendQueueHookRegistered = 0;
+static volatile LONG s_suspended = 0; // world-change / reconfig: NativeOnPacket no-ops
 static int s_sendQueueHookToken = 0;
 static volatile LONG s_sendQueueInjected = 0;
 static volatile LONG s_inSendQueueNative = 0;
@@ -345,6 +346,7 @@ static bool TryBeginSilentStamp(jvmtiEnv* jvmti, JNIEnv* env, jthread thread, jo
 static void OnWalkingEntry(jvmtiEnv* jvmti, JNIEnv* env, jthread thread)
 {
     if (!env || !thread || !jvmti) return;
+    if (InterlockedCompareExchange(&s_suspended, 0, 0) != 0) return;
 
     const bool silentWanted = InterlockedCompareExchange(&s_silentEngaged, 0, 0) != 0
         && InterlockedCompareExchange(&s_combatValid, 0, 0) != 0;
@@ -467,6 +469,9 @@ static void EndTempAttackStamp(JNIEnv* env, jobject player, float yaw, float pit
 static void JNICALL NativeOnPacket(JNIEnv* env, jclass, jobject packet)
 {
     if (!env || !packet) return;
+    // World/reconfig transitions delete C03/player JNI while this hook stays
+    // injected into ClientPacketListener.send — bail before any IsInstanceOf.
+    if (InterlockedCompareExchange(&s_suspended, 0, 0) != 0) return;
     if (InterlockedCompareExchange(&s_inSendQueueNative, 1, 0) != 0)
         return; // ignore re-entrant packets we enqueue ourselves
 
@@ -668,6 +673,7 @@ void Shutdown(JNIEnv* env)
     ClearPendingAttack(env);
     InterlockedExchange(&s_ready, 0);
     InterlockedExchange(&s_sendQueueReady, 0);
+    InterlockedExchange(&s_suspended, 0);
     InterlockedExchange64(&s_sendQueueArmedMs, 0);
     InterlockedExchange64(&s_lastMovementCallbackMs, 0);
     InterlockedExchange(&s_silentEngaged, 0);
@@ -900,6 +906,7 @@ void SetSilentCombatAngles(bool silentEngaged, float yaw, float pitch, float bod
 bool QueueAttack(JNIEnv* env, jobject target)
 {
     if (!env || !target) return false;
+    if (InterlockedCompareExchange(&s_suspended, 0, 0) != 0) return false;
     jobject global = env->NewGlobalRef(target);
     if (!global) return false;
 
@@ -931,8 +938,45 @@ void ClearPendingAttack(JNIEnv* env)
     LeaveCriticalSection(&s_pendingCs);
 }
 
+void SuspendForWorldChange(JNIEnv* env)
+{
+    // Arm first so in-flight NativeOnPacket sees suspended before we clear JNI.
+    const bool wasSuspended = InterlockedCompareExchange(&s_suspended, 1, 0) != 0;
+    ClearPendingAttack(env);
+    SetSilentCombatAngles(false, 0.0f, 0.0f, 0.0f, false);
+
+    // Drop stamp player global we own; do not DeleteGlobalRef C03 (bridge-owned).
+    if (env && s_stampedPlayer) {
+        env->DeleteGlobalRef(s_stampedPlayer);
+        s_stampedPlayer = nullptr;
+    }
+    InterlockedExchange(&s_inStamp, 0);
+
+    s_c03Class = nullptr;
+    s_c03Yaw = nullptr;
+    s_c03Pitch = nullptr;
+    s_c03HasRot = nullptr;
+    s_mcInstance = nullptr;
+    s_thePlayerField = nullptr;
+
+    if (!wasSuspended)
+        Log("KillAura PreMotion: suspended for world change");
+}
+
+void ResumeAfterWorldChange()
+{
+    if (InterlockedCompareExchange(&s_suspended, 0, 1) != 0)
+        Log("KillAura PreMotion: resumed after world change");
+}
+
+bool IsSuspended()
+{
+    return InterlockedCompareExchange(&s_suspended, 0, 0) != 0;
+}
+
 bool IsReady()
 {
+    if (InterlockedCompareExchange(&s_suspended, 0, 0) != 0) return false;
     return InterlockedCompareExchange(&s_sendQueueReady, 0, 0) != 0
         || InterlockedCompareExchange(&s_ready, 0, 0) != 0;
 }
@@ -951,6 +995,7 @@ unsigned long long LastMovementCallbackMs()
 
 bool IsOperational()
 {
+    if (InterlockedCompareExchange(&s_suspended, 0, 0) != 0) return false;
     const HookBackend backend = GetBackend();
     if (backend == HOOK_BREAKPOINT) return true;
     if (backend != HOOK_PACKET_RETRANSFORM) return false;

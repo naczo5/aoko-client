@@ -80,6 +80,7 @@ public static class InputHooks
         ["nametags"]         = 0,
         ["nickhider"]        = 0,
         ["closestplayer"]    = 0,
+        ["fightstatus"]      = 0,
         ["chestesp"]         = 0,
         ["cheststealer"]     = 0,
         ["blockesp"]         = 0,
@@ -151,6 +152,7 @@ public static class InputHooks
             case "nametags":         c.NametagsEnabled = !c.NametagsEnabled; break;
             case "nickhider":        c.NickHiderEnabled = !c.NickHiderEnabled; break;
             case "closestplayer":    c.ClosestPlayerInfoEnabled = !c.ClosestPlayerInfoEnabled; break;
+            case "fightstatus":      c.FightStatusEnabled = !c.FightStatusEnabled; break;
             case "chestesp":         c.ChestEspEnabled = !c.ChestEspEnabled; break;
             case "cheststealer":     c.ChestStealerEnabled = !c.ChestStealerEnabled; break;
             case "blockesp":         c.BlockEspEnabled = !c.BlockEspEnabled; break;

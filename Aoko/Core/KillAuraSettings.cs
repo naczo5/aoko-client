@@ -45,6 +45,7 @@ public sealed class KillAuraSettings : INotifyPropertyChanged
     private int _ravenSmoothing;
     private int _ravenPredictTicks;
     private int _ravenYawRandom;
+    private float _grokMaxSkew = 12f;
     private int _angleStep = 90;
     private bool _throughWalls = true;
     private bool _requirePress;
@@ -90,7 +91,7 @@ public sealed class KillAuraSettings : INotifyPropertyChanged
     public int MinCps { get => _minCps; set { int v = Math.Clamp(value, 1, 20); if (Set(ref _minCps, v) && _maxCps < v) MaxCps = v; } }
     public int MaxCps { get => _maxCps; set { int v = Math.Clamp(value, 1, 20); if (Set(ref _maxCps, v) && _minCps > v) MinCps = v; } }
     public int SwitchDelay { get => _switchDelay; set => Set(ref _switchDelay, Math.Clamp(value, 0, 1000)); }
-    public string Rotations { get => _rotations; set { if (SetMode(ref _rotations, value, "none", "legit", "silent", "lockview", "liquidbounce", "hypixel")) NotifyConditions(); } }
+    public string Rotations { get => _rotations; set { if (SetMode(ref _rotations, value, "none", "legit", "silent", "lockview", "liquidbounce", "hypixel", "grok")) NotifyConditions(); } }
     public float DeadZoneSize { get => _deadZoneSize; set => Set(ref _deadZoneSize, Math.Clamp(value, 0f, 2f)); }
     public float MaxTurnSpeed { get => _maxTurnSpeed; set => Set(ref _maxTurnSpeed, Math.Clamp(value, 5f, 180f)); }
     public float MinTurnSpeed { get => _minTurnSpeed; set => Set(ref _minTurnSpeed, Math.Clamp(value, 1f, 90f)); }
@@ -107,6 +108,7 @@ public sealed class KillAuraSettings : INotifyPropertyChanged
     public int RavenSmoothing { get => _ravenSmoothing; set => Set(ref _ravenSmoothing, Math.Clamp(value, 0, 10)); }
     public int RavenPredictTicks { get => _ravenPredictTicks; set => Set(ref _ravenPredictTicks, Math.Clamp(value, 0, 5)); }
     public int RavenYawRandom { get => _ravenYawRandom; set => Set(ref _ravenYawRandom, Math.Clamp(value, 0, 5)); }
+    public float GrokMaxSkew { get => _grokMaxSkew; set => Set(ref _grokMaxSkew, Math.Clamp(value, 6f, 25f)); }
     public int AngleStep { get => _angleStep; set => Set(ref _angleStep, Math.Clamp(value, 30, 180)); }
     public bool ThroughWalls { get => _throughWalls; set => Set(ref _throughWalls, value); }
     public bool RequirePress { get => _requirePress; set => Set(ref _requirePress, value); }
@@ -140,6 +142,7 @@ public sealed class KillAuraSettings : INotifyPropertyChanged
 
     public bool IsLiquidBounce => Rotations == "liquidbounce";
     public bool IsHypixelRotation => Rotations == "hypixel";
+    public bool IsGrokRotation => Rotations == "grok";
     public bool IsSwapAutoBlock => AutoBlock == "swap";
     public bool OvershootControlsEnabled => IsLiquidBounce && UseOvershoot;
     public bool RandomizeControlsEnabled => IsLiquidBounce && Randomize;
@@ -182,7 +185,7 @@ public sealed class KillAuraSettings : INotifyPropertyChanged
 
     private void NotifyConditions()
     {
-        foreach (string name in new[] { nameof(IsLiquidBounce), nameof(IsHypixelRotation), nameof(IsSwapAutoBlock), nameof(OvershootControlsEnabled), nameof(RandomizeControlsEnabled), nameof(PredictControlsEnabled), nameof(LiquidRandomizeControlsEnabled), nameof(AllowToolsEnabled) })
+        foreach (string name in new[] { nameof(IsLiquidBounce), nameof(IsHypixelRotation), nameof(IsGrokRotation), nameof(IsSwapAutoBlock), nameof(OvershootControlsEnabled), nameof(RandomizeControlsEnabled), nameof(PredictControlsEnabled), nameof(LiquidRandomizeControlsEnabled), nameof(AllowToolsEnabled) })
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
     }
 }

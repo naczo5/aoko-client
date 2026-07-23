@@ -284,6 +284,7 @@ public class ModuleRegistrationTests
             case "nametags": clicker.NametagsEnabled = enabled; return true;
             case "nickhider": clicker.NickHiderEnabled = enabled; return true;
             case "closestplayer": clicker.ClosestPlayerInfoEnabled = enabled; return true;
+            case "fightstatus": clicker.FightStatusEnabled = enabled; return true;
             case "chestesp": clicker.ChestEspEnabled = enabled; return true;
             case "cheststealer": clicker.ChestStealerEnabled = enabled; return true;
             case "blockesp": clicker.BlockEspEnabled = enabled; return true;

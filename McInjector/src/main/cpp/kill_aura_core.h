@@ -11,7 +11,7 @@ namespace killaura {
 
 enum TargetMode { TARGET_SINGLE = 0, TARGET_SWITCH = 1 };
 enum SortMode { SORT_DISTANCE = 0, SORT_HEALTH = 1, SORT_HURT_TIME = 2, SORT_FOV = 3 };
-enum RotationMode { ROT_NONE = 0, ROT_LEGIT = 1, ROT_SILENT = 2, ROT_LOCK_VIEW = 3, ROT_LIQUID_BOUNCE = 4, ROT_HYPIXEL = 5 };
+enum RotationMode { ROT_NONE = 0, ROT_LEGIT = 1, ROT_SILENT = 2, ROT_LOCK_VIEW = 3, ROT_LIQUID_BOUNCE = 4, ROT_HYPIXEL = 5, ROT_GROK = 6 };
 enum MoveFixMode { MOVE_FIX_NONE = 0, MOVE_FIX_SILENT = 1, MOVE_FIX_STRICT = 2 };
 enum AutoBlockMode { BLOCK_NONE = 0, BLOCK_VANILLA = 1, BLOCK_SPOOF = 2, BLOCK_HYPIXEL = 3, BLOCK_BLINK = 4, BLOCK_INTERACT = 5, BLOCK_SWAP = 6, BLOCK_LEGIT = 7, BLOCK_FAKE = 8, BLOCK_MORDEN = 9 };
 
@@ -163,6 +163,142 @@ inline Angles SmoothBack(const Angles& current, const Angles& target)
     float pitchDiff = Wrap(target.pitch - current.pitch);
     float speed = std::max(5.0f, std::abs(yawDiff) * 0.3f);
     Angles out = { current.yaw + Clamp(yawDiff, -speed, speed), current.pitch + Clamp(pitchDiff, -speed, speed) };
+    return out;
+}
+
+// Grok: silent rotations constrained to a cone around the real camera so Premotion
+// look stamps stay prediction-safe (Hypixel lag-patch movement simulation).
+struct GrokState {
+    float yawVel;
+    float pitchVel;
+    float orbitPhase;
+    bool engaged;
+    GrokState() : yawVel(0), pitchVel(0), orbitPhase(0), engaged(false) {}
+};
+
+struct GrokParams {
+    float maxSkewYaw;
+    float maxSkewPitch;
+    float deadZone;
+    float minTurnSpeed;
+    float maxTurnSpeed;
+    float acceleration;
+    float deceleration;
+    float noiseStrength;
+    float clientFovHalf;
+};
+
+struct GrokResult {
+    Angles desired;
+    float yawVel;
+    float pitchVel;
+    float orbitPhase;
+    bool engage;
+};
+
+inline Angles ClampAnglesToCone(const Angles& desired, const Angles& client,
+                                float maxSkewYaw, float maxSkewPitch)
+{
+    float dy = Clamp(Shortest(client.yaw, desired.yaw), -maxSkewYaw, maxSkewYaw);
+    float dp = Clamp(desired.pitch - client.pitch, -maxSkewPitch, maxSkewPitch);
+    Angles out = { client.yaw + dy, Clamp(client.pitch + dp, -90.0f, 90.0f) };
+    return out;
+}
+
+inline bool AnglesWithinCone(const Angles& angles, const Angles& client,
+                             float maxSkewYaw, float maxSkewPitch)
+{
+    return std::abs(Shortest(client.yaw, angles.yaw)) <= maxSkewYaw + 1.0e-3f
+        && std::abs(angles.pitch - client.pitch) <= maxSkewPitch + 1.0e-3f;
+}
+
+inline Angles GrokOrbitIntent(const Angles& target, float phase, float yawAmp, float pitchAmp)
+{
+    Angles out = {
+        Wrap(target.yaw + std::sin(phase) * yawAmp),
+        Clamp(target.pitch + std::cos(phase * 0.73f) * pitchAmp, -90.0f, 90.0f)
+    };
+    return out;
+}
+
+// Second-order impulse tracker with soft orbit, dead zone, jerk limit, and
+// hard client-cone clamp. engage==false means do not stamp silent look / attack.
+inline GrokResult GrokStep(const Angles& from, const Angles& target, const Angles& client,
+                           const GrokState& state, const GrokParams& params,
+                           float rand01, float randSigned01)
+{
+    const float skewYaw = Clamp(params.maxSkewYaw, 6.0f, 25.0f) * (0.92f + Clamp(rand01, 0.0f, 1.0f) * 0.16f);
+    const float skewPitch = Clamp(params.maxSkewPitch, 4.0f, 20.0f)
+        * (0.92f + Clamp(1.0f - rand01, 0.0f, 1.0f) * 0.16f);
+    const float yawAmp = std::min(skewYaw * 0.35f, 2.8f);
+    const float pitchAmp = std::min(skewPitch * 0.35f, 1.6f);
+    const float phase = state.orbitPhase + 0.11f + Clamp(rand01, 0.0f, 1.0f) * 0.04f;
+    const Angles intent = GrokOrbitIntent(target, phase, yawAmp, pitchAmp);
+
+    float yawErr = Shortest(from.yaw, intent.yaw);
+    float pitchErr = intent.pitch - from.pitch;
+    float dist = std::sqrt(yawErr * yawErr + pitchErr * pitchErr);
+
+    float yawVel = state.yawVel;
+    float pitchVel = state.pitchVel;
+    const float maxYaw = std::max(params.minTurnSpeed, params.maxTurnSpeed);
+    const float maxPitch = maxYaw / 1.6f;
+    const float dead = Clamp(params.deadZone, 0.0f, 2.0f);
+
+    if (dist <= dead) {
+        yawVel *= 0.55f;
+        pitchVel *= 0.55f;
+        yawVel += randSigned01 * params.noiseStrength * 0.15f;
+        pitchVel += randSigned01 * params.noiseStrength * 0.10f;
+    } else {
+        float desiredYawVel = Clamp(yawErr, -maxYaw, maxYaw);
+        float desiredPitchVel = Clamp(pitchErr, -maxPitch, maxPitch);
+        float accel = Clamp(params.acceleration * 0.15f, 0.05f, 0.9f);
+        float decel = Clamp(params.deceleration * 0.12f, 0.05f, 0.85f);
+        if (dist > 18.0f) {
+            yawVel += (desiredYawVel - yawVel) * accel;
+            pitchVel += (desiredPitchVel - pitchVel) * accel;
+        } else if (dist > 4.0f) {
+            yawVel += (desiredYawVel - yawVel) * 0.45f;
+            pitchVel += (desiredPitchVel - pitchVel) * 0.45f;
+        } else {
+            yawVel *= (1.0f - decel);
+            pitchVel *= (1.0f - decel);
+            yawVel += desiredYawVel * decel;
+            pitchVel += desiredPitchVel * decel;
+        }
+        yawVel = Clamp(yawVel, -maxYaw, maxYaw);
+        pitchVel = Clamp(pitchVel, -maxPitch, maxPitch);
+    }
+
+    // Jerk limit — avoids linear / constant-accel rotation streams.
+    const float maxJerkYaw = maxYaw * 0.35f;
+    const float maxJerkPitch = maxJerkYaw / 1.6f;
+    yawVel = state.yawVel + Clamp(yawVel - state.yawVel, -maxJerkYaw, maxJerkYaw);
+    pitchVel = state.pitchVel + Clamp(pitchVel - state.pitchVel, -maxJerkPitch, maxJerkPitch);
+
+    if (rand01 < 0.06f) {
+        yawVel *= 0.15f;
+        pitchVel *= 0.15f;
+    }
+
+    Angles desired = {
+        from.yaw + yawVel + randSigned01 * params.noiseStrength,
+        Clamp(from.pitch + pitchVel + randSigned01 * params.noiseStrength * 0.55f, -90.0f, 90.0f)
+    };
+    desired = ClampAnglesToCone(desired, client, skewYaw, skewPitch);
+
+    const float fovHalf = std::max(15.0f, params.clientFovHalf);
+    const bool targetInFov = std::abs(Shortest(client.yaw, target.yaw)) <= fovHalf
+        && std::abs(target.pitch - client.pitch) <= fovHalf;
+    const bool engage = AnglesWithinCone(desired, client, skewYaw, skewPitch) && targetInFov;
+
+    GrokResult out;
+    out.desired = desired;
+    out.yawVel = yawVel;
+    out.pitchVel = pitchVel;
+    out.orbitPhase = phase;
+    out.engage = engage;
     return out;
 }
 

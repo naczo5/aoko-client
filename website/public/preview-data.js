@@ -139,6 +139,13 @@ window.AOKO_PREVIEW_DATA = {
           ],
         },
         {
+          title: 'Fight Status',
+          toggle: { on: false, main: true },
+          controls: [
+            { type: 'note', text: 'Shows recent fight health and damage status in-game.' },
+          ],
+        },
+        {
           title: 'Show module list (top-right)',
           toggle: { on: true, main: true },
           controls: [
@@ -244,7 +251,7 @@ window.AOKO_PREVIEW_DATA = {
             { type: 'keybinds', items: [
               'Autoclicker', 'Right Click', 'Jitter', 'Click in Chests', 'Break Blocks',
               'Aim Assist', 'Triggerbot', 'Kill Aura', 'SpeedBridge', 'GTB Helper', 'Pixel Party',
-              'Nametags', 'Chest ESP', 'Chest Stealer', 'Block ESP', 'Closest Player',
+              'Nametags', 'Chest ESP', 'Chest Stealer', 'Block ESP', 'Closest Player', 'Fight Status',
               'Reach', 'Velocity', 'AutoTotem', 'AntiDebuff', 'Nick Hider', 'Hit Delay Fix', 'Panic',
             ] },
           ],

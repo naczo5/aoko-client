@@ -62,6 +62,25 @@ public class KillAuraSettingsTests
     }
 
     [Fact]
+    public void GrokRotation_IsAcceptedAndExposesSkew()
+    {
+        var settings = new KillAuraSettings { Rotations = "grok", GrokMaxSkew = 15f };
+
+        Assert.Equal("grok", settings.Rotations);
+        Assert.True(settings.IsGrokRotation);
+        Assert.False(settings.IsHypixelRotation);
+        Assert.Equal(15f, settings.GrokMaxSkew);
+
+        settings.GrokMaxSkew = 100f;
+        Assert.Equal(25f, settings.GrokMaxSkew);
+        settings.GrokMaxSkew = 1f;
+        Assert.Equal(6f, settings.GrokMaxSkew);
+
+        settings.Rotations = "not-a-mode";
+        Assert.Equal("none", settings.Rotations);
+    }
+
+    [Fact]
     public void GameState_DeserializesDynamicUnavailableReason()
     {
         GameState? state = JsonSerializer.Deserialize<GameState>(
