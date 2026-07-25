@@ -106,6 +106,15 @@ public class Profile
     public int AutoTotemDelay { get; set; } = 0;
     public int AutoTotemBehaviorMode { get; set; } = 0;
 
+    public bool AutoRodEnabled { get; set; } = false;
+    private int _autoRodSlotMode;
+    public int AutoRodSlotMode { get => _autoRodSlotMode; set => _autoRodSlotMode = Math.Clamp(value, 0, 9); }
+    public bool AutoRodVerifyForcedSlot { get; set; } = true;
+    private int _autoRodExtensionTicks = 4;
+    public int AutoRodExtensionTicks { get => _autoRodExtensionTicks; set => _autoRodExtensionTicks = Math.Clamp(value, 1, 40); }
+    public bool AutoRodHoldToExtend { get; set; } = false;
+    public int AutoRodActionKey { get; set; } = 0;
+
     public bool AntiDebuffEnabled { get; set; } = false;
     public bool HitDelayFixEnabled { get; set; } = false;
 
@@ -136,6 +145,7 @@ public class Profile
         ["reach"]            = 0,
         ["velocity"]         = 0,
         ["autototem"]        = 0,
+        ["autorod"]          = 0,
         ["antidebuff"]       = 0,
         ["hitdelayfix"]     = 0,
         ["panic"]            = 0,
@@ -498,6 +508,13 @@ public static class ProfileManager
             AutoTotemDelay = clicker.AutoTotemDelay,
             AutoTotemBehaviorMode = clicker.AutoTotemBehaviorMode,
 
+            AutoRodEnabled = clicker.AutoRodEnabled,
+            AutoRodSlotMode = clicker.AutoRodSlotMode,
+            AutoRodVerifyForcedSlot = clicker.AutoRodVerifyForcedSlot,
+            AutoRodExtensionTicks = clicker.AutoRodExtensionTicks,
+            AutoRodHoldToExtend = clicker.AutoRodHoldToExtend,
+            AutoRodActionKey = InputHooks.AutoRodActionKey,
+
             AntiDebuffEnabled = clicker.AntiDebuffEnabled,
             HitDelayFixEnabled = clicker.HitDelayFixEnabled,
 
@@ -615,13 +632,24 @@ public static class ProfileManager
         clicker.AutoTotemDelay = profile.AutoTotemDelay;
         clicker.AutoTotemBehaviorMode = profile.AutoTotemBehaviorMode;
 
+        clicker.AutoRodEnabled = profile.AutoRodEnabled;
+        clicker.AutoRodSlotMode = profile.AutoRodSlotMode;
+        clicker.AutoRodVerifyForcedSlot = profile.AutoRodVerifyForcedSlot;
+        clicker.AutoRodExtensionTicks = profile.AutoRodExtensionTicks;
+        clicker.AutoRodHoldToExtend = profile.AutoRodHoldToExtend;
+
         clicker.AntiDebuffEnabled = profile.AntiDebuffEnabled;
         clicker.HitDelayFixEnabled = profile.HitDelayFixEnabled;
 
         clicker.HudLayout = BuildHudLayout(profile.HudLayout);
 
+        // General module binds win over the dedicated Auto Rod action bind.
+        // This keeps older/conflicting profiles deterministic and preserves the toggle bind.
+        InputHooks.SetAutoRodActionKey(0);
         foreach (var kvp in profile.ModuleKeys)
             InputHooks.SetModuleKey(kvp.Key, kvp.Value);
+        if (!InputHooks.SetAutoRodActionKey(profile.AutoRodActionKey))
+            profile.AutoRodActionKey = 0;
         ThemeManager.ApplyTheme(profile.Theme);
 
         // Profiles may still store unfinished-module state; keep it off unless Dev Mode is on.

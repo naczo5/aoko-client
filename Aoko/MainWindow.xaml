@@ -415,6 +415,39 @@
                             </StackPanel>
                         </Border>
 
+                        <Border x:Name="AutoRodCard" Style="{StaticResource ControlCardStyle}" Margin="0,12,0,0">
+                            <StackPanel>
+                                <CheckBox Content="Auto Rod" IsChecked="{Binding AutoRodEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                <TextBlock x:Name="AutoRodAvailabilityText" Text="Available" Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,6,0,0"/>
+                                <DockPanel Margin="0,10,0,0">
+                                    <TextBlock Text="Slot mode" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left"/>
+                                </DockPanel>
+                                <ComboBox SelectedIndex="{Binding AutoRodSlotMode, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Style="{StaticResource DarkComboBox}" Height="28" Margin="0,2,0,0">
+                                    <ComboBoxItem Content="Auto"/>
+                                    <ComboBoxItem Content="Slot 1"/>
+                                    <ComboBoxItem Content="Slot 2"/>
+                                    <ComboBoxItem Content="Slot 3"/>
+                                    <ComboBoxItem Content="Slot 4"/>
+                                    <ComboBoxItem Content="Slot 5"/>
+                                    <ComboBoxItem Content="Slot 6"/>
+                                    <ComboBoxItem Content="Slot 7"/>
+                                    <ComboBoxItem Content="Slot 8"/>
+                                    <ComboBoxItem Content="Slot 9"/>
+                                </ComboBox>
+                                <CheckBox Content="Verify forced slot contains a fishing rod" IsChecked="{Binding AutoRodVerifyForcedSlot, Mode=TwoWay}" IsEnabled="{Binding AutoRodUsesForcedSlot}" Style="{StaticResource DarkCheckBox}" Margin="0,10,0,0"/>
+                                <TextBlock Text="Disable verification to use the selected slot with another item." Foreground="{DynamicResource DimTextBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,4,0,0"/>
+                                <CheckBox Content="Hold action bind to extend cast" IsChecked="{Binding AutoRodHoldToExtend, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,10,0,0"/>
+                                <DockPanel Margin="0,10,0,0" IsEnabled="{Binding AutoRodUsesFixedExtension}">
+                                    <TextBlock Text="Extension delay (ticks)" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left"/>
+                                    <TextBlock Text="{Binding AutoRodExtensionTicks, StringFormat={}{0} ticks}" Foreground="{DynamicResource DimTextBrush}" FontSize="11" DockPanel.Dock="Right"/>
+                                </DockPanel>
+                                <Slider Minimum="1" Maximum="40" TickFrequency="1" IsSnapToTickEnabled="True" Value="{Binding AutoRodExtensionTicks, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" IsEnabled="{Binding AutoRodUsesFixedExtension}" Style="{StaticResource DarkSlider}"/>
+                                <TextBlock Text="Fixed mode restores after the configured delay (about 50 ms per tick). Hold mode restores after the action bind is released; a safety timeout prevents a stuck slot." Foreground="{DynamicResource DimTextBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,4,0,0"/>
+                                <Button x:Name="AutoRodActionBindButton" Content="Action: Unbound" Click="AutoRodActionBindButton_Click" Style="{StaticResource DarkButton}" HorizontalAlignment="Left" Width="210" Margin="0,10,0,0"/>
+                                <TextBlock x:Name="AutoRodActionBindStatusText" Text="The action fires once per press while enabled, connected, in-game, and no GUI is open." Foreground="{DynamicResource DimTextBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,6,0,0"/>
+                            </StackPanel>
+                        </Border>
+
                         <Border x:Name="HitDelayFixCard" Style="{StaticResource ControlCardStyle}" Margin="0,12,0,0">
                             <StackPanel>
                                 <TextBlock Text="Hit Delay Fix" Foreground="{DynamicResource TextBrush}" FontSize="16" FontWeight="Bold" Margin="0,0,0,10"/>
@@ -1322,6 +1355,7 @@
                                     <Button x:Name="KeybindReachButton" Tag="reach" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
                                     <Button x:Name="KeybindVelocityButton" Tag="velocity" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
                                     <Button x:Name="KeybindAutoTotemButton" Tag="autototem" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
+                                    <Button x:Name="KeybindAutoRodButton" Tag="autorod" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
                                     <Button x:Name="KeybindAntiDebuffButton" Tag="antidebuff" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
                                     <Button x:Name="KeybindHitDelayFixButton" Tag="hitdelayfix" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
                                     <Button x:Name="KeybindPanicButton" Tag="panic" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>

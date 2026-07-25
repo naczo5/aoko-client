@@ -10,6 +10,14 @@ if not exist "%GPP%" (
 
 if not exist "tests" mkdir "tests"
 
+echo [NativeTests] Building auto_rod_core_tests.exe...
+"%GPP%" -m64 -std=c++11 -O2 -static-libgcc -static-libstdc++ -o tests\auto_rod_core_tests.exe tests\auto_rod_core_tests.cpp
+if %errorlevel% neq 0 exit /b %errorlevel%
+
+echo [NativeTests] Running auto_rod_core_tests.exe...
+tests\auto_rod_core_tests.exe
+if %errorlevel% neq 0 exit /b %errorlevel%
+
 echo [NativeTests] Building json_config_reader_tests.exe...
 "%GPP%" -m64 -std=c++11 -O2 -static-libgcc -static-libstdc++ -o tests\json_config_reader_tests.exe tests\json_config_reader_tests.cpp
 if %errorlevel% neq 0 exit /b %errorlevel%

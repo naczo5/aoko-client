@@ -28,6 +28,7 @@ public class GameStateClient : INotifyPropertyChanged
     private Task? _configSenderTask;
     private Task? _readTask;
     private readonly int _port = 25590;
+    private readonly SemaphoreSlim _sendLock = new(1, 1);
 
     private GameState _currentState = new();
     private bool _isConnected;
@@ -886,6 +887,92 @@ public class GameStateClient : INotifyPropertyChanged
         };
     }
 
+    internal static string BuildAutoRodActionMessage(
+        int slotMode, bool verifyForcedSlot, int extensionTicks, bool holdToExtend)
+        => JsonSerializer.Serialize(new
+        {
+            type = "moduleAction",
+            action = "autoRod",
+            phase = "press",
+            enabled = true,
+            slotMode = Math.Clamp(slotMode, 0, 9),
+            verifyForcedSlot,
+            extensionTicks = Math.Clamp(extensionTicks, 1, 40),
+            holdToExtend
+        }) + "\n";
+
+    internal static string BuildAutoRodReleaseMessage()
+        => JsonSerializer.Serialize(new
+        {
+            type = "moduleAction",
+            action = "autoRod",
+            phase = "release"
+        }) + "\n";
+
+    public async Task<bool> SendAutoRodActionAsync(CancellationToken token = default)
+    {
+        var clicker = Clicker.Instance;
+        if (!clicker.AutoRodEnabled)
+            return false;
+
+        string message = BuildAutoRodActionMessage(
+            clicker.AutoRodSlotMode,
+            clicker.AutoRodVerifyForcedSlot,
+            clicker.AutoRodExtensionTicks,
+            clicker.AutoRodHoldToExtend);
+        try
+        {
+            return await SendMessageAsync(
+                message,
+                token,
+                () => Clicker.Instance.AutoRodEnabled).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException or InvalidOperationException or ObjectDisposedException or SocketException or OperationCanceledException)
+        {
+            Debug.WriteLine($"[GameStateClient] Auto Rod action send failed: {ex.Message}");
+            return false;
+        }
+    }
+
+    public async Task<bool> SendAutoRodReleaseAsync(CancellationToken token = default)
+    {
+        try
+        {
+            return await SendMessageAsync(BuildAutoRodReleaseMessage(), token).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException or InvalidOperationException or ObjectDisposedException or SocketException or OperationCanceledException)
+        {
+            Debug.WriteLine($"[GameStateClient] Auto Rod release send failed: {ex.Message}");
+            return false;
+        }
+    }
+
+    private async Task<bool> SendMessageAsync(
+        string message,
+        CancellationToken token,
+        Func<bool>? sendGuard = null)
+    {
+        byte[] data = Encoding.UTF8.GetBytes(message);
+        await _sendLock.WaitAsync(token).ConfigureAwait(false);
+        try
+        {
+            if (sendGuard != null && !sendGuard())
+                return false;
+
+            TcpClient? client = _client;
+            if (client?.Connected != true)
+                return false;
+
+            NetworkStream stream = client.GetStream();
+            await stream.WriteAsync(data.AsMemory(), token).ConfigureAwait(false);
+            return true;
+        }
+        finally
+        {
+            _sendLock.Release();
+        }
+    }
+
     // === Config Sending (C# -> Bridge for HUD display) ===
 
     private void HandleBridgeCapabilities(string json)
@@ -1057,6 +1144,11 @@ public class GameStateClient : INotifyPropertyChanged
                     autoTotemElytra = clicker.AutoTotemElytra,
                     autoTotemDelay = clicker.AutoTotemDelay,
                     autoTotemBehaviorMode = clicker.AutoTotemBehaviorMode,
+                    autoRodEnabled = clicker.AutoRodEnabled,
+                    autoRodSlotMode = clicker.AutoRodSlotMode,
+                    autoRodVerifyForcedSlot = clicker.AutoRodVerifyForcedSlot,
+                    autoRodExtensionTicks = clicker.AutoRodExtensionTicks,
+                    autoRodHoldToExtend = clicker.AutoRodHoldToExtend,
                     antiDebuffEnabled = clicker.AntiDebuffEnabled,
                     hitDelayFixEnabled = clicker.HitDelayFixEnabled,
                     // Per-module keybinds
@@ -1077,18 +1169,14 @@ public class GameStateClient : INotifyPropertyChanged
                     keybindChestStealer  = InputHooks.GetModuleKey("cheststealer"),
                     keybindBlockEsp      = InputHooks.GetModuleKey("blockesp"),
                     keybindPixelPartyAssist = InputHooks.GetModuleKey("pixelpartyassist"),
+                    keybindAutoRod = InputHooks.GetModuleKey("autorod"),
                     hudEditor = clicker.HudEditorActive,
                     hudLayout = clicker.HudLayout.ToJson()
                 };
 
                 string json = JsonSerializer.Serialize(config) + "\n";
-                byte[] data = Encoding.UTF8.GetBytes(json);
-
-                if (_client?.Connected == true)
-                {
-                    var stream = _client.GetStream();
-                    await stream.WriteAsync(data, 0, data.Length, token);
-                }
+                if (!await SendMessageAsync(json, token).ConfigureAwait(false))
+                    break;
             }
             catch (Exception)
             {

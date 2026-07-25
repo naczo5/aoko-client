@@ -59,6 +59,7 @@ public partial class MainWindow : Window
 
     private bool _controlMode;
     private string? _pendingKeybindModuleId;
+    private bool _pendingAutoRodActionBind;
     private int _uiUpdateQueued;
     private readonly CancellationTokenSource _updateCheckCancellation = new();
     private string? _latestReleaseUrl;
@@ -86,6 +87,7 @@ public partial class MainWindow : Window
         ["reach"] = "Reach",
         ["velocity"] = "Velocity",
         ["autototem"] = "AutoTotem",
+        ["autorod"] = "Auto Rod",
         ["antidebuff"] = "AntiDebuff",
         ["hitdelayfix"] = "Hit Delay Fix",
         ["panic"] = "Panic"
@@ -315,6 +317,7 @@ public partial class MainWindow : Window
         bool reachSupported = IsModuleSupported("reach");
         bool velocitySupported = IsModuleSupported("velocity");
         bool autoTotemSupported = IsModuleSupported("autototem");
+        bool autoRodSupported = IsModuleSupported("autorod");
         bool antiDebuffSupported = IsModuleSupported("antidebuff");
         bool hitDelayFixSupported = IsModuleSupported("hitdelayfix");
         bool reloadMappingsSupported = GameStateClient.Instance.SupportsSetting("reloadMappingsNonce");
@@ -329,6 +332,7 @@ public partial class MainWindow : Window
         ReachCard.IsEnabled = reachSupported;
         VelocityCard.IsEnabled = velocitySupported;
         AutoTotemCard.IsEnabled = autoTotemSupported;
+        AutoRodCard.IsEnabled = autoRodSupported;
         AntiDebuffCard.IsEnabled = antiDebuffSupported;
         HitDelayFixCard.IsEnabled = hitDelayFixSupported;
 
@@ -342,6 +346,7 @@ public partial class MainWindow : Window
         if (!reachSupported && clicker.ReachEnabled) clicker.ReachEnabled = false;
         if (!velocitySupported && clicker.VelocityEnabled) clicker.VelocityEnabled = false;
         if (!autoTotemSupported && clicker.AutoTotemEnabled) clicker.AutoTotemEnabled = false;
+        if (!autoRodSupported && clicker.AutoRodEnabled) clicker.AutoRodEnabled = false;
         if (!antiDebuffSupported && clicker.AntiDebuffEnabled) clicker.AntiDebuffEnabled = false;
         if (!hitDelayFixSupported && clicker.HitDelayFixEnabled) clicker.HitDelayFixEnabled = false;
 
@@ -356,6 +361,7 @@ public partial class MainWindow : Window
         ReachAvailabilityText.Text = reachSupported ? "Available" : "Unavailable on current bridge";
         VelocityAvailabilityText.Text = velocitySupported ? "Available" : "Unavailable on current bridge";
         AutoTotemAvailabilityText.Text = autoTotemSupported ? "Available" : "Unavailable on current bridge";
+        AutoRodAvailabilityText.Text = autoRodSupported ? "Available" : "Unavailable on current bridge";
         AntiDebuffAvailabilityText.Text = antiDebuffSupported ? "Available" : "Unavailable on current bridge";
         HitDelayFixAvailabilityText.Text = hitDelayFixSupported ? "Available" : "Unavailable on current bridge";
         ChestStealerAvailabilityText.Text = chestStealerSupported ? "Available" : "Unavailable on current bridge";
@@ -376,6 +382,8 @@ public partial class MainWindow : Window
         KeybindReachButton.IsEnabled = reachSupported;
         KeybindVelocityButton.IsEnabled = velocitySupported;
         KeybindAutoTotemButton.IsEnabled = autoTotemSupported;
+        KeybindAutoRodButton.IsEnabled = autoRodSupported;
+        AutoRodActionBindButton.IsEnabled = autoRodSupported;
         KeybindAntiDebuffButton.IsEnabled = antiDebuffSupported;
         KeybindPanicButton.IsEnabled = true;
         ReloadMappingsButton.IsEnabled = reloadMappingsSupported;
@@ -1265,8 +1273,19 @@ public partial class MainWindow : Window
     {
         if (sender is not Button btn || btn.Tag is not string moduleId) return;
         if (!IsModuleSupported(moduleId)) return;
+        _pendingAutoRodActionBind = false;
         _pendingKeybindModuleId = moduleId;
         InputHooks.StartKeyCapture();
+        UpdateKeybindButtons();
+    }
+
+    private void AutoRodActionBindButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (!IsModuleSupported("autorod")) return;
+        _pendingKeybindModuleId = null;
+        _pendingAutoRodActionBind = true;
+        AutoRodActionBindStatusText.Text = "Press a keyboard or mouse button (Esc = unbind).";
+        InputHooks.StartKeyCapture(allowMouse: true);
         UpdateKeybindButtons();
     }
 
@@ -1336,11 +1355,24 @@ public partial class MainWindow : Window
 
     private void InputHooks_OnKeyCaptured(int vkCode)
     {
+        int finalVk = (vkCode == 0x1B) ? 0 : vkCode; // ESC unbinds.
+        if (_pendingAutoRodActionBind)
+        {
+            bool assigned = InputHooks.SetAutoRodActionKey(finalVk);
+            _pendingAutoRodActionBind = false;
+            AutoRodActionBindStatusText.Text = assigned
+                ? "Action bind updated."
+                : "Conflict: that input is already used by a general module bind.";
+            Dispatcher.BeginInvoke(UpdateKeybindButtons);
+            return;
+        }
+
         string? moduleId = _pendingKeybindModuleId;
         if (string.IsNullOrWhiteSpace(moduleId)) return;
 
-        int finalVk = (vkCode == 0x1B) ? 0 : vkCode; // ESC unbinds.
-        InputHooks.SetModuleKey(moduleId, finalVk);
+        bool generalAssigned = InputHooks.SetModuleKey(moduleId, finalVk);
+        if (!generalAssigned)
+            AutoRodActionBindStatusText.Text = "Conflict: that input is used by the Auto Rod action bind.";
         _pendingKeybindModuleId = null;
         Dispatcher.BeginInvoke(UpdateKeybindButtons);
     }
@@ -1373,9 +1405,13 @@ public partial class MainWindow : Window
         SetKeybindButtonContent(KeybindReachButton, "reach");
         SetKeybindButtonContent(KeybindVelocityButton, "velocity");
         SetKeybindButtonContent(KeybindAutoTotemButton, "autototem");
+        SetKeybindButtonContent(KeybindAutoRodButton, "autorod");
         SetKeybindButtonContent(KeybindAntiDebuffButton, "antidebuff");
         SetKeybindButtonContent(KeybindHitDelayFixButton, "hitdelayfix");
         SetKeybindButtonContent(KeybindPanicButton, "panic");
+        AutoRodActionBindButton.Content = _pendingAutoRodActionBind
+            ? "Action: [Press key or mouse...]"
+            : $"Action: {FormatVirtualKey(InputHooks.AutoRodActionKey)}";
     }
 
     private void SetKeybindButtonContent(Button btn, string moduleId)
@@ -1396,6 +1432,11 @@ public partial class MainWindow : Window
     private static string FormatVirtualKey(int vk)
     {
         if (vk <= 0) return "Unbound";
+        if (vk == 0x01) return "Mouse Left";
+        if (vk == 0x02) return "Mouse Right";
+        if (vk == 0x04) return "Mouse Middle";
+        if (vk == 0x05) return "Mouse X1";
+        if (vk == 0x06) return "Mouse X2";
         if (vk >= 0x70 && vk <= 0x7B) return $"F{vk - 0x6F}";
         if (vk == 0xC0) return "`";
         if (vk >= 0x30 && vk <= 0x39) return ((char)vk).ToString();

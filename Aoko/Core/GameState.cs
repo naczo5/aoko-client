@@ -16,6 +16,9 @@ public class GameState
     [JsonPropertyName("guiOpen")]
     public bool GuiOpen { get; set; }
 
+    [JsonPropertyName("inWorld")]
+    public bool InWorld { get; set; }
+
     [JsonPropertyName("screenName")]
     public string ScreenName { get; set; } = "unknown";
 
