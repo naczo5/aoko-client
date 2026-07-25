@@ -87,6 +87,23 @@ public class BridgeCapabilitiesTests
         Assert.True(caps.SupportsStateField("cheststealerstate"));
     }
 
+    [Theory]
+    [InlineData("1.8.9")]
+    [InlineData("1.21.4")]
+    [InlineData("26.1")]
+    [InlineData("26.2")]
+    public void AutoRod_FallbackSupportsModuleAndConfig(string version)
+    {
+        BridgeCapabilities caps = BridgeCapabilities.ForVersionFallback(version);
+
+        Assert.True(caps.SupportsModule("autorod"));
+        Assert.True(caps.SupportsSetting("autorodenabled"));
+        Assert.True(caps.SupportsSetting("autorodslotmode"));
+        Assert.True(caps.SupportsSetting("autorodverifyforcedslot"));
+        Assert.True(caps.SupportsSetting("keybindautorod"));
+        Assert.True(caps.SupportsStateField("inworld"));
+    }
+
     [Fact]
     public void AntiDebuff_AvailableOnAllVersions()
     {

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Windows;
 
@@ -27,10 +28,20 @@ public static class InputHooks
     private const int WH_KEYBOARD_LL = 13;
     private const int WH_MOUSE_LL = 14;
     private const int WM_KEYDOWN = 0x0100;
+    private const int WM_KEYUP = 0x0101;
     private const int WM_LBUTTONDOWN = 0x0201;
     private const int WM_LBUTTONUP = 0x0202;
     private const int WM_RBUTTONDOWN = 0x0204;
     private const int WM_RBUTTONUP = 0x0205;
+    private const int WM_MBUTTONDOWN = 0x0207;
+    private const int WM_MBUTTONUP = 0x0208;
+    private const int WM_XBUTTONDOWN = 0x020B;
+    private const int WM_XBUTTONUP = 0x020C;
+    private const int VK_LBUTTON = 0x01;
+    private const int VK_RBUTTON = 0x02;
+    private const int VK_MBUTTON = 0x04;
+    private const int VK_XBUTTON1 = 0x05;
+    private const int VK_XBUTTON2 = 0x06;
     private const int VK_OEM_3 = 0xC0; // Backtick key
     private const uint LLMHF_INJECTED = 0x00000001;
     
@@ -87,23 +98,99 @@ public static class InputHooks
         ["reach"]            = 0,
         ["velocity"]         = 0,
         ["autototem"]        = 0,
+        ["autorod"]          = 0,
         ["antidebuff"]       = 0,
         ["hitdelayfix"]     = 0,
         ["panic"]            = 0,
         ["hudeditor"]        = 0,
     };
 
-    public static void SetModuleKey(string moduleId, int vk)
+    public static int AutoRodActionKey { get; private set; }
+
+    public static bool SetModuleKey(string moduleId, int vk)
     {
+        if (vk > 0 && vk == AutoRodActionKey)
+            return false;
+
         ModuleKeys[moduleId] = vk;
         OnStateChanged?.Invoke();
+        return true;
+    }
+
+    public static bool SetAutoRodActionKey(int vk)
+    {
+        if (vk > 0 && ModuleKeys.Values.Contains(vk))
+            return false;
+
+        AutoRodActionLatch.End();
+        AutoRodActionKey = vk;
+        OnStateChanged?.Invoke();
+        return true;
     }
 
     public static int GetModuleKey(string moduleId)
         => ModuleKeys.TryGetValue(moduleId, out int vk) ? vk : 0;
 
+    internal static bool ShouldConsumeAutoRodAction(
+        bool enabled, bool supported, bool connected, bool minecraftForeground,
+        bool inWorld, bool anyScreenOpen)
+        => enabled && supported && connected && minecraftForeground && inWorld && !anyScreenOpen;
+
+    internal static bool IsAnyGameScreenOpen(GameState state)
+    {
+        if (state.GuiOpen)
+            return true;
+
+        string screenName = state.ScreenName?.Trim() ?? string.Empty;
+        return screenName.Length > 0 &&
+            !screenName.Equals("none", StringComparison.OrdinalIgnoreCase) &&
+            !screenName.Equals("unknown", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool CanConsumeAutoRodAction()
+    {
+        var client = GameStateClient.Instance;
+        GameState state = client.CurrentState;
+        return ShouldConsumeAutoRodAction(
+            Clicker.Instance.AutoRodEnabled,
+            client.SupportsModule("autorod"),
+            client.IsConnected,
+            WindowDetection.IsMinecraftForeground(),
+            state.InWorld,
+            IsAnyGameScreenOpen(state));
+    }
+
+    internal sealed class PressLatch
+    {
+        private bool _isDown;
+        private bool _consume;
+
+        public bool Begin(bool canConsume, out bool trigger)
+        {
+            trigger = false;
+            if (_isDown)
+                return _consume;
+
+            _isDown = true;
+            _consume = canConsume;
+            trigger = canConsume;
+            return _consume;
+        }
+
+        public bool End()
+        {
+            bool consume = _consume;
+            _isDown = false;
+            _consume = false;
+            return consume;
+        }
+    }
+
+    private static readonly PressLatch AutoRodActionLatch = new();
+
     // Key capture mode for rebinding (reserved for future use)
     public static bool IsCapturingKey { get; private set; } = false;
+    private static bool _captureAllowsMouse;
     public static event Action<int>? OnKeyCaptured;
 
     public static event Action? OnToggleRequested;
@@ -111,14 +198,16 @@ public static class InputHooks
 
     public static bool IsPhysicalLeftButtonDown { get; private set; } = false;
 
-    public static void StartKeyCapture()
+    public static void StartKeyCapture(bool allowMouse = false)
     {
+        _captureAllowsMouse = allowMouse;
         IsCapturingKey = true;
     }
 
     public static void StopKeyCapture()
     {
         IsCapturingKey = false;
+        _captureAllowsMouse = false;
     }
 
     private static void ToggleModule(string moduleId)
@@ -159,6 +248,7 @@ public static class InputHooks
             case "reach":            c.ReachEnabled = !c.ReachEnabled; break;
             case "velocity":         c.VelocityEnabled = !c.VelocityEnabled; break;
             case "autototem":        c.AutoTotemEnabled = !c.AutoTotemEnabled; break;
+            case "autorod":          c.AutoRodEnabled = !c.AutoRodEnabled; break;
             case "antidebuff":       c.AntiDebuffEnabled = !c.AntiDebuffEnabled; break;
             case "hitdelayfix":     c.HitDelayFixEnabled = !c.HitDelayFixEnabled; break;
             case "hudeditor":        c.HudEditorActive = !c.HudEditorActive; break;
@@ -171,7 +261,7 @@ public static class InputHooks
             return true;
 
         if (GameStateClient.Instance.IsConnected)
-            return GameStateClient.Instance.CurrentState.GuiOpen;
+            return IsAnyGameScreenOpen(GameStateClient.Instance.CurrentState);
 
         return WindowDetection.IsCursorVisible();
     }
@@ -191,6 +281,8 @@ public static class InputHooks
     
     public static void Uninstall()
     {
+        AutoRodActionLatch.End();
+
         if (_keyboardHook != IntPtr.Zero)
         {
             UnhookWindowsHookEx(_keyboardHook);
@@ -206,44 +298,84 @@ public static class InputHooks
     
     private static IntPtr KeyboardProc(int nCode, IntPtr wParam, IntPtr lParam)
     {
-        if (nCode >= 0 && wParam == (IntPtr)WM_KEYDOWN)
+        bool isDown = wParam == (IntPtr)WM_KEYDOWN;
+        bool isUp = wParam == (IntPtr)WM_KEYUP;
+        if (nCode >= 0 && (isDown || isUp))
         {
             var kb = Marshal.PtrToStructure<KBDLLHOOKSTRUCT>(lParam);
-            
-            // Key capture mode - capture the pressed key
-            if (IsCapturingKey)
-            {
-                IsCapturingKey = false;
-                Application.Current?.Dispatcher.BeginInvoke(() =>
-                {
-                    OnKeyCaptured?.Invoke((int)kb.VkCode);
-                });
-                return (IntPtr)1; // Block the key
-            }
-            
-            // Per-module keybinds
-            if (ShouldBlockModuleKeybinds())
-                return CallNextHookEx(_keyboardHook, nCode, wParam, lParam);
+            int vkCode = (int)kb.VkCode;
 
-            foreach (var kvp in ModuleKeys)
+            if (isDown && IsCapturingKey)
             {
-                if (kvp.Value > 0 && kb.VkCode == (uint)kvp.Value)
+                StopKeyCapture();
+                Application.Current?.Dispatcher.BeginInvoke(() => OnKeyCaptured?.Invoke(vkCode));
+                return (IntPtr)1;
+            }
+
+            if (vkCode == AutoRodActionKey && AutoRodActionKey > 0)
+            {
+                if (isDown)
                 {
-                    string id = kvp.Key;
-                    Application.Current?.Dispatcher.BeginInvoke(() =>
+                    bool consume = AutoRodActionLatch.Begin(CanConsumeAutoRodAction(), out bool trigger);
+                    if (trigger)
+                        Application.Current?.Dispatcher.BeginInvoke(() => _ = GameStateClient.Instance.SendAutoRodActionAsync());
+                    if (consume) return (IntPtr)1;
+                }
+                else if (AutoRodActionLatch.End())
+                {
+                    Application.Current?.Dispatcher.BeginInvoke(
+                        () => _ = GameStateClient.Instance.SendAutoRodReleaseAsync());
+                    return (IntPtr)1;
+                }
+            }
+
+            if (isDown)
+            {
+                if (ShouldBlockModuleKeybinds())
+                    return CallNextHookEx(_keyboardHook, nCode, wParam, lParam);
+
+                foreach (var kvp in ModuleKeys)
+                {
+                    if (kvp.Value > 0 && kb.VkCode == (uint)kvp.Value)
                     {
-                        ToggleModule(id);
-                        OnToggleRequested?.Invoke();
-                        OnStateChanged?.Invoke();
-                    });
-                    return (IntPtr)1; // Block the key
+                        string id = kvp.Key;
+                        Application.Current?.Dispatcher.BeginInvoke(() =>
+                        {
+                            ToggleModule(id);
+                            OnToggleRequested?.Invoke();
+                            OnStateChanged?.Invoke();
+                        });
+                        return (IntPtr)1;
+                    }
                 }
             }
         }
-        
+
         return CallNextHookEx(_keyboardHook, nCode, wParam, lParam);
     }
     
+    private static bool TryGetMouseBinding(int message, uint mouseData, out int vkCode, out bool isDown)
+    {
+        vkCode = 0;
+        isDown = false;
+        switch (message)
+        {
+            case WM_LBUTTONDOWN: vkCode = VK_LBUTTON; isDown = true; return true;
+            case WM_LBUTTONUP: vkCode = VK_LBUTTON; return true;
+            case WM_RBUTTONDOWN: vkCode = VK_RBUTTON; isDown = true; return true;
+            case WM_RBUTTONUP: vkCode = VK_RBUTTON; return true;
+            case WM_MBUTTONDOWN: vkCode = VK_MBUTTON; isDown = true; return true;
+            case WM_MBUTTONUP: vkCode = VK_MBUTTON; return true;
+            case WM_XBUTTONDOWN:
+            case WM_XBUTTONUP:
+                vkCode = ((mouseData >> 16) & 0xFFFF) == 1 ? VK_XBUTTON1 : VK_XBUTTON2;
+                isDown = message == WM_XBUTTONDOWN;
+                return true;
+            default:
+                return false;
+        }
+    }
+
     private static IntPtr MouseProc(int nCode, IntPtr wParam, IntPtr lParam)
     {
         if (nCode >= 0)
@@ -257,6 +389,32 @@ public static class InputHooks
             }
             
             int msg = wParam.ToInt32();
+            if (TryGetMouseBinding(msg, ms.MouseData, out int mouseVk, out bool mouseDown))
+            {
+                if (mouseDown && IsCapturingKey && _captureAllowsMouse)
+                {
+                    StopKeyCapture();
+                    Application.Current?.Dispatcher.BeginInvoke(() => OnKeyCaptured?.Invoke(mouseVk));
+                    return (IntPtr)1;
+                }
+
+                if (mouseVk == AutoRodActionKey && AutoRodActionKey > 0)
+                {
+                    if (mouseDown)
+                    {
+                        bool consume = AutoRodActionLatch.Begin(CanConsumeAutoRodAction(), out bool trigger);
+                        if (trigger)
+                            Application.Current?.Dispatcher.BeginInvoke(() => _ = GameStateClient.Instance.SendAutoRodActionAsync());
+                        if (consume) return (IntPtr)1;
+                    }
+                    else if (AutoRodActionLatch.End())
+                    {
+                        Application.Current?.Dispatcher.BeginInvoke(
+                            () => _ = GameStateClient.Instance.SendAutoRodReleaseAsync());
+                        return (IntPtr)1;
+                    }
+                }
+            }
 
             if (Clicker.Instance.IsArmed && Clicker.Instance.KillAuraEnabled &&
                 GameStateClient.Instance.IsConnected &&

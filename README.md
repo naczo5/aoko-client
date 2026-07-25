@@ -26,6 +26,7 @@ aoko client is an open-source Windows utility client and external overlay for Lu
 - SpeedBridge 
 - Reach and Velocity controls
 - AutoTotem (inventory-only and anarchy modes)
+- Auto Rod (auto/forced hotbar selection, one-use action bind, exact slot restoration)
 - AntiDebuff (hides Blindness/Nausea client-side, plus Darkness on 1.21/26.1)
 - Nick Hider (JVMTI-based local name spoofing)
 - Hit Delay Fix (removes 1.8.9 attack cooldown delays)

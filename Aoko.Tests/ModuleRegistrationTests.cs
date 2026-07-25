@@ -47,10 +47,11 @@ public class ModuleRegistrationTests
         var nativeIds = ParseQuotedStringsInside(header, "ModernCapabilitiesJson", "\\\"modules\\\":[", "]");
 
         var catalogIds = ModuleCatalog.Requiring(ModuleCatalog.Surfaces.Capability)
+            .Where(e => !e.ManagedOnly)
             .Select(e => e.Id)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-        AssertMissing("ModuleCatalog (Capability)", nativeIds, catalogIds);
+        AssertMissing("ModuleCatalog native capability subset", nativeIds, catalogIds);
         AssertMissing("bridge_capabilities.h ModernCapabilitiesJson modules", catalogIds, nativeIds);
     }
 
@@ -252,10 +253,12 @@ public class ModuleRegistrationTests
         string header = File.ReadAllText(Path.Combine(RepoRoot, "McInjector", "src", "main", "cpp", "bridge_capabilities.h"));
         var nativeIds = ParseQuotedStringsInside(header, "LegacyCapabilitiesJson", "\\\"modules\\\":[", "]");
 
+        var managedOnlyIds = ModuleCatalog.All.Where(e => e.ManagedOnly).Select(e => e.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var fallbackIds = BridgeCapabilities.ForVersionFallback("1.8.9").Modules
+            .Where(id => !managedOnlyIds.Contains(id))
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-        AssertMissing("BridgeCapabilities legacy modules", nativeIds, fallbackIds);
+        AssertMissing("BridgeCapabilities native legacy subset", nativeIds, fallbackIds);
         AssertMissing("bridge_capabilities.h LegacyCapabilitiesJson modules", fallbackIds, nativeIds);
     }
 
@@ -291,6 +294,7 @@ public class ModuleRegistrationTests
             case "reach": clicker.ReachEnabled = enabled; return true;
             case "velocity": clicker.VelocityEnabled = enabled; return true;
             case "autototem": clicker.AutoTotemEnabled = enabled; return true;
+            case "autorod": clicker.AutoRodEnabled = enabled; return true;
             case "antidebuff": clicker.AntiDebuffEnabled = enabled; return true;
             case "hitdelayfix": clicker.HitDelayFixEnabled = enabled; return true;
             default: return false;

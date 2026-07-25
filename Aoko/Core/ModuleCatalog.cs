@@ -38,7 +38,9 @@ public static class ModuleCatalog
         Func<Clicker, bool> IsEnabled,
         Surfaces RequiredSurfaces = StandardSurfaces,
         /// <summary>Hidden in the external GUI unless Clicker.DevMode is on.</summary>
-        bool DevOnly = false);
+        bool DevOnly = false,
+        /// <summary>Implemented in managed code while native capability payloads are updated separately.</summary>
+        bool ManagedOnly = false);
 
     public static IReadOnlyList<Entry> All { get; } =
     [
@@ -63,6 +65,7 @@ public static class ModuleCatalog
         new("reach", "Reach", "cfg.reachEnabled", c => c.ReachEnabled),
         new("velocity", "Velocity", "cfg.velocityEnabled", c => c.VelocityEnabled),
         new("autototem", "AutoTotem", "cfg.autoTotemEnabled", c => c.AutoTotemEnabled),
+        new("autorod", "Auto Rod", "cfg.autoRodEnabled", c => c.AutoRodEnabled),
         new("antidebuff", "AntiDebuff", "cfg.antiDebuffEnabled", c => c.AntiDebuffEnabled),
         new("hitdelayfix", "Hit Delay Fix", "cfg.hitDelayFixEnabled", c => c.HitDelayFixEnabled),
 

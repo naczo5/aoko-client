@@ -21,6 +21,7 @@
 #include <cctype>
 #include <unordered_map>
 #include <unordered_set>
+#include <deque>
 #include <fstream>
 #include <sstream>
 #include <cmath>
@@ -32,6 +33,7 @@
 #include "imgui_impl_win32.h"
 #include "imgui_impl_opengl3.h"
 #include "json_config_reader.h"
+#include "auto_rod_core.h"
 #include "bridge_capabilities.h"
 #include "nick_hider.h"
 #include "nick_hider_jvmti.h"
@@ -260,6 +262,12 @@ struct Config {
     int   autoTotemBehaviorMode = 0; // 0=Ghost (inventory only), 1=Anarchy
     bool  antiDebuffEnabled = false;
     bool  hitDelayFixEnabled = false;
+    bool  autoRodEnabled = false;
+    int   autoRodSlotMode = 0;
+    bool  autoRodVerifyForcedSlot = true;
+    int   autoRodExtensionTicks = autorod::kUseToRestoreTicks;
+    bool  autoRodHoldToExtend = false;
+    int   keybindAutoRod = 0;
     bool  pixelPartyAssist = false;
     int   pixelPartyScanRadius = 28;
     bool  pixelPartyAutoLook = false;
@@ -268,6 +276,44 @@ struct Config {
 };
 static Config g_config;
 static Mutex  g_configMutex;
+
+struct AutoRodRequest {
+    bool enabled;
+    int slotMode;
+    bool verifyForcedSlot;
+    int extensionTicks;
+    bool holdToExtend;
+
+    AutoRodRequest(bool enabledValue, int slotModeValue, bool verifyValue,
+                   int extensionTicksValue = autorod::kUseToRestoreTicks,
+                   bool holdToExtendValue = false)
+        : enabled(enabledValue), slotMode(slotModeValue), verifyForcedSlot(verifyValue),
+          extensionTicks(extensionTicksValue), holdToExtend(holdToExtendValue) {}
+};
+static const size_t kAutoRodQueueLimit = 16;
+static std::deque<AutoRodRequest> g_autoRodQueue;
+static Mutex g_autoRodQueueMutex;
+static volatile LONG g_autoRodReleaseRequested = 0;
+
+static void ClearAutoRodQueue() {
+    LockGuard lk(g_autoRodQueueMutex);
+    g_autoRodQueue.clear();
+}
+
+static void QueueAutoRodRequest(const AutoRodRequest& request) {
+    LockGuard lk(g_autoRodQueueMutex);
+    if (g_autoRodQueue.size() >= kAutoRodQueueLimit) g_autoRodQueue.pop_front();
+    g_autoRodQueue.push_back(request);
+}
+
+static bool TryPopAutoRodRequest(AutoRodRequest* out) {
+    if (!out) return false;
+    LockGuard lk(g_autoRodQueueMutex);
+    if (g_autoRodQueue.empty()) return false;
+    *out = g_autoRodQueue.front();
+    g_autoRodQueue.pop_front();
+    return true;
+}
 // Block ESP parsed targets (populated in ParseConfig, read by scan thread).
 static std::vector<lc::BlockEspTargetDef> g_blockEspTargets;
 static Mutex g_blockEspTargetsMutex;
@@ -281,7 +327,26 @@ static void ParseConfig(const std::string& line) {
     TRACE261_PATH("enter");
     lc::SimpleJsonConfigReader reader(line);
 
-    bool isConfig = TRACE261_IF("isConfigPacket", reader.GetString("type") == "config");
+    const std::string packetType = reader.GetString("type");
+    if (packetType == "moduleAction") {
+        if (reader.GetString("action") == "autoRod") {
+            const std::string phase = reader.GetString("phase");
+            if (phase == "release") {
+                InterlockedExchange(&g_autoRodReleaseRequested, 1);
+            } else if (reader.GetBool("enabled")) {
+                InterlockedExchange(&g_autoRodReleaseRequested, 0);
+                QueueAutoRodRequest(AutoRodRequest(
+                    true,
+                    lc::ClampInt(reader.GetInt("slotMode", 0), 0, 9),
+                    reader.GetBool("verifyForcedSlot", true),
+                    lc::ClampInt(reader.GetInt("extensionTicks", autorod::kUseToRestoreTicks),
+                                 autorod::kMinExtensionTicks, autorod::kMaxExtensionTicks),
+                    reader.GetBool("holdToExtend", false)));
+            }
+        }
+        return;
+    }
+    bool isConfig = TRACE261_IF("isConfigPacket", packetType == "config");
     if (!isConfig) return;
 
     LockGuard lk(g_configMutex);
@@ -457,6 +522,15 @@ static void ParseConfig(const std::string& line) {
     g_config.autoTotemBehaviorMode = lc::ClampInt(reader.GetInt("autoTotemBehaviorMode", 0), 0, 1);
     g_config.antiDebuffEnabled = reader.GetBool("antiDebuffEnabled");
     g_config.hitDelayFixEnabled = reader.GetBool("hitDelayFixEnabled");
+    g_config.autoRodEnabled = reader.GetBool("autoRodEnabled");
+    if (!g_config.autoRodEnabled) ClearAutoRodQueue();
+    g_config.autoRodSlotMode = lc::ClampInt(reader.GetInt("autoRodSlotMode", g_config.autoRodSlotMode), 0, 9);
+    g_config.autoRodVerifyForcedSlot = reader.GetBool("autoRodVerifyForcedSlot", true);
+    g_config.autoRodExtensionTicks = lc::ClampInt(
+        reader.GetInt("autoRodExtensionTicks", g_config.autoRodExtensionTicks),
+        autorod::kMinExtensionTicks, autorod::kMaxExtensionTicks);
+    g_config.autoRodHoldToExtend = reader.GetBool("autoRodHoldToExtend", false);
+    g_config.keybindAutoRod = lc::ClampInt(reader.GetInt("keybindAutoRod", g_config.keybindAutoRod), 0, 255);
     g_config.pixelPartyAssist = reader.GetBool("pixelPartyAssist");
     g_config.pixelPartyScanRadius = lc::ClampInt(reader.GetInt("pixelPartyScanRadius", g_config.pixelPartyScanRadius), 8, 48);
     g_config.pixelPartyAutoLook = reader.GetBool("pixelPartyAutoLook");
@@ -815,6 +889,52 @@ static bool      g_loggedAutoTotemResolveFail_121 = false;
 static DWORD     g_lastAutoTotemTickMs = 0;   // Throttle to ~20 tps
 static float     g_autoTotemPrevHealth = 20.0f; // For totem-pop / damage detection
 static int       g_autoTotemPendingSlot = -1; // Anarchy mode: step-2 pending slot
+
+// Auto Rod owns independent Yarn-first/Mojmap JNI mappings.
+static jmethodID g_autoRodGetInventory121 = nullptr;
+static jmethodID g_autoRodInventoryGetItem121 = nullptr;
+static jfieldID  g_autoRodSelectedSlotField121 = nullptr;
+static jmethodID g_autoRodItemStackGetItem121 = nullptr;
+static jclass    g_autoRodFishingRodClass121 = nullptr;
+static jfieldID  g_autoRodGameModeField121 = nullptr;
+static jmethodID g_autoRodSyncSelectedSlot121 = nullptr;
+static jmethodID g_autoRodUseItem121 = nullptr;
+static jobject   g_autoRodMainHand121 = nullptr;
+static jfieldID  g_autoRodPlayerTickCountField121 = nullptr;
+static DWORD     g_autoRodLastLogMs121 = 0;
+
+enum AutoRodTransactionPhase121 {
+    AUTO_ROD_TRANSACTION_IDLE_121 = 0,
+    AUTO_ROD_TRANSACTION_SELECTED_121,
+    AUTO_ROD_TRANSACTION_USED_121,
+    AUTO_ROD_TRANSACTION_RESTORING_121
+};
+
+struct AutoRodTransaction121 {
+    AutoRodTransactionPhase121 phase;
+    int originalSlot;
+    int targetSlot;
+    int phaseStartTick;
+    DWORD startedMs;
+    bool suppressUse;
+    int extensionTicks;
+    bool holdToExtend;
+
+    AutoRodTransaction121()
+        : phase(AUTO_ROD_TRANSACTION_IDLE_121), originalSlot(autorod::kInvalidSlot),
+          targetSlot(autorod::kInvalidSlot), phaseStartTick(0), startedMs(0),
+          suppressUse(false), extensionTicks(autorod::kUseToRestoreTicks),
+          holdToExtend(false) {}
+};
+
+static AutoRodTransaction121 g_autoRodTransaction121;
+static Mutex g_autoRodTransactionMutex121;
+static const DWORD kAutoRodTransactionSafetyTimeoutMs121 = 15000;
+
+static void ClearAutoRodTransactionLocked121() {
+    g_autoRodTransaction121 = AutoRodTransaction121();
+    InterlockedExchange(&g_autoRodReleaseRequested, 0);
+}
 
 // Cached JNI lookups for UpdateAutoTotem hot path (resolved once in EnsureAutoTotemJni)
 static jmethodID g_getConnectionMethod_121 = nullptr; // Minecraft.getConnection()
@@ -2260,6 +2380,8 @@ static bool AreNametagSuppressionRestoreMappingsReady121();
 static void LogNametagSuppressionMissingMappings121(JNIEnv* env, jobject worldObj);
 static void ResetNametagSuppressionCaches121(JNIEnv* env, const char* reason);
 static void ResetAutoTotemCaches(JNIEnv* env);
+static void ResetAutoRodModernCaches(JNIEnv* env);
+static void ExecuteAutoRodModern(JNIEnv* env);
 static void ResetModernJniRuntimeCaches121(JNIEnv* env, const char* reason);
 static bool TrackSuppressionWorldContext121(JNIEnv* env, jobject worldObj);
 static bool IsWorldTransitionActive();
@@ -6624,6 +6746,7 @@ static void ScheduleWorldTransition(JNIEnv* env, const char* reason, DWORD durat
     // Suspend Premotion BEFORE teardown: ServerReconfig/config-phase still
     // invokes NativePacketHook.onPacket while C03/player JNI may be deleted.
     ka_premotion::SuspendForWorldChange(env);
+    ClearAutoRodQueue();
 
     DWORD now = GetTickCount();
     {
@@ -9745,6 +9868,22 @@ static void DeleteGlobalRefSafe(JNIEnv* env, jclass& cls) {
     }
 }
 
+static void ResetAutoRodModernCaches(JNIEnv* env) {
+    LockGuard transactionLock(g_autoRodTransactionMutex121);
+    ClearAutoRodTransactionLocked121();
+    ClearAutoRodQueue();
+    DeleteGlobalRefSafe(env, g_autoRodFishingRodClass121);
+    DeleteGlobalRefSafe(env, g_autoRodMainHand121);
+    g_autoRodGetInventory121 = nullptr;
+    g_autoRodInventoryGetItem121 = nullptr;
+    g_autoRodSelectedSlotField121 = nullptr;
+    g_autoRodItemStackGetItem121 = nullptr;
+    g_autoRodGameModeField121 = nullptr;
+    g_autoRodSyncSelectedSlot121 = nullptr;
+    g_autoRodUseItem121 = nullptr;
+    g_autoRodPlayerTickCountField121 = nullptr;
+}
+
 // Reset ALL AutoTotem cached JNI lookups and runtime state.
 // Call on world transitions so stale method/field IDs are re-resolved.
 static void ResetAutoTotemCaches(JNIEnv* env) {
@@ -9858,6 +9997,7 @@ static void CleanupJniGlobals(JNIEnv* env) {
 static void ResetModernJniRuntimeCaches121(JNIEnv* env, const char* reason) {
     if (!env) return;
 
+    ResetAutoRodModernCaches(env);
     CleanupJniGlobals(env);
     ResetNametagSuppressionCaches121(env, nullptr);
 
@@ -10072,6 +10212,7 @@ static void CleanupImGuiAndHooks() {
 
 extern "C" __declspec(dllexport) void Detach() {
     Log("Detach requested (26.1)");
+    ClearAutoRodQueue();
     g_running = false;
 
     if (g_clientSocket != INVALID_SOCKET) {
@@ -10107,6 +10248,7 @@ extern "C" __declspec(dllexport) void Detach() {
         }
 
         CleanupImGuiAndHooks();
+        ResetAutoRodModernCaches(env);
         CleanupJniGlobals(env);
 
         if (attached && g_jvm) g_jvm->DetachCurrentThread();
@@ -11890,7 +12032,7 @@ static void UpdateRealGuiState() {
         std::string sn;
         { LockGuard lk(g_jniStateMtx); sn = g_jniScreenName; }
         // "ChatScreen" is our own cursor-unlock screen, not a real Minecraft GUI.
-        g_realGuiOpen = !sn.empty() && sn != "ChatScreen";
+        g_realGuiOpen = !sn.empty() && !ScreenChainContainsClass121(sn, "ChatScreen");
     } else {
         TRACE261_PATH("cursor-nonnormal-or-menu-path");
         g_realGuiOpen = false;
@@ -12195,6 +12337,473 @@ static void StartBackgroundThreadsIfNeeded() {
     Log("Background JNI threads started (state poll + chest scan).");
 }
 
+static void LogAutoRodModernRateLimited(const std::string& message) {
+    DWORD now = GetTickCount();
+    if (now - g_autoRodLastLogMs121 < 2000) return;
+    g_autoRodLastLogMs121 = now;
+    Log("AutoRod: " + message);
+}
+
+static jclass LoadAutoRodClass121(JNIEnv* env, const char* const* names) {
+    if (!env || !names) return nullptr;
+    for (int i = 0; names[i]; ++i) {
+        jclass cls = g_gameClassLoader ? LoadClassWithLoader(env, g_gameClassLoader, names[i]) : nullptr;
+        if (!cls) {
+            std::string slashName = names[i];
+            std::replace(slashName.begin(), slashName.end(), '.', '/');
+            cls = env->FindClass(slashName.c_str());
+            if (env->ExceptionCheck()) { env->ExceptionClear(); cls = nullptr; }
+        }
+        if (cls) return cls;
+    }
+    return nullptr;
+}
+
+static bool EnsureAutoRodPlayerTickMapping121(JNIEnv* env, jobject player) {
+    if (!env || !player) return false;
+    if (g_autoRodPlayerTickCountField121) return true;
+
+    jclass playerCls = env->GetObjectClass(player);
+    if (!playerCls) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return false;
+    }
+
+    // Entity.age is field_6012 at Fabric runtime; Mojmap exposes the same int as tickCount.
+    // GetFieldID searches superclasses, so resolving from the concrete player class is valid.
+    const char* names[] = { "field_6012", "tickCount", nullptr };
+    for (int i = 0; names[i] && !g_autoRodPlayerTickCountField121; ++i) {
+        g_autoRodPlayerTickCountField121 = env->GetFieldID(playerCls, names[i], "I");
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            g_autoRodPlayerTickCountField121 = nullptr;
+        }
+    }
+    env->DeleteLocalRef(playerCls);
+    return g_autoRodPlayerTickCountField121 != nullptr;
+}
+
+static bool ReadAutoRodPlayerTick121(JNIEnv* env, jobject player, int* tickOut) {
+    if (!tickOut || !EnsureAutoRodPlayerTickMapping121(env, player)) return false;
+    const jint tick = env->GetIntField(player, g_autoRodPlayerTickCountField121);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return false;
+    }
+    *tickOut = static_cast<int>(tick);
+    return true;
+}
+
+static bool EnsureAutoRodModernMappings(JNIEnv* env, jobject player, bool needRodClass) {
+    if (!env || !player || !g_mcInstance) return false;
+    jclass playerCls = env->GetObjectClass(player);
+    jclass mcCls = env->GetObjectClass(g_mcInstance);
+    if (!playerCls || !mcCls) {
+        if (playerCls) env->DeleteLocalRef(playerCls);
+        if (mcCls) env->DeleteLocalRef(mcCls);
+        return false;
+    }
+
+    if (!g_autoRodGetInventory121) {
+        const char* names[] = { "method_31548", "getInventory", nullptr };
+        const char* sigs[] = {
+            "()Lnet/minecraft/class_1661;",
+            "()Lnet/minecraft/world/entity/player/Inventory;",
+            "()Lnet/minecraft/entity/player/PlayerInventory;",
+            nullptr
+        };
+        for (int ni = 0; names[ni] && !g_autoRodGetInventory121; ++ni) {
+            for (int si = 0; sigs[si] && !g_autoRodGetInventory121; ++si) {
+                g_autoRodGetInventory121 = env->GetMethodID(playerCls, names[ni], sigs[si]);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoRodGetInventory121 = nullptr; }
+            }
+        }
+    }
+
+    jobject inventory = g_autoRodGetInventory121 ? env->CallObjectMethod(player, g_autoRodGetInventory121) : nullptr;
+    if (env->ExceptionCheck()) { env->ExceptionClear(); inventory = nullptr; }
+    if (inventory) {
+        jclass invCls = env->GetObjectClass(inventory);
+        if (invCls) {
+            if (!g_autoRodSelectedSlotField121) {
+                const char* names[] = { "field_7545", "selected", "selectedSlot", "f_35977_", nullptr };
+                for (int i = 0; names[i] && !g_autoRodSelectedSlotField121; ++i) {
+                    g_autoRodSelectedSlotField121 = env->GetFieldID(invCls, names[i], "I");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoRodSelectedSlotField121 = nullptr; }
+                }
+            }
+            if (needRodClass && !g_autoRodInventoryGetItem121) {
+                const char* names[] = { "method_5438", "getItem", "getStack", nullptr };
+                const char* sigs[] = {
+                    "(I)Lnet/minecraft/class_1799;",
+                    "(I)Lnet/minecraft/world/item/ItemStack;",
+                    "(I)Lnet/minecraft/item/ItemStack;",
+                    nullptr
+                };
+                for (int ni = 0; names[ni] && !g_autoRodInventoryGetItem121; ++ni) {
+                    for (int si = 0; sigs[si] && !g_autoRodInventoryGetItem121; ++si) {
+                        g_autoRodInventoryGetItem121 = env->GetMethodID(invCls, names[ni], sigs[si]);
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoRodInventoryGetItem121 = nullptr; }
+                    }
+                }
+            }
+            env->DeleteLocalRef(invCls);
+        }
+    }
+
+    if (!g_autoRodGameModeField121) {
+        const char* names[] = { "field_1761", "gameMode", nullptr };
+        const char* sigs[] = {
+            "Lnet/minecraft/class_636;",
+            "Lnet/minecraft/client/multiplayer/MultiPlayerGameMode;",
+            "Lnet/minecraft/client/network/ClientPlayerInteractionManager;",
+            nullptr
+        };
+        for (int ni = 0; names[ni] && !g_autoRodGameModeField121; ++ni) {
+            for (int si = 0; sigs[si] && !g_autoRodGameModeField121; ++si) {
+                g_autoRodGameModeField121 = env->GetFieldID(mcCls, names[ni], sigs[si]);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoRodGameModeField121 = nullptr; }
+            }
+        }
+    }
+
+    jobject gameMode = g_autoRodGameModeField121 ? env->GetObjectField(g_mcInstance, g_autoRodGameModeField121) : nullptr;
+    if (env->ExceptionCheck()) { env->ExceptionClear(); gameMode = nullptr; }
+    if (gameMode) {
+        jclass modeCls = env->GetObjectClass(gameMode);
+        if (modeCls) {
+            if (!g_autoRodSyncSelectedSlot121) {
+                const char* names[] = { "method_2911", "syncSelectedSlot", "ensureHasSentCarriedItem", nullptr };
+                for (int i = 0; names[i] && !g_autoRodSyncSelectedSlot121; ++i) {
+                    g_autoRodSyncSelectedSlot121 = env->GetMethodID(modeCls, names[i], "()V");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoRodSyncSelectedSlot121 = nullptr; }
+                }
+            }
+            if (!g_autoRodUseItem121) {
+                const char* names[] = { "method_2919", "useItem", "interactItem", nullptr };
+                const char* sigs[] = {
+                    "(Lnet/minecraft/class_1657;Lnet/minecraft/class_1268;)Lnet/minecraft/class_1269;",
+                    "(Lnet/minecraft/world/entity/player/Player;Lnet/minecraft/world/InteractionHand;)Lnet/minecraft/world/InteractionResult;",
+                    "(Lnet/minecraft/entity/player/PlayerEntity;Lnet/minecraft/util/Hand;)Lnet/minecraft/util/ActionResult;",
+                    nullptr
+                };
+                for (int ni = 0; names[ni] && !g_autoRodUseItem121; ++ni) {
+                    for (int si = 0; sigs[si] && !g_autoRodUseItem121; ++si) {
+                        g_autoRodUseItem121 = env->GetMethodID(modeCls, names[ni], sigs[si]);
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoRodUseItem121 = nullptr; }
+                    }
+                }
+            }
+            env->DeleteLocalRef(modeCls);
+        }
+    }
+
+    if (!g_autoRodMainHand121) {
+        const char* handClasses[] = {
+            "net.minecraft.class_1268",
+            "net.minecraft.world.InteractionHand",
+            "net.minecraft.util.Hand",
+            nullptr
+        };
+        jclass handCls = LoadAutoRodClass121(env, handClasses);
+        if (handCls) {
+            const char* handSigs[] = {
+                "Lnet/minecraft/class_1268;",
+                "Lnet/minecraft/world/InteractionHand;",
+                "Lnet/minecraft/util/Hand;",
+                nullptr
+            };
+            const char* handFieldNames[] = { "field_5808", "MAIN_HAND", nullptr };
+            jfieldID mainHandField = nullptr;
+            for (int ni = 0; handFieldNames[ni] && !mainHandField; ++ni) {
+                for (int si = 0; handSigs[si] && !mainHandField; ++si) {
+                    mainHandField = env->GetStaticFieldID(handCls, handFieldNames[ni], handSigs[si]);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); mainHandField = nullptr; }
+                }
+            }
+            if (mainHandField) {
+                jobject hand = env->GetStaticObjectField(handCls, mainHandField);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); hand = nullptr; }
+                if (hand) {
+                    g_autoRodMainHand121 = env->NewGlobalRef(hand);
+                    env->DeleteLocalRef(hand);
+                }
+            }
+            env->DeleteLocalRef(handCls);
+        }
+    }
+
+    if (needRodClass && !g_autoRodFishingRodClass121) {
+        const char* rodClasses[] = {
+            "net.minecraft.class_1753",
+            "net.minecraft.world.item.FishingRodItem",
+            "net.minecraft.item.FishingRodItem",
+            nullptr
+        };
+        jclass rodCls = LoadAutoRodClass121(env, rodClasses);
+        if (rodCls) {
+            g_autoRodFishingRodClass121 = (jclass)env->NewGlobalRef(rodCls);
+            env->DeleteLocalRef(rodCls);
+        }
+    }
+    if (needRodClass && !g_autoRodItemStackGetItem121) {
+        const char* stackClasses[] = {
+            "net.minecraft.class_1799",
+            "net.minecraft.world.item.ItemStack",
+            "net.minecraft.item.ItemStack",
+            nullptr
+        };
+        jclass stackCls = LoadAutoRodClass121(env, stackClasses);
+        if (stackCls) {
+            const char* names[] = { "method_7909", "getItem", nullptr };
+            const char* sigs[] = {
+                "()Lnet/minecraft/class_1792;",
+                "()Lnet/minecraft/world/item/Item;",
+                "()Lnet/minecraft/item/Item;",
+                nullptr
+            };
+            for (int ni = 0; names[ni] && !g_autoRodItemStackGetItem121; ++ni) {
+                for (int si = 0; sigs[si] && !g_autoRodItemStackGetItem121; ++si) {
+                    g_autoRodItemStackGetItem121 = env->GetMethodID(stackCls, names[ni], sigs[si]);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoRodItemStackGetItem121 = nullptr; }
+                }
+            }
+            env->DeleteLocalRef(stackCls);
+        }
+    }
+
+    if (inventory) env->DeleteLocalRef(inventory);
+    if (gameMode) env->DeleteLocalRef(gameMode);
+    env->DeleteLocalRef(playerCls);
+    env->DeleteLocalRef(mcCls);
+    return g_autoRodGetInventory121 && g_autoRodSelectedSlotField121 &&
+        g_autoRodPlayerTickCountField121 &&
+        (!needRodClass || (g_autoRodInventoryGetItem121 &&
+            g_autoRodItemStackGetItem121 && g_autoRodFishingRodClass121));
+}
+
+static bool SetAutoRodSelectedSlot121(JNIEnv* env, jobject inventory, int slot) {
+    if (!env || !inventory || !g_autoRodSelectedSlotField121 ||
+        slot < 0 || slot >= autorod::kHotbarSlots) return false;
+    env->SetIntField(inventory, g_autoRodSelectedSlotField121, slot);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return false;
+    }
+    return true;
+}
+
+static bool RestoreAutoRodOriginalSlot121(JNIEnv* env, jobject inventory) {
+    return SetAutoRodSelectedSlot121(
+        env, inventory, g_autoRodTransaction121.originalSlot);
+}
+
+static bool SendAutoRodUseInput121() {
+    INPUT inputs[2] = {};
+    inputs[0].type = INPUT_MOUSE;
+    inputs[0].mi.dwFlags = MOUSEEVENTF_RIGHTDOWN;
+    inputs[1].type = INPUT_MOUSE;
+    inputs[1].mi.dwFlags = MOUSEEVENTF_RIGHTUP;
+    return SendInput(2, inputs, sizeof(INPUT)) == 2;
+}
+
+static void ExecuteAutoRodModern(JNIEnv* env) {
+    LockGuard transactionLock(g_autoRodTransactionMutex121);
+
+    // Pending work always owns the runtime until it restores or cleanup cancels it.
+    // No request is popped while a selected/use transaction is in flight.
+    if (g_autoRodTransaction121.phase != AUTO_ROD_TRANSACTION_IDLE_121) {
+        Config cfg;
+        { LockGuard lk(g_configMutex); cfg = g_config; }
+        bool guiOpen = false;
+        bool inWorld = false;
+        { LockGuard lk(g_jniStateMtx); guiOpen = g_jniGuiOpen; inWorld = g_jniInWorld; }
+
+        if (!g_stateJniReady || !g_mcInstance || !g_playerField_121) {
+            ClearAutoRodTransactionLocked121();
+            ClearAutoRodQueue();
+            return;
+        }
+
+        if (env->PushLocalFrame(24) < 0) return;
+        jobject player = env->GetObjectField(g_mcInstance, g_playerField_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); player = nullptr; }
+        if (!player) {
+            // A missing player is disconnect/world teardown cleanup; stale slot state
+            // cannot safely be applied to a later player instance.
+            env->PopLocalFrame(nullptr);
+            ClearAutoRodTransactionLocked121();
+            ClearAutoRodQueue();
+            return;
+        }
+
+        int currentTick = 0;
+        if (!ReadAutoRodPlayerTick121(env, player, &currentTick) ||
+            !EnsureAutoRodModernMappings(env, player, false)) {
+            LogAutoRodModernRateLimited("pending transaction mappings unavailable");
+            env->PopLocalFrame(nullptr);
+            return;
+        }
+
+        jobject inventory = env->CallObjectMethod(player, g_autoRodGetInventory121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); inventory = nullptr; }
+        if (!inventory) {
+            env->PopLocalFrame(nullptr);
+            return;
+        }
+
+        const bool focusValid = g_hwnd && GetForegroundWindow() == g_hwnd;
+        int currentSlot = env->GetIntField(inventory, g_autoRodSelectedSlotField121);
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            currentSlot = autorod::kInvalidSlot;
+        }
+        if (!cfg.autoRodEnabled || !inWorld || guiOpen ||
+            IsWorldTransitionActive() || !focusValid ||
+            (g_autoRodTransaction121.phase == AUTO_ROD_TRANSACTION_SELECTED_121 &&
+             currentSlot != g_autoRodTransaction121.targetSlot)) {
+            // Once an unsafe context or manual slot change appears, this cast must
+            // never fire later even if the state recovers before the tick boundary.
+            g_autoRodTransaction121.suppressUse = true;
+        }
+        const bool timedOut = GetTickCount() - g_autoRodTransaction121.startedMs >=
+            kAutoRodTransactionSafetyTimeoutMs121;
+        if (timedOut) {
+            g_autoRodTransaction121.suppressUse = true;
+            LogAutoRodModernRateLimited("transaction safety timeout; restoring without use");
+        }
+
+        if (g_autoRodTransaction121.phase == AUTO_ROD_TRANSACTION_SELECTED_121 &&
+            (timedOut || autorod::HasElapsedTicks(
+                currentTick, g_autoRodTransaction121.phaseStartTick,
+                autorod::kSelectToUseTicks))) {
+            if (g_autoRodTransaction121.suppressUse || timedOut) {
+                if (RestoreAutoRodOriginalSlot121(env, inventory)) {
+                    g_autoRodTransaction121.phase = AUTO_ROD_TRANSACTION_RESTORING_121;
+                    g_autoRodTransaction121.phaseStartTick = currentTick;
+                } else if (timedOut) {
+                    ClearAutoRodTransactionLocked121();
+                }
+            } else {
+                // Minecraft processes this one right-click in its normal input/tick phase.
+                // The worker emits no use-item or held-item packet directly.
+                g_autoRodTransaction121.phase = AUTO_ROD_TRANSACTION_USED_121;
+                g_autoRodTransaction121.phaseStartTick = currentTick;
+                if (!SendAutoRodUseInput121())
+                    LogAutoRodModernRateLimited("right-click input failed; delayed restore remains scheduled");
+            }
+        } else if (g_autoRodTransaction121.phase == AUTO_ROD_TRANSACTION_USED_121) {
+            const bool releaseRequested =
+                InterlockedCompareExchange(&g_autoRodReleaseRequested, 0, 0) != 0;
+            const bool restoreReady = autorod::ShouldRestoreAfterUse(
+                currentTick, g_autoRodTransaction121.phaseStartTick,
+                g_autoRodTransaction121.extensionTicks,
+                g_autoRodTransaction121.holdToExtend, releaseRequested);
+            if (timedOut || restoreReady) {
+                if (RestoreAutoRodOriginalSlot121(env, inventory)) {
+                    g_autoRodTransaction121.phase = AUTO_ROD_TRANSACTION_RESTORING_121;
+                    g_autoRodTransaction121.phaseStartTick = currentTick;
+                } else if (timedOut) {
+                    ClearAutoRodTransactionLocked121();
+                }
+            }
+        } else if (g_autoRodTransaction121.phase == AUTO_ROD_TRANSACTION_RESTORING_121 &&
+                   (timedOut || autorod::HasElapsedTicks(
+                       currentTick, g_autoRodTransaction121.phaseStartTick,
+                       autorod::kRestoreSettleTicks))) {
+            ClearAutoRodTransactionLocked121();
+        }
+
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    Config cfg;
+    { LockGuard lk(g_configMutex); cfg = g_config; }
+    bool guiOpen = false;
+    bool inWorld = false;
+    { LockGuard lk(g_jniStateMtx); guiOpen = g_jniGuiOpen; inWorld = g_jniInWorld; }
+    if (!cfg.autoRodEnabled || !g_stateJniReady || !inWorld || guiOpen ||
+        IsWorldTransitionActive() || !g_mcInstance || !g_playerField_121 ||
+        !g_hwnd || GetForegroundWindow() != g_hwnd) return;
+
+    AutoRodRequest mutableRequest(false, 0, true);
+    if (!TryPopAutoRodRequest(&mutableRequest)) return;
+    const AutoRodRequest request = mutableRequest;
+    if (!request.enabled) return;
+
+    if (env->PushLocalFrame(48) < 0) return;
+    jobject player = env->GetObjectField(g_mcInstance, g_playerField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); player = nullptr; }
+    if (!player) { env->PopLocalFrame(nullptr); return; }
+
+    int selectedTick = 0;
+    if (!ReadAutoRodPlayerTick121(env, player, &selectedTick)) {
+        LogAutoRodModernRateLimited("Entity tick mapping unavailable");
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    const bool needRodClass = request.slotMode == 0 || request.verifyForcedSlot;
+    if (!EnsureAutoRodModernMappings(env, player, needRodClass)) {
+        LogAutoRodModernRateLimited("modern mappings unavailable");
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    jobject inventory = env->CallObjectMethod(player, g_autoRodGetInventory121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); inventory = nullptr; }
+    if (!inventory) { env->PopLocalFrame(nullptr); return; }
+
+    const int originalSlot = env->GetIntField(inventory, g_autoRodSelectedSlotField121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); env->PopLocalFrame(nullptr); return; }
+
+    bool rodSlots[autorod::kHotbarSlots] = {};
+    if (needRodClass) {
+        for (int slot = 0; slot < autorod::kHotbarSlots; ++slot) {
+            jobject stack = env->CallObjectMethod(inventory, g_autoRodInventoryGetItem121, slot);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); stack = nullptr; }
+            if (!stack) continue;
+            jobject item = env->CallObjectMethod(stack, g_autoRodItemStackGetItem121);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); item = nullptr; }
+            rodSlots[slot] = item && env->IsInstanceOf(item, g_autoRodFishingRodClass121);
+            if (item) env->DeleteLocalRef(item);
+            env->DeleteLocalRef(stack);
+        }
+    }
+
+    const int targetSlot = autorod::SelectTargetSlot(
+        originalSlot, request.slotMode, request.verifyForcedSlot,
+        needRodClass ? rodSlots : nullptr);
+    if (targetSlot == autorod::kInvalidSlot) {
+        LogAutoRodModernRateLimited("no valid target slot");
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    g_autoRodTransaction121.phase = AUTO_ROD_TRANSACTION_SELECTED_121;
+    g_autoRodTransaction121.originalSlot = originalSlot;
+    g_autoRodTransaction121.targetSlot = targetSlot;
+    g_autoRodTransaction121.phaseStartTick = selectedTick;
+    g_autoRodTransaction121.startedMs = GetTickCount();
+    g_autoRodTransaction121.suppressUse = false;
+    g_autoRodTransaction121.extensionTicks = request.extensionTicks;
+    g_autoRodTransaction121.holdToExtend = request.holdToExtend;
+
+    env->SetIntField(inventory, g_autoRodSelectedSlotField121, targetSlot);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        ClearAutoRodTransactionLocked121();
+        LogAutoRodModernRateLimited("target selection failed");
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    // Vanilla observes the selected field on its next tick and sends the held-item
+    // change in normal packet order before the synthetic use input is issued.
+    env->PopLocalFrame(nullptr);
+}
+
 static DWORD WINAPI FastPollThreadProc(LPVOID) {
     JNIEnv* env = nullptr;
     if (!g_jvm || g_jvm->AttachCurrentThread((void**)&env, nullptr) != JNI_OK) return 1;
@@ -12203,6 +12812,7 @@ static DWORD WINAPI FastPollThreadProc(LPVOID) {
             LockGuard remapGuard(g_jniRemapMtx);
             if (g_stateJniReady) {
                 UpdateJniState();
+                ExecuteAutoRodModern(env);
                 if (!IsWorldTransitionActive()) ReadCameraState(env);
             }
         }
@@ -12313,6 +12923,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                             if (g_lastAutoTotemWorld_121) {
                                 ScheduleWorldTransition(env, "world-instance-changed", kWorldContextTransitionGraceMs);
                             }
+                            ResetAutoRodModernCaches(env);
                             ResetAutoTotemCaches(env);
                             if (g_lastAutoTotemWorld_121) env->DeleteGlobalRef(g_lastAutoTotemWorld_121);
                             g_lastAutoTotemWorld_121 = env->NewGlobalRef(worldObj);
@@ -12375,6 +12986,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                         UpdateBlockEspList(env);
                 }
             } else if (g_stateJniReady && !inWorldNow) {
+                ResetAutoRodModernCaches(env);
                 // Left world — reset caches so next world gets fresh JNI lookups
                 lastScanPosValid = false;
                 ResetAutoTotemCaches(env);
@@ -12393,6 +13005,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                 { LockGuard lk4(g_pixelPartyMutex); g_pixelPartySnap = PixelPartySnap121(); }
             }
         } else {
+            ResetAutoRodModernCaches(env);
             lastScanPosValid = false;
             if (g_nametagSuppressionActive_121 || !g_modifiedTeamVisibility_121.empty() || !g_lcHideTagsMembers_121.empty()) {
                 ResetNametagSuppressionCaches121(env, "jni-not-ready");
@@ -13508,6 +14121,7 @@ static void RenderOverlayPanels(bool inWorld, const Config& cfg, const OverlayTh
                 if (cfg.triggerbot)    pushMod("Triggerbot", overlayTheme.accentSecondary);
                 if (cfg.killAura)      pushMod("Kill Aura", overlayTheme.accentSecondary);
                 if (cfg.speedBridge)   pushMod("SpeedBridge", overlayTheme.accentPrimary);
+                if (cfg.autoRodEnabled) pushMod("Auto Rod", overlayTheme.accentPrimary);
                 if (cfg.chestStealer)  pushMod("Chest Stealer", overlayTheme.accentTertiary);
                 if (cfg.chestEsp)      pushMod("Chest ESP", overlayTheme.accentSecondary);
                 if (cfg.blockEsp)      pushMod("Block ESP", overlayTheme.accentSecondary);
@@ -14122,6 +14736,7 @@ glfw_done:;
                 std::string sn;
                 std::string actionBar;
                 bool jniGui;
+                bool inWorld;
                 bool lookBlock;
                 bool lookEntity;
                 bool lookEntityLatched;
@@ -14138,6 +14753,7 @@ glfw_done:;
                     sn = g_jniScreenName;
                     actionBar = g_jniActionBar;
                     jniGui = g_jniGuiOpen;
+                    inWorld = g_jniInWorld;
                     lookBlock = g_jniLookingAtBlock;
                     lookEntity = g_jniLookingAtEntity;
                     lookEntityLatched = g_jniLookingAtEntityLatched;
@@ -14155,7 +14771,7 @@ glfw_done:;
                 }
 
                 // guiOpen follows real Minecraft screens; ChatScreen is treated as non-blocking for gameplay modules.
-                bool anyGui = (jniGui && sn != "ChatScreen");
+                bool anyGui = (jniGui && !ScreenChainContainsClass121(sn, "ChatScreen"));
                 TRACE261_BRANCH("stateAnyGui", anyGui);
 
                 // JSON-escape the screen name
@@ -14183,7 +14799,9 @@ glfw_done:;
 
                 std::string state;
                 state.reserve(4096);
-                state += "{\"type\":\"state\",\"guiOpen\":";
+                state += "{\"type\":\"state\",\"inWorld\":";
+                state += inWorld ? "true" : "false";
+                state += ",\"guiOpen\":";
                 state += anyGui ? "true" : "false";
                 state += ",\"screenName\":\"";
                 state += snEsc;
@@ -14354,6 +14972,7 @@ glfw_done:;
 
             Sleep(5);
         }
+        ClearAutoRodQueue();
         closesocket(cli);
         g_clientSocket = INVALID_SOCKET;
         Log("C# Loader disconnected.");
@@ -14394,6 +15013,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
             << "=== bridge_261.dll DLL_PROCESS_ATTACH ===\n";
         g_mainThreadHandle = CreateThread(nullptr, 0, MainThread, nullptr, 0, nullptr);
     } else if (reason == DLL_PROCESS_DETACH) {
+        ClearAutoRodQueue();
         g_running = false;
     }
     return TRUE;

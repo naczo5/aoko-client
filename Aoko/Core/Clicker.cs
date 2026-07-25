@@ -485,6 +485,7 @@ public class Clicker : INotifyPropertyChanged
             ReachEnabled = false;
             VelocityEnabled = false;
             AutoTotemEnabled = false;
+            AutoRodEnabled = false;
             AntiDebuffEnabled = false;
             HitDelayFixEnabled = false;
 
@@ -1386,6 +1387,89 @@ public class Clicker : INotifyPropertyChanged
                 OnPropertyChanged(nameof(AutoTotemBehaviorMode));
                 StateChanged?.Invoke();
             }
+        }
+    }
+
+    private bool _autoRodEnabled = false;
+    public bool AutoRodEnabled
+    {
+        get => _autoRodEnabled;
+        set
+        {
+            if (_autoRodEnabled == value) return;
+            _autoRodEnabled = value;
+            OnPropertyChanged(nameof(AutoRodEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private int _autoRodSlotMode = 0;
+    public int AutoRodSlotMode
+    {
+        get => _autoRodSlotMode;
+        set
+        {
+            int clamped = Math.Clamp(value, 0, 9);
+            if (_autoRodSlotMode == clamped) return;
+            _autoRodSlotMode = clamped;
+            OnPropertyChanged(nameof(AutoRodSlotMode));
+            OnPropertyChanged(nameof(AutoRodUsesForcedSlot));
+            StateChanged?.Invoke();
+        }
+    }
+
+    public bool AutoRodUsesForcedSlot => AutoRodSlotMode > 0;
+
+    private bool _autoRodVerifyForcedSlot = true;
+    public bool AutoRodVerifyForcedSlot
+    {
+        get => _autoRodVerifyForcedSlot;
+        set
+        {
+            if (_autoRodVerifyForcedSlot == value) return;
+            _autoRodVerifyForcedSlot = value;
+            OnPropertyChanged(nameof(AutoRodVerifyForcedSlot));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private int _autoRodExtensionTicks = 4;
+    public int AutoRodExtensionTicks
+    {
+        get => _autoRodExtensionTicks;
+        set
+        {
+            int clamped = Math.Clamp(value, 1, 40);
+            if (_autoRodExtensionTicks == clamped) return;
+            _autoRodExtensionTicks = clamped;
+            OnPropertyChanged(nameof(AutoRodExtensionTicks));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _autoRodHoldToExtend;
+    public bool AutoRodHoldToExtend
+    {
+        get => _autoRodHoldToExtend;
+        set
+        {
+            if (_autoRodHoldToExtend == value) return;
+            _autoRodHoldToExtend = value;
+            OnPropertyChanged(nameof(AutoRodHoldToExtend));
+            OnPropertyChanged(nameof(AutoRodUsesFixedExtension));
+            StateChanged?.Invoke();
+        }
+    }
+
+    public bool AutoRodUsesFixedExtension => !AutoRodHoldToExtend;
+
+    public int AutoRodActionKey
+    {
+        get => InputHooks.AutoRodActionKey;
+        set
+        {
+            if (InputHooks.SetAutoRodActionKey(value))
+                OnPropertyChanged(nameof(AutoRodActionKey));
         }
     }
 

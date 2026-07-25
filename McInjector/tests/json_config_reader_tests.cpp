@@ -85,6 +85,18 @@ static void TestCapabilitiesPayloads()
     ExpectTrue(modern.find("\"triggerbot\"") != std::string::npos, "modern should advertise triggerbot module");
     ExpectTrue(modern.find("\"reloadmappingsnonce\"") != std::string::npos, "modern should advertise reloadMappings nonce");
     ExpectTrue(legacy.find("\"keybindautoclicker\"") != std::string::npos, "legacy should advertise keybind setting");
+    ExpectTrue(legacy.find("\"autorod\"") != std::string::npos, "legacy should advertise Auto Rod module");
+    ExpectTrue(modern.find("\"autorod\"") != std::string::npos, "modern should advertise Auto Rod module");
+    ExpectTrue(legacy.find("\"autorodenabled\"") != std::string::npos, "legacy should advertise Auto Rod enabled setting");
+    ExpectTrue(modern.find("\"autorodslotmode\"") != std::string::npos, "modern should advertise Auto Rod slot setting");
+    ExpectTrue(legacy.find("\"autorodverifyforcedslot\"") != std::string::npos, "legacy should advertise Auto Rod verification setting");
+    ExpectTrue(legacy.find("\"autorodextensionticks\"") != std::string::npos, "legacy should advertise Auto Rod extension setting");
+    ExpectTrue(modern.find("\"autorodextensionticks\"") != std::string::npos, "modern should advertise Auto Rod extension setting");
+    ExpectTrue(legacy.find("\"autorodholdtoextend\"") != std::string::npos, "legacy should advertise Auto Rod hold setting");
+    ExpectTrue(modern.find("\"autorodholdtoextend\"") != std::string::npos, "modern should advertise Auto Rod hold setting");
+    ExpectTrue(modern.find("\"keybindautorod\"") != std::string::npos, "modern should advertise Auto Rod keybind setting");
+    ExpectTrue(legacy.find("\"inworld\"") != std::string::npos, "legacy should advertise in-world state");
+    ExpectTrue(modern.find("\"inworld\"") != std::string::npos, "modern should advertise in-world state");
     ExpectTrue(legacy.find("\"state\":[") != std::string::npos, "legacy should include state array");
     ExpectTrue(modern.find("\"state\":[") != std::string::npos, "modern should include state array");
 }
