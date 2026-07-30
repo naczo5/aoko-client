@@ -34,6 +34,14 @@ echo [NativeTests] Running telemetry_schedule_tests.exe...
 tests\telemetry_schedule_tests.exe
 if %errorlevel% neq 0 exit /b %errorlevel%
 
+echo [NativeTests] Building native_perf_diagnostics_tests.exe...
+"%GPP%" -m64 -std=c++11 -O2 -static-libgcc -static-libstdc++ -o tests\native_perf_diagnostics_tests.exe tests\native_perf_diagnostics_tests.cpp
+if %errorlevel% neq 0 exit /b %errorlevel%
+
+echo [NativeTests] Running native_perf_diagnostics_tests.exe...
+tests\native_perf_diagnostics_tests.exe
+if %errorlevel% neq 0 exit /b %errorlevel%
+
 echo [NativeTests] Building block_esp_tests.exe...
 "%GPP%" -m64 -std=c++11 -O2 -static-libgcc -static-libstdc++ -o tests\block_esp_tests.exe tests\block_esp_tests.cpp
 if %errorlevel% neq 0 exit /b %errorlevel%

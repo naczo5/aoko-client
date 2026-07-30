@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -325,8 +326,40 @@ public static class ProfileManager
     public static void SaveProfile(Profile profile)
     {
         string filePath = Path.Combine(ProfilesDir, $"{profile.Name}.json");
-        string json = JsonSerializer.Serialize(profile, JsonOptions);
-        File.WriteAllText(filePath, json);
+        try
+        {
+            string json = JsonSerializer.Serialize(profile, JsonOptions);
+            if (!TryWriteProfile(filePath, json))
+                Debug.WriteLine($"[ProfileManager] Could not save profile '{profile.Name}'.");
+        }
+        catch (JsonException ex)
+        {
+            Debug.WriteLine($"[ProfileManager] Could not serialize profile '{profile.Name}': {ex.Message}");
+        }
+    }
+
+    internal static bool TryWriteProfile(string filePath, string json)
+    {
+        try
+        {
+            string? directory = Path.GetDirectoryName(filePath);
+            if (!string.IsNullOrEmpty(directory))
+                Directory.CreateDirectory(directory);
+            File.WriteAllText(filePath, json);
+            return true;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+        catch (NotSupportedException)
+        {
+            return false;
+        }
     }
     
     public static Profile? LoadProfile(string name)

@@ -291,4 +291,28 @@ public class GameStateAndProfileTests
                 Directory.Delete(appData, recursive: true);
         }
     }
+
+    [Fact]
+    public void ProfileManager_TryWriteProfile_FailsOpenWhenPathIsNotWritable()
+    {
+        string root = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+
+        try
+        {
+            Directory.CreateDirectory(root);
+            string blockingFile = Path.Combine(root, "not-a-directory");
+            File.WriteAllText(blockingFile, "occupied");
+
+            bool written = ProfileManager.TryWriteProfile(
+                Path.Combine(blockingFile, "config.json"),
+                """{"name":"config"}""");
+
+            Assert.False(written);
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+                Directory.Delete(root, recursive: true);
+        }
+    }
 }

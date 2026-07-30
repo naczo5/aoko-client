@@ -25,6 +25,10 @@ Completed on `dev` after the plan was created:
 - Added opt-in managed transport counters behind
   `AOKO_PERF_DIAGNOSTICS=1`, covering inbound message rate/characters, parsing
   time, configuration serialization rate/time, and configuration sends.
+- Added opt-in, allocation-bounded modern native counters behind the same
+  switch, covering scan-loop work, player/chest/block scans, state publication
+  count/time/bytes, and overlay render time. Summaries are emitted every five
+  seconds rather than logging individual events.
 - Replaced unconditional five-times-per-second configuration serialization
   with change-triggered sends, a 25 ms burst coalescing window, and a two-second
   recovery heartbeat.
@@ -49,17 +53,18 @@ Completed on `dev` after the plan was created:
 - Reuse Pixel Party keyboard input storage and cached native structure sizes
   instead of allocating an array and recomputing sizes for each input event.
 - Added managed tests for diagnostics and config-send policy, plus a C++11
-  native harness for adaptive state and ESP scheduling.
+  native harness for adaptive state, ESP scheduling, and concurrent native
+  performance-counter aggregation.
+- Made profile persistence fail open on expected directory, access, and I/O
+  failures so application shutdown and tests are not aborted by an unavailable
+  `%APPDATA%` profile path.
 
 Verification:
 
-- 178 managed tests pass when the known sandbox-only
-  `MainWindowStartupTests` profile-write test is excluded.
+- All 180 managed tests pass, including `MainWindowStartupTests` in a restricted
+  profile environment.
 - All native harness tests pass.
 - `bridge_261.dll` compiles successfully with the documented MinGW toolchain.
-- The complete managed run still encounters the pre-existing sandbox denial
-  writing `%APPDATA%\Aoko\profiles\config.json`; its subsequent UI-thread test
-  contamination is not caused by this slice.
 
 ## Guiding principles
 

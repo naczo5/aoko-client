@@ -43,6 +43,7 @@
 #include "aim_assist_projection.h"
 #include "screen_projection.h"
 #include "telemetry_schedule.h"
+#include "native_perf_diagnostics.h"
 #include "jni_core/scoped_env.h"
 #include "jni_core/local_frame.h"
 #include "jni_core/resolver.h"
@@ -9829,6 +9830,101 @@ static void Log(const std::string& msg) {
     out << msg << "\n";
 }
 
+static bool NativePerfDiagnosticsEnabled()
+{
+    char value[16] = {};
+    const DWORD length = GetEnvironmentVariableA(
+        "AOKO_PERF_DIAGNOSTICS",
+        value,
+        static_cast<DWORD>(sizeof(value)));
+    if (length == 0 || length >= sizeof(value)) return false;
+    return std::strcmp(value, "1") == 0 ||
+        _stricmp(value, "true") == 0;
+}
+
+static lc::NativePerfDiagnostics& GetNativePerfDiagnostics()
+{
+    static lc::NativePerfDiagnostics diagnostics(
+        NativePerfDiagnosticsEnabled(),
+        5000,
+        GetTickCount());
+    return diagnostics;
+}
+
+static unsigned long long NativePerfTimestamp()
+{
+    LARGE_INTEGER value = {};
+    QueryPerformanceCounter(&value);
+    return static_cast<unsigned long long>(value.QuadPart);
+}
+
+static void RecordNativePerfSince(
+    lc::NativePerfMetric metric,
+    unsigned long long started,
+    unsigned long long units = 0)
+{
+    lc::NativePerfDiagnostics& diagnostics = GetNativePerfDiagnostics();
+    if (!diagnostics.Enabled() || started == 0) return;
+    diagnostics.Record(metric, NativePerfTimestamp() - started, units);
+}
+
+class NativePerfScope
+{
+public:
+    explicit NativePerfScope(lc::NativePerfMetric metric)
+        : _metric(metric),
+          _started(GetNativePerfDiagnostics().Enabled()
+              ? NativePerfTimestamp()
+              : 0)
+    {
+    }
+
+    ~NativePerfScope()
+    {
+        RecordNativePerfSince(_metric, _started);
+    }
+
+private:
+    lc::NativePerfMetric _metric;
+    unsigned long long _started;
+};
+
+static void MaybeLogNativePerfDiagnostics()
+{
+    lc::NativePerfDiagnostics& diagnostics = GetNativePerfDiagnostics();
+    lc::NativePerfSummary summary;
+    if (!diagnostics.TryTakeSummary(GetTickCount(), summary)) return;
+
+    LARGE_INTEGER frequency = {};
+    QueryPerformanceFrequency(&frequency);
+    const double ticksToMs = frequency.QuadPart > 0
+        ? 1000.0 / static_cast<double>(frequency.QuadPart)
+        : 0.0;
+    static const char* names[lc::PERF_METRIC_COUNT] = {
+        "scanLoop",
+        "playerScan",
+        "chestScan",
+        "blockScan",
+        "statePublish",
+        "overlayRender"
+    };
+
+    std::ostringstream line;
+    line << "[perf] window=" << summary.windowMs << "ms";
+    for (int i = 0; i < lc::PERF_METRIC_COUNT; ++i) {
+        const lc::NativePerfMetricSnapshot& metric = summary.metrics[i];
+        if (metric.count == 0) continue;
+        line << " " << names[i]
+             << "{count=" << metric.count
+             << ",totalMs=" << (metric.totalTicks * ticksToMs)
+             << ",maxMs=" << (metric.maxTicks * ticksToMs);
+        if (metric.units != 0)
+            line << ",units=" << metric.units;
+        line << "}";
+    }
+    Log(line.str());
+}
+
 static bool FileExistsA(const std::string& path) {
     std::ifstream f(path, std::ios::binary);
     return f.good();
@@ -12838,6 +12934,8 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
     double lastScanX = 0, lastScanY = 0, lastScanZ = 0;
     bool lastScanPosValid = false;
     while (g_running) {
+        const unsigned long long scanLoopPerfStarted =
+            GetNativePerfDiagnostics().Enabled() ? NativePerfTimestamp() : 0;
         const DWORD nickHiderNow = GetTickCount();
         if (nickHiderNow - lastNickHiderRefreshMs >= 2000) {
             lastNickHiderRefreshMs = nickHiderNow;
@@ -12983,8 +13081,10 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                     static bool s_fightStatusWasEnabled = false;
                     if (!cfg.fightStatus && s_fightStatusWasEnabled) ResetFightStatusState121();
                     s_fightStatusWasEnabled = cfg.fightStatus;
-                    if (cfg.nametags || cfg.nickHiderEnabled || cfg.closestPlayer || cfg.fightStatus || cfg.aimAssist || cfg.nametagHideVanilla || g_nametagSuppressionActive_121)
+                    if (cfg.nametags || cfg.nickHiderEnabled || cfg.closestPlayer || cfg.fightStatus || cfg.aimAssist || cfg.nametagHideVanilla || g_nametagSuppressionActive_121) {
+                        NativePerfScope playerScanPerf(lc::PERF_PLAYER_SCAN);
                         UpdatePlayerListOverlay(env);
+                    }
                     const DWORD producerNowMs = GetTickCount();
                     const bool chestEspScanEnabled = cfg.chestEsp || cfg.chestStealer;
                     const bool chestEspScanDue =
@@ -12995,6 +13095,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                             lastChestEspScanMs,
                             lc::kChestEspScanIntervalMs);
                     if (chestEspScanEnabled && chestEspScanDue) {
+                        NativePerfScope chestScanPerf(lc::PERF_CHEST_SCAN);
                         UpdateChestList(env);
                         lastChestEspScanMs = producerNowMs;
                     }
@@ -13007,6 +13108,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                             lastBlockEspScanMs,
                             lc::kBlockEspScanIntervalMs);
                     if (cfg.blockEsp && blockEspScanDue) {
+                        NativePerfScope blockScanPerf(lc::PERF_BLOCK_SCAN);
                         UpdateBlockEspList(env);
                         lastBlockEspScanMs = producerNowMs;
                     }
@@ -13046,6 +13148,8 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
             g_blockEspChunkCache.clear();
             { LockGuard lk3(g_bgCamMutex); g_bgCamState = BgCamState(); }
         }
+        RecordNativePerfSince(lc::PERF_SCAN_LOOP, scanLoopPerfStarted);
+        MaybeLogNativePerfDiagnostics();
         Sleep((cfg.aimAssist || cfg.killAura) ? 5 : 50); // fast poll for aim assist / Kill Aura
     }
     ReleaseSpeedBridgeSneak121(env);
@@ -13215,6 +13319,7 @@ static void RenderOverlayPanels(
     int winW,
     int winH) {
     if (!inWorld || IsWorldTransitionActive()) return;
+    NativePerfScope overlayPerf(lc::PERF_OVERLAY_RENDER);
     TRACE261_PATH("overlay-render-active");
             ImDrawList* fg = ImGui::GetForegroundDrawList();
             ImGuiIO& io = ImGui::GetIO();
@@ -14790,6 +14895,8 @@ glfw_done:;
 
             // Send state
             {
+                const unsigned long long statePublishPerfStarted =
+                    GetNativePerfDiagnostics().Enabled() ? NativePerfTimestamp() : 0;
                 std::string sn;
                 std::string actionBar;
                 bool jniGui;
@@ -15017,6 +15124,10 @@ glfw_done:;
                 }
                 state += "}\n";
                 send(cli, state.c_str(), (int)state.size(), 0);
+                RecordNativePerfSince(
+                    lc::PERF_STATE_PUBLISH,
+                    statePublishPerfStarted,
+                    static_cast<unsigned long long>(state.size()));
             }
 
             // Receive config from C#
@@ -15034,6 +15145,7 @@ glfw_done:;
                 } else if (r == 0) break;
             }
 
+            MaybeLogNativePerfDiagnostics();
             Sleep(stateIntervalMs);
         }
         ClearAutoRodQueue();
