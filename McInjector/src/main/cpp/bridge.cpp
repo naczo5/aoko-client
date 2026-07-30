@@ -33,6 +33,7 @@
 #include "silent_aura_aim.h"
 #include "kill_aura_core.h"
 #include "kill_aura_premotion.h"
+#include "native_perf_diagnostics.h"
 #include "jni_core/scoped_env.h"
 #include "jni_core/local_frame.h"
 #include "jni_core/matrix_reader.h"
@@ -980,6 +981,101 @@ void InitLogPath(HMODULE hModule) {
 void Log(const std::string& msg) {
     std::ofstream f(g_logPath.c_str(), std::ios_base::app);
     f << "[Bridge] " << msg << std::endl;
+}
+
+static bool NativePerfDiagnosticsEnabled()
+{
+    char value[16] = {};
+    const DWORD length = GetEnvironmentVariableA(
+        "AOKO_PERF_DIAGNOSTICS",
+        value,
+        static_cast<DWORD>(sizeof(value)));
+    if (length == 0 || length >= sizeof(value)) return false;
+    return std::strcmp(value, "1") == 0 ||
+        _stricmp(value, "true") == 0;
+}
+
+static lc::NativePerfDiagnostics& GetNativePerfDiagnostics()
+{
+    static lc::NativePerfDiagnostics diagnostics(
+        NativePerfDiagnosticsEnabled(),
+        5000,
+        GetTickCount());
+    return diagnostics;
+}
+
+static unsigned long long NativePerfTimestamp()
+{
+    LARGE_INTEGER value = {};
+    QueryPerformanceCounter(&value);
+    return static_cast<unsigned long long>(value.QuadPart);
+}
+
+static void RecordNativePerfSince(
+    lc::NativePerfMetric metric,
+    unsigned long long started,
+    unsigned long long units = 0)
+{
+    lc::NativePerfDiagnostics& diagnostics = GetNativePerfDiagnostics();
+    if (!diagnostics.Enabled() || started == 0) return;
+    diagnostics.Record(metric, NativePerfTimestamp() - started, units);
+}
+
+class NativePerfScope
+{
+public:
+    explicit NativePerfScope(lc::NativePerfMetric metric)
+        : _metric(metric),
+          _started(GetNativePerfDiagnostics().Enabled()
+              ? NativePerfTimestamp()
+              : 0)
+    {
+    }
+
+    ~NativePerfScope()
+    {
+        RecordNativePerfSince(_metric, _started);
+    }
+
+private:
+    lc::NativePerfMetric _metric;
+    unsigned long long _started;
+};
+
+static void MaybeLogNativePerfDiagnostics()
+{
+    lc::NativePerfDiagnostics& diagnostics = GetNativePerfDiagnostics();
+    lc::NativePerfSummary summary;
+    if (!diagnostics.TryTakeSummary(GetTickCount(), summary)) return;
+
+    LARGE_INTEGER frequency = {};
+    QueryPerformanceFrequency(&frequency);
+    const double ticksToMs = frequency.QuadPart > 0
+        ? 1000.0 / static_cast<double>(frequency.QuadPart)
+        : 0.0;
+    static const char* names[lc::PERF_METRIC_COUNT] = {
+        "stateScan",
+        "playerRenderScan",
+        "chestRenderScan",
+        "blockScan",
+        "statePublish",
+        "overlayRender"
+    };
+
+    std::ostringstream line;
+    line << "[perf] family=legacy window=" << summary.windowMs << "ms";
+    for (int i = 0; i < lc::PERF_METRIC_COUNT; ++i) {
+        const lc::NativePerfMetricSnapshot& metric = summary.metrics[i];
+        if (metric.count == 0) continue;
+        line << " " << names[i]
+             << "{count=" << metric.count
+             << ",totalMs=" << (metric.totalTicks * ticksToMs)
+             << ",maxMs=" << (metric.maxTicks * ticksToMs);
+        if (metric.units != 0)
+            line << ",units=" << metric.units;
+        line << "}";
+    }
+    Log(line.str());
 }
 
 static void TraceValue(const char* fn, const char* key, const std::string& value) {
@@ -11416,35 +11512,44 @@ BOOL WINAPI HookedSwapBuffers(HDC hdc) {
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
 
-    UpdateHudEditor(w, h);
-    RenderHUD(w, h);
-    if (!ShouldHideWorldRenderModules(state)) {
-        TryLockGuard jniTry(g_renderJniMutex);
-        if (jniTry.owns_lock()) {
-            RenderNametags(w, h);
-            RenderFightStatus(w, h);
-            RenderClosestPlayerInfo(w, h);
-            RenderPixelPartyAssist(w, h);
-            RenderChestESP(w, h);
-            RenderBlockESP(w, h);
-        } else {
-            static DWORD nextJniBusyLogAt = 0;
-            DWORD now = GetTickCount();
-            if (now >= nextJniBusyLogAt) {
-                nextJniBusyLogAt = now + 15000;
-                bool heavy = (InterlockedCompareExchange(&g_heavyDiscoveryInProgress, 0, 0) != 0);
-                Log(std::string("Skipped world overlay frame: JNI busy")
-                    + (heavy ? " (heavy discovery active)" : ""));
+    {
+        NativePerfScope overlayPerf(lc::PERF_OVERLAY_RENDER);
+        UpdateHudEditor(w, h);
+        RenderHUD(w, h);
+        if (!ShouldHideWorldRenderModules(state)) {
+            TryLockGuard jniTry(g_renderJniMutex);
+            if (jniTry.owns_lock()) {
+                {
+                    NativePerfScope playerPerf(lc::PERF_PLAYER_SCAN);
+                    RenderNametags(w, h);
+                }
+                RenderFightStatus(w, h);
+                RenderClosestPlayerInfo(w, h);
+                RenderPixelPartyAssist(w, h);
+                {
+                    NativePerfScope chestPerf(lc::PERF_CHEST_SCAN);
+                    RenderChestESP(w, h);
+                }
+                RenderBlockESP(w, h);
+            } else {
+                static DWORD nextJniBusyLogAt = 0;
+                DWORD now = GetTickCount();
+                if (now >= nextJniBusyLogAt) {
+                    nextJniBusyLogAt = now + 15000;
+                    bool heavy = (InterlockedCompareExchange(&g_heavyDiscoveryInProgress, 0, 0) != 0);
+                    Log(std::string("Skipped world overlay frame: JNI busy")
+                        + (heavy ? " (heavy discovery active)" : ""));
+                }
             }
         }
-    }
 
-    ImGui::Render();
-    ImGuiIO& io = ImGui::GetIO();
-    if (io.DisplaySize.x > 1.0f && io.DisplaySize.y > 1.0f) {
-        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        ImGui::Render();
+        ImGuiIO& io = ImGui::GetIO();
+        if (io.DisplaySize.x > 1.0f && io.DisplaySize.y > 1.0f) {
+            ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        }
+        glFlush();
     }
-    glFlush();
 
     return CallOriginalSwapBuffers(hdc);
 }
@@ -11986,6 +12091,8 @@ void ServerLoop() {
             }
 
             // ALWAYS Read Game State to update global state (for block detection etc.)
+            const unsigned long long stateScanPerfStarted =
+                GetNativePerfDiagnostics().Enabled() ? NativePerfTimestamp() : 0;
             GameState state;
             {
                 LockGuard jniLk(g_stateJniMutex);
@@ -12018,9 +12125,11 @@ void ServerLoop() {
                 }
                 UpdateHitDelayFixLegacy(env, cfgSnapshot, state);
                 if (cfgSnapshot.blockEsp) {
+                    NativePerfScope blockScanPerf(lc::PERF_BLOCK_SCAN);
                     UpdateBlockEspListLegacy(env, cfgSnapshot);
                 }
             }
+            RecordNativePerfSince(lc::PERF_SCAN_LOOP, stateScanPerfStarted);
             if (!cfgSnapshot.reachEnabled) {
                 g_reachAllowCurrentClick = false;
                 g_reachCurrentClickRange = 3.0;
@@ -12036,6 +12145,8 @@ void ServerLoop() {
             { LockGuard lk(g_stateMutex); g_gameState = state; }
 
             // Standard Logic: Build JSON from state
+            const unsigned long long statePublishPerfStarted =
+                GetNativePerfDiagnostics().Enabled() ? NativePerfTimestamp() : 0;
             std::string jsonToSend = "{";
             jsonToSend += "\"mapped\":" + std::string(state.mapped ? "true" : "false") + ",";
             jsonToSend += "\"inWorld\":" + std::string(state.inWorld ? "true" : "false") + ",";
@@ -12108,6 +12219,10 @@ void ServerLoop() {
                    if (WSAGetLastError() != WSAEWOULDBLOCK) break; 
                 }
             }
+            RecordNativePerfSince(
+                lc::PERF_STATE_PUBLISH,
+                statePublishPerfStarted,
+                static_cast<unsigned long long>(jsonToSend.size()));
             
             // Keep telemetry responsive without pegging CPU.
             // 14ms (~71 Hz) avoids JNI mutex contention with the render thread
@@ -12143,6 +12258,7 @@ void ServerLoop() {
                 if (err != WSAEWOULDBLOCK) break;
             }
 
+            MaybeLogNativePerfDiagnostics();
             Sleep(needEntityTelemetry ? 10 : 25);
         }
         {

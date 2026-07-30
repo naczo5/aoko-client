@@ -9973,7 +9973,7 @@ static void MaybeLogNativePerfDiagnostics()
     };
 
     std::ostringstream line;
-    line << "[perf] window=" << summary.windowMs << "ms";
+    line << "[perf] family=modern window=" << summary.windowMs << "ms";
     for (int i = 0; i < lc::PERF_METRIC_COUNT; ++i) {
         const lc::NativePerfMetricSnapshot& metric = summary.metrics[i];
         if (metric.count == 0) continue;

@@ -29,6 +29,10 @@ Completed on `dev` after the plan was created:
   switch, covering scan-loop work, player/chest/block scans, state publication
   count/time/bytes, and overlay render time. Summaries are emitted every five
   seconds rather than logging individual events.
+- Extended those opt-in counters to the legacy bridge, covering its JNI state
+  scan, player and chest render-thread scans, Block ESP production, state JSON
+  publication, and OpenGL overlay render time. Native summaries now identify
+  their bridge family explicitly.
 - Replaced unconditional five-times-per-second configuration serialization
   with change-triggered sends, a 25 ms burst coalescing window, and a two-second
   recovery heartbeat.
@@ -158,13 +162,13 @@ these minimum gates:
       logging every event.
 - [ ] Add counters for:
   - [ ] Modern combat/aim scan duration.
-  - [ ] Player/nametag scan duration.
-  - [ ] Chest scan duration.
-  - [ ] Block ESP scan duration.
-  - [ ] Legacy state scan duration.
-  - [ ] OpenGL overlay render duration.
-  - [ ] Vulkan overlay render duration.
-  - [ ] State JSON construction duration and payload bytes.
+  - [x] Player/nametag scan duration.
+  - [x] Chest scan duration.
+  - [x] Block ESP scan duration.
+  - [x] Legacy state scan duration.
+  - [x] OpenGL overlay render duration.
+  - [x] Vulkan overlay render duration.
+  - [x] State JSON construction duration and payload bytes.
   - [ ] State socket send duration and failures.
   - [ ] Relevant mutex acquisition wait time.
 - [ ] Flush summaries at a bounded interval, such as every 5 seconds.
