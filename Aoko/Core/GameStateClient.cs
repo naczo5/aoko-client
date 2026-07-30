@@ -29,6 +29,11 @@ public class GameStateClient : INotifyPropertyChanged
     private Task? _readTask;
     private readonly int _port = 25590;
     private readonly SemaphoreSlim _sendLock = new(1, 1);
+    private readonly SemaphoreSlim _configChangedSignal = new(0, 1);
+    private readonly ManagedTransportDiagnostics _transportDiagnostics =
+        ManagedTransportDiagnostics.FromEnvironment();
+    private const int ConfigHeartbeatMs = 2000;
+    private const int ConfigChangeCoalesceMs = 25;
 
     private GameState _currentState = new();
     private bool _isConnected;
@@ -42,6 +47,8 @@ public class GameStateClient : INotifyPropertyChanged
     private int _reloadMappingsNonce;
     private IntPtr _customTargetHwnd;
     private volatile bool _suppressConfigPush = false;
+    private long _configRevision = 1;
+    private int _configChangeTrackingAttached;
 
     public event PropertyChangedEventHandler? PropertyChanged;
     public event Action? StateUpdated;
@@ -161,6 +168,7 @@ public class GameStateClient : INotifyPropertyChanged
     public void RequestBridgeMappingReload()
     {
         Interlocked.Increment(ref _reloadMappingsNonce);
+        MarkBridgeConfigDirty();
         Log("Queued bridge mapping reload request.");
     }
 
@@ -409,6 +417,9 @@ public class GameStateClient : INotifyPropertyChanged
             return;
         }
 
+        EnsureConfigChangeTracking();
+        MarkBridgeConfigDirty();
+
         // Start config sender task
         _configSenderTask = Task.Run(() => ConfigSenderLoop(token), token);
         _readTask = Task.Run(() => ReadLoop(token), token);
@@ -446,6 +457,7 @@ public class GameStateClient : INotifyPropertyChanged
                 string? line = await reader.ReadLineAsync(token);
                 if (line == null) break;
 
+                long parseStarted = Stopwatch.GetTimestamp();
                 try
                 {
                     // Check if it's a command from ClickGUI
@@ -495,6 +507,13 @@ public class GameStateClient : INotifyPropertyChanged
                 catch (JsonException)
                 {
                     // Skip malformed lines
+                }
+                finally
+                {
+                    _transportDiagnostics.RecordInbound(
+                        line.Length,
+                        Stopwatch.GetTimestamp() - parseStarted);
+                    LogTransportDiagnosticsIfReady();
                 }
             }
         }
@@ -996,16 +1015,47 @@ public class GameStateClient : INotifyPropertyChanged
 
     private async Task ConfigSenderLoop(CancellationToken token)
     {
+        long lastSentRevision = -1;
+        long lastSentAt = 0;
+
         while (!token.IsCancellationRequested && _client?.Connected == true)
         {
             try
             {
-                if (_suppressConfigPush)
+                long revision = Volatile.Read(ref _configRevision);
+                long now = Environment.TickCount64;
+                long elapsedSinceSend = lastSentAt == 0 ? ConfigHeartbeatMs : now - lastSentAt;
+                bool revisionChanged = revision != lastSentRevision;
+                if (!IsConfigSendDue(
+                    revision,
+                    lastSentRevision,
+                    elapsedSinceSend,
+                    ConfigHeartbeatMs))
                 {
-                    await Task.Delay(200, token);
+                    int waitMs = (int)Math.Clamp(
+                        ConfigHeartbeatMs - elapsedSinceSend,
+                        1,
+                        ConfigHeartbeatMs);
+                    await _configChangedSignal.WaitAsync(waitMs, token).ConfigureAwait(false);
                     continue;
                 }
 
+                if (_suppressConfigPush)
+                {
+                    await Task.Delay(ConfigChangeCoalesceMs, token).ConfigureAwait(false);
+                    continue;
+                }
+
+                if (revisionChanged && lastSentAt != 0)
+                {
+                    await Task.Delay(ConfigChangeCoalesceMs, token).ConfigureAwait(false);
+                    while (_configChangedSignal.Wait(0))
+                    {
+                    }
+                    revision = Volatile.Read(ref _configRevision);
+                }
+
+                long serializationStarted = Stopwatch.GetTimestamp();
                 var clicker = Clicker.Instance;
                 var ka = clicker.KillAuraSettings;
                 var config = new
@@ -1175,15 +1225,59 @@ public class GameStateClient : INotifyPropertyChanged
                 };
 
                 string json = JsonSerializer.Serialize(config) + "\n";
+                _transportDiagnostics.RecordConfigSerialization(
+                    json.Length,
+                    Stopwatch.GetTimestamp() - serializationStarted);
                 if (!await SendMessageAsync(json, token).ConfigureAwait(false))
                     break;
+                _transportDiagnostics.RecordConfigSend(json.Length);
+                lastSentRevision = revision;
+                lastSentAt = Environment.TickCount64;
+                LogTransportDiagnosticsIfReady();
             }
             catch (Exception)
             {
                 break;
             }
+        }
+    }
 
-            await Task.Delay(200, token);
+    internal static bool IsConfigSendDue(
+        long revision,
+        long lastSentRevision,
+        long elapsedSinceSendMs,
+        int heartbeatMs)
+        => revision != lastSentRevision || elapsedSinceSendMs >= heartbeatMs;
+
+    private void EnsureConfigChangeTracking()
+    {
+        if (Interlocked.Exchange(ref _configChangeTrackingAttached, 1) != 0)
+            return;
+
+        Clicker.Instance.StateChanged += MarkBridgeConfigDirty;
+        InputHooks.OnStateChanged += MarkBridgeConfigDirty;
+    }
+
+    private void MarkBridgeConfigDirty()
+    {
+        Interlocked.Increment(ref _configRevision);
+        try
+        {
+            _configChangedSignal.Release();
+        }
+        catch (SemaphoreFullException)
+        {
+            // A pending signal already represents the latest revision.
+        }
+    }
+
+    private void LogTransportDiagnosticsIfReady()
+    {
+        if (_transportDiagnostics.TryTakeSnapshot(
+            Stopwatch.GetTimestamp(),
+            out ManagedTransportSnapshot snapshot))
+        {
+            Log(snapshot.ToLogMessage());
         }
     }
 

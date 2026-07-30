@@ -89,6 +89,8 @@ public class Clicker : INotifyPropertyChanged
     private const int PixelPartyTargetGraceMs = 160;
     private const uint INPUT_KEYBOARD = 1;
     private const uint KEYEVENTF_KEYUP = 0x0002;
+    private static readonly int MouseInputSize = Marshal.SizeOf<INPUT>();
+    private static readonly int KeyboardInputSize = Marshal.SizeOf<INPUT_KEY>();
     
     // State
     private bool _isArmed;
@@ -124,6 +126,7 @@ public class Clicker : INotifyPropertyChanged
     private readonly INPUT[] _leftClickInputs;
     private readonly INPUT[] _rightClickInputs;
     private readonly INPUT[] _aimAssistMoveInput;
+    private readonly INPUT_KEY[] _pixelPartyKeyInput = new INPUT_KEY[1];
     
     public event PropertyChangedEventHandler? PropertyChanged;
     public event Action? StateChanged;
@@ -567,13 +570,12 @@ public class Clicker : INotifyPropertyChanged
 
     private void SendPixelPartyKey(int vk, bool down)
     {
-        var input = new INPUT_KEY[1];
-        input[0].Type = INPUT_KEYBOARD;
-        input[0].U.Ki.WVk = (ushort)vk;
-        input[0].U.Ki.DwFlags = down ? 0u : KEYEVENTF_KEYUP;
         lock (_sendInputLock)
         {
-            SendInputKeyboard(1, input, Marshal.SizeOf<INPUT_KEY>());
+            _pixelPartyKeyInput[0].Type = INPUT_KEYBOARD;
+            _pixelPartyKeyInput[0].U.Ki.WVk = (ushort)vk;
+            _pixelPartyKeyInput[0].U.Ki.DwFlags = down ? 0u : KEYEVENTF_KEYUP;
+            SendInputKeyboard(1, _pixelPartyKeyInput, KeyboardInputSize);
         }
     }
 
@@ -614,7 +616,7 @@ public class Clicker : INotifyPropertyChanged
             _aimAssistMoveInput[0].Mi.Dy = 0;
             lock (_sendInputLock)
             {
-                SendInput(1, _aimAssistMoveInput, Marshal.SizeOf<INPUT>());
+                SendInput(1, _aimAssistMoveInput, MouseInputSize);
             }
 
             remaining -= moveX / gain;
@@ -2602,7 +2604,7 @@ public class Clicker : INotifyPropertyChanged
         INPUT[] inputs = leftButton ? _leftClickInputs : _rightClickInputs;
         lock (_sendInputLock)
         {
-            SendInput(2, inputs, Marshal.SizeOf<INPUT>());
+            SendInput(2, inputs, MouseInputSize);
         }
     }
 
@@ -2639,7 +2641,7 @@ public class Clicker : INotifyPropertyChanged
         _aimAssistMoveInput[0].Mi.Dy = move.MoveY;
         lock (_sendInputLock)
         {
-            SendInput(1, _aimAssistMoveInput, Marshal.SizeOf<INPUT>());
+            SendInput(1, _aimAssistMoveInput, MouseInputSize);
         }
     }
      

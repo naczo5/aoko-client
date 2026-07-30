@@ -42,6 +42,7 @@
 #include "fight_status_core.h"
 #include "aim_assist_projection.h"
 #include "screen_projection.h"
+#include "telemetry_schedule.h"
 #include "jni_core/scoped_env.h"
 #include "jni_core/local_frame.h"
 #include "jni_core/resolver.h"
@@ -12828,6 +12829,10 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
     TRACE261_PATH("thread-start");
     DWORD lastAutoRemapRetryMs = 0;
     DWORD lastNickHiderRefreshMs = 0;
+    DWORD lastChestEspScanMs = 0;
+    DWORD lastBlockEspScanMs = 0;
+    bool chestEspScanWasEnabled = false;
+    bool blockEspScanWasEnabled = false;
     // Teleport detection: track last scanned player position to catch same-world jumps
     // (arena teleports) that bypass the loading-screen / world-instance guards.
     double lastScanX = 0, lastScanY = 0, lastScanZ = 0;
@@ -12980,10 +12985,32 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                     s_fightStatusWasEnabled = cfg.fightStatus;
                     if (cfg.nametags || cfg.nickHiderEnabled || cfg.closestPlayer || cfg.fightStatus || cfg.aimAssist || cfg.nametagHideVanilla || g_nametagSuppressionActive_121)
                         UpdatePlayerListOverlay(env);
-                    if (cfg.chestEsp || cfg.chestStealer)
+                    const DWORD producerNowMs = GetTickCount();
+                    const bool chestEspScanEnabled = cfg.chestEsp || cfg.chestStealer;
+                    const bool chestEspScanDue =
+                        !chestEspScanWasEnabled ||
+                        cfg.chestStealer ||
+                        lc::IsTelemetryIntervalDue(
+                            producerNowMs,
+                            lastChestEspScanMs,
+                            lc::kChestEspScanIntervalMs);
+                    if (chestEspScanEnabled && chestEspScanDue) {
                         UpdateChestList(env);
-                    if (cfg.blockEsp)
+                        lastChestEspScanMs = producerNowMs;
+                    }
+                    chestEspScanWasEnabled = chestEspScanEnabled;
+
+                    const bool blockEspScanDue =
+                        !blockEspScanWasEnabled ||
+                        lc::IsTelemetryIntervalDue(
+                            producerNowMs,
+                            lastBlockEspScanMs,
+                            lc::kBlockEspScanIntervalMs);
+                    if (cfg.blockEsp && blockEspScanDue) {
                         UpdateBlockEspList(env);
+                        lastBlockEspScanMs = producerNowMs;
+                    }
+                    blockEspScanWasEnabled = cfg.blockEsp;
                 }
             } else if (g_stateJniReady && !inWorldNow) {
                 ResetAutoRodModernCaches(env);
@@ -13180,7 +13207,13 @@ static void UpdateHudEditor(int winW, int winH) {
     }
 }
 
-static void RenderOverlayPanels(bool inWorld, const Config& cfg, const OverlayTheme& overlayTheme, int winW, int winH) {
+static void RenderOverlayPanels(
+    bool inWorld,
+    const Config& cfg,
+    const OverlayTheme& overlayTheme,
+    const lc::HudLayout& hudLayout,
+    int winW,
+    int winH) {
     if (!inWorld || IsWorldTransitionActive()) return;
     TRACE261_PATH("overlay-render-active");
             ImDrawList* fg = ImGui::GetForegroundDrawList();
@@ -13189,7 +13222,7 @@ static void RenderOverlayPanels(bool inWorld, const Config& cfg, const OverlayTh
             { LockGuard lk(g_bgCamMutex); cpCamState = g_bgCamState; }
 
             // Snapshot player list under lock (background thread updates it concurrently).
-            std::vector<PlayerData121> playerSnap;
+            static thread_local std::vector<PlayerData121> playerSnap;
             { LockGuard lk(g_playerListMutex); playerSnap = g_playerList; }
 
             // ── Closest Player: styled HUD box above hotbar ───
@@ -13272,7 +13305,7 @@ static void RenderOverlayPanels(bool inWorld, const Config& cfg, const OverlayTh
                 contentH += padY;
 
                 lc::HudElementLayout cpLayout;
-                { LockGuard lkHud(g_configMutex); cpLayout = g_hudLayout.Resolve(lc::ELEM_CLOSESTPLAYER); }
+                cpLayout = hudLayout.Resolve(lc::ELEM_CLOSESTPLAYER);
                 contentW *= cpLayout.scale;
                 contentH *= cpLayout.scale;
 
@@ -13393,7 +13426,7 @@ static void RenderOverlayPanels(bool inWorld, const Config& cfg, const OverlayTh
                 contentH += padY;
 
                 lc::HudElementLayout ppLayout;
-                { LockGuard lkHud(g_configMutex); ppLayout = g_hudLayout.Resolve(lc::ELEM_PIXELPARTY); }
+                ppLayout = hudLayout.Resolve(lc::ELEM_PIXELPARTY);
                 contentW *= ppLayout.scale;
                 contentH *= ppLayout.scale;
 
@@ -13554,6 +13587,8 @@ static void RenderOverlayPanels(bool inWorld, const Config& cfg, const OverlayTh
             if (renderNametags) {
                 drawnTags = 0;
                 const int nametagRenderCap = (std::max)(1, (std::min)(20, cfg.nametagMaxCount));
+                const float nametagLayoutScale =
+                    hudLayout.Resolve(lc::ELEM_NAMETAGS).scale;
 
                 if (!playerSnap.empty()) {
                     const LegoVec3  cam      = sharedCam;
@@ -13629,12 +13664,11 @@ static void RenderOverlayPanels(bool inWorld, const Config& cfg, const OverlayTh
                                         statsText += armBuf;
                                     }
 
-                        const float layoutNtScale = g_hudLayout.Resolve(lc::ELEM_NAMETAGS).scale;
-                        const float nameFontSize = std::floor(ImGui::GetFontSize() * nameScale * layoutNtScale);
+                        const float nameFontSize = std::floor(ImGui::GetFontSize() * nameScale * nametagLayoutScale);
                         const float infoFontSize = std::floor(nameFontSize * 0.85f);
                                     
                                     ImVec2 nameSz = ImGui::CalcTextSize(nameText.c_str());
-                                    nameSz.x *= nameScale * layoutNtScale; nameSz.y *= nameScale * layoutNtScale;
+                                    nameSz.x *= nameScale * nametagLayoutScale; nameSz.y *= nameScale * nametagLayoutScale;
                                     
                                     ImVec2 statsSz = {0,0};
                                     if (!statsText.empty()) {
@@ -13655,7 +13689,7 @@ static void RenderOverlayPanels(bool inWorld, const Config& cfg, const OverlayTh
                                     if (statsSz.y > 0) totalH += statsSz.y + 2.0f;
                                     if (itemSz.y > 0) totalH += itemSz.y + 2.0f;
 
-                                    float pad = std::floor(4.0f * nameScale * layoutNtScale);
+                                    float pad = std::floor(4.0f * nameScale * nametagLayoutScale);
                                     float rx = std::floor(sx - maxW / 2.0f);
                                     float ry = std::floor(sy - totalH - pad * 2.0f);
 
@@ -13703,7 +13737,11 @@ static void RenderOverlayPanels(bool inWorld, const Config& cfg, const OverlayTh
             // ── Chest ESP: draw bounding rect over each nearby chest ──
             bool renderChestEsp = TRACE261_IF("renderChestEsp", (!g_realGuiOpen && cfg.chestEsp && sharedCamFound));
             if (renderChestEsp) {
-                LockGuard chestLk(g_chestListMutex); // protect g_chestList from background scan thread
+                static thread_local std::vector<ChestData121> chestSnapshot;
+                {
+                    LockGuard chestLk(g_chestListMutex);
+                    chestSnapshot = g_chestList;
+                }
                 // Use shared camera data (same source as nametags – no redundant JNI fetch)
                 const LegoVec3   espCam   = sharedCam;
                 const float      espYaw   = sharedYaw;
@@ -13714,9 +13752,9 @@ static void RenderOverlayPanels(bool inWorld, const Config& cfg, const OverlayTh
 
                 // One-time diagnostic: log projection state on first ESP frame
                 static bool s_espDiagLogged = false;
-                if (!s_espDiagLogged && !g_chestList.empty()) {
+                if (!s_espDiagLogged && !chestSnapshot.empty()) {
                     s_espDiagLogged = true;
-                    const auto& ch0 = g_chestList[0];
+                    const auto& ch0 = chestSnapshot[0];
                     float csx = ch0.hasScreenRect ? (ch0.minScreenX + ch0.maxScreenX) * 0.5f : 0.0f;
                     float csy = ch0.hasScreenRect ? (ch0.minScreenY + ch0.maxScreenY) * 0.5f : 0.0f;
                     bool ok = ch0.hasScreenRect;
@@ -13745,20 +13783,23 @@ static void RenderOverlayPanels(bool inWorld, const Config& cfg, const OverlayTh
                     constexpr double kChestEspMaxRenderDist = 64.0;
                     const size_t maxChestRenderCount = (size_t)(std::max)(1, (std::min)(20, cfg.chestEspMaxCount));
                     struct RenderChestCandidate { const ChestData121* chest; double dist; };
-                    std::vector<RenderChestCandidate> renderChests;
-                    renderChests.reserve((std::min)(g_chestList.size(), maxChestRenderCount));
-                    for (const auto& ch : g_chestList) {
+                    static thread_local std::vector<RenderChestCandidate> renderChests;
+                    renderChests.clear();
+                    renderChests.reserve(chestSnapshot.size());
+                    for (const auto& ch : chestSnapshot) {
                         double dx = ch.x - espCam.x;
                         double dy = ch.y - espCam.y;
                         double dz = ch.z - espCam.z;
                         double distNow = std::sqrt(dx*dx + dy*dy + dz*dz);
                         if (distNow > kChestEspMaxRenderDist) continue;
-                        size_t insertAt = 0;
-                        while (insertAt < renderChests.size() && renderChests[insertAt].dist <= distNow) insertAt++;
-                        if (insertAt >= maxChestRenderCount) continue;
-                        renderChests.insert(renderChests.begin() + static_cast<std::vector<RenderChestCandidate>::difference_type>(insertAt), { &ch, distNow });
-                        if (renderChests.size() > maxChestRenderCount) renderChests.pop_back();
+                        renderChests.push_back({ &ch, distNow });
                     }
+                    std::sort(renderChests.begin(), renderChests.end(),
+                        [](const RenderChestCandidate& a, const RenderChestCandidate& b) {
+                            return a.dist < b.dist;
+                        });
+                    if (renderChests.size() > maxChestRenderCount)
+                        renderChests.resize(maxChestRenderCount);
 
                     for (const auto& candidate : renderChests) {
                         const auto& ch = *candidate.chest;
@@ -13871,9 +13912,9 @@ static void RenderOverlayPanels(bool inWorld, const Config& cfg, const OverlayTh
             // ── Block ESP / X-ray: per-color boxes + tracers + HUD list ──
             bool renderBlockEsp = TRACE261_IF("renderBlockEsp", (!g_realGuiOpen && cfg.blockEsp && sharedCamFound));
             if (renderBlockEsp) {
-                std::vector<BlockEspData121> blocks;
+                static thread_local std::vector<BlockEspData121> blocks;
                 { LockGuard lk(g_blockEspListMutex); blocks = g_blockEspList; }
-                std::vector<lc::BlockEspTargetDef> targets;
+                static thread_local std::vector<lc::BlockEspTargetDef> targets;
                 { LockGuard tlk(g_blockEspTargetsMutex); targets = g_blockEspTargets; }
 
                 const int     winW = (int)io.DisplaySize.x;
@@ -13983,7 +14024,7 @@ static void RenderOverlayPanels(bool inWorld, const Config& cfg, const OverlayTh
                     float contentH = padY + rowH /*title*/ + rowH * (float)rows.size() + padY;
 
                     lc::HudElementLayout beLayout;
-                    { LockGuard lkHud(g_configMutex); beLayout = g_hudLayout.Resolve(lc::ELEM_BLOCKESPLIST); }
+                    beLayout = hudLayout.Resolve(lc::ELEM_BLOCKESPLIST);
                     contentW *= beLayout.scale;
                     contentH *= beLayout.scale;
 
@@ -14152,7 +14193,7 @@ static void RenderOverlayPanels(bool inWorld, const Config& cfg, const OverlayTh
                 // to the top-right corner and ignored g_hudLayout entirely, so the
                 // editor box moved but the list never did.
                 lc::HudElementLayout mlLayout;
-                { LockGuard lkHud(g_configMutex); mlLayout = g_hudLayout.Resolve(lc::ELEM_MODULELIST); }
+                mlLayout = hudLayout.Resolve(lc::ELEM_MODULELIST);
                 const float scale = mlLayout.scale;
 
                 const float padX      = 8.0f * scale;
@@ -14354,11 +14395,16 @@ ImDrawData* Bridge_BuildOverlayDrawData(int winW, int winH) {
     int h = (int)io.DisplaySize.y;
 
     Config cfg;
-    { LockGuard lk(g_configMutex); cfg = g_config; }
+    lc::HudLayout hudLayout;
+    {
+        LockGuard lk(g_configMutex);
+        cfg = g_config;
+        hudLayout = g_hudLayout;
+    }
     OverlayTheme overlayTheme = ResolveOverlayTheme(cfg.guiTheme);
     bool inWorld = false;
     { LockGuard lk(g_jniStateMtx); inWorld = g_jniInWorld; }
-    RenderOverlayPanels(inWorld, cfg, overlayTheme, w, h);
+    RenderOverlayPanels(inWorld, cfg, overlayTheme, hudLayout, w, h);
 
     ImGui::Render();
     if (io.DisplaySize.x <= 1.0f || io.DisplaySize.y <= 1.0f) return nullptr;
@@ -14375,11 +14421,16 @@ void Bridge_BeginOverlayImGuiFrame(int winW, int winH) {
 
 void Bridge_RenderOverlayPanels(bool inWorld) {
     Config cfg;
-    { LockGuard lk(g_configMutex); cfg = g_config; }
+    lc::HudLayout hudLayout;
+    {
+        LockGuard lk(g_configMutex);
+        cfg = g_config;
+        hudLayout = g_hudLayout;
+    }
     OverlayTheme overlayTheme = ResolveOverlayTheme(cfg.guiTheme);
     int winW = (int)ImGui::GetIO().DisplaySize.x;
     int winH = (int)ImGui::GetIO().DisplaySize.y;
-    RenderOverlayPanels(inWorld, cfg, overlayTheme, winW, winH);
+    RenderOverlayPanels(inWorld, cfg, overlayTheme, hudLayout, winW, winH);
 }
 
 void Bridge_EndOverlayImGuiFrame_OpenGL() {
@@ -14576,7 +14627,12 @@ BOOL WINAPI hwglSwapBuffers(HDC hDc) {
 
     {
         Config cfg;
-        { LockGuard lk(g_configMutex); cfg = g_config; }
+        lc::HudLayout hudLayout;
+        {
+            LockGuard lk(g_configMutex);
+            cfg = g_config;
+            hudLayout = g_hudLayout;
+        }
         OverlayTheme overlayTheme = ResolveOverlayTheme(cfg.guiTheme);
         bool inWorld = false;
         { LockGuard lk(g_jniStateMtx); inWorld = g_jniInWorld; }
@@ -14588,7 +14644,7 @@ BOOL WINAPI hwglSwapBuffers(HDC hDc) {
                 " showModuleList=" + (cfg.showModuleList ? "true" : "false"));
         }
 
-        RenderOverlayPanels(inWorld, cfg, overlayTheme, winW, winH);
+        RenderOverlayPanels(inWorld, cfg, overlayTheme, hudLayout, winW, winH);
         if (!inWorld) {
             TRACE261_PATH("overlay-render-skipped");
         }
@@ -14724,6 +14780,7 @@ glfw_done:;
         std::string readBuf;
         bool capabilitiesSent = false;
         while (g_running) {
+            unsigned int stateIntervalMs = lc::kModernStateNormalIntervalMs;
             TRACE261_PATH("client-loop-iteration");
             if (!capabilitiesSent) {
                 capabilitiesSent = TrySendCapabilities(cli);
@@ -14945,6 +15002,13 @@ glfw_done:;
                 state += "]";
                 {
                     LockGuard lk(g_configMutex);
+                    stateIntervalMs = lc::ModernStateIntervalMs(
+                        g_config.clicking,
+                        g_config.aimAssist,
+                        g_config.triggerbot,
+                        g_config.pixelPartyAutoLook,
+                        g_config.pixelPartyAutoWalk,
+                        g_config.hudEditor);
                     if (g_hudEditor.layoutDirty) {
                         state += ",\"hudLayout\":";
                         state += lc::SerializeHudLayout(g_hudLayout);
@@ -14970,7 +15034,7 @@ glfw_done:;
                 } else if (r == 0) break;
             }
 
-            Sleep(5);
+            Sleep(stateIntervalMs);
         }
         ClearAutoRodQueue();
         closesocket(cli);

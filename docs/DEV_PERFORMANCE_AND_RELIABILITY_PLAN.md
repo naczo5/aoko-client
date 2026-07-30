@@ -16,6 +16,51 @@ This plan favors measured, reversible changes. Each phase must preserve existing
 module behavior on all supported bridge/runtime combinations before the next
 phase starts.
 
+## Implementation progress
+
+### 2026-07-30 optimization slice
+
+Completed on `dev` after the plan was created:
+
+- Added opt-in managed transport counters behind
+  `AOKO_PERF_DIAGNOSTICS=1`, covering inbound message rate/characters, parsing
+  time, configuration serialization rate/time, and configuration sends.
+- Replaced unconditional five-times-per-second configuration serialization
+  with change-triggered sends, a 25 ms burst coalescing window, and a two-second
+  recovery heartbeat.
+- Added direct configuration wakeups for `Clicker` state, keybind state, and
+  mapping reload changes.
+- Changed modern full-state publication from a fixed 5 ms interval to:
+  - 5 ms while clicking, Aim Assist, Triggerbot, Pixel Party managed input, or
+    HUD editing needs low-latency state.
+  - 25 ms otherwise.
+- Decoupled Chest ESP and Block ESP production from the combat scan loop:
+  - Chest ESP: 100 ms while enabled; Chest Stealer retains its active loop rate.
+  - Block ESP: 150 ms while enabled.
+- Changed Chest ESP rendering to copy a short producer snapshot and release its
+  mutex before projection, sorting, and ImGui drawing.
+- Replaced insertion-based Chest ESP candidate ordering with one sort and
+  bounded resize.
+- Snapshot configuration and HUD layout together once per render entry and
+  resolve panel layouts from that snapshot without per-panel configuration
+  locks.
+- Reuse render-thread player, chest, block, target, and chest-candidate vector
+  capacity through thread-local snapshots.
+- Reuse Pixel Party keyboard input storage and cached native structure sizes
+  instead of allocating an array and recomputing sizes for each input event.
+- Added managed tests for diagnostics and config-send policy, plus a C++11
+  native harness for adaptive state and ESP scheduling.
+
+Verification:
+
+- 178 managed tests pass when the known sandbox-only
+  `MainWindowStartupTests` profile-write test is excluded.
+- All native harness tests pass.
+- `bridge_261.dll` compiles successfully with the documented MinGW toolchain.
+- The complete managed run still encounters the pre-existing sandbox denial
+  writing `%APPDATA%\Aoko\profiles\config.json`; its subsequent UI-thread test
+  contamination is not caused by this slice.
+
 ## Guiding principles
 
 1. Measure before optimizing.
