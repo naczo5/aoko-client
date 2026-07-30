@@ -1254,9 +1254,15 @@ public class GameStateClient : INotifyPropertyChanged
         if (Interlocked.Exchange(ref _configChangeTrackingAttached, 1) != 0)
             return;
 
+        Clicker.Instance.PropertyChanged += OnClickerConfigPropertyChanged;
         Clicker.Instance.StateChanged += MarkBridgeConfigDirty;
         InputHooks.OnStateChanged += MarkBridgeConfigDirty;
     }
+
+    private void OnClickerConfigPropertyChanged(
+        object? sender,
+        PropertyChangedEventArgs eventArgs)
+        => MarkBridgeConfigDirty();
 
     private void MarkBridgeConfigDirty()
     {

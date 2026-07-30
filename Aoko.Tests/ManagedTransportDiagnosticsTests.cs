@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Reflection;
 using Aoko.Core;
 
 namespace Aoko.Tests;
@@ -24,6 +25,34 @@ public sealed class ManagedTransportDiagnosticsTests
                 lastSentRevision,
                 elapsedMs,
                 heartbeatMs));
+    }
+
+    [Fact]
+    public void ConfigChangeTracking_CoversPropertiesNestedSettingsAndKeybinds()
+    {
+        MethodInfo? method = typeof(GameStateClient).GetMethod(
+            "EnsureConfigChangeTracking",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        string source = File.ReadAllText(
+            Path.Combine(
+                FindRepoRoot(),
+                "Aoko",
+                "Core",
+                "GameStateClient.cs"));
+        Assert.Contains(
+            "Clicker.Instance.PropertyChanged += OnClickerConfigPropertyChanged;",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "Clicker.Instance.StateChanged += MarkBridgeConfigDirty;",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "InputHooks.OnStateChanged += MarkBridgeConfigDirty;",
+            source,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -89,5 +118,18 @@ public sealed class ManagedTransportDiagnosticsTests
         Assert.Contains("inbound=2.0/s", message);
         Assert.Contains("configSerialize=0.40/s", message);
         Assert.Contains("configSend=0.20/s", message);
+    }
+
+    private static string FindRepoRoot()
+    {
+        string? directory = AppContext.BaseDirectory;
+        while (!string.IsNullOrEmpty(directory))
+        {
+            if (File.Exists(Path.Combine(directory, "Aoko", "Aoko.csproj")))
+                return directory;
+            directory = Directory.GetParent(directory)?.FullName;
+        }
+
+        throw new InvalidOperationException("Could not locate repository root.");
     }
 }
