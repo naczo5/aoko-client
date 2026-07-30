@@ -59,6 +59,10 @@ Completed on `dev` after the plan was created:
   capacity through thread-local snapshots.
 - Reuse Pixel Party keyboard input storage and cached native structure sizes
   instead of allocating an array and recomputing sizes for each input event.
+- Replaced relative AutoClicker delay compensation with a tested absolute
+  deadline scheduler. Minor scheduler overshoot is corrected on the following
+  interval, while a missed interval resets from the current time to prevent
+  catch-up click bursts.
 - Added managed tests for diagnostics and config-send policy, plus a C++11
   native harness for adaptive state, ESP scheduling, and concurrent native
   performance-counter aggregation.

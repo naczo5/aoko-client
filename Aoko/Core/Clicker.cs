@@ -2436,7 +2436,7 @@ public class Clicker : INotifyPropertyChanged
 
     private async Task ClickLoop(CancellationToken token)
     {
-        var stopwatch = new Stopwatch();
+        long nextClickDeadline = 0;
         
         while (!token.IsCancellationRequested)
         {
@@ -2552,8 +2552,6 @@ public class Clicker : INotifyPropertyChanged
                 }
             }
             
-            stopwatch.Restart();
-            
             float minCps = _useLeftButton ? MinCPS : RightMinCPS;
             float maxCps = _useLeftButton ? MaxCPS : RightMaxCPS;
             if (minCps > maxCps) minCps = maxCps;
@@ -2578,19 +2576,17 @@ public class Clicker : INotifyPropertyChanged
             // Perform click
             StatsTracker.Instance.RecordClick(cps, _useLeftButton);
             PerformClick(_useLeftButton);
-            
-            // Drift Compensation
-            // Stop stopwatch to see how long click + logic took
-            stopwatch.Stop();
-            double elapsed = stopwatch.Elapsed.TotalMilliseconds;
-            
-            // Calculate remaining wait time, compensating for elapsed time
-            int waitTime = (int)(targetInterval - elapsed);
-            if (waitTime < 1) waitTime = 1; // Always yield at least a bit
+
+            ClickSchedule schedule = ClickDeadlineScheduler.ScheduleNext(
+                nextClickDeadline,
+                Stopwatch.GetTimestamp(),
+                targetInterval,
+                Stopwatch.Frequency);
+            nextClickDeadline = schedule.DeadlineTimestamp;
             
             try
             {
-                await Task.Delay(waitTime, token).ConfigureAwait(false);
+                await Task.Delay(schedule.DelayMilliseconds, token).ConfigureAwait(false);
             }
             catch (TaskCanceledException)
             {
