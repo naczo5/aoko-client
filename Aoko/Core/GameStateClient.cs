@@ -34,9 +34,11 @@ public class GameStateClient : INotifyPropertyChanged
         ManagedTransportDiagnostics.FromEnvironment();
     private const int ConfigHeartbeatMs = 2000;
     private const int ConfigChangeCoalesceMs = 25;
+    private const int StateNotificationIntervalMs = 25;
     private const int MaximumInboundMessageCharacters = 1024 * 1024;
 
-    private GameState _currentState = new();
+    private volatile GameState _currentState = new();
+    private readonly CoalescedCallback _stateNotification;
     private bool _isConnected;
     private bool _isInjected;
     private string _statusMessage = "Not injected";
@@ -54,7 +56,12 @@ public class GameStateClient : INotifyPropertyChanged
     public event PropertyChangedEventHandler? PropertyChanged;
     public event Action? StateUpdated;
 
-    private GameStateClient() { }
+    private GameStateClient()
+    {
+        _stateNotification = new CoalescedCallback(
+            NotifyStateUpdated,
+            StateNotificationIntervalMs);
+    }
 
     // === Properties ===
 
@@ -64,9 +71,15 @@ public class GameStateClient : INotifyPropertyChanged
         private set
         {
             _currentState = value;
-            OnPropertyChanged(nameof(CurrentState));
-            StateUpdated?.Invoke();
+            _stateNotification.Signal();
         }
+    }
+
+    private void NotifyStateUpdated()
+    {
+        _transportDiagnostics.RecordStateNotification();
+        OnPropertyChanged(nameof(CurrentState));
+        StateUpdated?.Invoke();
     }
 
     public bool IsConnected
@@ -983,6 +996,14 @@ public class GameStateClient : INotifyPropertyChanged
         Func<bool>? sendGuard = null)
     {
         byte[] data = Encoding.UTF8.GetBytes(message);
+        return await SendMessageAsync(data, token, sendGuard).ConfigureAwait(false);
+    }
+
+    private async Task<bool> SendMessageAsync(
+        ReadOnlyMemory<byte> data,
+        CancellationToken token,
+        Func<bool>? sendGuard = null)
+    {
         await _sendLock.WaitAsync(token).ConfigureAwait(false);
         try
         {
@@ -994,7 +1015,7 @@ public class GameStateClient : INotifyPropertyChanged
                 return false;
 
             NetworkStream stream = client.GetStream();
-            await stream.WriteAsync(data.AsMemory(), token).ConfigureAwait(false);
+            await stream.WriteAsync(data, token).ConfigureAwait(false);
             return true;
         }
         finally
@@ -1028,6 +1049,8 @@ public class GameStateClient : INotifyPropertyChanged
     {
         long lastSentRevision = -1;
         long lastSentAt = 0;
+        long cachedRevision = -1;
+        byte[]? cachedPayload = null;
 
         while (!token.IsCancellationRequested && _client?.Connected == true)
         {
@@ -1066,12 +1089,19 @@ public class GameStateClient : INotifyPropertyChanged
                     revision = Volatile.Read(ref _configRevision);
                 }
 
-                long serializationStarted = Stopwatch.GetTimestamp();
-                var clicker = Clicker.Instance;
-                var ka = clicker.KillAuraSettings;
-                var config = new
+                byte[] payload;
+                if (ShouldSerializeConfig(
+                    revision,
+                    cachedRevision,
+                    cachedPayload != null))
                 {
+                    long serializationStarted = Stopwatch.GetTimestamp();
+                    var clicker = Clicker.Instance;
+                    var ka = clicker.KillAuraSettings;
+                    var config = new
+                    {
                     type = "config",
+                    perfDiagnostics = _transportDiagnostics.Enabled,
                     armed = clicker.IsArmed,
                     clicking = clicker.IsClicking,
                     minCPS = clicker.MinCPS,
@@ -1233,15 +1263,24 @@ public class GameStateClient : INotifyPropertyChanged
                     keybindAutoRod = InputHooks.GetModuleKey("autorod"),
                     hudEditor = clicker.HudEditorActive,
                     hudLayout = clicker.HudLayout.ToJson()
-                };
+                    };
 
-                string json = JsonSerializer.Serialize(config) + "\n";
-                _transportDiagnostics.RecordConfigSerialization(
-                    json.Length,
-                    Stopwatch.GetTimestamp() - serializationStarted);
-                if (!await SendMessageAsync(json, token).ConfigureAwait(false))
+                    string json = JsonSerializer.Serialize(config) + "\n";
+                    payload = Encoding.UTF8.GetBytes(json);
+                    cachedPayload = payload;
+                    cachedRevision = revision;
+                    _transportDiagnostics.RecordConfigSerialization(
+                        json.Length,
+                        Stopwatch.GetTimestamp() - serializationStarted);
+                }
+                else
+                {
+                    payload = cachedPayload!;
+                }
+
+                if (!await SendMessageAsync(payload, token).ConfigureAwait(false))
                     break;
-                _transportDiagnostics.RecordConfigSend(json.Length);
+                _transportDiagnostics.RecordConfigSend(payload.Length);
                 lastSentRevision = revision;
                 lastSentAt = Environment.TickCount64;
                 LogTransportDiagnosticsIfReady();
@@ -1259,6 +1298,12 @@ public class GameStateClient : INotifyPropertyChanged
         long elapsedSinceSendMs,
         int heartbeatMs)
         => revision != lastSentRevision || elapsedSinceSendMs >= heartbeatMs;
+
+    internal static bool ShouldSerializeConfig(
+        long revision,
+        long cachedRevision,
+        bool hasCachedPayload)
+        => !hasCachedPayload || revision != cachedRevision;
 
     private void EnsureConfigChangeTracking()
     {

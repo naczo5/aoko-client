@@ -9,6 +9,7 @@ internal readonly record struct ManagedTransportSnapshot(
     long InboundMessages,
     long InboundCharacters,
     long InboundParseTicks,
+    long StateNotifications,
     long ConfigSerializations,
     long ConfigCharacters,
     long ConfigSerializationTicks,
@@ -25,6 +26,7 @@ internal readonly record struct ManagedTransportSnapshot(
             $"transport window={seconds:0.0}s " +
             $"inbound={InboundMessages / seconds:0.0}/s chars={InboundCharacters / seconds:0}/s " +
             $"parse={InboundParseTicks * timestampToMilliseconds / seconds:0.00}ms/s " +
+            $"stateNotify={StateNotifications / seconds:0.0}/s " +
             $"configSerialize={ConfigSerializations / seconds:0.00}/s " +
             $"configSerializeCpu={ConfigSerializationTicks * timestampToMilliseconds / seconds:0.00}ms/s " +
             $"configSend={ConfigSends / seconds:0.00}/s chars={ConfigSendCharacters / seconds:0}/s");
@@ -39,6 +41,7 @@ internal sealed class ManagedTransportDiagnostics
     private long _inboundMessages;
     private long _inboundCharacters;
     private long _inboundParseTicks;
+    private long _stateNotifications;
     private long _configSerializations;
     private long _configCharacters;
     private long _configSerializationTicks;
@@ -61,6 +64,8 @@ internal sealed class ManagedTransportDiagnostics
         return new ManagedTransportDiagnostics(enabled);
     }
 
+    public bool Enabled => _enabled;
+
     public void RecordInbound(int characters, long parseTicks)
     {
         if (!_enabled) return;
@@ -75,6 +80,12 @@ internal sealed class ManagedTransportDiagnostics
         Interlocked.Increment(ref _configSerializations);
         Interlocked.Add(ref _configCharacters, Math.Max(0, characters));
         Interlocked.Add(ref _configSerializationTicks, Math.Max(0, serializationTicks));
+    }
+
+    public void RecordStateNotification()
+    {
+        if (!_enabled) return;
+        Interlocked.Increment(ref _stateNotifications);
     }
 
     public void RecordConfigSend(int characters)
@@ -99,6 +110,7 @@ internal sealed class ManagedTransportDiagnostics
             Interlocked.Exchange(ref _inboundMessages, 0),
             Interlocked.Exchange(ref _inboundCharacters, 0),
             Interlocked.Exchange(ref _inboundParseTicks, 0),
+            Interlocked.Exchange(ref _stateNotifications, 0),
             Interlocked.Exchange(ref _configSerializations, 0),
             Interlocked.Exchange(ref _configCharacters, 0),
             Interlocked.Exchange(ref _configSerializationTicks, 0),

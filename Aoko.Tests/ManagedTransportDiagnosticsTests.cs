@@ -6,6 +6,13 @@ namespace Aoko.Tests;
 
 public sealed class ManagedTransportDiagnosticsTests
 {
+    [Fact]
+    public void Enabled_ReflectsConfiguredState()
+    {
+        Assert.True(new ManagedTransportDiagnostics(enabled: true).Enabled);
+        Assert.False(new ManagedTransportDiagnostics(enabled: false).Enabled);
+    }
+
     [Theory]
     [InlineData(2, 1, 0, 2000, true)]
     [InlineData(1, 1, 1999, 2000, false)]
@@ -25,6 +32,24 @@ public sealed class ManagedTransportDiagnosticsTests
                 lastSentRevision,
                 elapsedMs,
                 heartbeatMs));
+    }
+
+    [Theory]
+    [InlineData(1, 1, false, true)]
+    [InlineData(2, 1, true, true)]
+    [InlineData(1, 1, true, false)]
+    public void ConfigSerializationPolicy_ReusesUnchangedPayload(
+        long revision,
+        long cachedRevision,
+        bool hasCachedPayload,
+        bool expected)
+    {
+        Assert.Equal(
+            expected,
+            GameStateClient.ShouldSerializeConfig(
+                revision,
+                cachedRevision,
+                hasCachedPayload));
     }
 
     [Fact]
@@ -56,6 +81,31 @@ public sealed class ManagedTransportDiagnosticsTests
     }
 
     [Fact]
+    public void DiagnosticsFlag_IsCarriedToBothNativeBridges()
+    {
+        string root = FindRepoRoot();
+        string managedSource = File.ReadAllText(
+            Path.Combine(root, "Aoko", "Core", "GameStateClient.cs"));
+        string legacySource = File.ReadAllText(
+            Path.Combine(root, "McInjector", "src", "main", "cpp", "bridge.cpp"));
+        string modernSource = File.ReadAllText(
+            Path.Combine(root, "McInjector", "src", "main", "cpp", "bridge_261.cpp"));
+
+        Assert.Contains(
+            "perfDiagnostics = _transportDiagnostics.Enabled",
+            managedSource,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "reader.GetString(\"perfDiagnostics\")",
+            legacySource,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "reader.GetString(\"perfDiagnostics\")",
+            modernSource,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void DisabledDiagnostics_DoNotProduceSnapshots()
     {
         var diagnostics = new ManagedTransportDiagnostics(
@@ -79,6 +129,7 @@ public sealed class ManagedTransportDiagnosticsTests
 
         diagnostics.RecordInbound(120, 12);
         diagnostics.RecordInbound(80, 8);
+        diagnostics.RecordStateNotification();
         diagnostics.RecordConfigSerialization(300, 25);
         diagnostics.RecordConfigSend(300);
 
@@ -86,6 +137,7 @@ public sealed class ManagedTransportDiagnosticsTests
         Assert.Equal(2, snapshot.InboundMessages);
         Assert.Equal(200, snapshot.InboundCharacters);
         Assert.Equal(20, snapshot.InboundParseTicks);
+        Assert.Equal(1, snapshot.StateNotifications);
         Assert.Equal(1, snapshot.ConfigSerializations);
         Assert.Equal(300, snapshot.ConfigCharacters);
         Assert.Equal(25, snapshot.ConfigSerializationTicks);
@@ -106,6 +158,7 @@ public sealed class ManagedTransportDiagnosticsTests
             InboundMessages: 10,
             InboundCharacters: 1000,
             InboundParseTicks: Stopwatch.Frequency / 100,
+            StateNotifications: 25,
             ConfigSerializations: 2,
             ConfigCharacters: 500,
             ConfigSerializationTicks: Stopwatch.Frequency / 200,
@@ -116,6 +169,7 @@ public sealed class ManagedTransportDiagnosticsTests
         string message = snapshot.ToLogMessage();
 
         Assert.Contains("inbound=2.0/s", message);
+        Assert.Contains("stateNotify=5.0/s", message);
         Assert.Contains("configSerialize=0.40/s", message);
         Assert.Contains("configSend=0.20/s", message);
     }

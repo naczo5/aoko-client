@@ -55,7 +55,21 @@ public:
 
     bool Enabled() const
     {
-        return _enabled;
+        return _enabled.load(std::memory_order_relaxed);
+    }
+
+    void SetEnabled(bool enabled, unsigned int nowMs)
+    {
+        const bool wasEnabled = _enabled.exchange(enabled, std::memory_order_acq_rel);
+        if (!enabled || wasEnabled) return;
+
+        _windowStartedMs.store(nowMs, std::memory_order_relaxed);
+        for (std::size_t i = 0; i < PERF_METRIC_COUNT; ++i) {
+            _metrics[i].count.store(0, std::memory_order_relaxed);
+            _metrics[i].totalTicks.store(0, std::memory_order_relaxed);
+            _metrics[i].maxTicks.store(0, std::memory_order_relaxed);
+            _metrics[i].units.store(0, std::memory_order_relaxed);
+        }
     }
 
     void Record(
@@ -63,7 +77,7 @@ public:
         unsigned long long elapsedTicks,
         unsigned long long units = 0)
     {
-        if (!_enabled || metric < 0 || metric >= PERF_METRIC_COUNT) return;
+        if (!Enabled() || metric < 0 || metric >= PERF_METRIC_COUNT) return;
 
         MetricCounter& counter = _metrics[metric];
         counter.count.fetch_add(1, std::memory_order_relaxed);
@@ -82,7 +96,7 @@ public:
 
     bool TryTakeSummary(unsigned int nowMs, NativePerfSummary& summary)
     {
-        if (!_enabled) return false;
+        if (!Enabled()) return false;
 
         unsigned int started = _windowStartedMs.load(std::memory_order_relaxed);
         const unsigned int elapsed = static_cast<unsigned int>(nowMs - started);
@@ -118,7 +132,7 @@ private:
         std::atomic<unsigned long long> units;
     };
 
-    bool _enabled;
+    std::atomic<bool> _enabled;
     unsigned int _intervalMs;
     std::atomic<unsigned int> _windowStartedMs;
     MetricCounter _metrics[PERF_METRIC_COUNT];

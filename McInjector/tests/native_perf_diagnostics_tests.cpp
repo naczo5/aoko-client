@@ -34,6 +34,23 @@ int main()
         !disabled.TryTakeSummary(1000, disabledSummary),
         "disabled diagnostics never emit");
 
+    disabled.SetEnabled(true, 500);
+    disabled.Record(lc::PERF_SCAN_LOOP, 25, 2);
+    ExpectTrue(
+        !disabled.TryTakeSummary(599, disabledSummary),
+        "dynamic enable resets summary window");
+    ExpectTrue(
+        disabled.TryTakeSummary(600, disabledSummary),
+        "dynamic enable emits after interval");
+    ExpectEq(1, disabledSummary.metrics[lc::PERF_SCAN_LOOP].count, "dynamic enable count");
+    ExpectEq(25, disabledSummary.metrics[lc::PERF_SCAN_LOOP].totalTicks, "dynamic enable ticks");
+    ExpectEq(2, disabledSummary.metrics[lc::PERF_SCAN_LOOP].units, "dynamic enable units");
+    disabled.SetEnabled(false, 700);
+    disabled.Record(lc::PERF_SCAN_LOOP, 100, 10);
+    ExpectTrue(
+        !disabled.TryTakeSummary(1000, disabledSummary),
+        "dynamic disable stops summaries");
+
     lc::NativePerfDiagnostics diagnostics(true, 100, 1000);
     diagnostics.Record(lc::PERF_STATE_PUBLISH, 10, 100);
     diagnostics.Record(lc::PERF_STATE_PUBLISH, 25, 250);

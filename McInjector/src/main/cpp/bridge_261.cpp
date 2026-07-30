@@ -324,6 +324,7 @@ static volatile LONG g_blockEspTargetsVersion = 0;
 static lc::HudLayout g_hudLayout = lc::HudLayout::DefaultLayout();
 static lc::HudEditorState g_hudEditor;
 static volatile LONG g_forceGlobalJniRemap_121 = 0;
+static void SetNativePerfDiagnosticsEnabled(bool enabled);
 
 // ===================== CONFIG PARSER =====================
 static void ParseConfig(const std::string& line) {
@@ -351,6 +352,10 @@ static void ParseConfig(const std::string& line) {
     }
     bool isConfig = TRACE261_IF("isConfigPacket", packetType == "config");
     if (!isConfig) return;
+
+    const std::string perfDiagnostics = reader.GetString("perfDiagnostics");
+    if (!perfDiagnostics.empty())
+        SetNativePerfDiagnosticsEnabled(reader.GetBool("perfDiagnostics"));
 
     LockGuard lk(g_configMutex);
     int prevReloadNonce = g_config.reloadMappingsNonce;
@@ -9912,6 +9917,11 @@ static lc::NativePerfDiagnostics& GetNativePerfDiagnostics()
         5000,
         GetTickCount());
     return diagnostics;
+}
+
+static void SetNativePerfDiagnosticsEnabled(bool enabled)
+{
+    GetNativePerfDiagnostics().SetEnabled(enabled, GetTickCount());
 }
 
 static unsigned long long NativePerfTimestamp()

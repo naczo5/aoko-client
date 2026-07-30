@@ -33,9 +33,16 @@ Completed on `dev` after the plan was created:
   scan, player and chest render-thread scans, Block ESP production, state JSON
   publication, and OpenGL overlay render time. Native summaries now identify
   their bridge family explicitly.
+- Propagate the managed diagnostics flag through the normal configuration
+  heartbeat so an already-running Minecraft process enables native counters
+  dynamically; launching Lunar from a special environment is no longer
+  required.
 - Replaced unconditional five-times-per-second configuration serialization
   with change-triggered sends, a 25 ms burst coalescing window, and a two-second
   recovery heartbeat.
+- Cache both serialized configuration and its UTF-8 payload by revision, so an
+  unchanged recovery heartbeat performs no anonymous-object construction, JSON
+  serialization, or encoding allocation.
 - Added direct configuration wakeups for `Clicker` state, keybind state, and
   mapping reload changes. Both `PropertyChanged` and `StateChanged` are tracked
   so appearance properties and nested KillAura settings retain immediate sync.
@@ -68,6 +75,24 @@ Completed on `dev` after the plan was created:
   deadline scheduler. Minor scheduler overshoot is corrected on the following
   interval, while a missed interval resets from the current time to prevent
   catch-up click bursts.
+- Publish every inbound game snapshot immediately to input loops through a
+  volatile reference while coalescing `StateUpdated`/`CurrentState`
+  notifications to a maximum of 40 Hz with a guaranteed trailing update.
+- Changed legacy menu-close handling to retain a valid ImGui context, font
+  atlas, Win32 backend, and OpenGL backend while skipping the transition frame.
+  Real HWND, GL context, and missing-context transitions still use full reset.
+- Removed routine legacy entity, projection, and held-item file logging observed
+  during the live run (220 entity samples, 221 matrix samples, and 125 held-item
+  samples), preserving warnings and opt-in structured performance summaries.
+- Snapshot legacy render configuration and HUD layout once per frame and pass
+  them directly to individual panels instead of reacquiring the configuration
+  mutex from Module List, Nametags, Closest Player, Pixel Party, Chest ESP, and
+  Block ESP.
+- Reuse legacy render candidate/vector capacity for module rows, HUD editor
+  elements, fight candidates, Block ESP snapshots/aggregation, and producer
+  merge output.
+- Fold Closest Player selection into the existing legacy player/nametag pass,
+  eliminating its separate full JNI traversal each rendered frame.
 - Added managed tests for diagnostics and config-send policy, plus a C++11
   native harness for adaptive state, ESP scheduling, and concurrent native
   performance-counter aggregation.
@@ -88,7 +113,7 @@ Completed on `dev` after the plan was created:
 
 Verification:
 
-- All 190 managed tests pass, including `MainWindowStartupTests` in a restricted
+- All 204 managed tests pass, including `MainWindowStartupTests` in a restricted
   profile environment.
 - All native harness tests pass, including bounded-reader recovery and strict
   configuration parsing cases.
@@ -226,7 +251,7 @@ Exit criteria:
 - [ ] Increment it when bridge-relevant state changes.
 - [ ] Coalesce multiple changes made in the same UI operation.
 - [ ] Serialize and send immediately when the revision changes.
-- [ ] Cache the serialized payload for the current revision.
+- [x] Cache the serialized payload for the current revision.
 - [ ] Retain a one-to-two-second heartbeat for reconnect/recovery.
 - [ ] Force a full send after connection, injection, version selection, mapping
       reload, and HUD editor completion.
@@ -257,11 +282,11 @@ Acceptance criteria:
 
 ### P1.3 Coalesce UI-only state notifications
 
-- [ ] Keep the latest game state available immediately to input loops.
-- [ ] Rate-limit property change and visual UI updates independently from state
+- [x] Keep the latest game state available immediately to input loops.
+- [x] Rate-limit property change and visual UI updates independently from state
       ingestion.
-- [ ] Coalesce action-bar/UI dispatch to one pending dispatcher operation.
-- [ ] Do not rate-limit state used by Triggerbot, Aim Assist, mining intent, or
+- [x] Coalesce action-bar/UI dispatch to one pending dispatcher operation.
+- [x] Do not rate-limit state used by Triggerbot, Aim Assist, mining intent, or
       Auto Rod.
 
 Acceptance criteria:
@@ -405,8 +430,8 @@ Acceptance criteria:
 ### P4.1 Capture one frame snapshot
 
 - [ ] At frame start, copy or acquire:
-  - [ ] Configuration needed for drawing.
-  - [ ] HUD layout.
+  - [x] Configuration needed for drawing.
+  - [x] HUD layout.
   - [ ] Theme.
   - [ ] Camera/viewport state.
   - [ ] Player/nametag snapshot.
@@ -415,8 +440,8 @@ Acceptance criteria:
   - [ ] Fight Status snapshot.
   - [ ] Pixel Party snapshot.
 - [ ] Resolve HUD element layouts once from that frame snapshot.
-- [ ] Do not reacquire configuration or HUD locks from individual panels.
-- [ ] Do not hold a producer mutex while issuing ImGui calls.
+- [x] Do not reacquire configuration or HUD locks from individual panels.
+- [x] Do not hold a producer mutex while issuing ImGui calls.
 
 Implementation options to benchmark:
 
@@ -436,8 +461,8 @@ Acceptance criteria:
 
 ### P4.2 Remove per-frame heap churn
 
-- [ ] Reserve known maximum sizes for render candidate vectors.
-- [ ] Reuse row, line, aggregation, and smoothing buffers.
+- [x] Reserve known maximum sizes for render candidate vectors.
+- [x] Reuse row, line, aggregation, and smoothing buffers.
 - [ ] Move sorting and nearest-N selection to background producers where the
       result does not depend on the current frame camera.
 - [ ] Replace insertion-based sorting with bounded selection followed by one

@@ -814,6 +814,18 @@ struct FightStatusDrawSnapshot18 {
     float normalizedAdvantage = 0.0f;
 };
 
+struct ClosestPlayerDrawSnapshot18 {
+    bool valid = false;
+    std::string name;
+    std::string heldText;
+    float health = 20.0f;
+    int armorPoints = -1;
+    float distance = 0.0f;
+    double relativeX = 0.0;
+    double relativeZ = 0.0;
+    float localYaw = 0.0f;
+};
+
 static fightstatus::FightStatusTracker g_fightStatusTracker18;
 static std::unordered_map<std::uint64_t, FightStatusTargetObservation18> g_fightStatusObservations18;
 static FightStatusDrawSnapshot18 g_fightStatusDrawSnapshot18;
@@ -1002,6 +1014,11 @@ static lc::NativePerfDiagnostics& GetNativePerfDiagnostics()
         5000,
         GetTickCount());
     return diagnostics;
+}
+
+static void SetNativePerfDiagnosticsEnabled(bool enabled)
+{
+    GetNativePerfDiagnostics().SetEnabled(enabled, GetTickCount());
 }
 
 static unsigned long long NativePerfTimestamp()
@@ -7611,12 +7628,6 @@ GameState ReadGameState(JNIEnv* env) {
                                         jclass ic = env->GetObjectClass(item);
                                         std::string inm = GetClassNameFromClass(env, ic);
                                         
-                                        // Debug Log for Item Class (throttled)
-                                        static int itemLogCtr = 0;
-                                        if (itemLogCtr++ % 200 == 0) {
-                                            Log("Held Item Class: " + inm);
-                                        }
-
                                         if (inm.find("ItemBlock") != std::string::npos || 
                                             inm.find("Block") != std::string::npos ||
                                             inm.find("ItemReed") != std::string::npos || // Sugar Cane
@@ -9043,7 +9054,8 @@ static void UpdateHudEditor(int winW, int winH) {
 
     // Struct for editor-visible elements
     struct EditorElem { std::string id; ImVec2 tl; float w, h; };
-    std::vector<EditorElem> elems;
+    static thread_local std::vector<EditorElem> elems;
+    elems.clear();
 
     lc::HudLayout layoutSnap;
     { LockGuard lk(g_configMutex); layoutSnap = g_hudLayout; }
@@ -9149,12 +9161,12 @@ static void UpdateHudEditor(int winW, int winH) {
     }
 }
 
-void RenderHUD(int winW, int winH) {
-
-    Config cfg; { LockGuard lk(g_configMutex); cfg = g_config; }
-
-    GameState state;
-    { LockGuard lk(g_stateMutex); state = g_gameState; }
+void RenderHUD(
+    int winW,
+    int winH,
+    const Config& cfg,
+    const GameState& state,
+    const lc::HudLayout& hudLayout) {
     if (ShouldHideWorldRenderModules(state)) {
         return;
     }
@@ -9168,8 +9180,9 @@ void RenderHUD(int winW, int winH) {
     ImGuiIO& io = ImGui::GetIO();
 
     struct ModLine { std::string text; ImU32 accent; float width; };
-    std::vector<ModLine> mods;
-    mods.reserve(16);
+    static thread_local std::vector<ModLine> mods;
+    mods.clear();
+    if (mods.capacity() < 32) mods.reserve(32);
 
     auto pushMod = [&](const std::string& text, ImU32 accent) {
         if (text.empty()) return;
@@ -9217,8 +9230,7 @@ void RenderHUD(int winW, int winH) {
     // HudElementPixelPos helper (same as the editor box and the other panels),
     // and all metrics are multiplied by the element scale. Previously scale was
     // ignored, so resizing the module list in the editor had no visible effect.
-    lc::HudElementLayout modLayout;
-    { LockGuard lk2(g_configMutex); modLayout = g_hudLayout.Resolve(lc::ELEM_MODULELIST); }
+    lc::HudElementLayout modLayout = hudLayout.Resolve(lc::ELEM_MODULELIST);
     const float scale = modLayout.scale;
 
     const float padX       = 8.0f * scale;
@@ -9317,7 +9329,8 @@ void RenderHUD(int winW, int winH) {
         if (hint.empty() || hint == "-") hint = "waiting for hint...";
         if (preview == "-") preview.clear();
 
-        std::vector<std::string> lines;
+        static thread_local std::vector<std::string> lines;
+        lines.clear();
         if (!preview.empty()) {
             std::stringstream pss(preview);
             std::string line;
@@ -9552,9 +9565,15 @@ bool WorldToScreen(const double x, const double y, const double z, const Matrix4
 
     return true;
 }
-void RenderNametags(int w, int h) {
+void RenderNametags(
+    int w,
+    int h,
+    const Config& config,
+    ClosestPlayerDrawSnapshot18* closestSnapshot) {
     TRACE_PATH("enter");
-   static bool warnedMissingMappings = false;
+    if (closestSnapshot)
+        *closestSnapshot = ClosestPlayerDrawSnapshot18();
+    static bool warnedMissingMappings = false;
     bool showHealth = true;
     bool showArmor = true;
     bool hideVanillaTags = false;
@@ -9565,21 +9584,20 @@ void RenderNametags(int w, int h) {
     int nametagMaxCount = 8;
     std::string guiTheme = "Default";
     std::string nickHiderAlias;
-    {
-         LockGuard lk(g_configMutex);
-         nametagsEnabled = g_config.nametags;
-         nickHiderEnabled = g_config.nickHiderEnabled;
-         fightStatusEnabled = g_config.fightStatus;
-         nickHiderAlias = g_config.nickHiderAlias;
-         entityTelemetryNeeded = g_config.nametags || g_config.nickHiderEnabled || g_config.closestPlayerInfo || g_config.aimAssist || g_config.fightStatus || g_config.nametagHideVanilla || g_legacyNametagSuppressionActive;
-         TRACE_BRANCH("entityTelemetryNeeded", entityTelemetryNeeded);
-          if (!entityTelemetryNeeded) { ResetFightStatusState18(); return; }
-         showHealth = g_config.nametagShowHealth;
-         showArmor = g_config.nametagShowArmor;
-         hideVanillaTags = g_config.nametagHideVanilla;
-         nametagMaxCount = (std::max)(1, (std::min)(20, g_config.nametagMaxCount));
-         guiTheme = g_config.guiTheme;
-    }
+    nametagsEnabled = config.nametags;
+    nickHiderEnabled = config.nickHiderEnabled;
+    fightStatusEnabled = config.fightStatus;
+    nickHiderAlias = config.nickHiderAlias;
+    entityTelemetryNeeded = config.nametags || config.nickHiderEnabled ||
+        config.closestPlayerInfo || config.aimAssist || config.fightStatus ||
+        config.nametagHideVanilla || g_legacyNametagSuppressionActive;
+    TRACE_BRANCH("entityTelemetryNeeded", entityTelemetryNeeded);
+    if (!entityTelemetryNeeded) { ResetFightStatusState18(); return; }
+    showHealth = config.nametagShowHealth;
+    showArmor = config.nametagShowArmor;
+    hideVanillaTags = config.nametagHideVanilla;
+    nametagMaxCount = (std::max)(1, (std::min)(20, config.nametagMaxCount));
+    guiTheme = config.guiTheme;
     OverlayTheme nametagTheme = ResolveOverlayTheme(guiTheme);
 
     // Default to empty telemetry each run so stale entities are not reused.
@@ -9662,7 +9680,6 @@ void RenderNametags(int w, int h) {
     static bool loggedCapturedMatrixFallback = false;
     static bool loggedUiMatrixReject = false;
     if (logctr++ % 600 == 0) {
-         Log("Matrix Debug - View[0]: " + std::to_string(view.m[0]) + " Proj[0]: " + std::to_string(proj.m[0]));
          if (!matrixProjectionUsable) Log("WARNING: Matrix projection unavailable.");
          if (usedCapturedMatrices && !loggedCapturedMatrixFallback) {
              loggedCapturedMatrixFallback = true;
@@ -9741,8 +9758,6 @@ void RenderNametags(int w, int h) {
         env->PopLocalFrame(nullptr);
         return;
     }
-    if (logctr % 600 == 0) Log("Entity List Size: " + std::to_string(size));
-    
     int count = 0;
 
     bool guiOpen = false; // Internal ClickGUI was removed; only Minecraft screens suppress tags.
@@ -9780,7 +9795,7 @@ void RenderNametags(int w, int h) {
     std::stringstream ss;
     ss << "[";
     constexpr int kEntityJsonCap = 20;
-    const int entityProcessCap = fightStatusEnabled
+    const int entityProcessCap = (fightStatusEnabled || config.closestPlayerInfo)
         ? (std::max)(1, size)
         : (hideVanillaTags || g_legacyNametagSuppressionActive)
         ? (std::max)(1, size)
@@ -9830,8 +9845,14 @@ void RenderNametags(int w, int h) {
     double localPX = 0.0, localPY = 0.0, localPZ = 0.0;
     bool haveLocalPos = false;
     FightStatusLocalSample18 fightSelf;
-    std::vector<FightStatusCandidate18> fightCandidates;
-    if (fightStatusEnabled) fightCandidates.reserve((size_t)(std::max)(0, size));
+    static thread_local std::vector<FightStatusCandidate18> fightCandidates;
+    fightCandidates.clear();
+    if (fightStatusEnabled &&
+        fightCandidates.capacity() < static_cast<size_t>((std::max)(0, size))) {
+        fightCandidates.reserve(static_cast<size_t>((std::max)(0, size)));
+    }
+    int closestPlayerIndex = -1;
+    double closestPlayerDistance = 99999.0;
     if (player) {
         localPX = env->GetDoubleField(player, g_posXField);
         localPY = env->GetDoubleField(player, g_posYField);
@@ -9957,7 +9978,8 @@ void RenderNametags(int w, int h) {
             }
         }
         int armorPoints = -1;
-        if ((fightStatusEnabled || (nametagsEnabled && showArmor)) && g_getTotalArmorValueMethod) {
+        if ((fightStatusEnabled || (config.closestPlayerInfo && showArmor) ||
+             (nametagsEnabled && showArmor)) && g_getTotalArmorValueMethod) {
             armorPoints = env->CallIntMethod(entity, g_getTotalArmorValueMethod);
             if (env->ExceptionCheck()) { env->ExceptionClear(); armorPoints = -1; }
         }
@@ -9972,6 +9994,20 @@ void RenderNametags(int w, int h) {
         double dy = iY - localPY;
         double dz = iZ - localPZ;
         double dist = sqrt(dx*dx + dy*dy + dz*dz);
+
+        if (closestSnapshot && config.closestPlayerInfo &&
+            dist < closestPlayerDistance && dist <= 96.0) {
+            closestPlayerDistance = dist;
+            closestPlayerIndex = i;
+            closestSnapshot->valid = true;
+            closestSnapshot->name = displayName;
+            closestSnapshot->health = health;
+            closestSnapshot->armorPoints = armorPoints;
+            closestSnapshot->distance = static_cast<float>(dist);
+            closestSnapshot->relativeX = dx;
+            closestSnapshot->relativeZ = dz;
+            closestSnapshot->localYaw = fallbackYaw;
+        }
 
         // Project (prefer matrix when stable, otherwise fallback to angle/FOV)
         float sX = 0, sY = 0;
@@ -10045,9 +10081,6 @@ void RenderNametags(int w, int h) {
         }
 
         if (projected) {
-             if (logctr % 600 == 0 && count == 0) {
-                 Log("Tagged: " + displayName + " SX: " + std::to_string(sX) + " SY: " + std::to_string(sY));
-             }
              if (dist > 48.0) {
                  env->DeleteLocalRef(entity);
                  continue;
@@ -10220,6 +10253,19 @@ void RenderNametags(int w, int h) {
 
         env->DeleteLocalRef(entity);
     }
+    if (closestSnapshot && closestSnapshot->valid && closestPlayerIndex >= 0) {
+        jobject closestEntity =
+            env->CallObjectMethod(startList, g_listGetMethod, closestPlayerIndex);
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            closestSnapshot->heldText.clear();
+        } else if (closestEntity) {
+            closestSnapshot->heldText =
+                GetEntityHeldItemInfo(env, closestEntity, nullptr);
+            env->DeleteLocalRef(closestEntity);
+        }
+    }
+
     UpdateFightStatusState18(GetTickCount(), fightStatusEnabled, guiOpen, fightSelf, fightCandidates);
     if (hideTeamObj) env->DeleteLocalRef(hideTeamObj);
     if (hideScoreboardObj) env->DeleteLocalRef(hideScoreboardObj);
@@ -10331,21 +10377,15 @@ static void RenderFightStatus(int w, int h) {
     drawText(prediction, midY + 3.0f, IM_COL32(235, 238, 245, 240), smallFont);
 }
 
-void RenderPixelPartyAssist(int w, int h) {
-    bool enabled = false;
-    bool closestAlso = false;
-    {
-        LockGuard lk(g_configMutex);
-        enabled = g_config.pixelPartyAssist;
-        closestAlso = g_config.closestPlayerInfo;
-    }
-    if (!enabled) return;
+void RenderPixelPartyAssist(
+    int w,
+    int h,
+    const Config& config,
+    const GameState& state) {
+    if (!config.pixelPartyAssist) return;
 
     PixelPartySnap ppSnap;
     { LockGuard lk(g_pixelPartyMutex); ppSnap = g_pixelPartySnap; }
-
-    GameState state;
-    { LockGuard lk(g_stateMutex); state = g_gameState; }
 
     char dirArrow = '^';
     if (ppSnap.targetFound) {
@@ -10390,7 +10430,7 @@ void RenderPixelPartyAssist(int w, int h) {
     contentH += padY;
 
     float cx = (float)w * 0.5f;
-    float bottomOffset = closestAlso ? 200.0f : 120.0f;
+    float bottomOffset = config.closestPlayerInfo ? 200.0f : 120.0f;
     float by = (float)h - bottomOffset;
     float rx = std::floor(cx - contentW * 0.5f);
     float ry = std::floor(by - contentH);
@@ -10416,130 +10456,37 @@ void RenderPixelPartyAssist(int w, int h) {
     }
 }
 
-void RenderClosestPlayerInfo(int w, int h) {
-    bool enabled = false;
-    bool showHealth = true;
-    bool showArmor = true;
-    std::string guiTheme = "Default";
-    {
-        LockGuard lk(g_configMutex);
-        enabled = g_config.closestPlayerInfo;
-        showHealth = g_config.nametagShowHealth;
-        showArmor = g_config.nametagShowArmor;
-        guiTheme = g_config.guiTheme;
-    }
-    if (!enabled) return;
-    if (!g_mapped || !g_mcInstance || !g_theWorldField || !g_listSizeMethod || !g_listGetMethod) return;
-    if (!g_thePlayerField || !g_posXField || !g_posYField || !g_posZField) return;
-
-    ScopedJNIEnv env(g_jvm);
-    if (!env) return;
-
-    TryResolveWorldMappings(env);
-    if (!g_playerEntitiesField) return;
-
-    if (env->ExceptionCheck()) { env->ExceptionClear(); return; }
-    if (env->PushLocalFrame(256) < 0) { env->ExceptionClear(); return; }
-
-    auto finish = [&]() {
-        env->PopLocalFrame(nullptr);
-    };
-
-    jobject world = env->GetObjectField(g_mcInstance, g_theWorldField);
-    if (!world) { finish(); return; }
-    jobject list = env->GetObjectField(world, g_playerEntitiesField);
-    if (!list) { finish(); return; }
-
-    jobject localPlayer = env->GetObjectField(g_mcInstance, g_thePlayerField);
-    if (!localPlayer) { finish(); return; }
-
-    double lpx = env->GetDoubleField(localPlayer, g_posXField);
-    double lpy = env->GetDoubleField(localPlayer, g_posYField);
-    double lpz = env->GetDoubleField(localPlayer, g_posZField);
-    float localYaw = 0.0f;
-    if (g_rotationYawField) localYaw = env->GetFloatField(localPlayer, g_rotationYawField);
-
-    int size = env->CallIntMethod(list, g_listSizeMethod);
-    if (env->ExceptionCheck()) { env->ExceptionClear(); finish(); return; }
-
-    int closestIndex = -1;
-    double bestDist = 99999.0;
-    double bestDx = 0.0, bestDz = 0.0;
-
-    for (int i = 0; i < size; i++) {
-        jobject entity = env->CallObjectMethod(list, g_listGetMethod, i);
-        if (env->ExceptionCheck()) { env->ExceptionClear(); break; }
-        if (!entity) continue;
-        if (env->IsSameObject(entity, localPlayer)) { env->DeleteLocalRef(entity); continue; }
-
-        double ex = env->GetDoubleField(entity, g_posXField);
-        double ey = env->GetDoubleField(entity, g_posYField);
-        double ez = env->GetDoubleField(entity, g_posZField);
-        double dx = ex - lpx;
-        double dy = ey - lpy;
-        double dz = ez - lpz;
-        double dist = std::sqrt(dx * dx + dy * dy + dz * dz);
-        if (dist < bestDist) {
-            std::string candidateName = GetStablePlayerName(env, entity);
-            if (!candidateName.empty() && !LooksLikeFakePlayerLine(candidateName)) {
-                bestDist = dist;
-                closestIndex = i;
-                bestDx = dx;
-                bestDz = dz;
-            }
-        }
-
-        env->DeleteLocalRef(entity);
-    }
-
-    if (closestIndex < 0 || bestDist > 96.0) { finish(); return; }
-
-    jobject closest = env->CallObjectMethod(list, g_listGetMethod, closestIndex);
-    if (env->ExceptionCheck()) { env->ExceptionClear(); finish(); return; }
-    if (!closest) { finish(); return; }
-
-    std::string name = GetStablePlayerName(env, closest);
-    if (name.empty() || LooksLikeFakePlayerLine(name)) {
-        finish();
-        return;
-    }
-
-    float health = 20.0f;
-    if (showHealth && g_getHealthMethod) {
-        health = env->CallFloatMethod(closest, g_getHealthMethod);
-        if (env->ExceptionCheck()) { env->ExceptionClear(); health = 20.0f; }
-    }
-
-    int armorPoints = -1;
-    if (showArmor && g_getTotalArmorValueMethod) {
-        armorPoints = env->CallIntMethod(closest, g_getTotalArmorValueMethod);
-        if (env->ExceptionCheck()) { env->ExceptionClear(); armorPoints = -1; }
-    }
-
-    std::string heldText = GetEntityHeldItemInfo(env, closest, nullptr);
-
-    std::string statsText;
-    if (showHealth) {
-        char hp[24];
-        float hpClamped = health < 0 ? 0 : (health > 40 ? 40 : health);
-        snprintf(hp, sizeof(hp), "%.0f HP", hpClamped);
-        statsText += hp;
-    }
-    if (showArmor && armorPoints >= 0) {
-        if (!statsText.empty()) statsText += " | ";
-        char ar[24];
-        snprintf(ar, sizeof(ar), "%d ARM", armorPoints);
-        statsText += ar;
-    }
+void RenderClosestPlayerInfo(
+    int w,
+    int h,
+    const Config& config,
+    const lc::HudLayout& hudLayout,
+    const ClosestPlayerDrawSnapshot18& snapshot) {
+    if (!config.closestPlayerInfo || !snapshot.valid) return;
+    const bool showHealth = config.nametagShowHealth;
+    const bool showArmor = config.nametagShowArmor;
+    const std::string& guiTheme = config.guiTheme;
+    const float health = snapshot.health;
+    const int armorPoints = snapshot.armorPoints;
+    const std::string& heldText = snapshot.heldText;
 
     char dirArrow = '^';
-    std::string dirText = RelativeDirectionText(localYaw, bestDx, bestDz);
+    std::string dirText = RelativeDirectionText(
+        snapshot.localYaw,
+        snapshot.relativeX,
+        snapshot.relativeZ);
     if (dirText == "Back") dirArrow = 'v';
     else if (dirText == "Left") dirArrow = '<';
     else if (dirText == "Right") dirArrow = '>';
 
     char nameRow[96];
-    snprintf(nameRow, sizeof(nameRow), "%c %s  %.0fm", dirArrow, name.c_str(), (float)bestDist);
+    snprintf(
+        nameRow,
+        sizeof(nameRow),
+        "%c %s  %.0fm",
+        dirArrow,
+        snapshot.name.c_str(),
+        snapshot.distance);
 
     std::string statsRow;
     if (showHealth) {
@@ -10569,8 +10516,8 @@ void RenderClosestPlayerInfo(int w, int h) {
     ImVec2 nameSz = ImGui::CalcTextSize(nameRow);
     ImVec2 statsSz = statsRow.empty() ? ImVec2(0, 0) : ImGui::CalcTextSize(statsRow.c_str());
 
-    lc::HudElementLayout cpLayout;
-    { LockGuard lkHud(g_configMutex); cpLayout = g_hudLayout.Resolve(lc::ELEM_CLOSESTPLAYER); }
+    lc::HudElementLayout cpLayout =
+        hudLayout.Resolve(lc::ELEM_CLOSESTPLAYER);
 
     float contentW = (std::max)(boxW, (std::max)(nameSz.x + padX * 2.0f, statsSz.x + padX * 2.0f));
     contentW *= cpLayout.scale;
@@ -10610,20 +10557,15 @@ void RenderClosestPlayerInfo(int w, int h) {
         ImU32 sCol = health <= 6.0f ? IM_COL32(255, 100, 100, 240) : IM_COL32(160, 200, 255, 230);
         fg->AddText(ImGui::GetFont(), smallSz, ImVec2(stx, curY), sCol, statsRow.c_str());
     }
-
-    finish();
 }
 
-void RenderChestESP(int w, int h) {
+void RenderChestESP(int w, int h, const Config& config) {
     TRACE_PATH("enter");
     static bool warnedChestMappings = false;
-    int chestEspMaxCount = 5;
-    {
-        LockGuard lk(g_configMutex);
-        TRACE_BRANCH("chestEspEnabled", g_config.chestEsp);
-        if (!g_config.chestEsp) return;
-        chestEspMaxCount = (std::max)(1, (std::min)(20, g_config.chestEspMaxCount));
-    }
+    TRACE_BRANCH("chestEspEnabled", config.chestEsp);
+    if (!config.chestEsp) return;
+    const int chestEspMaxCount =
+        (std::max)(1, (std::min)(20, config.chestEspMaxCount));
     bool mappedReady = (g_mapped && g_mcInstance);
     TRACE_BRANCH("mappedReady", mappedReady);
     if (!mappedReady) return;
@@ -11079,7 +11021,8 @@ static void UpdateBlockEspListLegacy(JNIEnv* env, const Config& cfg) {
 
     env->DeleteLocalRef(world);
 
-    std::vector<BlockEspData18> merged;
+    static thread_local std::vector<BlockEspData18> merged;
+    merged.clear();
     for (auto& kv : g_blockEspChunkCache18) {
         for (auto& h : kv.second.hits) {
             double ddx = h.x - px, ddy = h.y - py, ddz = h.z - pz;
@@ -11094,11 +11037,12 @@ static void UpdateBlockEspListLegacy(JNIEnv* env, const Config& cfg) {
     { LockGuard lk(g_blockEspListMutex); g_blockEspList.swap(merged); }
 }
 
-void RenderBlockESP(int w, int h) {
-    {
-        LockGuard lk(g_configMutex);
-        if (!g_config.blockEsp) return;
-    }
+void RenderBlockESP(
+    int w,
+    int h,
+    const Config& config,
+    const lc::HudLayout& hudLayout) {
+    if (!config.blockEsp) return;
     if (!g_mapped || !g_mcInstance) return;
     ScopedJNIEnv env(g_jvm);
     if (!env) return;
@@ -11108,14 +11052,15 @@ void RenderBlockESP(int w, int h) {
     if (!g_thePlayerField || !g_posXField || !g_posYField || !g_posZField) return;
     if (!g_activeRenderInfoClass || !g_modelViewField || !g_projectionField) return;
 
-    bool boxes, tracers, hud;
-    int maxCount;
-    { LockGuard lk(g_configMutex); boxes = g_config.blockEspBoxes; tracers = g_config.blockEspTracers; hud = g_config.blockEspHud; maxCount = g_config.blockEspMaxCount; }
+    const bool boxes = config.blockEspBoxes;
+    const bool tracers = config.blockEspTracers;
+    const bool hud = config.blockEspHud;
+    const int maxCount = config.blockEspMaxCount;
 
-    std::vector<BlockEspData18> blocks;
+    static thread_local std::vector<BlockEspData18> blocks;
     { LockGuard lk(g_blockEspListMutex); blocks = g_blockEspList; }
     if (blocks.empty()) return;
-    std::vector<lc::BlockEspTargetDef> targets;
+    static thread_local std::vector<lc::BlockEspTargetDef> targets;
     { LockGuard tlk(g_blockEspTargetsMutex); targets = g_blockEspTargets; }
 
     if (env->ExceptionCheck()) { env->ExceptionClear(); return; }
@@ -11141,7 +11086,8 @@ void RenderBlockESP(int w, int h) {
     ImDrawList* fg = ImGui::GetForegroundDrawList();
 
     struct ColorAgg18 { unsigned int color; int count; double nearest; float nsx, nsy; bool hasScreen; };
-    std::vector<ColorAgg18> aggs;
+    static thread_local std::vector<ColorAgg18> aggs;
+    aggs.clear();
     auto findAgg = [&](unsigned int col) -> ColorAgg18& {
         for (auto& a : aggs) if (a.color == col) return a;
         aggs.push_back({ col, 0, 1e9, 0, 0, false });
@@ -11201,7 +11147,10 @@ void RenderBlockESP(int w, int h) {
             return "Block";
         };
         const float padX = 8.0f, padY = 6.0f, rowH = ImGui::GetFontSize() + 4.0f, sw = 10.0f;
-        std::vector<std::string> rows; std::vector<unsigned int> rowColors;
+        static thread_local std::vector<std::string> rows;
+        static thread_local std::vector<unsigned int> rowColors;
+        rows.clear();
+        rowColors.clear();
         float maxTextW = 0.0f;
         for (const auto& a : aggs) {
             char buf[96];
@@ -11215,8 +11164,7 @@ void RenderBlockESP(int w, int h) {
         float contentW = (std::max)(titleW, sw + 6.0f + maxTextW) + padX * 2;
         float contentH = padY + rowH + rowH * (float)rows.size() + padY;
 
-        lc::HudElementLayout beLayout;
-        { LockGuard lk(g_configMutex); beLayout = g_hudLayout.Resolve(lc::ELEM_BLOCKESPLIST); }
+        lc::HudElementLayout beLayout = hudLayout.Resolve(lc::ELEM_BLOCKESPLIST);
         contentW *= beLayout.scale; contentH *= beLayout.scale;
         ImVec2 beTL = lc::HudElementPixelPos(beLayout, contentW, contentH, w, h);
         ImVec2 pMin(beTL.x, beTL.y), pMax(beTL.x + contentW, beTL.y + contentH);
@@ -11501,7 +11449,9 @@ BOOL WINAPI HookedSwapBuffers(HDC hdc) {
         s_wasNonChatMinecraftScreen = true;
     } else if (s_wasNonChatMinecraftScreen && g_imguiInitialized) {
         s_wasNonChatMinecraftScreen = false;
-        ResetImGuiBackendsForReinit("minecraft screen closed");
+        // The HWND and GL context remain valid when an inventory/menu closes.
+        // Skip this transition frame so Minecraft can restore its world state,
+        // but keep the expensive ImGui context, font atlas, and GL backend.
         return CallOriginalSwapBuffers(hdc);
     }
 
@@ -11515,22 +11465,40 @@ BOOL WINAPI HookedSwapBuffers(HDC hdc) {
     {
         NativePerfScope overlayPerf(lc::PERF_OVERLAY_RENDER);
         UpdateHudEditor(w, h);
-        RenderHUD(w, h);
+        Config renderConfig;
+        lc::HudLayout renderHudLayout;
+        {
+            LockGuard lk(g_configMutex);
+            renderConfig = g_config;
+            renderHudLayout = g_hudLayout;
+        }
+
+        RenderHUD(w, h, renderConfig, state, renderHudLayout);
         if (!ShouldHideWorldRenderModules(state)) {
             TryLockGuard jniTry(g_renderJniMutex);
             if (jniTry.owns_lock()) {
+                ClosestPlayerDrawSnapshot18 closestPlayerSnapshot;
                 {
                     NativePerfScope playerPerf(lc::PERF_PLAYER_SCAN);
-                    RenderNametags(w, h);
+                    RenderNametags(
+                        w,
+                        h,
+                        renderConfig,
+                        &closestPlayerSnapshot);
                 }
                 RenderFightStatus(w, h);
-                RenderClosestPlayerInfo(w, h);
-                RenderPixelPartyAssist(w, h);
+                RenderClosestPlayerInfo(
+                    w,
+                    h,
+                    renderConfig,
+                    renderHudLayout,
+                    closestPlayerSnapshot);
+                RenderPixelPartyAssist(w, h, renderConfig, state);
                 {
                     NativePerfScope chestPerf(lc::PERF_CHEST_SCAN);
-                    RenderChestESP(w, h);
+                    RenderChestESP(w, h, renderConfig);
                 }
-                RenderBlockESP(w, h);
+                RenderBlockESP(w, h, renderConfig, renderHudLayout);
             } else {
                 static DWORD nextJniBusyLogAt = 0;
                 DWORD now = GetTickCount();
@@ -11747,6 +11715,10 @@ void ParseConfig(const std::string& line) {
         return;
     }
     if (type == "config") {
+        const std::string perfDiagnostics = reader.GetString("perfDiagnostics");
+        if (!perfDiagnostics.empty())
+            SetNativePerfDiagnosticsEnabled(reader.GetBool("perfDiagnostics"));
+
         LockGuard lk(g_configMutex);
         g_config.armed = reader.GetBool("armed");
         g_config.clicking = reader.GetBool("clicking");
