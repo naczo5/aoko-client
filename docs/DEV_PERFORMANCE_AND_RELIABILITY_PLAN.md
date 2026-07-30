@@ -33,7 +33,8 @@ Completed on `dev` after the plan was created:
   with change-triggered sends, a 25 ms burst coalescing window, and a two-second
   recovery heartbeat.
 - Added direct configuration wakeups for `Clicker` state, keybind state, and
-  mapping reload changes.
+  mapping reload changes. Both `PropertyChanged` and `StateChanged` are tracked
+  so appearance properties and nested KillAura settings retain immediate sync.
 - Changed modern full-state publication from a fixed 5 ms interval to:
   - 5 ms while clicking, Aim Assist, Triggerbot, Pixel Party managed input, or
     HUD editing needs low-latency state.
@@ -72,7 +73,7 @@ Completed on `dev` after the plan was created:
 
 Verification:
 
-- All 180 managed tests pass, including `MainWindowStartupTests` in a restricted
+- All 185 managed tests pass, including `MainWindowStartupTests` in a restricted
   profile environment.
 - All native harness tests pass.
 - `bridge_261.dll` compiles successfully with the documented MinGW toolchain.

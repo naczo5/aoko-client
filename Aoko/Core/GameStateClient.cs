@@ -16,7 +16,7 @@ namespace Aoko.Core;
 
 /// <summary>
 /// TCP client that connects to the injected Java agent running inside Minecraft.
-/// Receives game state updates at ~20Hz and exposes them to the rest of the app.
+/// Receives adaptive game-state updates and exposes the latest snapshot to the app.
 /// </summary>
 public class GameStateClient : INotifyPropertyChanged
 {
