@@ -1,6 +1,11 @@
 #pragma once
 
 #include <algorithm>
+#include <cerrno>
+#include <cctype>
+#include <cmath>
+#include <cstdlib>
+#include <limits>
 #include <string>
 
 namespace lc {
@@ -33,24 +38,54 @@ public:
     {
         std::string value = GetString(key);
         if (value.empty()) return defaultValue;
-        return value == "true";
+        if (value == "true") return true;
+        if (value == "false") return false;
+        return defaultValue;
     }
 
     float GetFloat(const char* key, float defaultValue = 0.0f) const
     {
         std::string value = GetString(key);
         if (value.empty()) return defaultValue;
-        try { return std::stof(value); } catch (...) { return defaultValue; }
+
+        errno = 0;
+        char* end = NULL;
+        const char* start = value.c_str();
+        float parsed = std::strtof(start, &end);
+        if (end == start || errno == ERANGE || !std::isfinite(parsed) || !OnlyWhitespaceRemains(end))
+            return defaultValue;
+        return parsed;
     }
 
     int GetInt(const char* key, int defaultValue = 0) const
     {
         std::string value = GetString(key);
         if (value.empty()) return defaultValue;
-        try { return std::stoi(value); } catch (...) { return defaultValue; }
+
+        errno = 0;
+        char* end = NULL;
+        const char* start = value.c_str();
+        long parsed = std::strtol(start, &end, 10);
+        if (end == start ||
+            errno == ERANGE ||
+            parsed < (std::numeric_limits<int>::min)() ||
+            parsed > (std::numeric_limits<int>::max)() ||
+            !OnlyWhitespaceRemains(end)) {
+            return defaultValue;
+        }
+        return static_cast<int>(parsed);
     }
 
 private:
+    static bool OnlyWhitespaceRemains(const char* value)
+    {
+        while (*value != '\0') {
+            if (!std::isspace(static_cast<unsigned char>(*value))) return false;
+            ++value;
+        }
+        return true;
+    }
+
     std::string _line;
 };
 

@@ -70,13 +70,26 @@ Completed on `dev` after the plan was created:
 - Made profile persistence fail open on expected directory, access, and I/O
   failures so application shutdown and tests are not aborted by an unavailable
   `%APPDATA%` profile path.
+- Replaced unbounded newline accumulation on both sides of the V1 TCP transport:
+  - The managed reader caps an inbound bridge message at 1 MiB, discards only
+    the oversized line, and resumes with the next message.
+  - Both native bridges apply the same cap to loader configuration messages and
+    release partial oversized data while waiting for the terminating newline.
+- Hardened the shared native configuration reader so partial numeric tokens,
+  integer overflow, `NaN`, infinity, and invalid Boolean tokens fall back to
+  validated defaults instead of entering module state.
+- Completed an initial live smoke session on Lunar 26.2 with Vulkan. Normal
+  gameplay, Aim Assist, Triggerbot, and ESP behaved correctly; the log contained
+  no crashes, fatal errors, JNI exceptions, mapping failures, or socket errors.
 
 Verification:
 
-- All 185 managed tests pass, including `MainWindowStartupTests` in a restricted
+- All 190 managed tests pass, including `MainWindowStartupTests` in a restricted
   profile environment.
-- All native harness tests pass.
-- `bridge_261.dll` compiles successfully with the documented MinGW toolchain.
+- All native harness tests pass, including bounded-reader recovery and strict
+  configuration parsing cases.
+- Both `bridge.dll` and `bridge_261.dll` compile successfully with the documented
+  MinGW toolchain.
 
 ## Guiding principles
 
@@ -609,10 +622,10 @@ Acceptance criteria for each extraction:
 
 ### P8.1 Harden the existing V1 transport
 
-- [ ] Enforce maximum line and receive-buffer sizes.
-- [ ] Reject non-finite numbers and out-of-range integer conversions.
+- [x] Enforce maximum line and receive-buffer sizes.
+- [x] Reject non-finite numbers and out-of-range integer conversions.
 - [ ] Preserve unknown-field tolerance.
-- [ ] Keep malformed-line handling fail-open for the connection.
+- [x] Keep malformed-line handling fail-open for the connection.
 - [ ] Add representative fixtures for both bridge families.
 - [ ] Add loader-newer/bridge-older and bridge-newer/loader-older tests.
 

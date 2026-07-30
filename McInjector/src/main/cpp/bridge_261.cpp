@@ -33,6 +33,7 @@
 #include "imgui_impl_win32.h"
 #include "imgui_impl_opengl3.h"
 #include "json_config_reader.h"
+#include "bounded_newline_buffer.h"
 #include "auto_rod_core.h"
 #include "bridge_capabilities.h"
 #include "nick_hider.h"
@@ -14944,7 +14945,8 @@ glfw_done:;
         Log("C# Loader connected.");
         u_long nb = 1; ioctlsocket(cli, FIONBIO, &nb);
 
-        std::string readBuf;
+        lc::BoundedNewlineBuffer readBuf(1024 * 1024);
+        std::vector<std::string> receivedConfigLines;
         bool capabilitiesSent = false;
         while (g_running) {
             unsigned int stateIntervalMs = lc::kModernStateNormalIntervalMs;
@@ -15201,12 +15203,16 @@ glfw_done:;
                 char buf[4096];
                 int r = recv(cli, buf, sizeof(buf)-1, 0);
                 if (r > 0) {
-                    buf[r] = 0; readBuf += buf;
-                    size_t pos;
-                    while ((pos = readBuf.find('\n')) != std::string::npos) {
-                        std::string pkt = readBuf.substr(0, pos);
-                        readBuf.erase(0, pos+1);
-                        if (!pkt.empty()) ParseConfig(pkt);
+                    receivedConfigLines.clear();
+                    size_t discarded = readBuf.Append(
+                        buf,
+                        static_cast<size_t>(r),
+                        &receivedConfigLines);
+                    if (discarded != 0)
+                        Log("Ignored oversized loader config message.");
+                    for (size_t i = 0; i < receivedConfigLines.size(); ++i) {
+                        if (!receivedConfigLines[i].empty())
+                            ParseConfig(receivedConfigLines[i]);
                     }
                 } else if (r == 0) break;
             }

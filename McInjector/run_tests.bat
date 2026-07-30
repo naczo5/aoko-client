@@ -26,6 +26,14 @@ echo [NativeTests] Running json_config_reader_tests.exe...
 tests\json_config_reader_tests.exe
 if %errorlevel% neq 0 exit /b %errorlevel%
 
+echo [NativeTests] Building bounded_newline_buffer_tests.exe...
+"%GPP%" -m64 -std=c++11 -O2 -static-libgcc -static-libstdc++ -o tests\bounded_newline_buffer_tests.exe tests\bounded_newline_buffer_tests.cpp
+if %errorlevel% neq 0 exit /b %errorlevel%
+
+echo [NativeTests] Running bounded_newline_buffer_tests.exe...
+tests\bounded_newline_buffer_tests.exe
+if %errorlevel% neq 0 exit /b %errorlevel%
+
 echo [NativeTests] Building telemetry_schedule_tests.exe...
 "%GPP%" -m64 -std=c++11 -O2 -static-libgcc -static-libstdc++ -o tests\telemetry_schedule_tests.exe tests\telemetry_schedule_tests.cpp
 if %errorlevel% neq 0 exit /b %errorlevel%

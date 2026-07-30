@@ -34,6 +34,7 @@ public class GameStateClient : INotifyPropertyChanged
         ManagedTransportDiagnostics.FromEnvironment();
     private const int ConfigHeartbeatMs = 2000;
     private const int ConfigChangeCoalesceMs = 25;
+    private const int MaximumInboundMessageCharacters = 1024 * 1024;
 
     private GameState _currentState = new();
     private bool _isConnected;
@@ -450,12 +451,22 @@ public class GameStateClient : INotifyPropertyChanged
         {
             if (_client == null) return;
             using var stream = _client.GetStream();
-            using var reader = new StreamReader(stream, Encoding.UTF8);
+            using var reader = new BoundedLineReader(
+                stream,
+                MaximumInboundMessageCharacters,
+                Encoding.UTF8);
 
             while (!token.IsCancellationRequested && _client.Connected)
             {
-                string? line = await reader.ReadLineAsync(token);
-                if (line == null) break;
+                BoundedLineReadResult readResult = await reader.ReadLineAsync(token);
+                if (readResult.IsEndOfStream) break;
+                if (readResult.IsTooLong)
+                {
+                    Log($"Ignored bridge message exceeding {MaximumInboundMessageCharacters} characters.");
+                    continue;
+                }
+
+                string line = readResult.Line!;
 
                 long parseStarted = Stopwatch.GetTimestamp();
                 try
