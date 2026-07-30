@@ -38,6 +38,13 @@ Completed on `dev` after the plan was created:
   - 5 ms while clicking, Aim Assist, Triggerbot, Pixel Party managed input, or
     HUD editing needs low-latency state.
   - 25 ms otherwise.
+- Moved managed Aim Assist body-point projection into the player snapshot
+  producer, which already runs at the combat freshness budget. State
+  publication consumes the prepared point and retains the previous projection
+  path only as a fail-open fallback.
+- Pre-escape published player names and reuse state JSON, escaped-string, and
+  player snapshot buffers in the modern socket thread instead of reconstructing
+  their capacities at 40–200 Hz.
 - Decoupled Chest ESP and Block ESP production from the combat scan loop:
   - Chest ESP: 100 ms while enabled; Chest Stealer retains its active loop rate.
   - Block ESP: 150 ms while enabled.

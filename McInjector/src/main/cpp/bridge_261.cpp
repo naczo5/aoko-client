@@ -1221,6 +1221,7 @@ static DWORD       g_lastClosestUpdateMs = 0;
 
 struct PlayerData121 {
     std::string name;
+    std::string jsonEscapedName;
     std::string stableName;
     double dist;
     double ex, ey, ez;
@@ -1235,6 +1236,9 @@ struct PlayerData121 {
     float screenX;
     float screenY;
     bool hasScreenPoint;
+    float managedScreenX;
+    float managedScreenY;
+    bool hasManagedScreenPoint;
     float nametagScreenX;
     float nametagScreenY;
     bool hasNametagScreenPoint;
@@ -4909,13 +4913,26 @@ static void UpdatePlayerListOverlay(JNIEnv* env) {
 
     // Fight Status distance must use the local entity position; camera state is
     // retained for the other overlays and for render-time projection only.
+    BgCamState managedProjectionCamera;
+    {
+        LockGuard lk(g_bgCamMutex);
+        managedProjectionCamera = g_bgCamState;
+    }
+    OverlayViewport121 managedProjectionViewport;
+    const bool canProjectManagedAim =
+        cfg.aimAssist &&
+        managedProjectionCamera.camFound &&
+        ReadOverlayViewport121(&managedProjectionViewport);
+
     double sx = 0, sy = 0, sz = 0;
     if (fightStatusActive) {
         sx = CallDoubleNoArgs(env, selfObj, g_getX_121);
         sy = CallDoubleNoArgs(env, selfObj, g_getY_121);
         sz = CallDoubleNoArgs(env, selfObj, g_getZ_121);
     } else {
-        { LockGuard lk(g_bgCamMutex); sx = g_bgCamState.camX; sy = g_bgCamState.camY; sz = g_bgCamState.camZ; }
+        sx = managedProjectionCamera.camX;
+        sy = managedProjectionCamera.camY;
+        sz = managedProjectionCamera.camZ;
         if (sx == 0 && sy == 0 && sz == 0) {
             sx = CallDoubleNoArgs(env, selfObj, g_getX_121);
             sy = CallDoubleNoArgs(env, selfObj, g_getY_121);
@@ -5027,6 +5044,11 @@ static void UpdatePlayerListOverlay(JNIEnv* env) {
                             bool hurtTimeAvailable, const std::string& held) {
         PlayerData121 data{};
         data.name = lc::ReplaceNickHiderText(name, cfg.nickHiderEnabled, localAccountName, cfg.nickHiderAlias);
+        data.jsonEscapedName.reserve(data.name.size());
+        for (char c : data.name) {
+            if (c == '"' || c == '\\') data.jsonEscapedName += '\\';
+            data.jsonEscapedName += c;
+        }
         data.stableName = name;
         data.dist = lw.dist;
         data.ex = lw.x; data.ey = lw.y; data.ez = lw.z;
@@ -5038,6 +5060,46 @@ static void UpdatePlayerListOverlay(JNIEnv* env) {
         data.armorAvailable = armorAvailable;
         data.hurtTimeAvailable = hurtTimeAvailable;
         data.heldItem = held;
+        if (canProjectManagedAim) {
+            const LegoVec3 cameraPosition = {
+                managedProjectionCamera.camX,
+                managedProjectionCamera.camY,
+                managedProjectionCamera.camZ
+            };
+            auto projectBodyPoint = [&](double worldX, double worldY, double worldZ,
+                                        float* outX, float* outY) -> bool {
+                const LegoVec3 point = { worldX, worldY, worldZ };
+                return managedProjectionCamera.matsOk
+                    ? WorldToScreen(
+                        point,
+                        cameraPosition,
+                        managedProjectionCamera.view,
+                        managedProjectionCamera.proj,
+                        managedProjectionViewport.width,
+                        managedProjectionViewport.height,
+                        outX,
+                        outY)
+                    : WorldToScreen_Angles(
+                        point,
+                        cameraPosition,
+                        managedProjectionCamera.yaw,
+                        managedProjectionCamera.pitch,
+                        managedProjectionCamera.fov,
+                        managedProjectionViewport.width,
+                        managedProjectionViewport.height,
+                        outX,
+                        outY);
+            };
+            data.hasManagedScreenPoint = lc::aimassist::SelectClosestBodyPoint(
+                lw.x,
+                lw.y,
+                lw.z,
+                managedProjectionViewport.width,
+                managedProjectionViewport.height,
+                projectBodyPoint,
+                &data.managedScreenX,
+                &data.managedScreenY);
+        }
         if (gameRendererForProjection) {
             data.hasScreenPoint = ProjectWorldPointToScreen121(
                 env, gameRendererForProjection, LegoVec3{lw.x, lw.y + 0.95, lw.z},
@@ -14939,14 +15001,20 @@ glfw_done:;
                 TRACE261_BRANCH("stateAnyGui", anyGui);
 
                 // JSON-escape the screen name
-                std::string snEsc;
+                static thread_local std::string snEsc;
+                snEsc.clear();
+                snEsc.reserve(sn.size() + 8);
                 for (char c : sn) { if (c == '"' || c == '\\') snEsc += '\\'; snEsc += c; }
-                std::string actionEsc;
+                static thread_local std::string actionEsc;
+                actionEsc.clear();
+                actionEsc.reserve(actionBar.size() + 8);
                 for (char c : actionBar) { if (c == '"' || c == '\\') actionEsc += '\\'; actionEsc += c; }
-                std::string killAuraReasonEsc;
+                static thread_local std::string killAuraReasonEsc;
+                killAuraReasonEsc.clear();
+                killAuraReasonEsc.reserve(killAuraUnavailableReason.size() + 8);
                 for (char c : killAuraUnavailableReason) { if (c == '"' || c == '\\') killAuraReasonEsc += '\\'; killAuraReasonEsc += c; }
 
-                std::vector<PlayerData121> players;
+                static thread_local std::vector<PlayerData121> players;
                 { LockGuard lk(g_playerListMutex); players = g_playerList; }
 
                 BgCamState camState;
@@ -14961,7 +15029,8 @@ glfw_done:;
                     }
                 }
 
-                std::string state;
+                static thread_local std::string state;
+                state.clear();
                 state.reserve(4096);
                 state += "{\"type\":\"state\",\"inWorld\":";
                 state += inWorld ? "true" : "false";
@@ -15049,10 +15118,10 @@ glfw_done:;
                 for (const auto& p : players) {
                     if (sentEntities >= 32) break; // Limit JSON size
                     float sx = -1.0f, sy = -1.0f;
-                    bool projected = p.hasScreenPoint;
+                    bool projected = p.hasManagedScreenPoint || p.hasScreenPoint;
                     if (projected) {
-                        sx = p.screenX;
-                        sy = p.screenY;
+                        sx = p.hasManagedScreenPoint ? p.managedScreenX : p.screenX;
+                        sy = p.hasManagedScreenPoint ? p.managedScreenY : p.screenY;
                     }
 
                     bool canProject = TRACE261_IF("entityProjectionCamFound", camState.camFound);
@@ -15088,9 +15157,6 @@ glfw_done:;
                         }
                     }
 
-                    std::string nameEsc;
-                    for (char c : p.name) { if (c == '"' || c == '\\') nameEsc += '\\'; nameEsc += c; }
-
                     if (!first) state += ",";
                     first = false;
                     state += "{\"sx\":";
@@ -15100,7 +15166,7 @@ glfw_done:;
                     state += ",\"dist\":";
                     state += std::to_string(p.dist);
                     state += ",\"name\":\"";
-                    state += nameEsc;
+                    state += p.jsonEscapedName;
                     state += "\",\"hp\":";
                     state += std::to_string(p.hp);
                     state += "}";
