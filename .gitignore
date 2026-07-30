@@ -45,6 +45,7 @@ generate_analysis.py
 *.md
 !README.md
 !GUIDE.md
+!docs/DEV_PERFORMANCE_AND_RELIABILITY_PLAN.md
 /Aoko_Release
 /aoko-client_Release
 /archive
