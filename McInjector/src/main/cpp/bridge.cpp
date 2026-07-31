@@ -12134,8 +12134,10 @@ void ParseConfig(const std::string& line) {
     }
 }
 
-bool TrySendCapabilities(SOCKET sock, bool newConnection) {
-    if (sock == INVALID_SOCKET) return false;
+// Returns 1 when the complete line is queued, 0 when the caller should retry
+// after backpressure, and -1 for a terminal socket failure.
+int TrySendCapabilities(SOCKET sock, bool newConnection) {
+    if (sock == INVALID_SOCKET) return -1;
 
     const char* capabilitiesJson = lc::LegacyCapabilitiesJson();
     const size_t payloadLength = strlen(capabilitiesJson);
@@ -12153,11 +12155,11 @@ bool TrySendCapabilities(SOCKET sock, bool newConnection) {
             continue;
         }
         int err = WSAGetLastError();
-        if (sent == SOCKET_ERROR && err == WSAEWOULDBLOCK) return false;
+        if (sent == SOCKET_ERROR && err == WSAEWOULDBLOCK) return 0;
         Log("Capabilities send failed, err=" + std::to_string(err));
         pendingSocket = INVALID_SOCKET;
         pendingOffset = 0;
-        return false;
+        return -1;
     }
     pendingSocket = INVALID_SOCKET;
     pendingOffset = 0;
@@ -12224,9 +12226,19 @@ void ServerLoop() {
         bool capabilitiesAttempted = false;
         while (IsBridgeRunning()) {
             if (!capabilitiesSent) {
-                capabilitiesSent = TrySendCapabilities(clientSocket, !capabilitiesAttempted);
+                const int capabilitiesResult = TrySendCapabilities(clientSocket, !capabilitiesAttempted);
+                capabilitiesSent = capabilitiesResult > 0;
                 capabilitiesAttempted = true;
                 if (capabilitiesSent) Log("Sent bridge capabilities packet");
+                // Keep the capability line contiguous on the newline-delimited
+                // stream.  A nonblocking send may have queued only a prefix;
+                // publishing state before the remainder would interleave two
+                // logical lines and poison the loader's receive buffer.
+                if (capabilitiesResult < 0) break;
+                if (!capabilitiesSent) {
+                    Sleep(1);
+                    continue;
+                }
             }
 
             

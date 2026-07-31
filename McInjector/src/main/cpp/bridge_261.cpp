@@ -590,8 +590,10 @@ static void ParseConfig(const std::string& line) {
     }
 }
 
-static bool TrySendCapabilities(SOCKET sock, bool newConnection) {
-    if (sock == INVALID_SOCKET) return false;
+// Returns 1 when the complete line is queued, 0 when the caller should retry
+// after backpressure, and -1 for a terminal socket failure.
+static int TrySendCapabilities(SOCKET sock, bool newConnection) {
+    if (sock == INVALID_SOCKET) return -1;
 
     const char* capabilitiesJson = lc::ModernCapabilitiesJson();
     const size_t payloadLength = std::strlen(capabilitiesJson);
@@ -609,11 +611,11 @@ static bool TrySendCapabilities(SOCKET sock, bool newConnection) {
             continue;
         }
         int err = WSAGetLastError();
-        if (sent == SOCKET_ERROR && err == WSAEWOULDBLOCK) return false;
+        if (sent == SOCKET_ERROR && err == WSAEWOULDBLOCK) return 0;
         Log("Capabilities send failed, err=" + std::to_string(err));
         pendingSocket = INVALID_SOCKET;
         pendingOffset = 0;
-        return false;
+        return -1;
     }
     pendingSocket = INVALID_SOCKET;
     pendingOffset = 0;
@@ -15199,10 +15201,20 @@ glfw_done:;
             if (sendFullState) lastFullStateMs = stateNowMs;
             TRACE261_PATH("client-loop-iteration");
             if (!capabilitiesSent) {
-                capabilitiesSent = TrySendCapabilities(cli, !capabilitiesAttempted);
+                const int capabilitiesResult = TrySendCapabilities(cli, !capabilitiesAttempted);
+                capabilitiesSent = capabilitiesResult > 0;
                 capabilitiesAttempted = true;
                 TRACE261_BRANCH("capabilitiesSent", capabilitiesSent);
                 if (capabilitiesSent) Log("Sent bridge capabilities packet");
+                // Keep the capability line contiguous on the newline-delimited
+                // stream.  A nonblocking send may have queued only a prefix;
+                // publishing state before the remainder would interleave two
+                // logical lines and poison the loader's receive buffer.
+                if (capabilitiesResult < 0) break;
+                if (!capabilitiesSent) {
+                    Sleep(1);
+                    continue;
+                }
             }
 
             // Send state
