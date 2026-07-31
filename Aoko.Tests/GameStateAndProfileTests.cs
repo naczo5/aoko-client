@@ -130,6 +130,22 @@ public class GameStateAndProfileTests
         Assert.Equal(530, y);
     }
 
+    [Theory]
+    [InlineData(-1, 10)]
+    [InlineData(854, 10)]
+    [InlineData(10, -1)]
+    [InlineData(10, 480)]
+    public void ChestStealerCoordinateMapper_RejectsOutOfBoundsSlots(int x, int y)
+    {
+        var state = new ChestStealerState { ScreenWidth = 854, ScreenHeight = 480 };
+        var slot = new ChestStealerSlot { X = x, Y = y };
+        var clientRect = new WindowDetection.RECT { Left = 100, Top = 50, Right = 1808, Bottom = 1010 };
+
+        bool mapped = ChestStealerCoordinateMapper.TryMapScaledPoint(state, slot, clientRect, out _, out _);
+
+        Assert.False(mapped);
+    }
+
     [Fact]
     public void Profile_DefaultValuesRemainStable()
     {

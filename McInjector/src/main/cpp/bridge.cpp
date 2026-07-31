@@ -106,17 +106,67 @@ public:
 
 // ===================== GLOBALS =====================
 JavaVM* g_jvm = nullptr;
-bool g_running = true;
+static volatile LONG g_running = 1;
+static bool IsBridgeRunning() {
+    return InterlockedCompareExchange(&g_running, 0, 0) != 0;
+}
 // Per-subsystem JNI locks (finer-grained than the old single JNI lock).
 // Render thread (SwapBuffers) holds g_renderJniMutex; LegoBridge thread holds
 // g_stateJniMutex.  Reach state is shared by the LegoBridge thread and WndProc,
 // so both reach paths serialize on g_stateJniMutex.
 static Mutex g_renderJniMutex;  // nametags / chest ESP / closest-player (render thread)
 static Mutex g_stateJniMutex;   // ReadGameState / reach / velocity (LegoBridge thread)
-SOCKET g_serverSocket = INVALID_SOCKET;
-SOCKET g_clientSocket = INVALID_SOCKET;
+static volatile SOCKET g_serverSocket = INVALID_SOCKET;
+static volatile SOCKET g_clientSocket = INVALID_SOCKET;
+static SOCKET AtomicSocketLoad(const volatile SOCKET* slot) {
+    return (SOCKET)(ULONG_PTR)InterlockedCompareExchangePointer(
+        reinterpret_cast<PVOID volatile*>(const_cast<volatile SOCKET*>(slot)), nullptr, nullptr);
+}
+static void AtomicSocketStore(volatile SOCKET* slot, SOCKET value) {
+    InterlockedExchangePointer(reinterpret_cast<PVOID volatile*>(slot), (PVOID)(ULONG_PTR)value);
+}
+static SOCKET AtomicSocketTake(volatile SOCKET* slot) {
+    for (;;) {
+        SOCKET current = AtomicSocketLoad(slot);
+        if (current == INVALID_SOCKET) return INVALID_SOCKET;
+        if ((SOCKET)(ULONG_PTR)InterlockedCompareExchangePointer(
+                reinterpret_cast<PVOID volatile*>(slot),
+                (PVOID)(ULONG_PTR)INVALID_SOCKET,
+                (PVOID)(ULONG_PTR)current) == current)
+            return current;
+    }
+}
 static volatile LONG g_heavyDiscoveryInProgress = 0;
+static HANDLE g_legacyMainThreadHandle = nullptr;
+static volatile LONG g_legacyDetachRequested = 0;
+static Mutex g_legacyDetachCleanupMutex;
+static volatile LONG g_legacyRenderCleanupRequested = 0;
+static volatile LONG g_legacyRenderCallbacksInFlight = 0;
 static void ResetAutoRodLegacyJniCaches(JNIEnv* env);
+
+class LegacyRenderCallbackLease {
+    bool active_;
+public:
+    LegacyRenderCallbackLease() : active_(false) {
+        if (InterlockedCompareExchange(&g_legacyRenderCleanupRequested, 0, 0) != 0) return;
+        InterlockedIncrement(&g_legacyRenderCallbacksInFlight);
+        if (InterlockedCompareExchange(&g_legacyRenderCleanupRequested, 0, 0) == 0) {
+            active_ = true;
+        } else {
+            InterlockedDecrement(&g_legacyRenderCallbacksInFlight);
+        }
+    }
+    ~LegacyRenderCallbackLease() {
+        if (active_) InterlockedDecrement(&g_legacyRenderCallbacksInFlight);
+    }
+    bool Active() const { return active_; }
+};
+
+static void WaitForLegacyRenderCallbacks()
+{
+    while (InterlockedCompareExchange(&g_legacyRenderCallbacksInFlight, 0, 0) != 0)
+        Sleep(1);
+}
 
 // Rendering
 static GLuint g_fontTexture = 0;
@@ -155,6 +205,7 @@ struct Config {
     bool fightStatus = false;
     bool nametagShowHealth = true;
     bool nametagShowArmor = true;
+    bool nametagShowHeldItem = true;
     bool nametagHideVanilla = false;
     int nametagMaxCount = 8;
     bool chestEsp = false;
@@ -354,6 +405,7 @@ static bool TryPopAutoRodRequest(AutoRodRequest* out) {
 }
 static lc::HudLayout g_hudLayout = lc::HudLayout::DefaultLayout();
 static lc::HudEditorState g_hudEditor;
+static Mutex g_hudEditorMutex;
 
 // ── Block ESP / X-ray shared state (legacy 1.8.9) ──
 struct BlockEspData18 { double x, y, z; unsigned int color; double dist; };
@@ -456,6 +508,8 @@ static float g_glyphAdvance[128] = {};
 // Hook
 typedef BOOL(WINAPI* SwapBuffersFn)(HDC);
 static SwapBuffersFn g_origSwapBuffers = nullptr;
+static void* g_legacyIatSwapSlot = nullptr;
+static void* g_legacyIatSwapOriginal = nullptr;
 
 
 // JNI cached refs
@@ -6906,6 +6960,9 @@ static std::string BuildChestStealerStateJson(JNIEnv* env, bool enabled) {
         env->PopLocalFrame(nullptr);
         return "null";
     }
+    // A normal chest has at most 54 storage slots. Keep a small allowance for
+    // unusual container layouts while bounding JNI work and wire payload size.
+    if (chestSlotCount > 90) chestSlotCount = 90;
 
     std::ostringstream slotsJson;
     int count = 0;
@@ -7790,7 +7847,26 @@ GameState ReadGameState(JNIEnv* env) {
 }
 
 // ===================== DETACH =====================
-static void CleanupImGuiAndHooks() {
+static bool CleanupImGuiAndHooks() {
+    // Stop new render-hook entries before deleting the context/backend. Any
+    // callback that already entered holds a lease and is drained below.
+    InterlockedExchange(&g_legacyRenderCleanupRequested, 1);
+    if (g_legacyIatSwapSlot && g_legacyIatSwapOriginal) {
+        DWORD oldProt = 0;
+        if (!VirtualProtect(g_legacyIatSwapSlot, sizeof(void*), PAGE_EXECUTE_READWRITE, &oldProt)) {
+            Log("ERROR: could not make legacy SwapBuffers IAT writable; retaining bridge loaded.");
+            InterlockedExchange(&g_legacyRenderCleanupRequested, 0);
+            return false;
+        }
+        *(void**)g_legacyIatSwapSlot = g_legacyIatSwapOriginal;
+        FlushInstructionCache(GetCurrentProcess(), g_legacyIatSwapSlot, sizeof(void*));
+        VirtualProtect(g_legacyIatSwapSlot, sizeof(void*), oldProt, &oldProt);
+        g_legacyIatSwapSlot = nullptr;
+        g_legacyIatSwapOriginal = nullptr;
+    }
+    if (g_minhookInitialized) MH_DisableHook(MH_ALL_HOOKS);
+    WaitForLegacyRenderCallbacks();
+
     if (g_wndProcHookedHwnd && g_origWndProc) {
         SetWindowLongPtrA(g_wndProcHookedHwnd, GWLP_WNDPROC, (LONG_PTR)g_origWndProc);
         g_wndProcHookedHwnd = nullptr;
@@ -7824,6 +7900,7 @@ static void CleanupImGuiAndHooks() {
         MH_Uninitialize();
         g_minhookInitialized = false;
     }
+    return true;
 }
 
 static void ResetImGuiBackendsForReinit(const char* reason) {
@@ -7860,30 +7937,53 @@ static void ResetImGuiBackendsForReinit(const char* reason) {
     g_glInitialized = false;
 }
 
+static bool WaitForLegacyMainThreadExit(DWORD timeoutMs) {
+    if (!g_legacyMainThreadHandle) return true;
+    const DWORD result = WaitForSingleObject(g_legacyMainThreadHandle, timeoutMs);
+    if (result != WAIT_OBJECT_0) {
+        Log("Detach: legacy main thread did not stop; keeping bridge loaded for safety.");
+        return false;
+    }
+    CloseHandle(g_legacyMainThreadHandle);
+    g_legacyMainThreadHandle = nullptr;
+    return true;
+}
+
 extern "C" __declspec(dllexport) void Detach() {
+    if (InterlockedExchange(&g_legacyDetachRequested, 1) != 0) {
+        Log("Detach requested more than once; cleanup already in progress.");
+        return;
+    }
     Log("Detach requested");
     ResetFightStatusState18();
-    g_running = false;
+    InterlockedExchange(&g_running, 0);
 
-    if (g_clientSocket != INVALID_SOCKET) {
-        closesocket(g_clientSocket);
-        g_clientSocket = INVALID_SOCKET;
+    SOCKET clientSocket = AtomicSocketTake(&g_clientSocket);
+    if (clientSocket != INVALID_SOCKET) {
+        shutdown(clientSocket, SD_BOTH);
+        closesocket(clientSocket);
     }
-    if (g_serverSocket != INVALID_SOCKET) {
-        closesocket(g_serverSocket);
-        g_serverSocket = INVALID_SOCKET;
+    SOCKET serverSocket = AtomicSocketTake(&g_serverSocket);
+    if (serverSocket != INVALID_SOCKET) {
+        shutdown(serverSocket, SD_BOTH);
+        closesocket(serverSocket);
     }
     
-    CleanupImGuiAndHooks();
-    
-    // Restore SwapBuffers (simplified: just unhook IAT if possible, but honestly
-    // safely unhooking IAT without race conditions is hard. 
-    // For now we just stop rendering logic via g_running flag and let DLL stay loaded but dormant?)
-    // A true unload requires FreeLibraryAndExitThread.
-    
-    // Create a thread to free library safely
+    // Stop the server/render owner before touching ImGui or MinHook.  The
+    // previous path cleaned those resources immediately and unloaded 100 ms
+    // later, which could race ServerLoop or a SwapBuffers callback.
     CreateThread(nullptr, 0, [](LPVOID) -> DWORD {
-        Sleep(100);
+        if (!WaitForLegacyMainThreadExit(5000)) {
+            // Permit a later Detach call to retry after a transient server/JNI
+    // stall rather than permanently latching a failed teardown.
+            InterlockedExchange(&g_legacyDetachRequested, 0);
+            return 0;
+        }
+        LockGuard cleanupGuard(g_legacyDetachCleanupMutex);
+        if (!CleanupImGuiAndHooks()) {
+            InterlockedExchange(&g_legacyDetachRequested, 0);
+            return 0;
+        }
         FreeLibraryAndExitThread(GetModuleHandleA("bridge.dll"), 0);
         return 0;
     }, nullptr, 0, nullptr);
@@ -9039,6 +9139,13 @@ static bool ShouldHideWorldRenderModules(const GameState& state) {
 
 // ===================== HUD RENDERING =====================
 static void UpdateHudEditor(int winW, int winH) {
+    struct EditorElem { std::string id; ImVec2 tl; float w, h; };
+    static thread_local std::vector<EditorElem> elems;
+    lc::HudLayout layoutDraw;
+    std::string grabbedIdForDraw;
+
+    {
+    LockGuard hudLock(g_hudEditorMutex);
     if (!g_hudEditor.active) return;
     if (winW <= 0 || winH <= 0) return;
 
@@ -9053,8 +9160,6 @@ static void UpdateHudEditor(int winW, int winH) {
     bool mouseReleased = ImGui::IsMouseReleased(0);
 
     // Struct for editor-visible elements
-    struct EditorElem { std::string id; ImVec2 tl; float w, h; };
-    static thread_local std::vector<EditorElem> elems;
     elems.clear();
 
     lc::HudLayout layoutSnap;
@@ -9136,10 +9241,12 @@ static void UpdateHudEditor(int winW, int winH) {
         g_hudEditor.layoutDirty = true;
     }
 
-    // 4. Draw bounding boxes for each element
-    ImDrawList* fg = ImGui::GetForegroundDrawList();
-    lc::HudLayout layoutDraw;
+    // Snapshot the final layout and editor selection before releasing the
+    // editor mutex; ImGui draw calls must not hold it.
     { LockGuard lk(g_configMutex); layoutDraw = g_hudLayout; }
+    grabbedIdForDraw = g_hudEditor.grabbedId;
+    }
+    ImDrawList* fg = ImGui::GetForegroundDrawList();
     for (const auto& e : elems) {
         lc::HudElementLayout el = layoutDraw.Resolve(e.id);
         float sw = e.w; // already scaled
@@ -9147,7 +9254,7 @@ static void UpdateHudEditor(int winW, int winH) {
         ImVec2 tl = lc::HudElementPixelPos(el, sw, sh, winW, winH);
         ImVec2 br(tl.x + sw, tl.y + sh);
 
-        bool grabbed = (g_hudEditor.grabbedId == e.id);
+        bool grabbed = (grabbedIdForDraw == e.id);
         ImU32 boxCol = grabbed ? IM_COL32(255, 200, 50, 200) : IM_COL32(80, 180, 255, 140);
         fg->AddRect(tl, br, boxCol, 4.0f, 0, grabbed ? 2.0f : 1.5f);
 
@@ -9576,6 +9683,7 @@ void RenderNametags(
     static bool warnedMissingMappings = false;
     bool showHealth = true;
     bool showArmor = true;
+    bool showHeldItem = true;
     bool hideVanillaTags = false;
     bool nametagsEnabled = false;
     bool nickHiderEnabled = false;
@@ -9595,6 +9703,7 @@ void RenderNametags(
     if (!entityTelemetryNeeded) { ResetFightStatusState18(); return; }
     showHealth = config.nametagShowHealth;
     showArmor = config.nametagShowArmor;
+    showHeldItem = config.nametagShowHeldItem;
     hideVanillaTags = config.nametagHideVanilla;
     nametagMaxCount = (std::max)(1, (std::min)(20, config.nametagMaxCount));
     guiTheme = config.guiTheme;
@@ -10130,7 +10239,9 @@ void RenderNametags(
                      statsText += armorBuf;
                  }
 
-                 std::string heldText = GetEntityHeldItemInfo(env, entity, nullptr);
+                 std::string heldText = showHeldItem
+                     ? GetEntityHeldItemInfo(env, entity, nullptr)
+                     : std::string();
 
                  int key = 0;
                  if (g_objectHashCodeMethod) {
@@ -10260,8 +10371,9 @@ void RenderNametags(
             env->ExceptionClear();
             closestSnapshot->heldText.clear();
         } else if (closestEntity) {
-            closestSnapshot->heldText =
-                GetEntityHeldItemInfo(env, closestEntity, nullptr);
+            closestSnapshot->heldText = showHeldItem
+                ? GetEntityHeldItemInfo(env, closestEntity, nullptr)
+                : std::string();
             env->DeleteLocalRef(closestEntity);
         }
     }
@@ -11192,7 +11304,14 @@ void RenderBlockESP(
 LRESULT CALLBACK HookedWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     // HUD editor: only intercept mouse when editor active AND a GUI/chat is open
     // (chat open = OS cursor is available, so dragging works naturally).
-    if (g_hudEditor.active) {
+    bool hudEditorActive = false;
+    bool hudEditorGrabbed = false;
+    {
+        LockGuard lk(g_hudEditorMutex);
+        hudEditorActive = g_hudEditor.active;
+        hudEditorGrabbed = !g_hudEditor.grabbedId.empty();
+    }
+    if (hudEditorActive) {
         bool chatOpen = false;
         { LockGuard lk(g_stateMutex); chatOpen = g_gameState.guiOpen; }
         if (chatOpen) {
@@ -11200,7 +11319,7 @@ LRESULT CALLBACK HookedWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
             if (isMouseMsg) {
                 ImGui_ImplWin32_WndProcHandler(hwnd, msg, wParam, lParam);
                 // Consume clicks while a drag is active so the game GUI doesn't react
-                if (!g_hudEditor.grabbedId.empty() || msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP) {
+                if (hudEditorGrabbed || msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP) {
                     return 0;
                 }
             }
@@ -11216,6 +11335,7 @@ LRESULT CALLBACK HookedWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     if (msg == WM_LBUTTONDOWN || rawInputClickEdge) {
         Config cfgSnapshot;
         {
+            LockGuard hudLock(g_hudEditorMutex);
             LockGuard lk(g_configMutex);
             cfgSnapshot = g_config;
         }
@@ -11325,6 +11445,8 @@ static void ConfigureImGuiFontAndStyle(HWND hwnd) {
 
 // ===================== SWAPBUFFERS HOOK =====================
 BOOL WINAPI HookedSwapBuffers(HDC hdc) {
+    LegacyRenderCallbackLease renderLease;
+    if (!renderLease.Active()) return CallOriginalSwapBuffers(hdc);
     if (!hdc) return CallOriginalSwapBuffers(hdc);
 
     HGLRC currentRc = wglGetCurrentContext();
@@ -11468,6 +11590,7 @@ BOOL WINAPI HookedSwapBuffers(HDC hdc) {
         Config renderConfig;
         lc::HudLayout renderHudLayout;
         {
+            LockGuard hudLock(g_hudEditorMutex);
             LockGuard lk(g_configMutex);
             renderConfig = g_config;
             renderHudLayout = g_hudLayout;
@@ -11550,6 +11673,10 @@ bool PatchIAT(HMODULE hModule, const char* targetDll, const char* funcName, void
                 VirtualProtect(&firstThunk->u1.Function, sizeof(void*), PAGE_EXECUTE_READWRITE, &oldProt);
                 firstThunk->u1.Function = (ULONGLONG)hookFunc;
                 VirtualProtect(&firstThunk->u1.Function, sizeof(void*), oldProt, &oldProt);
+                if (strcmp(funcName, "SwapBuffers") == 0 && hookFunc == (void*)HookedSwapBuffers) {
+                    g_legacyIatSwapSlot = (void*)&firstThunk->u1.Function;
+                    g_legacyIatSwapOriginal = *origFunc;
+                }
                 return true;
             }
         }
@@ -11719,6 +11846,7 @@ void ParseConfig(const std::string& line) {
         if (!perfDiagnostics.empty())
             SetNativePerfDiagnosticsEnabled(reader.GetBool("perfDiagnostics"));
 
+        {
         LockGuard lk(g_configMutex);
         g_config.armed = reader.GetBool("armed");
         g_config.clicking = reader.GetBool("clicking");
@@ -11826,6 +11954,7 @@ void ParseConfig(const std::string& line) {
         if (fightStatusWasEnabled && !g_config.fightStatus) ResetFightStatusState18();
         g_config.nametagShowHealth = reader.GetBool("nametagShowHealth");
         g_config.nametagShowArmor = reader.GetBool("nametagShowArmor");
+        g_config.nametagShowHeldItem = reader.GetBool("nametagShowHeldItem", true);
         g_config.nametagHideVanilla = reader.GetBool("nametagHideVanilla");
         g_config.chestEsp = reader.GetBool("chestEsp");
         g_config.chestStealer = reader.GetBool("chestStealerEnabled");
@@ -11883,6 +12012,7 @@ void ParseConfig(const std::string& line) {
 
         g_config.nametagShowHealth = reader.GetBool("nametagShowHealth");
         g_config.nametagShowArmor = reader.GetBool("nametagShowArmor");
+        g_config.nametagShowHeldItem = reader.GetBool("nametagShowHeldItem", true);
         g_config.nametagHideVanilla = reader.GetBool("nametagHideVanilla");
 
         int nametagMaxCount = reader.GetInt("nametagMaxCount", -1);
@@ -11974,6 +12104,14 @@ void ParseConfig(const std::string& line) {
         g_config.pixelPartyAutoWalk = reader.GetBool("pixelPartyAutoWalk");
 
         g_config.hudEditor = reader.GetBool("hudEditor");
+        }
+
+        // HUD editor state is protected separately so the long configuration
+        // parse cannot block render/editor work. Keep the established HUD ->
+        // config lock order for this short reconciliation and layout snapshot.
+        {
+        LockGuard hudLock(g_hudEditorMutex);
+        LockGuard lk(g_configMutex);
         if (!g_config.hudEditor) {
             g_hudEditor.grabbedId.clear();
             g_hudEditor.mode = lc::HudEditorState::Mode::None;
@@ -11992,31 +12130,69 @@ void ParseConfig(const std::string& line) {
             }
             g_hudLayout = incoming;
         }
+        }
     }
 }
 
-bool TrySendCapabilities(SOCKET sock) {
+bool TrySendCapabilities(SOCKET sock, bool newConnection) {
     if (sock == INVALID_SOCKET) return false;
 
     const char* capabilitiesJson = lc::LegacyCapabilitiesJson();
-    int sent = send(sock, capabilitiesJson, (int)strlen(capabilitiesJson), 0);
-    if (sent == SOCKET_ERROR) {
+    const size_t payloadLength = strlen(capabilitiesJson);
+    static SOCKET pendingSocket = INVALID_SOCKET;
+    static size_t pendingOffset = 0;
+    if (newConnection || pendingSocket != sock) {
+        pendingSocket = sock;
+        pendingOffset = 0;
+    }
+    while (pendingOffset < payloadLength) {
+        int sent = send(sock, capabilitiesJson + pendingOffset,
+                        (int)(payloadLength - pendingOffset), 0);
+        if (sent > 0) {
+            pendingOffset += (size_t)sent;
+            continue;
+        }
         int err = WSAGetLastError();
-        if (err == WSAEWOULDBLOCK) return false;
+        if (sent == SOCKET_ERROR && err == WSAEWOULDBLOCK) return false;
         Log("Capabilities send failed, err=" + std::to_string(err));
+        pendingSocket = INVALID_SOCKET;
+        pendingOffset = 0;
         return false;
     }
+    pendingSocket = INVALID_SOCKET;
+    pendingOffset = 0;
     return true;
+}
+
+// Preserve newline-delimited JSON framing even when the nonblocking socket is
+// temporarily backpressured.  A timeout drops this complete line; it never
+// publishes a truncated JSON document that would poison the receive buffer.
+static int SendJsonLine(SOCKET sock, const std::string& line) {
+    size_t offset = 0;
+    while (offset < line.size()) {
+        int sent = send(sock, line.data() + offset, (int)(line.size() - offset), 0);
+        if (sent > 0) { offset += (size_t)sent; continue; }
+        if (sent == 0) return -1;
+        int err = WSAGetLastError();
+        if (err != WSAEWOULDBLOCK) return -1;
+        fd_set writable;
+        FD_ZERO(&writable);
+        FD_SET(sock, &writable);
+        timeval wait = { 0, 5000 };
+        if (select(0, nullptr, &writable, nullptr, &wait) <= 0) return -1;
+    }
+    return 1;
 }
 
 void ServerLoop() {
     WSADATA wsaData; WSAStartup(MAKEWORD(2, 2), &wsaData);
-    g_serverSocket = socket(AF_INET, SOCK_STREAM, 0);
-    int opt = 1; setsockopt(g_serverSocket, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
+    SOCKET serverSocket = socket(AF_INET, SOCK_STREAM, 0);
+    AtomicSocketStore(&g_serverSocket, serverSocket);
+    int opt = 1; setsockopt(serverSocket, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
     sockaddr_in addr = {}; addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = INADDR_ANY; addr.sin_port = htons(25590);
-    bind(g_serverSocket, (sockaddr*)&addr, sizeof(addr));
-    listen(g_serverSocket, 1);
+    bind(serverSocket, (sockaddr*)&addr, sizeof(addr));
+    listen(serverSocket, 1);
 
     // FIX: Force C locale for correct JSON float formatting (dots not commas)
     setlocale(LC_NUMERIC, "C"); 
@@ -12032,21 +12208,24 @@ void ServerLoop() {
     bool mapped = DiscoverMappings(env);
     Log(mapped ? "Discovery OK" : "Discovery FAILED");
 
-    while (g_running) {
+    while (IsBridgeRunning()) {
         Log("Waiting for client...");
-        g_clientSocket = accept(g_serverSocket, nullptr, nullptr);
-        if (g_clientSocket == INVALID_SOCKET) { if (!g_running) break; continue; }
+        SOCKET clientSocket = accept(serverSocket, nullptr, nullptr);
+        AtomicSocketStore(&g_clientSocket, clientSocket);
+        if (clientSocket == INVALID_SOCKET) { if (!IsBridgeRunning()) break; continue; }
         Log("Client connected");
 
         // Set non-blocking for reading config from C#
-        u_long mode = 1; ioctlsocket(g_clientSocket, FIONBIO, &mode);
+        u_long mode = 1; ioctlsocket(clientSocket, FIONBIO, &mode);
 
         lc::BoundedNewlineBuffer readBuf(1024 * 1024);
         std::vector<std::string> receivedConfigLines;
         bool capabilitiesSent = false;
-        while (g_running) {
+        bool capabilitiesAttempted = false;
+        while (IsBridgeRunning()) {
             if (!capabilitiesSent) {
-                capabilitiesSent = TrySendCapabilities(g_clientSocket);
+                capabilitiesSent = TrySendCapabilities(clientSocket, !capabilitiesAttempted);
+                capabilitiesAttempted = true;
                 if (capabilitiesSent) Log("Sent bridge capabilities packet");
             }
 
@@ -12174,6 +12353,7 @@ void ServerLoop() {
             }
             jsonToSend += entitiesJson;
             {
+                LockGuard hudLock(g_hudEditorMutex);
                 LockGuard lk(g_configMutex);
                 if (g_hudEditor.layoutDirty) {
                     jsonToSend += ",\"hudLayout\":";
@@ -12186,10 +12366,7 @@ void ServerLoop() {
             // Send if we have data
             if (!jsonToSend.empty()) {
                 LockGuard lk(g_socketMutex);
-                int sent = send(g_clientSocket, jsonToSend.c_str(), (int)jsonToSend.length(), 0);
-                if (sent == SOCKET_ERROR) {
-                   if (WSAGetLastError() != WSAEWOULDBLOCK) break; 
-                }
+                if (SendJsonLine(clientSocket, jsonToSend) < 0) break;
             }
             RecordNativePerfSince(
                 lc::PERF_STATE_PUBLISH,
@@ -12210,7 +12387,7 @@ void ServerLoop() {
             }
             // Read config from C# (non-blocking)
             char buf[2048];
-            int r = recv(g_clientSocket, buf, sizeof(buf) - 1, 0);
+            int r = recv(clientSocket, buf, sizeof(buf) - 1, 0);
             if (r > 0) {
                 receivedConfigLines.clear();
                 size_t discarded = readBuf.Append(
@@ -12239,7 +12416,8 @@ void ServerLoop() {
             ResetSpeedBridgeMovementTracking();
             AbortAutoRodLegacyTransaction(env, true);
         }
-        closesocket(g_clientSocket); g_clientSocket = INVALID_SOCKET;
+        SOCKET ownedClient = AtomicSocketTake(&g_clientSocket);
+        if (ownedClient != INVALID_SOCKET) closesocket(ownedClient);
         Log("Client disconnected");
     }
     {
@@ -12253,7 +12431,9 @@ void ServerLoop() {
         ka_premotion::Shutdown(env);
     }
     g_jvm->DetachCurrentThread();
-    closesocket(g_serverSocket); WSACleanup();
+    SOCKET ownedServer = AtomicSocketTake(&g_serverSocket);
+    if (ownedServer != INVALID_SOCKET) closesocket(ownedServer);
+    WSACleanup();
 }
 
 // ===================== MAIN THREAD & DLLMAIN =====================
@@ -12286,7 +12466,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved) {
         std::ofstream f(g_logPath.c_str(), std::ios_base::trunc);
         f << "[Bridge] DLL_PROCESS_ATTACH" << std::endl; f.close();
         Log("Log path: " + g_logPath);
-        CreateThread(nullptr, 0, MainThread, nullptr, 0, nullptr);
+        g_legacyMainThreadHandle = CreateThread(nullptr, 0, MainThread, nullptr, 0, nullptr);
     } else if (reason == DLL_PROCESS_DETACH) {
         AbortAutoRodLegacyTransaction(nullptr, false);
         ResetFightStatusState18();

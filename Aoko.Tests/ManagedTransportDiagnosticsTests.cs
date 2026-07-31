@@ -106,6 +106,23 @@ public sealed class ManagedTransportDiagnosticsTests
     }
 
     [Fact]
+    public void ModernFastState_UsesExplicitPartialEnvelope()
+    {
+        string root = FindRepoRoot();
+        string modernSource = File.ReadAllText(
+            Path.Combine(root, "McInjector", "src", "main", "cpp", "bridge_261.cpp"));
+        string clientSource = File.ReadAllText(
+            Path.Combine(root, "Aoko", "Core", "GameStateClient.cs"));
+
+        Assert.Contains("\\\"partial\\\":true", modernSource, StringComparison.Ordinal);
+        Assert.Contains("GameStatePatchMerger.IsPartial", clientSource, StringComparison.Ordinal);
+        Assert.Contains("ModernFullStateDue", modernSource, StringComparison.Ordinal);
+        Assert.Contains("supportsStatePatches = true", clientSource, StringComparison.Ordinal);
+        Assert.Contains("supportsStatePatches = false", modernSource, StringComparison.Ordinal);
+        Assert.Contains("supportsStatePatches && lc::ModernStateNeedsFast", modernSource, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void DisabledDiagnostics_DoNotProduceSnapshots()
     {
         var diagnostics = new ManagedTransportDiagnostics(

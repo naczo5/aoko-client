@@ -45,6 +45,7 @@
 #include "screen_projection.h"
 #include "telemetry_schedule.h"
 #include "native_perf_diagnostics.h"
+#include "mapping_probe_gate.h"
 #include "jni_core/scoped_env.h"
 #include "jni_core/local_frame.h"
 #include "jni_core/resolver.h"
@@ -228,6 +229,8 @@ struct Config {
     int   keybindFightStatus = 0;
     bool  nametagHealth  = true;
     bool  nametagArmor   = true;
+    bool  nametagShowHeldItem = true;
+    bool  supportsStatePatches = false;
     bool  nametagHideVanilla = false;
     int   nametagMaxCount = 8;
     int   chestEspMaxCount = 5;
@@ -323,6 +326,7 @@ static Mutex g_blockEspTargetsMutex;
 static volatile LONG g_blockEspTargetsVersion = 0;
 static lc::HudLayout g_hudLayout = lc::HudLayout::DefaultLayout();
 static lc::HudEditorState g_hudEditor;
+static Mutex g_hudEditorMutex;
 static volatile LONG g_forceGlobalJniRemap_121 = 0;
 static void SetNativePerfDiagnosticsEnabled(bool enabled);
 
@@ -357,6 +361,7 @@ static void ParseConfig(const std::string& line) {
     if (!perfDiagnostics.empty())
         SetNativePerfDiagnosticsEnabled(reader.GetBool("perfDiagnostics"));
 
+    {
     LockGuard lk(g_configMutex);
     int prevReloadNonce = g_config.reloadMappingsNonce;
     g_config.armed         = reader.GetBool("armed");
@@ -367,6 +372,9 @@ static void ParseConfig(const std::string& line) {
     g_config.clickInChests = reader.GetBool("clickInChests");
     g_config.aimAssist     = reader.GetBool("aimAssist");
     g_config.triggerbot    = reader.GetBool("triggerbot");
+    // Partial fast-state packets are opt-in so a newer bridge remains safe
+    // with an older loader that deserializes each line as a complete GameState.
+    g_config.supportsStatePatches = reader.GetBool("supportsStatePatches", false);
 
     g_config.killAura = reader.GetBool("killAura");
     g_config.killAuraRecordCps = reader.GetString("killAuraCpsMode") == "record";
@@ -465,6 +473,7 @@ static void ParseConfig(const std::string& line) {
     g_config.keybindFightStatus = reader.GetInt("keybindFightStatus", 0);
     g_config.nametagHealth = reader.GetBool("nametagShowHealth");
     g_config.nametagArmor  = reader.GetBool("nametagShowArmor");
+    g_config.nametagShowHeldItem = reader.GetBool("nametagShowHeldItem", true);
     g_config.nametagHideVanilla = reader.GetBool("nametagHideVanilla");
     g_config.nametagMaxCount = lc::ClampInt(reader.GetInt("nametagMaxCount", g_config.nametagMaxCount), 1, 20);
     g_config.chestEspMaxCount = lc::ClampInt(reader.GetInt("chestEspMaxCount", g_config.chestEspMaxCount), 1, 20);
@@ -552,6 +561,14 @@ static void ParseConfig(const std::string& line) {
     }
 
     g_config.hudEditor = reader.GetBool("hudEditor");
+    }
+
+    // HUD editor state is protected separately so the long configuration parse
+    // cannot block render/editor work. Keep the established HUD -> config lock
+    // order for this short reconciliation and layout snapshot.
+    {
+    LockGuard hudLock(g_hudEditorMutex);
+    LockGuard lk(g_configMutex);
     if (!g_config.hudEditor) {
         g_hudEditor.grabbedId.clear();
         g_hudEditor.mode = lc::HudEditorState::Mode::None;
@@ -570,20 +587,54 @@ static void ParseConfig(const std::string& line) {
         }
         g_hudLayout = incoming;
     }
+    }
 }
 
-static bool TrySendCapabilities(SOCKET sock) {
+static bool TrySendCapabilities(SOCKET sock, bool newConnection) {
     if (sock == INVALID_SOCKET) return false;
 
     const char* capabilitiesJson = lc::ModernCapabilitiesJson();
-    int sent = send(sock, capabilitiesJson, (int)strlen(capabilitiesJson), 0);
-    if (sent == SOCKET_ERROR) {
+    const size_t payloadLength = std::strlen(capabilitiesJson);
+    static SOCKET pendingSocket = INVALID_SOCKET;
+    static size_t pendingOffset = 0;
+    if (newConnection || pendingSocket != sock) {
+        pendingSocket = sock;
+        pendingOffset = 0;
+    }
+    while (pendingOffset < payloadLength) {
+        int sent = send(sock, capabilitiesJson + pendingOffset,
+                        (int)(payloadLength - pendingOffset), 0);
+        if (sent > 0) {
+            pendingOffset += (size_t)sent;
+            continue;
+        }
         int err = WSAGetLastError();
-        if (err == WSAEWOULDBLOCK) return false;
+        if (sent == SOCKET_ERROR && err == WSAEWOULDBLOCK) return false;
         Log("Capabilities send failed, err=" + std::to_string(err));
+        pendingSocket = INVALID_SOCKET;
+        pendingOffset = 0;
         return false;
     }
+    pendingSocket = INVALID_SOCKET;
+    pendingOffset = 0;
     return true;
+}
+
+static int SendJsonLine121(SOCKET sock, const std::string& line) {
+    size_t offset = 0;
+    while (offset < line.size()) {
+        int sent = send(sock, line.data() + offset, (int)(line.size() - offset), 0);
+        if (sent > 0) { offset += (size_t)sent; continue; }
+        if (sent == 0) return -1;
+        int err = WSAGetLastError();
+        if (err != WSAEWOULDBLOCK) return -1;
+        fd_set writable;
+        FD_ZERO(&writable);
+        FD_SET(sock, &writable);
+        timeval wait = { 0, 5000 };
+        if (select(0, nullptr, &writable, nullptr, &wait) <= 0) return -1;
+    }
+    return 1;
 }
 
 struct OverlayTheme {
@@ -706,14 +757,35 @@ static OverlayTheme ResolveOverlayTheme(const std::string& guiTheme)
 }
 
 // ===================== GLOBALS =====================
-static bool g_running          = true;
+static volatile LONG g_running = 1;
+static bool IsBridgeRunning121() {
+    return InterlockedCompareExchange(&g_running, 0, 0) != 0;
+}
 static bool g_imguiInitialized = false;
 static bool g_realGuiOpen      = false;
 static int  g_imguiWarmupFrames = 0;
 static bool g_imguiPhase1Done = false;
 
-static SOCKET g_serverSocket = INVALID_SOCKET;
-static SOCKET g_clientSocket = INVALID_SOCKET;
+static volatile SOCKET g_serverSocket = INVALID_SOCKET;
+static volatile SOCKET g_clientSocket = INVALID_SOCKET;
+static SOCKET AtomicSocketLoad121(const volatile SOCKET* slot) {
+    return (SOCKET)(ULONG_PTR)InterlockedCompareExchangePointer(
+        reinterpret_cast<PVOID volatile*>(const_cast<volatile SOCKET*>(slot)), nullptr, nullptr);
+}
+static void AtomicSocketStore121(volatile SOCKET* slot, SOCKET value) {
+    InterlockedExchangePointer(reinterpret_cast<PVOID volatile*>(slot), (PVOID)(ULONG_PTR)value);
+}
+static SOCKET AtomicSocketTake121(volatile SOCKET* slot) {
+    for (;;) {
+        SOCKET current = AtomicSocketLoad121(slot);
+        if (current == INVALID_SOCKET) return INVALID_SOCKET;
+        if ((SOCKET)(ULONG_PTR)InterlockedCompareExchangePointer(
+                reinterpret_cast<PVOID volatile*>(slot),
+                (PVOID)(ULONG_PTR)INVALID_SOCKET,
+                (PVOID)(ULONG_PTR)current) == current)
+            return current;
+    }
+}
 
 // Track the OpenGL context used for ImGui rendering. Minecraft/Lunar can recreate GL contexts
 // (resolution/fullscreen changes, GPU resets, etc.). If we keep using stale GL objects, the
@@ -822,6 +894,21 @@ static unsigned long long g_lastCooldownPerTickFallbackLogMs = 0;
 static unsigned long long g_lastCooldownSampleLogMs = 0;
 static Mutex       g_jniStateMtx;
 static Mutex       g_jniRemapMtx;
+// Incremented whenever the JNI cache is invalidated. Lazy optional mapping
+// probes use this token to avoid repeating the same failing JNI lookups on
+// every scan tick while still retrying after an explicit remap/world reload.
+static volatile LONG g_mappingGeneration121 = 1;
+static lc::MappingProbeGate g_entityMappingProbeGate121;
+static lc::MappingProbeGate g_speedBridgeWorldMappingProbeGate121;
+static lc::MappingProbeGate g_speedBridgeStateMappingProbeGate121;
+static lc::MappingProbeGate g_blockEspMappingProbeGate121;
+static lc::MappingProbeGate g_blockEspBaseMappingProbeGate121;
+static lc::MappingProbeGate g_chestStateMappingProbeGate121;
+static lc::MappingProbeGate g_chestBaseStateMappingProbeGate121;
+static lc::MappingProbeGate g_chunkAccessMappingProbeGate121;
+static lc::MappingProbeGate g_blockEntityClassProbeGate121;
+static lc::MappingProbeGate g_chunkEntityMappingProbeGate121;
+static lc::MappingProbeGate g_blockPosMappingProbeGate121;
 static std::string g_lastLoggedScreen;
 static jfieldID    g_inGameHudField_121 = nullptr; // MinecraftClient.inGameHud
 static std::vector<jfieldID> g_hudTextFields_121;  // InGameHud Text fields
@@ -874,6 +961,11 @@ static jfieldID  g_chestStealerSlotYField_121 = nullptr;
 static jmethodID g_chestStealerSlotHasStackMethod_121 = nullptr;
 static DWORD     g_lastChestStealerMappingLogMs_121 = 0;
 static DWORD     g_lastChestStealerSkipLogMs_121 = 0;
+
+static unsigned long long CurrentMappingGeneration121() {
+    return static_cast<unsigned long long>(
+        InterlockedCompareExchange(&g_mappingGeneration121, 0, 0));
+}
 
 // ===================== AUTOTOTEM MODULE JNI GLOBALS =====================
 static bool g_autoTotemMethodsResolved = false;
@@ -2104,6 +2196,10 @@ static bool IsChestLikeToken(const std::string& valueLower) {
 
 static void EnsureChestStateDetectionCaches(JNIEnv* env, jobject be) {
     if (!env) return;
+    const unsigned long long generation = CurrentMappingGeneration121();
+    const bool probeBase = g_chestBaseStateMappingProbeGate121.Begin(generation);
+    const bool probeEntity = be && g_chestStateMappingProbeGate121.Begin(generation);
+    if (!probeBase && !probeEntity) return;
 
     if (!g_blockStateClass_121) {
         const char* stateNames[] = {
@@ -2198,10 +2294,11 @@ static void EnsureChestStateDetectionCaches(JNIEnv* env, jobject be) {
 static bool IsChestBlockEntity(JNIEnv* env, jobject be) {
     if (!env || !be) return false;
     
-    static bool init = false;
-    static bool s_initLogged = false;
-    if (!init) {
-        init = true;
+    static unsigned long long initGeneration = 0;
+    static unsigned long long loggedGeneration = 0;
+    const unsigned long long mappingGeneration = CurrentMappingGeneration121();
+    if (initGeneration != mappingGeneration) {
+        initGeneration = mappingGeneration;
         const char* yarn[] = { "net.minecraft.class_2595", "net.minecraft.class_2611", "net.minecraft.class_3719", "net.minecraft.class_2627" };
         const char* moj[]  = { "net.minecraft.world.level.block.entity.ChestBlockEntity", "net.minecraft.world.level.block.entity.EnderChestBlockEntity", "net.minecraft.world.level.block.entity.BarrelBlockEntity", "net.minecraft.world.level.block.entity.ShulkerBoxBlockEntity" };
         
@@ -2225,8 +2322,8 @@ static bool IsChestBlockEntity(JNIEnv* env, jobject be) {
     }
 
     // Diagnostic: log BE class name on first call
-    if (!s_initLogged) {
-        s_initLogged = true;
+    if (loggedGeneration != mappingGeneration) {
+        loggedGeneration = mappingGeneration;
         jclass beCls = env->GetObjectClass(be);
         std::string beClsName = beCls ? GetClassNameFromClass(env, beCls) : "null";
         if (beCls) env->DeleteLocalRef(beCls);
@@ -3258,6 +3355,16 @@ static double SpeedBridgeSupportProbeDistance121(const Config& cfg) {
 
 static void EnsureSpeedBridgeBlockProbeJni(JNIEnv* env, jobject worldObj, jobject stateObj) {
     if (!env) return;
+    // World and BlockState objects arrive on separate calls. Keep independent
+    // gates so resolving the world method does not suppress the later state
+    // method probe for the same mapping generation.
+    if (worldObj && !g_speedBridgeWorldMappingProbeGate121.Begin(CurrentMappingGeneration121())) {
+        worldObj = nullptr;
+    }
+    if (stateObj && !g_speedBridgeStateMappingProbeGate121.Begin(CurrentMappingGeneration121())) {
+        stateObj = nullptr;
+    }
+    if (!worldObj && !stateObj) return;
 
     if (!g_blockPosClass_121) {
         const char* names[] = { "net.minecraft.class_2338", "net.minecraft.core.BlockPos", "net.minecraft.util.math.BlockPos", nullptr };
@@ -4926,7 +5033,7 @@ static void UpdatePlayerListOverlay(JNIEnv* env) {
     }
     OverlayViewport121 managedProjectionViewport;
     const bool canProjectManagedAim =
-        cfg.aimAssist &&
+        (cfg.aimAssist || cfg.triggerbot) &&
         managedProjectionCamera.camFound &&
         ReadOverlayViewport121(&managedProjectionViewport);
 
@@ -5035,6 +5142,7 @@ static void UpdatePlayerListOverlay(JNIEnv* env) {
     // Fast path: use HelperBridge to pack all entity data in one JNI call.
     int processedCount = 0;
     bool usedHelper = false;
+    const bool needHeldItem = cfg.nametagShowHeldItem && (cfg.nametags || cfg.closestPlayer);
     // The renderer projector is only callable on this background JNI thread.
     // Its screen coordinates are stale by the next swap frame during fast turns,
     // so render-time angle projection owns Fabric visual placement instead.
@@ -5249,7 +5357,9 @@ static void UpdatePlayerListOverlay(JNIEnv* env) {
                 }
 
                 int armor = GetEntityArmor(env, lw.obj);
-                std::string held = GetHeldItemInfo(env, lw.obj);
+                std::string held = needHeldItem
+                    ? GetHeldItemInfo(env, lw.obj)
+                    : std::string();
                 appendPlayer(name, lw, hp, healthAvailable, absorption, armor,
                     g_getArmor_121 != nullptr, hurtTime, hurtTimeAvailable, held);
                 processedCount++;
@@ -5301,6 +5411,7 @@ static void UpdatePlayerListOverlay(JNIEnv* env) {
 
 // Ensure the base BlockEntity class is cached.
 static void EnsureBlockEntityClass(JNIEnv* env) {
+    if (!env || !g_blockEntityClassProbeGate121.Begin(CurrentMappingGeneration121())) return;
     if (g_blockEntityClass_121) return;
     const char* names[] = { "net.minecraft.class_2586", "net.minecraft.world.level.block.entity.BlockEntity", "net.minecraft.tileentity.TileEntity", nullptr };
     jclass be = nullptr;
@@ -5321,6 +5432,9 @@ static void EnsureBlockEntityClass(JNIEnv* env) {
 
 // Try known getChunk(int,int) signatures directly; only fall back to reflection if needed.
 static bool EnsureChunkAccess(JNIEnv* env, jobject worldObj) {
+    if (!env || !g_chunkAccessMappingProbeGate121.Begin(CurrentMappingGeneration121())) {
+        return g_worldGetChunkMethod_121 != nullptr;
+    }
     if (g_worldGetChunkMethod_121) return true;
     if (!worldObj) return false;
 
@@ -5459,6 +5573,9 @@ static bool EnsureChunkAccess(JNIEnv* env, jobject worldObj) {
 // they are class_5564 wrappers around BlockEntityTickInvoker.  The real blockEntities map
 // lives on the parent class class_2791 with a version-specific obfuscated name.
 static bool EnsureChunkBEMap(JNIEnv* env, jobject chunkObj) {
+    if (!env || !g_chunkEntityMappingProbeGate121.Begin(CurrentMappingGeneration121())) {
+        return g_chunkBlockEntitiesMapField_121 != nullptr;
+    }
     if (g_chunkBlockEntitiesMapField_121) return true;
     if (!chunkObj) return false;
 
@@ -5651,7 +5768,7 @@ static bool EnsureChunkBEMap(JNIEnv* env, jobject chunkObj) {
 }
 
 static void EnsureBlockPosCache(JNIEnv* env, jobject beObj) {
-    if (!env || !beObj) return;
+    if (!env || !beObj || !g_blockPosMappingProbeGate121.Begin(CurrentMappingGeneration121())) return;
 
     if (!g_beGetPos_121) {
         jclass beCls = env->GetObjectClass(beObj);
@@ -6167,6 +6284,9 @@ static std::string BuildModernChestStealerStateJson(JNIEnv* env, jobject screenO
         env->DeleteLocalRef(slotsObj);
         return "null";
     }
+    // A normal chest has at most 54 storage slots. Keep a small allowance for
+    // unusual container layouts while bounding JNI work and wire payload size.
+    if (chestSlotCount > 90) chestSlotCount = 90;
 
     std::ostringstream slotsJson;
     int count = 0;
@@ -6552,6 +6672,11 @@ static long long BlockEspChunkKey121(int cx, int cz) {
 static int BlockEspAbsI(int v) { return v < 0 ? -v : v; }
 
 static void EnsureBlockEspSectionMappings(JNIEnv* env, jobject chunkObj, jobject worldObj) {
+    if (!env) return;
+    const unsigned long long generation = CurrentMappingGeneration121();
+    const bool probeBase = g_blockEspBaseMappingProbeGate121.Begin(generation);
+    const bool probeChunk = chunkObj && g_blockEspMappingProbeGate121.Begin(generation);
+    if (!probeBase && !probeChunk) return;
     if (chunkObj && !g_chunkGetSectionArray_121) {
         jclass cls = env->GetObjectClass(chunkObj);
         if (cls) {
@@ -9012,7 +9137,7 @@ static void DiscoverWorldPlayersListField(JNIEnv* env, jobject worldObj) {
 }
 
 static void EnsureEntityMethods(JNIEnv* env, jobject entObj) {
-    if (!entObj) return;
+    if (!env || !entObj || !g_entityMappingProbeGate121.Begin(CurrentMappingGeneration121())) return;
     jclass entCls = env->GetObjectClass(entObj);
     if (entCls) {
         if (!g_getX_121) {
@@ -9889,6 +10014,47 @@ static HMODULE g_hModule121 = nullptr;
 static HANDLE  g_mainThreadHandle = nullptr;
 static HANDLE  g_chestThreadHandle = nullptr;
 static HANDLE  g_fastPollThreadHandle = nullptr;
+static volatile LONG g_detachRequested121 = 0;
+static Mutex g_detachCleanupMutex121;
+static volatile LONG g_modernRenderCleanupRequested = 0;
+static volatile LONG g_modernRenderCallbacksInFlight = 0;
+
+class ModernRenderCallbackLease {
+    bool active_;
+public:
+    ModernRenderCallbackLease() : active_(false) {
+        if (InterlockedCompareExchange(&g_modernRenderCleanupRequested, 0, 0) != 0) return;
+        InterlockedIncrement(&g_modernRenderCallbacksInFlight);
+        if (InterlockedCompareExchange(&g_modernRenderCleanupRequested, 0, 0) == 0) {
+            active_ = true;
+        } else {
+            InterlockedDecrement(&g_modernRenderCallbacksInFlight);
+        }
+    }
+    ~ModernRenderCallbackLease() {
+        if (active_) InterlockedDecrement(&g_modernRenderCallbacksInFlight);
+    }
+    bool Active() const { return active_; }
+};
+
+static void WaitForModernRenderCallbacks()
+{
+    while (InterlockedCompareExchange(&g_modernRenderCallbacksInFlight, 0, 0) != 0)
+        Sleep(1);
+}
+
+static bool WaitForOwnedThreadExit(HANDLE& handle, const char* name, DWORD timeoutMs) {
+    if (!handle) return true;
+    const DWORD result = WaitForSingleObject(handle, timeoutMs);
+    if (result != WAIT_OBJECT_0) {
+        Log(std::string("Detach: timed out waiting for ") + (name ? name : "worker") +
+            "; keeping bridge loaded for safety.");
+        return false;
+    }
+    CloseHandle(handle);
+    handle = nullptr;
+    return true;
+}
 
 // ===================== LOGGER =====================
 static std::string g_logPath = "bridge_261_debug.log";
@@ -10167,6 +10333,8 @@ static void CleanupJniGlobals(JNIEnv* env) {
 static void ResetModernJniRuntimeCaches121(JNIEnv* env, const char* reason) {
     if (!env) return;
 
+    InterlockedIncrement(&g_mappingGeneration121);
+
     ResetAutoRodModernCaches(env);
     CleanupJniGlobals(env);
     ResetNametagSuppressionCaches121(env, nullptr);
@@ -10349,6 +10517,12 @@ static void ResetModernJniRuntimeCaches121(JNIEnv* env, const char* reason) {
 
 static void CleanupImGuiAndHooks() {
 
+    // Stop new OpenGL hook entries before destroying ImGui/Vulkan resources;
+    // callbacks already inside the hook hold a lease and are drained first.
+    InterlockedExchange(&g_modernRenderCleanupRequested, 1);
+    MH_DisableHook(MH_ALL_HOOKS);
+    WaitForModernRenderCallbacks();
+
     // Tear down the Vulkan overlay backend (and its hooks) FIRST, while the ImGui context
     // is still alive — ImGui_ImplVulkan_Shutdown() requires a valid context. No-ops on
     // OpenGL sessions where the Vulkan backend was never initialized.
@@ -10376,34 +10550,48 @@ static void CleanupImGuiAndHooks() {
     g_realGuiOpen = false;
 
     MH_DisableHook(MH_ALL_HOOKS);
-    o_wglSwapBuffers = nullptr;
     MH_Uninitialize();
 }
 
 extern "C" __declspec(dllexport) void Detach() {
+    if (InterlockedExchange(&g_detachRequested121, 1) != 0) {
+        Log("Detach requested more than once; cleanup already in progress.");
+        return;
+    }
     Log("Detach requested (26.1)");
     ClearAutoRodQueue();
-    g_running = false;
+    InterlockedExchange(&g_running, 0);
 
-    if (g_clientSocket != INVALID_SOCKET) {
-        closesocket(g_clientSocket);
-        g_clientSocket = INVALID_SOCKET;
+    SOCKET clientSocket = AtomicSocketTake121(&g_clientSocket);
+    if (clientSocket != INVALID_SOCKET) {
+        shutdown(clientSocket, SD_BOTH);
+        closesocket(clientSocket);
     }
-    if (g_serverSocket != INVALID_SOCKET) {
-        closesocket(g_serverSocket);
-        g_serverSocket = INVALID_SOCKET;
+    SOCKET serverSocket = AtomicSocketTake121(&g_serverSocket);
+    if (serverSocket != INVALID_SOCKET) {
+        shutdown(serverSocket, SD_BOTH);
+        closesocket(serverSocket);
     }
 
     CreateThread(nullptr, 0, [](LPVOID) -> DWORD {
-        for (int i = 0; i < 30; i++) {
-            bool chestDone = !g_chestThreadHandle || WaitForSingleObject(g_chestThreadHandle, 50) == WAIT_OBJECT_0;
-            bool pollDone = !g_fastPollThreadHandle || WaitForSingleObject(g_fastPollThreadHandle, 50) == WAIT_OBJECT_0;
-            if (chestDone && pollDone) break;
-            Sleep(25);
+        LockGuard cleanupGuard(g_detachCleanupMutex121);
+        // JNI globals and renderer resources must not be deleted while an
+        // attached bridge worker can still execute code that references them.
+        // The old bounded polling loop could unload the DLL after ~2 seconds
+        // even when a worker was still inside JNI.  Wait for every owned
+        // thread before entering the cold-path cleanup; if a thread is stuck,
+        // leave the module loaded rather than turning a shutdown into a use-
+        // after-free or an invalid instruction fetch.
+        const bool workersStopped =
+            WaitForOwnedThreadExit(g_chestThreadHandle, "chest scan thread", 5000) &&
+            WaitForOwnedThreadExit(g_fastPollThreadHandle, "fast poll thread", 5000) &&
+            WaitForOwnedThreadExit(g_mainThreadHandle, "main thread", 5000);
+        if (!workersStopped) {
+            // The caller may retry after a transient JNI stall; do not leave
+            // the idempotence latch permanently closed when no cleanup ran.
+            InterlockedExchange(&g_detachRequested121, 0);
+            return 0;
         }
-
-        if (g_chestThreadHandle) { CloseHandle(g_chestThreadHandle); g_chestThreadHandle = nullptr; }
-        if (g_fastPollThreadHandle) { CloseHandle(g_fastPollThreadHandle); g_fastPollThreadHandle = nullptr; }
 
         JNIEnv* env = nullptr;
         bool attached = false;
@@ -10417,6 +10605,11 @@ extern "C" __declspec(dllexport) void Detach() {
             }
         }
 
+        // These hooks may have been installed before mapping discovery started;
+        // own their final shutdown here as well as in the normal worker exit
+        // path so a failed/partial startup cannot leave callbacks in the DLL.
+        lc::ShutdownNickHiderJvmti(env);
+        ka_premotion::Shutdown(env);
         CleanupImGuiAndHooks();
         ResetAutoRodModernCaches(env);
         CleanupJniGlobals(env);
@@ -10762,6 +10955,10 @@ static bool ResolveGuiScreenPath(JNIEnv* env, jobject mcInst, jclass mcClass, jo
 // discovers screen field by method hierarchy walking, finds ChatScreen + setScreen.
 static bool DiscoverJniMappings(JNIEnv* env) {
     TRACE261_PATH("enter");
+    // A discovery pass is an explicit mapping-generation boundary. Optional
+    // lazy probes may safely retry once after this pass, including startup and
+    // automatic recovery attempts that do not go through the full reset path.
+    InterlockedIncrement(&g_mappingGeneration121);
     Log("Starting JNI discovery for 26.1...");
 
     // Get JVMTI
@@ -12499,9 +12696,8 @@ static DWORD WINAPI FastPollThreadProc(LPVOID);
 static DWORD WINAPI ChestScanThreadProc(LPVOID);
 
 static void StartBackgroundThreadsIfNeeded() {
-    static bool s_started = false;
-    if (s_started || !g_jvm) return;
-    s_started = true;
+    static volatile LONG s_started = 0;
+    if (!g_jvm || InterlockedCompareExchange(&s_started, 1, 0) != 0) return;
     g_chestThreadHandle = CreateThread(nullptr, 0, ChestScanThreadProc, nullptr, 0, nullptr);
     g_fastPollThreadHandle = CreateThread(nullptr, 0, FastPollThreadProc, nullptr, 0, nullptr);
     Log("Background JNI threads started (state poll + chest scan).");
@@ -12977,7 +13173,7 @@ static void ExecuteAutoRodModern(JNIEnv* env) {
 static DWORD WINAPI FastPollThreadProc(LPVOID) {
     JNIEnv* env = nullptr;
     if (!g_jvm || g_jvm->AttachCurrentThread((void**)&env, nullptr) != JNI_OK) return 1;
-    while (g_running) {
+    while (IsBridgeRunning121()) {
         if (g_stateJniReady) {
             LockGuard remapGuard(g_jniRemapMtx);
             if (g_stateJniReady) {
@@ -13006,7 +13202,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
     // (arena teleports) that bypass the loading-screen / world-instance guards.
     double lastScanX = 0, lastScanY = 0, lastScanZ = 0;
     bool lastScanPosValid = false;
-    while (g_running) {
+    while (IsBridgeRunning121()) {
         const unsigned long long scanLoopPerfStarted =
             GetNativePerfDiagnostics().Enabled() ? NativePerfTimestamp() : 0;
         const DWORD nickHiderNow = GetTickCount();
@@ -13028,7 +13224,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                 ReleaseSpeedBridgeSneak121(env);
                 ResetSpeedBridgeMovementTracking121();
                 ResetModernJniRuntimeCaches121(env, "manual-reload-request");
-                for (int attempt = 0; attempt < 8 && g_running; ++attempt) {
+                for (int attempt = 0; attempt < 8 && IsBridgeRunning121(); ++attempt) {
                     if (DiscoverJniMappings(env)) {
                         remapReady = true;
                         break;
@@ -13154,7 +13350,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                     static bool s_fightStatusWasEnabled = false;
                     if (!cfg.fightStatus && s_fightStatusWasEnabled) ResetFightStatusState121();
                     s_fightStatusWasEnabled = cfg.fightStatus;
-                    if (cfg.nametags || cfg.nickHiderEnabled || cfg.closestPlayer || cfg.fightStatus || cfg.aimAssist || cfg.nametagHideVanilla || g_nametagSuppressionActive_121) {
+                    if (cfg.nametags || cfg.nickHiderEnabled || cfg.closestPlayer || cfg.fightStatus || cfg.aimAssist || cfg.triggerbot || cfg.nametagHideVanilla || g_nametagSuppressionActive_121) {
                         NativePerfScope playerScanPerf(lc::PERF_PLAYER_SCAN);
                         UpdatePlayerListOverlay(env);
                     }
@@ -13223,7 +13419,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
         }
         RecordNativePerfSince(lc::PERF_SCAN_LOOP, scanLoopPerfStarted);
         MaybeLogNativePerfDiagnostics();
-        Sleep((cfg.aimAssist || cfg.killAura) ? 5 : 50); // fast poll for aim assist / Kill Aura
+        Sleep((cfg.aimAssist || cfg.triggerbot || cfg.killAura) ? 5 : 50); // fast poll for latency-sensitive combat
     }
     ReleaseSpeedBridgeSneak121(env);
     ResetSpeedBridgeMovementTracking121();
@@ -13235,6 +13431,13 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
 
 // ===================== HUD EDITOR =====================
 static void UpdateHudEditor(int winW, int winH) {
+    struct EditorElem { std::string id; ImVec2 tl; float w, h; };
+    static thread_local std::vector<EditorElem> elems;
+    lc::HudLayout layoutDraw;
+    std::string grabbedIdForDraw;
+
+    {
+    LockGuard hudLock(g_hudEditorMutex);
     if (!g_hudEditor.active) return;
     if (winW <= 0 || winH <= 0) return;
 
@@ -13277,8 +13480,7 @@ static void UpdateHudEditor(int winW, int winH) {
     s_prevDown = physDown;
 
     // Struct for editor-visible elements
-    struct EditorElem { std::string id; ImVec2 tl; float w, h; };
-    std::vector<EditorElem> elems;
+    elems.clear();
 
     lc::HudLayout layoutSnap;
     { LockGuard lk(g_configMutex); layoutSnap = g_hudLayout; }
@@ -13359,10 +13561,12 @@ static void UpdateHudEditor(int winW, int winH) {
         g_hudEditor.layoutDirty = true;
     }
 
-    // 4. Draw bounding boxes for each element
-    ImDrawList* fg = ImGui::GetForegroundDrawList();
-    lc::HudLayout layoutDraw;
+    // Snapshot the final layout and editor selection before releasing the
+    // editor mutex; ImGui draw calls must not hold it.
     { LockGuard lk(g_configMutex); layoutDraw = g_hudLayout; }
+    grabbedIdForDraw = g_hudEditor.grabbedId;
+    }
+    ImDrawList* fg = ImGui::GetForegroundDrawList();
     for (const auto& e : elems) {
         lc::HudElementLayout el = layoutDraw.Resolve(e.id);
         float sw = e.w; // already scaled
@@ -13370,7 +13574,7 @@ static void UpdateHudEditor(int winW, int winH) {
         ImVec2 tl = lc::HudElementPixelPos(el, sw, sh, winW, winH);
         ImVec2 br(tl.x + sw, tl.y + sh);
 
-        bool grabbed = (g_hudEditor.grabbedId == e.id);
+        bool grabbed = (grabbedIdForDraw == e.id);
         ImU32 boxCol = grabbed ? IM_COL32(255, 200, 50, 200) : IM_COL32(80, 180, 255, 140);
         fg->AddRect(tl, br, boxCol, 4.0f, 0, grabbed ? 2.0f : 1.5f);
 
@@ -13467,7 +13671,7 @@ static void RenderOverlayPanels(
                     char ab[16]; snprintf(ab, sizeof(ab), "ARM %d", cp.armor);
                     statsRow += ab;
                 }
-                if (!cp.heldItem.empty()) {
+                if (cfg.nametagShowHeldItem && !cp.heldItem.empty()) {
                     if (!statsRow.empty()) statsRow += "  ";
                     statsRow += cp.heldItem;
                 }
@@ -13856,7 +14060,7 @@ static void RenderOverlayPanels(
                                     }
                                     
                                     ImVec2 itemSz = {0,0};
-                                    if (!it.heldItem.empty()) {
+                                    if (cfg.nametagShowHeldItem && !it.heldItem.empty()) {
                                         itemSz = ImGui::CalcTextSize(it.heldItem.c_str());
                                         itemSz.x *= (infoFontSize / ImGui::GetFontSize());
                                         itemSz.y *= (infoFontSize / ImGui::GetFontSize());
@@ -13894,7 +14098,7 @@ static void RenderOverlayPanels(
                                     }
                                     
                                     // Item
-                                    if (!it.heldItem.empty()) {
+                                    if (cfg.nametagShowHeldItem && !it.heldItem.empty()) {
                                         float itx = std::floor(sx - itemSz.x / 2.0f);
                                         fg->AddText(ImGui::GetFont(), infoFontSize, ImVec2(itx + 1, curY + 1), IM_COL32(0, 0, 0, 255), it.heldItem.c_str());
                                         fg->AddText(ImGui::GetFont(), infoFontSize, ImVec2(itx, curY), IM_COL32(255, 200, 80, 250), it.heldItem.c_str());
@@ -14575,6 +14779,7 @@ ImDrawData* Bridge_BuildOverlayDrawData(int winW, int winH) {
     Config cfg;
     lc::HudLayout hudLayout;
     {
+        LockGuard hudLock(g_hudEditorMutex);
         LockGuard lk(g_configMutex);
         cfg = g_config;
         hudLayout = g_hudLayout;
@@ -14601,6 +14806,7 @@ void Bridge_RenderOverlayPanels(bool inWorld) {
     Config cfg;
     lc::HudLayout hudLayout;
     {
+        LockGuard hudLock(g_hudEditorMutex);
         LockGuard lk(g_configMutex);
         cfg = g_config;
         hudLayout = g_hudLayout;
@@ -14631,6 +14837,8 @@ void Bridge_EndOverlayImGuiFrame_OpenGL() {
 // Two-phase init: phase 1 = ImGui context + Win32 (no GL), phase 2 = GL backend (deferred).
 
 BOOL WINAPI hwglSwapBuffers(HDC hDc) {
+    ModernRenderCallbackLease renderLease;
+    if (!renderLease.Active()) return o_wglSwapBuffers(hDc);
     TRACE261_PATH("enter");
     bool hasHdc = TRACE261_IF("hasHdc", hDc != nullptr);
     if (!hasHdc) return o_wglSwapBuffers(hDc);
@@ -14807,6 +15015,7 @@ BOOL WINAPI hwglSwapBuffers(HDC hDc) {
         Config cfg;
         lc::HudLayout hudLayout;
         {
+            LockGuard hudLock(g_hudEditorMutex);
             LockGuard lk(g_configMutex);
             cfg = g_config;
             hudLayout = g_hudLayout;
@@ -14937,7 +15146,7 @@ glfw_done:;
     // TCP Server
     WSADATA wsa; WSAStartup(MAKEWORD(2,2), &wsa);
     SOCKET srv = socket(AF_INET, SOCK_STREAM, 0);
-    g_serverSocket = srv;
+    AtomicSocketStore121(&g_serverSocket, srv);
     int opt = 1; setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, (char*)&opt, sizeof(opt));
     sockaddr_in addr = {}; addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = INADDR_ANY; addr.sin_port = htons(25590);
@@ -14947,22 +15156,51 @@ glfw_done:;
 
     setlocale(LC_NUMERIC, "C");
 
-    while (g_running) {
+    while (IsBridgeRunning121()) {
         SOCKET cli = accept(srv, nullptr, nullptr);
         TRACE261_BRANCH("clientAccepted", cli != INVALID_SOCKET);
         if (cli == INVALID_SOCKET) { Sleep(100); continue; }
-        g_clientSocket = cli;
+        AtomicSocketStore121(&g_clientSocket, cli);
+        {
+            LockGuard lk(g_configMutex);
+            // State-patch support is negotiated by the current loader config;
+            // never carry an opt-in from a previous TCP client into a new one.
+            g_config.supportsStatePatches = false;
+        }
         Log("C# Loader connected.");
         u_long nb = 1; ioctlsocket(cli, FIONBIO, &nb);
 
         lc::BoundedNewlineBuffer readBuf(1024 * 1024);
         std::vector<std::string> receivedConfigLines;
         bool capabilitiesSent = false;
-        while (g_running) {
+        bool capabilitiesAttempted = false;
+        DWORD lastFullStateMs = 0;
+        while (IsBridgeRunning121()) {
             unsigned int stateIntervalMs = lc::kModernStateNormalIntervalMs;
+            bool fastState = false;
+            bool includeFastEntities = false;
+            bool sendFullState = true;
+            {
+                LockGuard lk(g_configMutex);
+                fastState = g_config.supportsStatePatches && lc::ModernStateNeedsFast(
+                    g_config.clicking,
+                    g_config.aimAssist,
+                    g_config.triggerbot,
+                    g_config.pixelPartyAutoLook,
+                    g_config.pixelPartyAutoWalk,
+                    g_config.hudEditor);
+                includeFastEntities = g_config.aimAssist || g_config.triggerbot;
+                stateIntervalMs = fastState
+                    ? lc::kModernStateFastIntervalMs
+                    : lc::kModernStateNormalIntervalMs;
+            }
+            const DWORD stateNowMs = GetTickCount();
+            sendFullState = lc::ModernFullStateDue(stateNowMs, lastFullStateMs, fastState);
+            if (sendFullState) lastFullStateMs = stateNowMs;
             TRACE261_PATH("client-loop-iteration");
             if (!capabilitiesSent) {
-                capabilitiesSent = TrySendCapabilities(cli);
+                capabilitiesSent = TrySendCapabilities(cli, !capabilitiesAttempted);
+                capabilitiesAttempted = true;
                 TRACE261_BRANCH("capabilitiesSent", capabilitiesSent);
                 if (capabilitiesSent) Log("Sent bridge capabilities packet");
             }
@@ -14989,7 +15227,7 @@ glfw_done:;
                 unsigned long long stateMs;
                 { LockGuard lk(g_jniStateMtx);
                     sn = g_jniScreenName;
-                    actionBar = g_jniActionBar;
+                    if (sendFullState) actionBar = g_jniActionBar;
                     jniGui = g_jniGuiOpen;
                     inWorld = g_jniInWorld;
                     lookBlock = g_jniLookingAtBlock;
@@ -14999,8 +15237,10 @@ glfw_done:;
                     holdBlock = g_jniHoldingBlock;
                     attackCooldown = g_jniAttackCooldown;
                     attackCooldownPerTick = g_jniAttackCooldownPerTick;
-                    killAuraUnavailableReason = g_jniKillAuraUnavailableReason;
-                    chestStealerStateJson = g_jniChestStealerStateJson;
+                    if (sendFullState) {
+                        killAuraUnavailableReason = g_jniKillAuraUnavailableReason;
+                        chestStealerStateJson = g_jniChestStealerStateJson;
+                    }
                     stateMs = g_jniStateMs;
                 }
                 { LockGuard lk(g_killAuraRenderMutex_121);
@@ -15012,22 +15252,29 @@ glfw_done:;
                 bool anyGui = (jniGui && !ScreenChainContainsClass121(sn, "ChatScreen"));
                 TRACE261_BRANCH("stateAnyGui", anyGui);
 
-                // JSON-escape the screen name
+                // JSON-escape strings only on full-state iterations. Fast patches retain
+                // the latest complete values in the loader and carry input-critical data.
                 static thread_local std::string snEsc;
                 snEsc.clear();
-                snEsc.reserve(sn.size() + 8);
-                for (char c : sn) { if (c == '"' || c == '\\') snEsc += '\\'; snEsc += c; }
                 static thread_local std::string actionEsc;
                 actionEsc.clear();
-                actionEsc.reserve(actionBar.size() + 8);
-                for (char c : actionBar) { if (c == '"' || c == '\\') actionEsc += '\\'; actionEsc += c; }
                 static thread_local std::string killAuraReasonEsc;
                 killAuraReasonEsc.clear();
-                killAuraReasonEsc.reserve(killAuraUnavailableReason.size() + 8);
-                for (char c : killAuraUnavailableReason) { if (c == '"' || c == '\\') killAuraReasonEsc += '\\'; killAuraReasonEsc += c; }
+                if (sendFullState) {
+                    snEsc.reserve(sn.size() + 8);
+                    for (char c : sn) { if (c == '"' || c == '\\') snEsc += '\\'; snEsc += c; }
+                    actionEsc.reserve(actionBar.size() + 8);
+                    for (char c : actionBar) { if (c == '"' || c == '\\') actionEsc += '\\'; actionEsc += c; }
+                    killAuraReasonEsc.reserve(killAuraUnavailableReason.size() + 8);
+                    for (char c : killAuraUnavailableReason) { if (c == '"' || c == '\\') killAuraReasonEsc += '\\'; killAuraReasonEsc += c; }
+                }
 
+                const bool includeEntities = sendFullState || includeFastEntities;
                 static thread_local std::vector<PlayerData121> players;
-                { LockGuard lk(g_playerListMutex); players = g_playerList; }
+                if (includeEntities) {
+                    LockGuard lk(g_playerListMutex);
+                    players = g_playerList;
+                }
 
                 BgCamState camState;
                 { LockGuard lk(g_bgCamMutex); camState = g_bgCamState; }
@@ -15044,23 +15291,27 @@ glfw_done:;
                 static thread_local std::string state;
                 state.clear();
                 state.reserve(4096);
-                state += "{\"type\":\"state\",\"inWorld\":";
+                state += "{\"type\":\"state\"";
+                if (fastState) state += ",\"partial\":true";
+                state += ",\"inWorld\":";
                 state += inWorld ? "true" : "false";
                 state += ",\"guiOpen\":";
                 state += anyGui ? "true" : "false";
-                state += ",\"screenName\":\"";
-                state += snEsc;
-                state += "\",\"actionBar\":\"";
-                state += actionEsc;
-                state += "\",\"health\":20,\"posX\":0,\"posY\":0,\"posZ\":0";
-                char fovBuf[32];
-                snprintf(fovBuf, sizeof(fovBuf), "%.2f", camState.fov);
-                state += ",\"fov\":";
-                state += fovBuf;
-                state += ",\"viewportWidth\":";
-                state += std::to_string(winW);
-                state += ",\"viewportHeight\":";
-                state += std::to_string(winH);
+                if (sendFullState) {
+                    state += ",\"screenName\":\"";
+                    state += snEsc;
+                    state += "\",\"actionBar\":\"";
+                    state += actionEsc;
+                    state += "\",\"health\":20,\"posX\":0,\"posY\":0,\"posZ\":0";
+                    char fovBuf[32];
+                    snprintf(fovBuf, sizeof(fovBuf), "%.2f", camState.fov);
+                    state += ",\"fov\":";
+                    state += fovBuf;
+                    state += ",\"viewportWidth\":";
+                    state += std::to_string(winW);
+                    state += ",\"viewportHeight\":";
+                    state += std::to_string(winH);
+                }
                 state += ",\"holdingBlock\":";
                 state += holdBlock ? "true" : "false";
                 state += ",\"lookingAtBlock\":";
@@ -15083,15 +15334,19 @@ glfw_done:;
                 snprintf(attackCooldownPerTickBuf, sizeof(attackCooldownPerTickBuf), "%.3f", attackCooldownPerTick);
                 state += ",\"attackCooldownPerTick\":";
                 state += attackCooldownPerTickBuf;
-                state += ",\"killAuraUnavailableReason\":\"";
-                state += killAuraReasonEsc;
-                state += "\"";
+                if (sendFullState) {
+                    state += ",\"killAuraUnavailableReason\":\"";
+                    state += killAuraReasonEsc;
+                    state += "\"";
+                }
                 state += ",\"killAuraHasTarget\":";
                 state += killAuraHasTarget ? "true" : "false";
                 state += ",\"killAuraBlocking\":";
                 state += killAuraBlocking ? "true" : "false";
-                state += ",\"chestStealerState\":";
-                state += chestStealerStateJson.empty() ? "null" : chestStealerStateJson;
+                if (sendFullState) {
+                    state += ",\"chestStealerState\":";
+                    state += chestStealerStateJson.empty() ? "null" : chestStealerStateJson;
+                }
 
                 bool ppFound = false;
                 float ppYaw = 0.0f;
@@ -15122,12 +15377,13 @@ glfw_done:;
                 state += ",\"pixelPartyYawDelta\":";
                 state += ppDeltaBuf;
 
-                state += ",\"entities\":[";
+                if (includeEntities) state += ",\"entities\":[";
 
                 bool first = true;
                 LegoVec3 camPos = { camState.camX, camState.camY, camState.camZ };
                 int sentEntities = 0;
                 for (const auto& p : players) {
+                    if (!includeEntities) break;
                     if (sentEntities >= 32) break; // Limit JSON size
                     float sx = -1.0f, sy = -1.0f;
                     bool projected = p.hasManagedScreenPoint || p.hasScreenPoint;
@@ -15184,16 +15440,10 @@ glfw_done:;
                     state += "}";
                     sentEntities++;
                 }
-                state += "]";
-                {
+                if (includeEntities) state += "]";
+                if (sendFullState) {
+                    LockGuard hudLock(g_hudEditorMutex);
                     LockGuard lk(g_configMutex);
-                    stateIntervalMs = lc::ModernStateIntervalMs(
-                        g_config.clicking,
-                        g_config.aimAssist,
-                        g_config.triggerbot,
-                        g_config.pixelPartyAutoLook,
-                        g_config.pixelPartyAutoWalk,
-                        g_config.hudEditor);
                     if (g_hudEditor.layoutDirty) {
                         state += ",\"hudLayout\":";
                         state += lc::SerializeHudLayout(g_hudLayout);
@@ -15201,7 +15451,7 @@ glfw_done:;
                     }
                 }
                 state += "}\n";
-                send(cli, state.c_str(), (int)state.size(), 0);
+                if (SendJsonLine121(cli, state) < 0) break;
                 RecordNativePerfSince(
                     lc::PERF_STATE_PUBLISH,
                     statePublishPerfStarted,
@@ -15224,20 +15474,24 @@ glfw_done:;
                         if (!receivedConfigLines[i].empty())
                             ParseConfig(receivedConfigLines[i]);
                     }
-                } else if (r == 0) break;
+                } else if (r == 0) {
+                    break;
+                } else if (WSAGetLastError() != WSAEWOULDBLOCK) {
+                    break;
+                }
             }
 
             MaybeLogNativePerfDiagnostics();
             Sleep(stateIntervalMs);
         }
         ClearAutoRodQueue();
-        closesocket(cli);
-        g_clientSocket = INVALID_SOCKET;
+        SOCKET ownedClient = AtomicSocketTake121(&g_clientSocket);
+        if (ownedClient != INVALID_SOCKET) closesocket(ownedClient);
         Log("C# Loader disconnected.");
     }
 
-    closesocket(srv);
-    g_serverSocket = INVALID_SOCKET;
+    SOCKET ownedServer = AtomicSocketTake121(&g_serverSocket);
+    if (ownedServer != INVALID_SOCKET) closesocket(ownedServer);
     WSACleanup();
     return 0;
 }
@@ -15272,7 +15526,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
         g_mainThreadHandle = CreateThread(nullptr, 0, MainThread, nullptr, 0, nullptr);
     } else if (reason == DLL_PROCESS_DETACH) {
         ClearAutoRodQueue();
-        g_running = false;
+        InterlockedExchange(&g_running, 0);
     }
     return TRUE;
 }

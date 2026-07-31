@@ -1,0 +1,16 @@
+{
+  "metadata": {
+    "commit": "dev-current",
+    "runtime": "Lunar 26.2",
+    "renderer": "Vulkan",
+    "scene": "normal-world",
+    "durationSeconds": 60
+  },
+  "metrics": {
+    "fpsP95": { "value": 236.0, "direction": "higher" },
+    "frameTimeMsP99": { "value": 7.2, "direction": "lower" },
+    "stateBandwidthBytesPerSecond": { "value": 18000, "direction": "lower" },
+    "managedParseMsP95": { "value": 0.41, "direction": "lower" },
+    "aimStateAgeMsP99": { "value": 17.5, "direction": "lower" }
+  }
+}

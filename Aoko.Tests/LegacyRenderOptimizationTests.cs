@@ -47,6 +47,20 @@ public sealed class LegacyRenderOptimizationTests
             renderEntry);
     }
 
+    [Fact]
+    public void HeldItemNametagSetting_IsParsedAndApplied()
+    {
+        string source = LegacyBridgeSource();
+
+        Assert.Contains("nametagShowHeldItem", source, StringComparison.Ordinal);
+        Assert.Contains("showHeldItem", source, StringComparison.Ordinal);
+        Assert.Contains("GetEntityHeldItemInfo", source, StringComparison.Ordinal);
+        Assert.Contains(
+            "if (!heldText.empty())",
+            source,
+            StringComparison.Ordinal);
+    }
+
     private static string LegacyBridgeSource()
         => File.ReadAllText(
             Path.Combine(

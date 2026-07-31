@@ -50,6 +50,14 @@ echo [NativeTests] Running native_perf_diagnostics_tests.exe...
 tests\native_perf_diagnostics_tests.exe
 if %errorlevel% neq 0 exit /b %errorlevel%
 
+echo [NativeTests] Building mapping_probe_gate_tests.exe...
+"%GPP%" -m64 -std=c++11 -O2 -static-libgcc -static-libstdc++ -o tests\mapping_probe_gate_tests.exe tests\mapping_probe_gate_tests.cpp
+if %errorlevel% neq 0 exit /b %errorlevel%
+
+echo [NativeTests] Running mapping_probe_gate_tests.exe...
+tests\mapping_probe_gate_tests.exe
+if %errorlevel% neq 0 exit /b %errorlevel%
+
 echo [NativeTests] Building block_esp_tests.exe...
 "%GPP%" -m64 -std=c++11 -O2 -static-libgcc -static-libstdc++ -o tests\block_esp_tests.exe tests\block_esp_tests.cpp
 if %errorlevel% neq 0 exit /b %errorlevel%

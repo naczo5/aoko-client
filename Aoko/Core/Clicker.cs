@@ -97,12 +97,14 @@ public class Clicker : INotifyPropertyChanged
     private bool _isClicking;
     private bool _useLeftButton = true;
     private CancellationTokenSource? _clickCts;
-    private CancellationTokenSource? _aimAssistCts;
-    private CancellationTokenSource? _triggerbotCts;
     private Task? _clickTask;
-    private Task? _aimAssistTask;
-    private Task? _triggerbotTask;
     private readonly AimAssistMotionController _aimAssistMotionController = new();
+    private readonly OwnedAsyncLoop _aimAssistLoop = new(
+        "Aim Assist",
+        exception => Debug.WriteLine($"[Aim Assist] loop failed and will restart: {exception}"));
+    private readonly OwnedAsyncLoop _triggerbotLoop = new(
+        "Triggerbot",
+        exception => Debug.WriteLine($"[Triggerbot] loop failed and will restart: {exception}"));
     private int _panicInProgress;
     
     // Settings
@@ -520,10 +522,7 @@ public class Clicker : INotifyPropertyChanged
 
     private void StartAimAssistLoop()
     {
-        if (_aimAssistCts != null) return;
-        var cts = new CancellationTokenSource();
-        _aimAssistCts = cts;
-        _aimAssistTask = Task.Run(() => AimAssistLoop(cts.Token));
+        _aimAssistLoop.Start(AimAssistLoop);
     }
 
     private CancellationTokenSource? _pixelPartyAssistInputCts;
@@ -625,39 +624,20 @@ public class Clicker : INotifyPropertyChanged
 
     private void StopAimAssistLoop()
     {
-        var cts = _aimAssistCts;
-        var task = _aimAssistTask;
-        _aimAssistCts = null;
-        _aimAssistTask = null;
         _aimAssistMotionController.Reset();
-        if (cts != null)
-        {
-            cts.Cancel();
-            _ = DisposeCtsWhenDoneAsync(cts, task);
-        }
+        _aimAssistLoop.Stop();
     }
 
     public bool IsUsingLeftButton => _useLeftButton;
 
     private void StartTriggerbotLoop()
     {
-        if (_triggerbotCts != null) return;
-        var cts = new CancellationTokenSource();
-        _triggerbotCts = cts;
-        _triggerbotTask = Task.Run(() => TriggerbotLoop(cts.Token));
+        _triggerbotLoop.Start(TriggerbotLoop);
     }
 
     private void StopTriggerbotLoop()
     {
-        var cts = _triggerbotCts;
-        var task = _triggerbotTask;
-        _triggerbotCts = null;
-        _triggerbotTask = null;
-        if (cts != null)
-        {
-            cts.Cancel();
-            _ = DisposeCtsWhenDoneAsync(cts, task);
-        }
+        _triggerbotLoop.Stop();
     }
 
     private static async Task DisposeCtsWhenDoneAsync(CancellationTokenSource cts, Task? task)

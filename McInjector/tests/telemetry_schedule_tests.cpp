@@ -56,6 +56,30 @@ int main()
         1,
         lc::IsTelemetryIntervalDue(25, 0xfffffff0u, 40) ? 1u : 0u,
         "deadline comparison survives tick-count wrap");
+    ExpectEq(
+        1,
+        lc::ModernStateNeedsFast(true, false, false, false, false, false) ? 1u : 0u,
+        "clicking needs fast state");
+    ExpectEq(
+        0,
+        lc::ModernStateNeedsFast(false, false, false, false, false, false) ? 1u : 0u,
+        "idle state does not need fast state");
+    ExpectEq(
+        1,
+        lc::ModernFullStateDue(100, 0, true) ? 1u : 0u,
+        "first fast-state iteration emits a full state");
+    ExpectEq(
+        0,
+        lc::ModernFullStateDue(110, 100, true) ? 1u : 0u,
+        "fast state does not emit full state before cadence");
+    ExpectEq(
+        1,
+        lc::ModernFullStateDue(125, 100, true) ? 1u : 0u,
+        "fast state emits full state at cadence");
+    ExpectEq(
+        1,
+        lc::ModernFullStateDue(110, 100, false) ? 1u : 0u,
+        "normal state is always full");
 
     if (g_failures != 0) {
         std::cerr << "telemetry_schedule_tests: "

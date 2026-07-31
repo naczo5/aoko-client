@@ -35,4 +35,31 @@ inline unsigned int ModernStateIntervalMs(
         : kModernStateNormalIntervalMs;
 }
 
+inline bool ModernStateNeedsFast(
+    bool clicking,
+    bool aimAssist,
+    bool triggerbot,
+    bool pixelPartyAutoLook,
+    bool pixelPartyAutoWalk,
+    bool hudEditor)
+{
+    return ModernStateIntervalMs(
+        clicking,
+        aimAssist,
+        triggerbot,
+        pixelPartyAutoLook,
+        pixelPartyAutoWalk,
+        hudEditor) == kModernStateFastIntervalMs;
+}
+
+inline bool ModernFullStateDue(
+    unsigned int nowMs,
+    unsigned int lastFullStateMs,
+    bool fastState,
+    unsigned int fullIntervalMs = kModernStateNormalIntervalMs)
+{
+    return !fastState || lastFullStateMs == 0 ||
+        IsTelemetryIntervalDue(nowMs, lastFullStateMs, fullIntervalMs);
+}
+
 } // namespace lc

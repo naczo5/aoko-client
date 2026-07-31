@@ -61,6 +61,7 @@ static float s_combatBody = 0.0f;
 
 static volatile LONG s_inStamp = 0;
 static jobject s_stampedPlayer = nullptr; // global ref while stamp active
+static volatile LONG s_callbacksInFlight = 0;
 static float s_savedYaw = 0.0f;
 static float s_savedPitch = 0.0f;
 static float s_savedHead = 0.0f;
@@ -86,6 +87,40 @@ static void EnsurePendingCs()
 static void Log(const std::string& msg)
 {
     if (s_log) s_log(msg);
+}
+
+// JVMTI/packet callbacks can enter concurrently with a world remap or bridge
+// shutdown.  The owner sets s_suspended first, then waits for this short-lived
+// lease to drain before deleting the globals the callback reads.
+class CallbackLease {
+public:
+    CallbackLease() : active_(false) {
+        InterlockedIncrement(&s_callbacksInFlight);
+        if (InterlockedCompareExchange(&s_suspended, 0, 0) == 0) {
+            active_ = true;
+        } else {
+            InterlockedDecrement(&s_callbacksInFlight);
+        }
+    }
+
+    ~CallbackLease() {
+        if (active_) InterlockedDecrement(&s_callbacksInFlight);
+    }
+
+    bool Active() const { return active_; }
+
+private:
+    bool active_;
+};
+
+static bool WaitForCallbacksToDrain(DWORD timeoutMs)
+{
+    const DWORD started = GetTickCount();
+    while (InterlockedCompareExchange(&s_callbacksInFlight, 0, 0) != 0) {
+        if (timeoutMs != INFINITE && GetTickCount() - started >= timeoutMs) return false;
+        Sleep(1);
+    }
+    return true;
 }
 
 static bool SignatureIsClientPlayer(const char* signature)
@@ -405,6 +440,8 @@ static bool IsReturnSite(jlocation location)
 static void JNICALL OnBreakpoint(jvmtiEnv* jvmti, JNIEnv* env, jthread thread,
                                  jmethodID method, jlocation location)
 {
+    CallbackLease lease;
+    if (!lease.Active()) return;
     if (!s_walkingMethod || method != s_walkingMethod) return;
     if (location == 0)
         OnWalkingEntry(jvmti, env, thread);
@@ -415,6 +452,8 @@ static void JNICALL OnBreakpoint(jvmtiEnv* jvmti, JNIEnv* env, jthread thread,
 static void JNICALL OnFramePop(jvmtiEnv*, JNIEnv* env, jthread,
                                jmethodID method, jboolean)
 {
+    CallbackLease lease;
+    if (!lease.Active()) return;
     if (!s_walkingMethod || method != s_walkingMethod) return;
     OnWalkingExit(env);
 }
@@ -469,6 +508,8 @@ static void EndTempAttackStamp(JNIEnv* env, jobject player, float yaw, float pit
 static void JNICALL NativeOnPacket(JNIEnv* env, jclass, jobject packet)
 {
     if (!env || !packet) return;
+    CallbackLease lease;
+    if (!lease.Active()) return;
     // World/reconfig transitions delete C03/player JNI while this hook stays
     // injected into ClientPacketListener.send — bail before any IsInstanceOf.
     if (InterlockedCompareExchange(&s_suspended, 0, 0) != 0) return;
@@ -644,6 +685,11 @@ void Install(JavaVM* /*vm*/, void (*logger)(const std::string&))
 
 void Shutdown(JNIEnv* env)
 {
+    InterlockedExchange(&s_suspended, 1);
+    // Cleanup follows immediately after this call, so never delete JNI globals
+    // while a callback is still in flight. A callback itself does not wait on
+    // bridge state, therefore an unbounded drain is preferable to a UAF.
+    WaitForCallbacksToDrain(INFINITE);
     ClearReturnSiteBreakpoints();
     if (s_walkingMethod)
         lc::SharedJvmtiClearBreakpoint(s_walkingMethod, 0);
@@ -673,7 +719,10 @@ void Shutdown(JNIEnv* env)
     ClearPendingAttack(env);
     InterlockedExchange(&s_ready, 0);
     InterlockedExchange(&s_sendQueueReady, 0);
-    InterlockedExchange(&s_suspended, 0);
+    // Keep callbacks disabled after shutdown.  The injected callback class can
+    // remain reachable until the JVM unloads it, so reopening the gate here
+    // would permit it to touch cleared JNI globals during bridge teardown.
+    InterlockedExchange(&s_suspended, 1);
     InterlockedExchange64(&s_sendQueueArmedMs, 0);
     InterlockedExchange64(&s_lastMovementCallbackMs, 0);
     InterlockedExchange(&s_silentEngaged, 0);
@@ -942,6 +991,7 @@ void SuspendForWorldChange(JNIEnv* env)
 {
     // Arm first so in-flight NativeOnPacket sees suspended before we clear JNI.
     const bool wasSuspended = InterlockedCompareExchange(&s_suspended, 1, 0) != 0;
+    WaitForCallbacksToDrain(INFINITE);
     ClearPendingAttack(env);
     SetSilentCombatAngles(false, 0.0f, 0.0f, 0.0f, false);
 

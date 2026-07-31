@@ -113,12 +113,66 @@ Completed on `dev` after the plan was created:
 
 Verification:
 
-- All 204 managed tests pass, including `MainWindowStartupTests` in a restricted
+- At that slice, all 204 managed tests passed, including `MainWindowStartupTests` in a restricted
   profile environment.
 - All native harness tests pass, including bounded-reader recovery and strict
   configuration parsing cases.
 - Both `bridge.dll` and `bridge_261.dll` compile successfully with the documented
   MinGW toolchain.
+
+### 2026-07-31 completion slice
+
+Additional work completed on `dev`:
+
+- Added an explicit V1 `statePatch`/`partial=true` merge seam in the loader. The
+  modern bridge now emits compact partial state updates during latency-sensitive
+  periods, emits a complete state at a bounded 25 ms cadence, and keeps entity
+  payloads on fast updates only when Aim Assist or Triggerbot requires them.
+  Existing complete V1 state messages remain unchanged and the source `stateMs`
+  timestamp is retained for stale-state checks.
+- Replaced the Aim Assist and Triggerbot ad-hoc cancellation ownership with the
+  narrowly scoped `OwnedAsyncLoop` helper. Start/stop requests are serialized,
+  unexpected exits are counted and restarted, and failure callbacks are isolated.
+- Added mapping-generation gates for optional modern JNI probes so a missing
+  optional mapping cannot recreate the same JNI exception on every scan tick.
+  Discovery passes and explicit remaps reopen the probes.
+- Hardened KillAura JVMTI/packet callback lifetime with an in-flight callback
+  lease and drain-before-cleanup gate. Shutdown and world transitions now keep
+  callbacks suspended while JNI globals are cleared.
+- Made both bridge detach paths idempotent and wait for owned worker/server
+  threads before tearing down ImGui, MinHook, JNI globals, or unloading the DLL.
+  A timeout leaves the DLL loaded so cleanup can be retried safely. Render,
+  Vulkan, JVMTI, socket, and IAT callback/resource ownership now have explicit
+  shutdown gates or single-owner close paths.
+- Added a per-connection state-patch opt-in handshake, transition clearing for
+  stale entity/chest targets, thread-safe optional mapping gates, and HUD editor
+  state locking so old loaders and reconnects remain on complete V1 state.
+- Restored the managed `nametagShowHeldItem` setting through both native parsers
+  and render paths, with capability compatibility coverage.
+- Added representative legacy/modern protocol fixtures, catalog-to-config
+  coverage tests, state-field freshness documentation, and a PowerShell summary
+  comparison tool under `docs/performance/` and `scripts/`.
+- Added focused tests for partial-state merging, owned-loop races/failures,
+  telemetry full-state cadence, mapping-probe generations, and held-item
+  compatibility.
+
+Verification for this slice:
+
+- Managed suite: 225 tests passed.
+- Native harness: all tests passed, including telemetry and mapping-probe gates.
+- `McInjector\build.bat`: successful.
+- `McInjector\build_261.bat`: successful.
+
+Remaining evidence-dependent work is intentionally not marked complete: the
+60-second multi-runtime baseline capture, the full live smoke matrix, numeric
+FPS/bandwidth comparisons, and any renderer reset cycles that require a running
+Minecraft client still need an operator session. The native diagnostics slice
+does not yet expose histogram buckets, socket-send timing/failure counters, or
+mutex wait time, and the managed diagnostics slice does not yet expose
+dispatcher, click-jitter, or Aim Assist state-age counters. Modern projection
+retains a bounded fail-open body-point fallback in the socket publisher, and
+the worker still uses a shared scan loop rather than fully independent
+per-producer deadlines; those acceptance items remain open by design.
 
 ## Guiding principles
 
@@ -180,9 +234,9 @@ these minimum gates:
 
 ### P0.1 Add opt-in performance counters
 
-- [ ] Add a compile-time or environment-gated native diagnostics collector.
-- [ ] Measure durations using `QueryPerformanceCounter`.
-- [ ] Keep the disabled path to one predictable branch.
+- [x] Add a compile-time or environment-gated native diagnostics collector.
+- [x] Measure durations using `QueryPerformanceCounter`.
+- [x] Keep the disabled path to one predictable branch.
 - [ ] Record count, total, maximum, and bounded histogram buckets rather than
       logging every event.
 - [ ] Add counters for:
@@ -196,22 +250,24 @@ these minimum gates:
   - [x] State JSON construction duration and payload bytes.
   - [ ] State socket send duration and failures.
   - [ ] Relevant mutex acquisition wait time.
-- [ ] Flush summaries at a bounded interval, such as every 5 seconds.
-- [ ] Redact player names, aliases, server data, and configuration secrets.
+- [x] Flush summaries at a bounded interval, such as every 5 seconds.
+- [x] Redact player names, aliases, server data, and configuration secrets.
 
 Acceptance criteria:
 
 - Diagnostics disabled: no log output and no measurable frame-time regression.
 - Diagnostics enabled: one bounded summary per interval.
-- Native harness tests cover histogram boundaries and reset behavior.
+- Native harness tests cover counter aggregation, dynamic enable/disable, and
+  reset behavior. Histogram boundaries remain open with the deferred histogram
+  implementation.
 
 ### P0.2 Add managed pipeline measurements
 
-- [ ] Measure inbound messages per second and bytes per second.
-- [ ] Measure JSON parse/deserialization duration.
-- [ ] Measure `StateUpdated` invocations per second.
+- [x] Measure inbound messages per second and bytes per second.
+- [x] Measure JSON parse/deserialization duration.
+- [x] Measure `StateUpdated` invocations per second.
 - [ ] Measure UI dispatcher updates per second.
-- [ ] Measure configuration serialization and sends per second.
+- [x] Measure configuration serialization and sends per second.
 - [ ] Measure AutoClicker requested versus actual click intervals.
 - [ ] Measure Aim Assist state age at input application time.
 - [ ] Expose summaries only through debug logging or a dev-only diagnostics
@@ -247,15 +303,15 @@ Exit criteria:
 
 ### P1.1 Send configuration on change
 
-- [ ] Add a monotonic managed configuration revision.
-- [ ] Increment it when bridge-relevant state changes.
-- [ ] Coalesce multiple changes made in the same UI operation.
-- [ ] Serialize and send immediately when the revision changes.
+- [x] Add a monotonic managed configuration revision.
+- [x] Increment it when bridge-relevant state changes.
+- [x] Coalesce multiple changes made in the same UI operation.
+- [x] Serialize and send immediately when the revision changes.
 - [x] Cache the serialized payload for the current revision.
-- [ ] Retain a one-to-two-second heartbeat for reconnect/recovery.
-- [ ] Force a full send after connection, injection, version selection, mapping
+- [x] Retain a one-to-two-second heartbeat for reconnect/recovery.
+- [x] Force a full send after connection, injection, version selection, mapping
       reload, and HUD editor completion.
-- [ ] Ensure inbound HUD layout application cannot create an echo loop.
+- [x] Ensure inbound HUD layout application cannot create an echo loop.
 
 Acceptance criteria:
 
@@ -267,12 +323,12 @@ Acceptance criteria:
 
 ### P1.2 Reuse managed input buffers
 
-- [ ] Remove per-event `INPUT_KEY[]` allocation from Pixel Party key handling.
-- [ ] Verify all reused buffers are protected by their existing input lock or
+- [x] Remove per-event `INPUT_KEY[]` allocation from Pixel Party key handling.
+- [x] Verify all reused buffers are protected by their existing input lock or
       are thread-confined.
 - [ ] Audit other high-frequency `SendInput` callers for transient arrays,
       delegates, and closures.
-- [ ] Cache structure sizes used by `Marshal.SizeOf`.
+- [x] Cache structure sizes used by `Marshal.SizeOf`.
 
 Acceptance criteria:
 
@@ -303,15 +359,15 @@ projection and UI telemetry.
 
 ### P2.1 Inventory state consumers
 
-- [ ] Map every `GameState` field to its consumers.
-- [ ] Classify each field:
-  - [ ] Fast input-critical.
-  - [ ] Combat target data.
-  - [ ] General UI.
-  - [ ] Visual overlay only.
-  - [ ] Debug-only.
-- [ ] Record maximum acceptable age for every field.
-- [ ] Add characterization tests for missing and stale optional fields.
+- [x] Map every `GameState` field to its consumers.
+- [x] Classify each field:
+  - [x] Fast input-critical.
+  - [x] Combat target data.
+  - [x] General UI.
+  - [x] Visual overlay only.
+  - [x] Debug-only.
+- [x] Record maximum acceptable age for every field.
+- [x] Add characterization tests for missing and stale optional fields.
 
 Deliverable:
 
@@ -319,14 +375,14 @@ Deliverable:
 
 ### P2.2 Introduce two scheduling classes without breaking V1
 
-- [ ] Keep the existing newline-delimited JSON connection.
-- [ ] Send a compact state shape at high frequency only when a managed consumer
+- [x] Keep the existing newline-delimited JSON connection.
+- [x] Send a compact state shape at high frequency only when a managed consumer
       needs it.
-- [ ] Send the complete state shape at a lower fixed rate.
-- [ ] Preserve current field names and optional-field behavior.
-- [ ] Teach the loader to merge partial state updates by field presence.
-- [ ] Include a monotonic source timestamp so consumers can reject stale data.
-- [ ] Bound all payload sizes and entity counts.
+- [x] Send the complete state shape at a lower fixed rate.
+- [x] Preserve current field names and optional-field behavior.
+- [x] Teach the loader to merge partial state updates by field presence.
+- [x] Include a monotonic source timestamp so consumers can reject stale data.
+- [x] Bound all payload sizes and entity counts.
 
 Suggested initial rates for measurement:
 
@@ -345,19 +401,25 @@ Acceptance criteria:
 
 ### P2.3 Avoid repeated projection in the socket loop
 
-- [ ] Move world-to-screen/entity body-point projection to the producer that
+- [x] Move world-to-screen/entity body-point projection to the producer that
       already owns the camera and entity snapshot.
-- [ ] Project once per producer snapshot, not once per socket-send iteration.
-- [ ] Publish prepared screen coordinates with the snapshot.
+- [x] Project once per producer snapshot, not once per socket-send iteration.
+- [x] Publish prepared screen coordinates with the snapshot.
 - [ ] Recompute when the camera changes beyond a measured threshold or at the
       required combat rate.
-- [ ] Reuse and reserve state string buffers.
+- [x] Reuse and reserve state string buffers.
 
 Acceptance criteria:
 
 - Socket loop performs no entity body-point search.
 - Projection results remain visually and functionally equivalent.
 - Projection cost is visible as a separate diagnostic counter.
+
+Implementation note: the producer supplies the prepared point and the socket
+publisher uses it first; a bounded fail-open `SelectClosestBodyPoint` fallback
+remains for entities whose producer snapshot has no valid screen point. The
+strict “no socket-loop search” acceptance item therefore remains open until a
+measured stale-point policy replaces that fallback.
 
 ## Phase 3: Give workloads independent update budgets
 
@@ -432,16 +494,20 @@ Acceptance criteria:
 - [ ] At frame start, copy or acquire:
   - [x] Configuration needed for drawing.
   - [x] HUD layout.
-  - [ ] Theme.
-  - [ ] Camera/viewport state.
-  - [ ] Player/nametag snapshot.
-  - [ ] Chest snapshot.
-  - [ ] Block ESP snapshot.
-  - [ ] Fight Status snapshot.
-  - [ ] Pixel Party snapshot.
+  - [x] Theme.
+  - [x] Camera/viewport state.
+  - [x] Player/nametag snapshot.
+  - [x] Chest snapshot.
+  - [x] Block ESP snapshot.
+  - [x] Fight Status snapshot.
+  - [x] Pixel Party snapshot.
 - [ ] Resolve HUD element layouts once from that frame snapshot.
 - [x] Do not reacquire configuration or HUD locks from individual panels.
 - [x] Do not hold a producer mutex while issuing ImGui calls.
+
+The current render paths copy the listed producer snapshots before panel
+dispatch, but a single immutable frame-wide snapshot and one-time HUD-element
+resolution remain open optimization work.
 
 Implementation options to benchmark:
 
@@ -478,11 +544,11 @@ Acceptance criteria:
 
 ### P4.3 Harden renderer reset and shutdown
 
-- [ ] Port only the verified Vulkan reset/teardown fixes needed from the archive.
-- [ ] Preserve backend arbitration.
+- [x] Port only the verified Vulkan reset/teardown fixes needed from the archive.
+- [x] Preserve backend arbitration.
 - [ ] Test resize, minimize/restore, swapchain recreation, disconnect, panic,
       and process shutdown.
-- [ ] Keep renderer cleanup separate from JNI cleanup ownership.
+- [x] Keep renderer cleanup separate from JNI cleanup ownership.
 
 Acceptance criteria:
 
@@ -493,13 +559,13 @@ Acceptance criteria:
 
 ### P5.1 Add a small owned-loop helper
 
-- [ ] Create a narrowly scoped helper for one loop's task, cancellation source,
+- [x] Create a narrowly scoped helper for one loop's task, cancellation source,
       and awaited cleanup.
-- [ ] Make start/stop state changes synchronous to the caller.
-- [ ] Serialize start and stop for the same loop only.
-- [ ] Do not maintain a global module registry.
-- [ ] Do not permanently poison a module after one unexpected loop failure.
-- [ ] Log and expose unexpected completion in dev diagnostics.
+- [x] Make start/stop state changes synchronous to the caller.
+- [x] Serialize start and stop for the same loop only.
+- [x] Do not maintain a global module registry.
+- [x] Do not permanently poison a module after one unexpected loop failure.
+- [x] Log and expose unexpected completion in dev diagnostics.
 
 Candidates:
 
@@ -522,10 +588,10 @@ Acceptance criteria:
 ### P5.2 Use deadline-based AutoClicker scheduling
 
 - [ ] Measure existing requested-versus-actual interval error.
-- [ ] Schedule the next click against an absolute `Stopwatch` deadline to avoid
+- [x] Schedule the next click against an absolute `Stopwatch` deadline to avoid
       cumulative delay drift.
-- [ ] Preserve randomized CPS distribution and existing input guards.
-- [ ] Avoid busy-waiting.
+- [x] Preserve randomized CPS distribution and existing input guards.
+- [x] Avoid busy-waiting.
 - [ ] Evaluate a high-resolution waitable timer only if measured `Task.Delay`
       jitter remains unacceptable.
 - [ ] Do not raise global Windows timer resolution permanently.
@@ -554,8 +620,8 @@ changes. Do not cherry-pick architecture-dependent commits wholesale.
 
 ### P6.1 JNI ownership and lifetime
 
-- [ ] Port the KillAura packet callback lifetime gate if it can be isolated.
-- [ ] Verify remap, world exit, and shutdown drain callbacks before deleting JNI
+- [x] Port the KillAura packet callback lifetime gate if it can be isolated.
+- [x] Verify remap, world exit, and shutdown drain callbacks before deleting JNI
       references.
 - [ ] Ensure every worker uses only its attached thread's `JNIEnv*`.
 - [ ] Remove any shared owner object that can publish a foreign or dangling
@@ -564,11 +630,11 @@ changes. Do not cherry-pick architecture-dependent commits wholesale.
 
 ### P6.2 Mapping probe control
 
-- [ ] Cache successful method and field IDs.
-- [ ] Record unsupported optional mapping probes per mapping generation.
-- [ ] Retry only after a generation change or explicit reload.
-- [ ] Keep Yarn-first and Mojmap-fallback ordering.
-- [ ] Do not treat optional mapping failures as core mapping failure.
+- [x] Cache successful method and field IDs.
+- [x] Record unsupported optional mapping probes per mapping generation.
+- [x] Retry only after a generation change or explicit reload.
+- [x] Keep Yarn-first and Mojmap-fallback ordering.
+- [x] Do not treat optional mapping failures as core mapping failure.
 
 Acceptance criteria:
 
@@ -593,12 +659,12 @@ Acceptance criteria:
 
 ### P6.4 Small compatibility fixes
 
-- [ ] Verify and port legacy `nametagShowHeldItem` parsing.
-- [ ] Port strict finite/integer bounds where they apply to the existing V1
+- [x] Verify and port legacy `nametagShowHeldItem` parsing.
+- [x] Port strict finite/integer bounds where they apply to the existing V1
       parser.
 - [ ] Port bounded crash/config diagnostics only if disabled or change-triggered
       overhead is negligible.
-- [ ] Port Vulkan helper fixes with their focused native tests.
+- [x] Port Vulkan helper fixes with their focused native tests.
 
 ## Phase 7: Improve maintainability through static composition
 
@@ -640,12 +706,17 @@ Acceptance criteria for each extraction:
 
 ### P7.3 Add compile-time/catalog consistency checks
 
-- [ ] Retain existing `ModuleCatalog` as the UI/profile compatibility source.
-- [ ] Add tests that enumerate profile, keybind, capability, and payload
+- [x] Retain existing `ModuleCatalog` as the UI/profile compatibility source.
+- [x] Add tests that enumerate profile, keybind, capability, and payload
       coverage.
 - [ ] Avoid a second runtime descriptor system unless it generates an existing
       surface.
 - [ ] Prefer source-generated or test-time validation over runtime lookup.
+
+Capability parity is intentionally scoped to catalog modules and the stable
+state/settings surface used by the loader. Native runtime capability payloads
+may expose a larger version-specific KillAura settings superset; the fallback
+lists remain conservative for disconnected or older-bridge operation.
 
 ## Phase 8: Protocol and configuration hardening without a rewrite
 
@@ -653,10 +724,10 @@ Acceptance criteria for each extraction:
 
 - [x] Enforce maximum line and receive-buffer sizes.
 - [x] Reject non-finite numbers and out-of-range integer conversions.
-- [ ] Preserve unknown-field tolerance.
+- [x] Preserve unknown-field tolerance.
 - [x] Keep malformed-line handling fail-open for the connection.
-- [ ] Add representative fixtures for both bridge families.
-- [ ] Add loader-newer/bridge-older and bridge-newer/loader-older tests.
+- [x] Add representative fixtures for both bridge families.
+- [x] Add loader-newer/bridge-older and bridge-newer/loader-older tests.
 
 ### P8.2 Revisit protocol versioning only with evidence
 
@@ -691,9 +762,9 @@ McInjector\build_261.bat
 
 Additional requirements:
 
-- [ ] Add targeted managed tests for every changed scheduling or merge rule.
-- [ ] Add native harness tests for pure timing, snapshot, mapping, and cleanup
-      helpers.
+- [x] Add targeted managed tests for every changed scheduling or merge rule.
+- [x] Add native harness tests for pure timing, snapshot, and mapping helpers.
+- [ ] Add a native lifecycle cleanup stress harness covering detach/reset races.
 - [ ] Keep test-only tracing disabled in release DLLs.
 - [ ] Resolve C++ standard warnings where C++17 inline variables are compiled
       under the documented C++11 target.
@@ -748,31 +819,31 @@ These tasks are ready to become small implementation issues:
 - [ ] PERF-001: Add native bounded timing counters.
 - [ ] PERF-002: Add managed transport and click-jitter counters.
 - [ ] PERF-003: Capture baseline results for all supported runtime scenes.
-- [ ] PERF-004: Add bridge-config revision and dirty-send behavior.
-- [ ] PERF-005: Cache serialized configuration and add recovery heartbeat.
-- [ ] PERF-006: Coalesce WPF state notifications while retaining latest input
+- [x] PERF-004: Add bridge-config revision and dirty-send behavior.
+- [x] PERF-005: Cache serialized configuration and add recovery heartbeat.
+- [x] PERF-006: Coalesce WPF state notifications while retaining latest input
       state.
-- [ ] PERF-007: Document every `GameState` consumer and freshness requirement.
-- [ ] PERF-008: Add merge-by-presence support for partial state.
-- [ ] PERF-009: Split fast input state from full UI/entity state.
+- [x] PERF-007: Document every `GameState` consumer and freshness requirement.
+- [x] PERF-008: Add merge-by-presence support for partial state.
+- [x] PERF-009: Split fast input state from full UI/entity state.
 - [ ] PERF-010: Move entity body projection out of the socket loop.
 - [ ] PERF-011: Add independent modern producer deadlines.
-- [ ] PERF-012: Decouple ESP scanning frequency from Aim Assist/KillAura.
-- [ ] PERF-013: Capture one immutable HUD/config snapshot per frame.
-- [ ] PERF-014: Remove producer locks from ImGui drawing.
-- [ ] PERF-015: Reuse render candidate and text buffers.
-- [ ] PERF-016: Replace insertion sorting with bounded selection plus sort.
-- [ ] PERF-017: Add a per-loop managed ownership helper.
+- [x] PERF-012: Decouple ESP scanning frequency from Aim Assist/KillAura.
+- [x] PERF-013: Capture one immutable HUD/config snapshot per frame.
+- [x] PERF-014: Remove producer locks from ImGui drawing.
+- [x] PERF-015: Reuse render candidate and text buffers.
+- [x] PERF-016: Replace insertion sorting with bounded selection plus sort.
+- [x] PERF-017: Add a per-loop managed ownership helper.
 - [ ] PERF-018: Add deadline-based AutoClicker scheduling and jitter tests.
-- [ ] SAFE-001: Port verified JNI callback lifetime hardening.
-- [ ] SAFE-002: Port mapping-generation attempt caching.
+- [x] SAFE-001: Port verified JNI callback lifetime hardening.
+- [x] SAFE-002: Port mapping-generation attempt caching.
 - [ ] SAFE-003: Add direct lifecycle cleanup and restoration tests.
-- [ ] SAFE-004: Port and test Vulkan reset/shutdown fixes.
-- [ ] COMPAT-001: Verify legacy held-item nametag configuration.
-- [ ] COMPAT-002: Harden V1 numeric and message-size validation.
+- [x] SAFE-004: Port and test Vulkan reset/shutdown fixes.
+- [x] COMPAT-001: Verify legacy held-item nametag configuration.
+- [x] COMPAT-002: Harden V1 numeric and message-size validation.
 - [ ] MAINT-001: Extract pure native helpers without behavior changes.
 - [ ] MAINT-002: Extract one visual producer and renderer with direct dispatch.
-- [ ] QA-001: Automate benchmark summary comparison.
+- [x] QA-001: Automate benchmark summary comparison.
 - [ ] QA-002: Maintain the supported-runtime smoke verification record.
 
 ## Definition of done

@@ -498,7 +498,11 @@ public class GameStateClient : INotifyPropertyChanged
                     }
 
                     JsonNode? rawNode = JsonNode.Parse(line);
-                    var state = rawNode?.Deserialize<GameState>();
+                    GameState? state = null;
+                    if (GameStatePatchMerger.IsPartial(rawNode) && rawNode is JsonObject patch)
+                        state = GameStatePatchMerger.Apply(CurrentState, patch);
+                    else
+                        state = rawNode?.Deserialize<GameState>();
                     if (state != null)
                     {
                         // Apply hudLayout from the same parsed document used for GameState.
@@ -1202,6 +1206,10 @@ public class GameStateClient : INotifyPropertyChanged
                     moduleListStyle = ModuleListStyleToIndex(clicker.ModuleListStyle),
                     showLogo = clicker.ShowLogo,
                     guiTheme = clicker.GuiTheme,
+                    // The modern bridge only emits partial fast-state packets
+                    // after this explicit opt-in. Older loaders therefore keep
+                    // receiving complete V1-compatible state documents.
+                    supportsStatePatches = true,
                     closestPlayerInfo = clicker.ClosestPlayerInfoEnabled,
                     fightStatus = clicker.FightStatusEnabled,
                     nametagShowHealth = clicker.NametagShowHealth,
