@@ -158,7 +158,7 @@ Additional work completed on `dev`:
 
 Verification for this slice:
 
-- Managed suite: 225 tests passed.
+- Managed suite: 230 tests passed.
 - Native harness: all tests passed, including telemetry and mapping-probe gates.
 - `McInjector\build.bat`: successful.
 - `McInjector\build_261.bat`: successful.
@@ -173,6 +173,24 @@ dispatcher, click-jitter, or Aim Assist state-age counters. Modern projection
 retains a bounded fail-open body-point fallback in the socket publisher, and
 the worker still uses a shared scan loop rather than fully independent
 per-producer deadlines; those acceptance items remain open by design.
+
+### 2026-08-01 correctness follow-up
+
+- Clear the modern prepared entity snapshot on the enabled-to-disabled
+  transition of the final entity consumer, preventing stale targets from being
+  published while Aim Assist or Triggerbot is re-enabled.
+- Replace action-bar timestamp-only throttling with a single pending
+  latest-value dispatcher and one trailing callback, so a stalled WPF thread
+  cannot accumulate stale dispatcher work.
+- Preserve validated native CPS/reach settings when config fields are missing
+  or malformed, with bounded ranges and a normalized min/max pair in both
+  bridges.
+
+Verification for this follow-up:
+
+- Managed suite: 230 tests passed.
+- Native harness: all tests passed.
+- Both native bridge builds succeeded.
 
 ## Guiding principles
 

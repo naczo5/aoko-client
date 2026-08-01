@@ -32,6 +32,7 @@ public class GameStateClient : INotifyPropertyChanged
     private readonly SemaphoreSlim _configChangedSignal = new(0, 1);
     private readonly ManagedTransportDiagnostics _transportDiagnostics =
         ManagedTransportDiagnostics.FromEnvironment();
+    private readonly CoalescedLatestValue<string> _actionBarDispatcher;
     private const int ConfigHeartbeatMs = 2000;
     private const int ConfigChangeCoalesceMs = 25;
     private const int StateNotificationIntervalMs = 25;
@@ -61,6 +62,16 @@ public class GameStateClient : INotifyPropertyChanged
         _stateNotification = new CoalescedCallback(
             NotifyStateUpdated,
             StateNotificationIntervalMs);
+        _actionBarDispatcher = new CoalescedLatestValue<string>(
+            action =>
+            {
+                System.Windows.Threading.Dispatcher? dispatcher =
+                    System.Windows.Application.Current?.Dispatcher;
+                if (dispatcher == null)
+                    throw new InvalidOperationException("WPF dispatcher is unavailable.");
+                dispatcher.BeginInvoke(action);
+            },
+            actionBar => Clicker.Instance.UpdateGtbFromActionBar(actionBar));
     }
 
     // === Properties ===
@@ -518,18 +529,7 @@ public class GameStateClient : INotifyPropertyChanged
                         state.LastUpdate = DateTime.Now;
                         CurrentState = state;
                         if (Capabilities.SupportsStateField("actionBar"))
-                        {
-                            string actionBar = state.ActionBar;
-                            long nowTicks = Environment.TickCount64;
-                            long last = Interlocked.Read(ref _lastUiActionBarDispatchTicks);
-                            if ((nowTicks - last) >= 25 && Interlocked.CompareExchange(ref _lastUiActionBarDispatchTicks, nowTicks, last) == last)
-                            {
-                                System.Windows.Application.Current?.Dispatcher.BeginInvoke(new Action(() =>
-                                {
-                                    Clicker.Instance.UpdateGtbFromActionBar(actionBar);
-                                }));
-                            }
-                        }
+                            QueueActionBarUpdate(state.ActionBar);
                     }
                 }
                 catch (JsonException)
@@ -1001,6 +1001,23 @@ public class GameStateClient : INotifyPropertyChanged
     {
         byte[] data = Encoding.UTF8.GetBytes(message);
         return await SendMessageAsync(data, token, sendGuard).ConfigureAwait(false);
+    }
+
+    private void QueueActionBarUpdate(string actionBar)
+    {
+        long nowTicks = Environment.TickCount64;
+        long last = Interlocked.Read(ref _lastUiActionBarDispatchTicks);
+        bool allowSchedule = last == 0 || nowTicks - last >= StateNotificationIntervalMs;
+
+        try
+        {
+            if (_actionBarDispatcher.Publish(actionBar, allowSchedule))
+                Interlocked.Exchange(ref _lastUiActionBarDispatchTicks, nowTicks);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[GameStateClient] Action-bar dispatch unavailable: {ex.Message}");
+        }
     }
 
     private async Task<bool> SendMessageAsync(

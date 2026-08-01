@@ -11850,12 +11850,14 @@ void ParseConfig(const std::string& line) {
         LockGuard lk(g_configMutex);
         g_config.armed = reader.GetBool("armed");
         g_config.clicking = reader.GetBool("clicking");
-        g_config.minCPS = reader.GetFloat("minCPS");
-        g_config.maxCPS = reader.GetFloat("maxCPS");
+        g_config.minCPS = lc::ClampFloat(reader.GetFloat("minCPS", g_config.minCPS), 1.0f, 25.0f);
+        g_config.maxCPS = lc::ClampFloat(reader.GetFloat("maxCPS", g_config.maxCPS), 1.0f, 25.0f);
+        if (g_config.maxCPS < g_config.minCPS) g_config.maxCPS = g_config.minCPS;
         g_config.leftClick = reader.GetBool("left");
         g_config.rightClick = reader.GetBool("right");
-        g_config.rightMinCPS = reader.GetFloat("rightMinCPS");
-        g_config.rightMaxCPS = reader.GetFloat("rightMaxCPS");
+        g_config.rightMinCPS = lc::ClampFloat(reader.GetFloat("rightMinCPS", g_config.rightMinCPS), 1.0f, 25.0f);
+        g_config.rightMaxCPS = lc::ClampFloat(reader.GetFloat("rightMaxCPS", g_config.rightMaxCPS), 1.0f, 25.0f);
+        if (g_config.rightMaxCPS < g_config.rightMinCPS) g_config.rightMaxCPS = g_config.rightMinCPS;
         g_config.rightBlockOnly = reader.GetBool("rightBlock");
         g_config.breakBlocks = reader.GetBool("breakBlocks");
         g_config.jitter = reader.GetBool("jitter");

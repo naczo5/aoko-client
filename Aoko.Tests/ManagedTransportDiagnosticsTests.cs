@@ -123,6 +123,36 @@ public sealed class ManagedTransportDiagnosticsTests
     }
 
     [Fact]
+    public void ModernEntityProducer_ClearsSnapshotWhenConsumersTurnOff()
+    {
+        string modernSource = File.ReadAllText(
+            Path.Combine(FindRepoRoot(), "McInjector", "src", "main", "cpp", "bridge_261.cpp"));
+
+        Assert.Contains("entityProducerWasEnabled", modernSource, StringComparison.Ordinal);
+        Assert.Contains("g_playerList.clear();", modernSource, StringComparison.Ordinal);
+        Assert.Contains("const bool entityProducerEnabled", modernSource, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void NativeFloatConfigIntegration_UsesValidatedExistingDefaults()
+    {
+        string root = FindRepoRoot();
+        string legacySource = File.ReadAllText(Path.Combine(root, "McInjector", "src", "main", "cpp", "bridge.cpp"));
+        string modernSource = File.ReadAllText(Path.Combine(root, "McInjector", "src", "main", "cpp", "bridge_261.cpp"));
+
+        foreach (string source in new[] { legacySource, modernSource })
+        {
+            Assert.Contains("reader.GetFloat(\"minCPS\", g_config.minCPS)", source, StringComparison.Ordinal);
+            Assert.Contains("reader.GetFloat(\"maxCPS\", g_config.maxCPS)", source, StringComparison.Ordinal);
+            Assert.Contains("reader.GetFloat(\"rightMinCPS\", g_config.rightMinCPS)", source, StringComparison.Ordinal);
+            Assert.Contains("reader.GetFloat(\"rightMaxCPS\", g_config.rightMaxCPS)", source, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("reader.GetFloat(\"reachMin\", g_config.reachMin)", modernSource, StringComparison.Ordinal);
+        Assert.Contains("reader.GetFloat(\"reachMax\", g_config.reachMax)", modernSource, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void DisabledDiagnostics_DoNotProduceSnapshots()
     {
         var diagnostics = new ManagedTransportDiagnostics(

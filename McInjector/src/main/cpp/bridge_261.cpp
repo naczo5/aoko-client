@@ -366,8 +366,9 @@ static void ParseConfig(const std::string& line) {
     int prevReloadNonce = g_config.reloadMappingsNonce;
     g_config.armed         = reader.GetBool("armed");
     g_config.clicking      = reader.GetBool("clicking");
-    g_config.minCPS        = reader.GetFloat("minCPS");
-    g_config.maxCPS        = reader.GetFloat("maxCPS");
+    g_config.minCPS        = lc::ClampFloat(reader.GetFloat("minCPS", g_config.minCPS), 1.0f, 25.0f);
+    g_config.maxCPS        = lc::ClampFloat(reader.GetFloat("maxCPS", g_config.maxCPS), 1.0f, 25.0f);
+    if (g_config.maxCPS < g_config.minCPS) g_config.maxCPS = g_config.minCPS;
     g_config.jitter        = reader.GetBool("jitter");
     g_config.clickInChests = reader.GetBool("clickInChests");
     g_config.aimAssist     = reader.GetBool("aimAssist");
@@ -505,8 +506,9 @@ static void ParseConfig(const std::string& line) {
         }
     }
     g_config.rightClick    = reader.GetBool("right");
-    g_config.rightMinCPS   = reader.GetFloat("rightMinCPS");
-    g_config.rightMaxCPS   = reader.GetFloat("rightMaxCPS");
+    g_config.rightMinCPS   = lc::ClampFloat(reader.GetFloat("rightMinCPS", g_config.rightMinCPS), 1.0f, 25.0f);
+    g_config.rightMaxCPS   = lc::ClampFloat(reader.GetFloat("rightMaxCPS", g_config.rightMaxCPS), 1.0f, 25.0f);
+    if (g_config.rightMaxCPS < g_config.rightMinCPS) g_config.rightMaxCPS = g_config.rightMinCPS;
     g_config.moduleListStyle = lc::ClampInt(reader.GetInt("moduleListStyle", 0), 0, 4);
     std::string showLogoRaw = reader.GetString("showLogo");
     g_config.showLogo = showLogoRaw.empty() ? true : (showLogoRaw == "true");
@@ -524,8 +526,9 @@ static void ParseConfig(const std::string& line) {
     g_config.gtbCount      = reader.GetInt("gtbCount", 0);
     g_config.gtbPreview    = reader.GetString("gtbPreview");
     g_config.reachEnabled  = reader.GetBool("reachEnabled");
-    g_config.reachMin      = reader.GetFloat("reachMin");
-    g_config.reachMax      = reader.GetFloat("reachMax");
+    g_config.reachMin      = lc::ClampFloat(reader.GetFloat("reachMin", g_config.reachMin), 3.0f, 6.0f);
+    g_config.reachMax      = lc::ClampFloat(reader.GetFloat("reachMax", g_config.reachMax), 3.0f, 6.0f);
+    if (g_config.reachMax < g_config.reachMin) g_config.reachMax = g_config.reachMin;
     g_config.reachChance   = reader.GetInt("reachChance", 100);
     g_config.velocityEnabled = reader.GetBool("velocityEnabled");
     g_config.velocityHorizontal = lc::ClampInt(reader.GetInt("velocityHorizontal", 100), 1, 100);
@@ -13200,6 +13203,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
     DWORD lastBlockEspScanMs = 0;
     bool chestEspScanWasEnabled = false;
     bool blockEspScanWasEnabled = false;
+    bool entityProducerWasEnabled = false;
     // Teleport detection: track last scanned player position to catch same-world jumps
     // (arena teleports) that bypass the loading-screen / world-instance guards.
     double lastScanX = 0, lastScanY = 0, lastScanZ = 0;
@@ -13352,10 +13356,20 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                     static bool s_fightStatusWasEnabled = false;
                     if (!cfg.fightStatus && s_fightStatusWasEnabled) ResetFightStatusState121();
                     s_fightStatusWasEnabled = cfg.fightStatus;
-                    if (cfg.nametags || cfg.nickHiderEnabled || cfg.closestPlayer || cfg.fightStatus || cfg.aimAssist || cfg.triggerbot || cfg.nametagHideVanilla || g_nametagSuppressionActive_121) {
+                    const bool entityProducerEnabled =
+                        cfg.nametags || cfg.nickHiderEnabled || cfg.closestPlayer ||
+                        cfg.fightStatus || cfg.aimAssist || cfg.triggerbot ||
+                        cfg.nametagHideVanilla || g_nametagSuppressionActive_121;
+                    if (entityProducerEnabled) {
                         NativePerfScope playerScanPerf(lc::PERF_PLAYER_SCAN);
                         UpdatePlayerListOverlay(env);
+                    } else if (entityProducerWasEnabled) {
+                        // Do not let full or newly-enabled fast state packets
+                        // publish targets from the last enabled producer run.
+                        LockGuard playerListLock(g_playerListMutex);
+                        g_playerList.clear();
                     }
+                    entityProducerWasEnabled = entityProducerEnabled;
                     const DWORD producerNowMs = GetTickCount();
                     const bool chestEspScanEnabled = cfg.chestEsp || cfg.chestStealer;
                     const bool chestEspScanDue =
