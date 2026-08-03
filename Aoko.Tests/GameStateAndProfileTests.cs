@@ -130,6 +130,22 @@ public class GameStateAndProfileTests
         Assert.Equal(530, y);
     }
 
+    [Theory]
+    [InlineData(-1, 10)]
+    [InlineData(854, 10)]
+    [InlineData(10, -1)]
+    [InlineData(10, 480)]
+    public void ChestStealerCoordinateMapper_RejectsOutOfBoundsSlots(int x, int y)
+    {
+        var state = new ChestStealerState { ScreenWidth = 854, ScreenHeight = 480 };
+        var slot = new ChestStealerSlot { X = x, Y = y };
+        var clientRect = new WindowDetection.RECT { Left = 100, Top = 50, Right = 1808, Bottom = 1010 };
+
+        bool mapped = ChestStealerCoordinateMapper.TryMapScaledPoint(state, slot, clientRect, out _, out _);
+
+        Assert.False(mapped);
+    }
+
     [Fact]
     public void Profile_DefaultValuesRemainStable()
     {
@@ -289,6 +305,30 @@ public class GameStateAndProfileTests
         {
             if (Directory.Exists(appData))
                 Directory.Delete(appData, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void ProfileManager_TryWriteProfile_FailsOpenWhenPathIsNotWritable()
+    {
+        string root = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+
+        try
+        {
+            Directory.CreateDirectory(root);
+            string blockingFile = Path.Combine(root, "not-a-directory");
+            File.WriteAllText(blockingFile, "occupied");
+
+            bool written = ProfileManager.TryWriteProfile(
+                Path.Combine(blockingFile, "config.json"),
+                """{"name":"config"}""");
+
+            Assert.False(written);
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+                Directory.Delete(root, recursive: true);
         }
     }
 }

@@ -55,6 +55,8 @@ static volatile LONG s_hasLocalVars = 0;
 static volatile LONG s_hasGetBytecodes = 0;
 static volatile LONG s_hasRetransform = 0;
 static volatile LONG s_hasRetransformAny = 0;
+static volatile LONG s_shutdownRequested = 0;
+static volatile LONG s_callbacksInFlight = 0;
 
 typedef void (*JvmtiClassFileLoadHookFn)(jvmtiEnv* jvmti, JNIEnv* env, jclass classBeingRedefined,
                                          jobject loader, const char* name, jobject protectionDomain,
@@ -67,6 +69,29 @@ static SRWLOCK s_classFileHookLock = SRWLOCK_INIT;
 static void Log(const std::string& message)
 {
     if (s_log) s_log(message);
+}
+
+class CallbackLease {
+    bool active_;
+public:
+    CallbackLease() : active_(false) {
+        if (InterlockedCompareExchange(&s_shutdownRequested, 0, 0) != 0) return;
+        InterlockedIncrement(&s_callbacksInFlight);
+        if (InterlockedCompareExchange(&s_shutdownRequested, 0, 0) == 0) {
+            active_ = true;
+        } else {
+            InterlockedDecrement(&s_callbacksInFlight);
+        }
+    }
+    ~CallbackLease() {
+        if (active_) InterlockedDecrement(&s_callbacksInFlight);
+    }
+    bool Active() const { return active_; }
+};
+
+static void WaitForCallbacksToDrain() {
+    while (InterlockedCompareExchange(&s_callbacksInFlight, 0, 0) != 0)
+        Sleep(1);
 }
 
 static bool IsLegacySurface(const char* signature, const char*& label)
@@ -217,6 +242,8 @@ static SurfaceEntry* FindCallingSurface(JNIEnv* env, jthread thread)
 
 static void JNICALL OnBreakpoint(jvmtiEnv* jvmti, JNIEnv* env, jthread thread, jmethodID method, jlocation location)
 {
+    CallbackLease lease;
+    if (!lease.Active()) return;
     if (s_extraBreakpoint)
         s_extraBreakpoint(jvmti, env, thread, method, location);
 
@@ -255,6 +282,8 @@ static void JNICALL OnBreakpoint(jvmtiEnv* jvmti, JNIEnv* env, jthread thread, j
 static void JNICALL OnFramePop(jvmtiEnv* jvmti, JNIEnv* env, jthread thread, jmethodID method,
                                jboolean wasPoppedByException)
 {
+    CallbackLease lease;
+    if (!lease.Active()) return;
     if (s_extraFramePop)
         s_extraFramePop(jvmti, env, thread, method, wasPoppedByException);
 }
@@ -265,6 +294,8 @@ static void JNICALL OnClassFileLoadHook(jvmtiEnv* jvmti, JNIEnv* env,
                                         jint classDataLen, const unsigned char* classData,
                                         jint* newClassDataLen, unsigned char** newClassData)
 {
+    CallbackLease lease;
+    if (!lease.Active()) return;
     JvmtiClassFileLoadHookFn snapshot[kMaxClassFileHooks] = {};
     AcquireSRWLockShared(&s_classFileHookLock);
     for (int i = 0; i < kMaxClassFileHooks; ++i) snapshot[i] = s_classFileHooks[i];
@@ -338,6 +369,7 @@ bool InstallNickHiderJvmti(JavaVM* vm, NickHiderJvmtiGeneration generation, void
     if (InterlockedCompareExchange(&s_installed, 0, 0)) return true;
     if (!vm) return false;
     s_vm = vm;
+    InterlockedExchange(&s_shutdownRequested, 0);
     s_generation = generation;
     s_log = logger;
     if (vm->GetEnv(reinterpret_cast<void**>(&s_jvmti), JVMTI_VERSION_1_2) != JNI_OK || !s_jvmti) {
@@ -555,11 +587,13 @@ void FlushNickHiderJvmtiDiagnostics()
 
 void ShutdownNickHiderJvmti(JNIEnv* env)
 {
+    InterlockedExchange(&s_shutdownRequested, 1);
     if (s_jvmti) {
         s_jvmti->SetEventNotificationMode(JVMTI_DISABLE, JVMTI_EVENT_BREAKPOINT, nullptr);
         s_jvmti->SetEventNotificationMode(JVMTI_DISABLE, JVMTI_EVENT_FRAME_POP, nullptr);
         s_jvmti->SetEventNotificationMode(JVMTI_DISABLE, JVMTI_EVENT_CLASS_FILE_LOAD_HOOK, nullptr);
     }
+    WaitForCallbacksToDrain();
     if (env) {
         for (LONG i = 0; i < InterlockedCompareExchange(&s_surfaceCount, 0, 0); ++i)
             if (s_surfaces[i].clazz) env->DeleteGlobalRef(s_surfaces[i].clazz);

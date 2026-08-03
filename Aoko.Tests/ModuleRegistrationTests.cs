@@ -56,6 +56,83 @@ public class ModuleRegistrationTests
     }
 
     [Fact]
+    public void NativeModernCapabilities_AdvertiseStableManagedFields()
+    {
+        string header = File.ReadAllText(Path.Combine(RepoRoot, "McInjector", "src", "main", "cpp", "bridge_capabilities.h"));
+
+        Assert.Contains("\\\"holdingblock\\\"", header, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("\\\"lookingatblock\\\"", header, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("\\\"fov\\\"", header, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("\\\"viewportwidth\\\"", header, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("\\\"viewportheight\\\"", header, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("\\\"autototembehaviormode\\\"", header, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("\\\"nametagshowhelditem\\\"", header, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Catalog_ToggleModules_HaveManagedConfigPayloadFields()
+    {
+        string source = File.ReadAllText(Path.Combine(RepoRoot, "Aoko", "Core", "GameStateClient.cs"));
+        int start = source.IndexOf("var config = new", StringComparison.Ordinal);
+        Assert.True(start >= 0, "GameStateClient config object not found");
+        int end = source.IndexOf("string json = JsonSerializer.Serialize(config)", start, StringComparison.Ordinal);
+        Assert.True(end > start, "GameStateClient config serialization boundary not found");
+        string configBlock = source[start..end];
+
+        var actual = Regex.Matches(
+                configBlock,
+                @"(?m)^\s*(?<name>[A-Za-z][A-Za-z0-9]*)\s*=")
+            .Select(m => m.Groups["name"].Value)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        // These are the canonical enable flags consumed by both bridge
+        // families.  Keep this map explicit: several UI ids intentionally do
+        // not match their wire key (autoclicker -> armed, rightclick -> right).
+        var expected = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["autoclicker"] = "armed",
+            ["rightclick"] = "right",
+            ["jitter"] = "jitter",
+            ["clickinchests"] = "clickInChests",
+            ["breakblocks"] = "breakBlocks",
+            ["aimassist"] = "aimAssist",
+            ["triggerbot"] = "triggerbot",
+            ["killaura"] = "killAura",
+            ["speedbridge"] = "speedBridge",
+            ["gtbhelper"] = "gtbHelper",
+            ["pixelpartyassist"] = "pixelPartyAssist",
+            ["nametags"] = "nametags",
+            ["nickhider"] = "nickHiderEnabled",
+            ["closestplayer"] = "closestPlayerInfo",
+            ["fightstatus"] = "fightStatus",
+            ["chestesp"] = "chestEsp",
+            ["cheststealer"] = "chestStealerEnabled",
+            ["blockesp"] = "blockEspEnabled",
+            ["reach"] = "reachEnabled",
+            ["velocity"] = "velocityEnabled",
+            ["autototem"] = "autoTotemEnabled",
+            ["autorod"] = "autoRodEnabled",
+            ["antidebuff"] = "antiDebuffEnabled",
+            ["hitdelayfix"] = "hitDelayFixEnabled"
+        };
+
+        var catalogIds = ModuleCatalog.Requiring(ModuleCatalog.Surfaces.OverlayList)
+            .Select(entry => entry.Id)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        Assert.True(catalogIds.SetEquals(expected.Keys),
+            "Managed config payload map must cover exactly the catalog OverlayList modules.");
+
+        var missing = expected
+            .Where(pair => !actual.Contains(pair.Value))
+            .Select(pair => $"{pair.Key} -> {pair.Value}")
+            .ToList();
+
+        Assert.True(missing.Count == 0,
+            "GameStateClient config payload is missing module enable field(s): " +
+            string.Join(", ", missing));
+    }
+
+    [Fact]
     public void KeybindGui_MainWindowXaml_HasButtonForEveryCatalogModule()
     {
         string xaml = File.ReadAllText(Path.Combine(RepoRoot, "Aoko", "MainWindow.xaml"));

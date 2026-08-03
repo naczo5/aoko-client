@@ -16,7 +16,7 @@ namespace Aoko.Core;
 
 /// <summary>
 /// TCP client that connects to the injected Java agent running inside Minecraft.
-/// Receives game state updates at ~20Hz and exposes them to the rest of the app.
+/// Receives adaptive game-state updates and exposes the latest snapshot to the app.
 /// </summary>
 public class GameStateClient : INotifyPropertyChanged
 {
@@ -29,8 +29,17 @@ public class GameStateClient : INotifyPropertyChanged
     private Task? _readTask;
     private readonly int _port = 25590;
     private readonly SemaphoreSlim _sendLock = new(1, 1);
+    private readonly SemaphoreSlim _configChangedSignal = new(0, 1);
+    private readonly ManagedTransportDiagnostics _transportDiagnostics =
+        ManagedTransportDiagnostics.FromEnvironment();
+    private readonly CoalescedLatestValue<string> _actionBarDispatcher;
+    private const int ConfigHeartbeatMs = 2000;
+    private const int ConfigChangeCoalesceMs = 25;
+    private const int StateNotificationIntervalMs = 25;
+    private const int MaximumInboundMessageCharacters = 1024 * 1024;
 
-    private GameState _currentState = new();
+    private volatile GameState _currentState = new();
+    private readonly CoalescedCallback _stateNotification;
     private bool _isConnected;
     private bool _isInjected;
     private string _statusMessage = "Not injected";
@@ -42,11 +51,28 @@ public class GameStateClient : INotifyPropertyChanged
     private int _reloadMappingsNonce;
     private IntPtr _customTargetHwnd;
     private volatile bool _suppressConfigPush = false;
+    private long _configRevision = 1;
+    private int _configChangeTrackingAttached;
 
     public event PropertyChangedEventHandler? PropertyChanged;
     public event Action? StateUpdated;
 
-    private GameStateClient() { }
+    private GameStateClient()
+    {
+        _stateNotification = new CoalescedCallback(
+            NotifyStateUpdated,
+            StateNotificationIntervalMs);
+        _actionBarDispatcher = new CoalescedLatestValue<string>(
+            action =>
+            {
+                System.Windows.Threading.Dispatcher? dispatcher =
+                    System.Windows.Application.Current?.Dispatcher;
+                if (dispatcher == null)
+                    throw new InvalidOperationException("WPF dispatcher is unavailable.");
+                dispatcher.BeginInvoke(action);
+            },
+            actionBar => Clicker.Instance.UpdateGtbFromActionBar(actionBar));
+    }
 
     // === Properties ===
 
@@ -56,9 +82,15 @@ public class GameStateClient : INotifyPropertyChanged
         private set
         {
             _currentState = value;
-            OnPropertyChanged(nameof(CurrentState));
-            StateUpdated?.Invoke();
+            _stateNotification.Signal();
         }
+    }
+
+    private void NotifyStateUpdated()
+    {
+        _transportDiagnostics.RecordStateNotification();
+        OnPropertyChanged(nameof(CurrentState));
+        StateUpdated?.Invoke();
     }
 
     public bool IsConnected
@@ -161,6 +193,7 @@ public class GameStateClient : INotifyPropertyChanged
     public void RequestBridgeMappingReload()
     {
         Interlocked.Increment(ref _reloadMappingsNonce);
+        MarkBridgeConfigDirty();
         Log("Queued bridge mapping reload request.");
     }
 
@@ -409,6 +442,9 @@ public class GameStateClient : INotifyPropertyChanged
             return;
         }
 
+        EnsureConfigChangeTracking();
+        MarkBridgeConfigDirty();
+
         // Start config sender task
         _configSenderTask = Task.Run(() => ConfigSenderLoop(token), token);
         _readTask = Task.Run(() => ReadLoop(token), token);
@@ -439,13 +475,24 @@ public class GameStateClient : INotifyPropertyChanged
         {
             if (_client == null) return;
             using var stream = _client.GetStream();
-            using var reader = new StreamReader(stream, Encoding.UTF8);
+            using var reader = new BoundedLineReader(
+                stream,
+                MaximumInboundMessageCharacters,
+                Encoding.UTF8);
 
             while (!token.IsCancellationRequested && _client.Connected)
             {
-                string? line = await reader.ReadLineAsync(token);
-                if (line == null) break;
+                BoundedLineReadResult readResult = await reader.ReadLineAsync(token);
+                if (readResult.IsEndOfStream) break;
+                if (readResult.IsTooLong)
+                {
+                    Log($"Ignored bridge message exceeding {MaximumInboundMessageCharacters} characters.");
+                    continue;
+                }
 
+                string line = readResult.Line!;
+
+                long parseStarted = Stopwatch.GetTimestamp();
                 try
                 {
                     // Check if it's a command from ClickGUI
@@ -462,7 +509,11 @@ public class GameStateClient : INotifyPropertyChanged
                     }
 
                     JsonNode? rawNode = JsonNode.Parse(line);
-                    var state = rawNode?.Deserialize<GameState>();
+                    GameState? state = null;
+                    if (GameStatePatchMerger.IsPartial(rawNode) && rawNode is JsonObject patch)
+                        state = GameStatePatchMerger.Apply(CurrentState, patch);
+                    else
+                        state = rawNode?.Deserialize<GameState>();
                     if (state != null)
                     {
                         // Apply hudLayout from the same parsed document used for GameState.
@@ -478,23 +529,19 @@ public class GameStateClient : INotifyPropertyChanged
                         state.LastUpdate = DateTime.Now;
                         CurrentState = state;
                         if (Capabilities.SupportsStateField("actionBar"))
-                        {
-                            string actionBar = state.ActionBar;
-                            long nowTicks = Environment.TickCount64;
-                            long last = Interlocked.Read(ref _lastUiActionBarDispatchTicks);
-                            if ((nowTicks - last) >= 25 && Interlocked.CompareExchange(ref _lastUiActionBarDispatchTicks, nowTicks, last) == last)
-                            {
-                                System.Windows.Application.Current?.Dispatcher.BeginInvoke(new Action(() =>
-                                {
-                                    Clicker.Instance.UpdateGtbFromActionBar(actionBar);
-                                }));
-                            }
-                        }
+                            QueueActionBarUpdate(state.ActionBar);
                     }
                 }
                 catch (JsonException)
                 {
                     // Skip malformed lines
+                }
+                finally
+                {
+                    _transportDiagnostics.RecordInbound(
+                        line.Length,
+                        Stopwatch.GetTimestamp() - parseStarted);
+                    LogTransportDiagnosticsIfReady();
                 }
             }
         }
@@ -953,6 +1000,31 @@ public class GameStateClient : INotifyPropertyChanged
         Func<bool>? sendGuard = null)
     {
         byte[] data = Encoding.UTF8.GetBytes(message);
+        return await SendMessageAsync(data, token, sendGuard).ConfigureAwait(false);
+    }
+
+    private void QueueActionBarUpdate(string actionBar)
+    {
+        long nowTicks = Environment.TickCount64;
+        long last = Interlocked.Read(ref _lastUiActionBarDispatchTicks);
+        bool allowSchedule = last == 0 || nowTicks - last >= StateNotificationIntervalMs;
+
+        try
+        {
+            if (_actionBarDispatcher.Publish(actionBar, allowSchedule))
+                Interlocked.Exchange(ref _lastUiActionBarDispatchTicks, nowTicks);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[GameStateClient] Action-bar dispatch unavailable: {ex.Message}");
+        }
+    }
+
+    private async Task<bool> SendMessageAsync(
+        ReadOnlyMemory<byte> data,
+        CancellationToken token,
+        Func<bool>? sendGuard = null)
+    {
         await _sendLock.WaitAsync(token).ConfigureAwait(false);
         try
         {
@@ -964,7 +1036,7 @@ public class GameStateClient : INotifyPropertyChanged
                 return false;
 
             NetworkStream stream = client.GetStream();
-            await stream.WriteAsync(data.AsMemory(), token).ConfigureAwait(false);
+            await stream.WriteAsync(data, token).ConfigureAwait(false);
             return true;
         }
         finally
@@ -996,21 +1068,61 @@ public class GameStateClient : INotifyPropertyChanged
 
     private async Task ConfigSenderLoop(CancellationToken token)
     {
+        long lastSentRevision = -1;
+        long lastSentAt = 0;
+        long cachedRevision = -1;
+        byte[]? cachedPayload = null;
+
         while (!token.IsCancellationRequested && _client?.Connected == true)
         {
             try
             {
-                if (_suppressConfigPush)
+                long revision = Volatile.Read(ref _configRevision);
+                long now = Environment.TickCount64;
+                long elapsedSinceSend = lastSentAt == 0 ? ConfigHeartbeatMs : now - lastSentAt;
+                bool revisionChanged = revision != lastSentRevision;
+                if (!IsConfigSendDue(
+                    revision,
+                    lastSentRevision,
+                    elapsedSinceSend,
+                    ConfigHeartbeatMs))
                 {
-                    await Task.Delay(200, token);
+                    int waitMs = (int)Math.Clamp(
+                        ConfigHeartbeatMs - elapsedSinceSend,
+                        1,
+                        ConfigHeartbeatMs);
+                    await _configChangedSignal.WaitAsync(waitMs, token).ConfigureAwait(false);
                     continue;
                 }
 
-                var clicker = Clicker.Instance;
-                var ka = clicker.KillAuraSettings;
-                var config = new
+                if (_suppressConfigPush)
                 {
+                    await Task.Delay(ConfigChangeCoalesceMs, token).ConfigureAwait(false);
+                    continue;
+                }
+
+                if (revisionChanged && lastSentAt != 0)
+                {
+                    await Task.Delay(ConfigChangeCoalesceMs, token).ConfigureAwait(false);
+                    while (_configChangedSignal.Wait(0))
+                    {
+                    }
+                    revision = Volatile.Read(ref _configRevision);
+                }
+
+                byte[] payload;
+                if (ShouldSerializeConfig(
+                    revision,
+                    cachedRevision,
+                    cachedPayload != null))
+                {
+                    long serializationStarted = Stopwatch.GetTimestamp();
+                    var clicker = Clicker.Instance;
+                    var ka = clicker.KillAuraSettings;
+                    var config = new
+                    {
                     type = "config",
+                    perfDiagnostics = _transportDiagnostics.Enabled,
                     armed = clicker.IsArmed,
                     clicking = clicker.IsClicking,
                     minCPS = clicker.MinCPS,
@@ -1111,6 +1223,10 @@ public class GameStateClient : INotifyPropertyChanged
                     moduleListStyle = ModuleListStyleToIndex(clicker.ModuleListStyle),
                     showLogo = clicker.ShowLogo,
                     guiTheme = clicker.GuiTheme,
+                    // The modern bridge only emits partial fast-state packets
+                    // after this explicit opt-in. Older loaders therefore keep
+                    // receiving complete V1-compatible state documents.
+                    supportsStatePatches = true,
                     closestPlayerInfo = clicker.ClosestPlayerInfoEnabled,
                     fightStatus = clicker.FightStatusEnabled,
                     nametagShowHealth = clicker.NametagShowHealth,
@@ -1172,18 +1288,83 @@ public class GameStateClient : INotifyPropertyChanged
                     keybindAutoRod = InputHooks.GetModuleKey("autorod"),
                     hudEditor = clicker.HudEditorActive,
                     hudLayout = clicker.HudLayout.ToJson()
-                };
+                    };
 
-                string json = JsonSerializer.Serialize(config) + "\n";
-                if (!await SendMessageAsync(json, token).ConfigureAwait(false))
+                    string json = JsonSerializer.Serialize(config) + "\n";
+                    payload = Encoding.UTF8.GetBytes(json);
+                    cachedPayload = payload;
+                    cachedRevision = revision;
+                    _transportDiagnostics.RecordConfigSerialization(
+                        json.Length,
+                        Stopwatch.GetTimestamp() - serializationStarted);
+                }
+                else
+                {
+                    payload = cachedPayload!;
+                }
+
+                if (!await SendMessageAsync(payload, token).ConfigureAwait(false))
                     break;
+                _transportDiagnostics.RecordConfigSend(payload.Length);
+                lastSentRevision = revision;
+                lastSentAt = Environment.TickCount64;
+                LogTransportDiagnosticsIfReady();
             }
             catch (Exception)
             {
                 break;
             }
+        }
+    }
 
-            await Task.Delay(200, token);
+    internal static bool IsConfigSendDue(
+        long revision,
+        long lastSentRevision,
+        long elapsedSinceSendMs,
+        int heartbeatMs)
+        => revision != lastSentRevision || elapsedSinceSendMs >= heartbeatMs;
+
+    internal static bool ShouldSerializeConfig(
+        long revision,
+        long cachedRevision,
+        bool hasCachedPayload)
+        => !hasCachedPayload || revision != cachedRevision;
+
+    private void EnsureConfigChangeTracking()
+    {
+        if (Interlocked.Exchange(ref _configChangeTrackingAttached, 1) != 0)
+            return;
+
+        Clicker.Instance.PropertyChanged += OnClickerConfigPropertyChanged;
+        Clicker.Instance.StateChanged += MarkBridgeConfigDirty;
+        InputHooks.OnStateChanged += MarkBridgeConfigDirty;
+    }
+
+    private void OnClickerConfigPropertyChanged(
+        object? sender,
+        PropertyChangedEventArgs eventArgs)
+        => MarkBridgeConfigDirty();
+
+    private void MarkBridgeConfigDirty()
+    {
+        Interlocked.Increment(ref _configRevision);
+        try
+        {
+            _configChangedSignal.Release();
+        }
+        catch (SemaphoreFullException)
+        {
+            // A pending signal already represents the latest revision.
+        }
+    }
+
+    private void LogTransportDiagnosticsIfReady()
+    {
+        if (_transportDiagnostics.TryTakeSnapshot(
+            Stopwatch.GetTimestamp(),
+            out ManagedTransportSnapshot snapshot))
+        {
+            Log(snapshot.ToLogMessage());
         }
     }
 

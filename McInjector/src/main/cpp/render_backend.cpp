@@ -66,6 +66,31 @@ static bool IsVulkanHookEnabled() {
 // ============================================================================
 
 static volatile LONG g_activeBackend = (LONG)GfxBackendKind::Unknown;
+static volatile LONG g_vkRenderCleanupRequested = 0;
+static volatile LONG g_vkRenderCallbacksInFlight = 0;
+
+class VkRenderCallbackLease {
+    bool active_;
+public:
+    VkRenderCallbackLease() : active_(false) {
+        if (InterlockedCompareExchange(&g_vkRenderCleanupRequested, 0, 0) != 0) return;
+        InterlockedIncrement(&g_vkRenderCallbacksInFlight);
+        if (InterlockedCompareExchange(&g_vkRenderCleanupRequested, 0, 0) == 0) {
+            active_ = true;
+        } else {
+            InterlockedDecrement(&g_vkRenderCallbacksInFlight);
+        }
+    }
+    ~VkRenderCallbackLease() {
+        if (active_) InterlockedDecrement(&g_vkRenderCallbacksInFlight);
+    }
+    bool Active() const { return active_; }
+};
+
+static void WaitForVkRenderCallbacks() {
+    while (InterlockedCompareExchange(&g_vkRenderCallbacksInFlight, 0, 0) != 0)
+        Sleep(1);
+}
 
 GfxBackendKind RenderBackend_GetActiveKind() {
     return (GfxBackendKind)InterlockedCompareExchange(&g_activeBackend, 0, 0);
@@ -532,6 +557,8 @@ static void CaptureLiveDevice(VkDevice device) {
 static VkResult VKAPI_PTR Hooked_vkAcquireNextImageKHR(
         VkDevice device, VkSwapchainKHR swapchain, uint64_t timeout,
         VkSemaphore semaphore, VkFence fence, uint32_t* pImageIndex) {
+    VkRenderCallbackLease lease;
+    if (!lease.Active()) return o_vkAcquireNextImageKHR(device, swapchain, timeout, semaphore, fence, pImageIndex);
     {
         VkLockGuard lk;
         if (g_device == VK_NULL_HANDLE) CaptureLiveDevice(device);
@@ -550,6 +577,8 @@ static VkResult VKAPI_PTR Hooked_vkAcquireNextImageKHR(
 static VkResult VKAPI_PTR Hooked_vkCreateSwapchainKHR(
         VkDevice device, const VkSwapchainCreateInfoKHR* pCreateInfo,
         const VkAllocationCallbacks* pAllocator, VkSwapchainKHR* pSwapchain) {
+    VkRenderCallbackLease lease;
+    if (!lease.Active()) return o_vkCreateSwapchainKHR(device, pCreateInfo, pAllocator, pSwapchain);
     VkResult r = o_vkCreateSwapchainKHR(device, pCreateInfo, pAllocator, pSwapchain);
     if (r == VK_SUCCESS && pSwapchain && pCreateInfo) {
         VkLockGuard lk;
@@ -576,6 +605,8 @@ static VkResult VKAPI_PTR Hooked_vkCreateSwapchainKHR(
 }
 
 static VkResult VKAPI_PTR Hooked_vkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* pPresentInfo) {
+    VkRenderCallbackLease lease;
+    if (!lease.Active()) return o_vkQueuePresentKHR(queue, pPresentInfo);
     if (RenderBackend_GetActiveKind() == GfxBackendKind::OpenGL || !pPresentInfo)
         return o_vkQueuePresentKHR(queue, pPresentInfo);
 
@@ -619,6 +650,8 @@ static VkResult VKAPI_PTR Hooked_vkQueuePresentKHR(VkQueue queue, const VkPresen
 
 static void VKAPI_PTR Hooked_vkDestroySwapchainKHR(
         VkDevice device, VkSwapchainKHR swapchain, const VkAllocationCallbacks* pAllocator) {
+    VkRenderCallbackLease lease;
+    if (!lease.Active()) { o_vkDestroySwapchainKHR(device, swapchain, pAllocator); return; }
     {
         VkLockGuard lk;
         if (device == g_device && swapchain == g_swapchain) {
@@ -632,6 +665,8 @@ static void VKAPI_PTR Hooked_vkDestroySwapchainKHR(
 }
 
 static void VKAPI_PTR Hooked_vkDestroyDevice(VkDevice device, const VkAllocationCallbacks* pAllocator) {
+    VkRenderCallbackLease lease;
+    if (!lease.Active()) { o_vkDestroyDevice(device, pAllocator); return; }
     {
         VkLockGuard lk;
         if (device == g_device) {
@@ -770,6 +805,7 @@ static bool InstallHook(void* target, void* detour, void** original, int slot) {
 bool RenderBackend_InitHooks() {
     if (!IsVulkanHookEnabled()) return false;
     if (g_hookTargets[0]) return true;
+    InterlockedExchange(&g_vkRenderCleanupRequested, 0);
 
     g_vulkanDll = GetModuleHandleA("vulkan-1.dll");
     if (!g_vulkanDll) g_vulkanDll = LoadLibraryA("vulkan-1.dll");
@@ -799,6 +835,11 @@ bool RenderBackend_InitHooks() {
 }
 
 void RenderBackend_Shutdown() {
+    InterlockedExchange(&g_vkRenderCleanupRequested, 1);
+    for (int i = 0; i < kMaxHooks; ++i) {
+        if (g_hookTargets[i]) MH_DisableHook(g_hookTargets[i]);
+    }
+    WaitForVkRenderCallbacks();
     {
         VkLockGuard lk;
         ShutdownImGuiVulkan();
@@ -806,13 +847,12 @@ void RenderBackend_Shutdown() {
         if (g_renderPass && p_vkDestroyRenderPass && g_device) { p_vkDestroyRenderPass(g_device, g_renderPass, nullptr); g_renderPass = VK_NULL_HANDLE; }
     }
     for (int i = 0; i < kMaxHooks; ++i) {
-        if (g_hookTargets[i]) { MH_DisableHook(g_hookTargets[i]); g_hookTargets[i] = nullptr; }
+        if (g_hookTargets[i]) { g_hookTargets[i] = nullptr; }
     }
-    o_vkQueuePresentKHR = nullptr;
-    o_vkAcquireNextImageKHR = nullptr;
-    o_vkCreateSwapchainKHR = nullptr;
-    o_vkDestroySwapchainKHR = nullptr;
-    o_vkDestroyDevice = nullptr;
+    // Keep the original dispatch pointers valid for a detour that observed the
+    // cleanup gate immediately before it was raised.  Hooks are disabled and
+    // the module is not unloaded until the owning bridge teardown completes,
+    // so retaining these tiny function pointers is safer than a null-call race.
     // Note: the throwaway instance/device are intentionally left alive; g_physicalDevice is
     // used for ImGui memory-type queries and the trampoline addresses remain valid regardless.
 }

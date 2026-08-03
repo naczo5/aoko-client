@@ -55,14 +55,33 @@ static void TestReadsQuotedAndUnquotedValues()
 static void TestFallbacksOnMissingOrInvalidValues()
 {
     const std::string line =
-        "{\"type\":\"config\",\"velocityHorizontal\":\"oops\",\"velocityVertical\":,\"missingBool\":false}";
+        "{\"type\":\"config\",\"velocityHorizontal\":\"oops\",\"velocityVertical\":,"
+        "\"partialInt\":\"12junk\",\"partialFloat\":\"3.5ms\",\"notFinite\":\"NaN\","
+        "\"infinity\":\"Infinity\",\"overflow\":\"999999999999999999999999\","
+        "\"invalidBool\":\"yes\",\"missingBool\":false}";
     lc::SimpleJsonConfigReader reader(line);
 
     ExpectEq("config", reader.GetString("type"), "type");
     ExpectEq(77, reader.GetInt("velocityHorizontal", 77), "int fallback on invalid");
     ExpectNear(9.25f, reader.GetFloat("velocityVertical", 9.25f), 0.0001f, "float fallback on invalid");
+    ExpectEq(13, reader.GetInt("partialInt", 13), "int fallback on trailing junk");
+    ExpectNear(4.25f, reader.GetFloat("partialFloat", 4.25f), 0.0001f, "float fallback on trailing junk");
+    ExpectNear(5.25f, reader.GetFloat("notFinite", 5.25f), 0.0001f, "float fallback on NaN");
+    ExpectNear(6.25f, reader.GetFloat("infinity", 6.25f), 0.0001f, "float fallback on infinity");
+    ExpectEq(14, reader.GetInt("overflow", 14), "int fallback on overflow");
+    ExpectTrue(reader.GetBool("invalidBool", true), "bool fallback on invalid token");
     ExpectTrue(reader.GetBool("missingField", true), "bool fallback when missing");
     ExpectTrue(!reader.GetBool("missingBool", true), "bool explicit false");
+}
+
+static void TestAcceptsWhitespaceAroundNumbers()
+{
+    const std::string line =
+        "{\"type\":\"config\",\"integer\": 42  ,\"decimal\": -1.25  }";
+    lc::SimpleJsonConfigReader reader(line);
+
+    ExpectEq(42, reader.GetInt("integer", 0), "int with surrounding whitespace");
+    ExpectNear(-1.25f, reader.GetFloat("decimal", 0.0f), 0.0001f, "float with surrounding whitespace");
 }
 
 static void TestClampUtilities()
@@ -105,6 +124,7 @@ int main()
 {
     TestReadsQuotedAndUnquotedValues();
     TestFallbacksOnMissingOrInvalidValues();
+    TestAcceptsWhitespaceAroundNumbers();
     TestClampUtilities();
     TestCapabilitiesPayloads();
 

@@ -175,11 +175,12 @@ inline MethodDesc METHOD_GET_HEALTH{ CLS_LIVING_ENTITY, kGetHealthNames, kGetHea
 // ── AntiDebuff: LivingEntity.removeEffect(Holder<MobEffect>) -> boolean ─────────
 // Yarn:   method_6016(class_6880)            -> removeStatusEffect(RegistryEntry)
 // Mojmap: removeEffect(net.minecraft.core.Holder)
-// Targeted effect holders are static fields on StatusEffects/MobEffects:
+// Targeted effect holders are resolved independently from static fields on StatusEffects/MobEffects:
 //   BLINDNESS = field_5919 / BLINDNESS
 //   NAUSEA    = field_5916 / NAUSEA (official Mojmap; legacy MCP name CONFUSION)  (registry id "nausea")
 //   DARKNESS  = field_38092 / DARKNESS   (1.19+)
-// Resolved inline in bridge_261.cpp (EnsureAntiDebuffJni) using these names.
+// Resolved inline in bridge_261.cpp (EnsureAntiDebuffJni) using these names. A missing
+// optional holder must not disable removal of the holders that did resolve.
 inline const char* kRemoveEffectNames[] = { "method_6016", "removeEffect", nullptr };
 inline const char* kRemoveEffectSigs[]  = {
     "(Lnet/minecraft/class_6880;)Z",

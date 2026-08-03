@@ -26,6 +26,38 @@ echo [NativeTests] Running json_config_reader_tests.exe...
 tests\json_config_reader_tests.exe
 if %errorlevel% neq 0 exit /b %errorlevel%
 
+echo [NativeTests] Building bounded_newline_buffer_tests.exe...
+"%GPP%" -m64 -std=c++11 -O2 -static-libgcc -static-libstdc++ -o tests\bounded_newline_buffer_tests.exe tests\bounded_newline_buffer_tests.cpp
+if %errorlevel% neq 0 exit /b %errorlevel%
+
+echo [NativeTests] Running bounded_newline_buffer_tests.exe...
+tests\bounded_newline_buffer_tests.exe
+if %errorlevel% neq 0 exit /b %errorlevel%
+
+echo [NativeTests] Building telemetry_schedule_tests.exe...
+"%GPP%" -m64 -std=c++11 -O2 -static-libgcc -static-libstdc++ -o tests\telemetry_schedule_tests.exe tests\telemetry_schedule_tests.cpp
+if %errorlevel% neq 0 exit /b %errorlevel%
+
+echo [NativeTests] Running telemetry_schedule_tests.exe...
+tests\telemetry_schedule_tests.exe
+if %errorlevel% neq 0 exit /b %errorlevel%
+
+echo [NativeTests] Building native_perf_diagnostics_tests.exe...
+"%GPP%" -m64 -std=c++11 -O2 -static-libgcc -static-libstdc++ -o tests\native_perf_diagnostics_tests.exe tests\native_perf_diagnostics_tests.cpp
+if %errorlevel% neq 0 exit /b %errorlevel%
+
+echo [NativeTests] Running native_perf_diagnostics_tests.exe...
+tests\native_perf_diagnostics_tests.exe
+if %errorlevel% neq 0 exit /b %errorlevel%
+
+echo [NativeTests] Building mapping_probe_gate_tests.exe...
+"%GPP%" -m64 -std=c++11 -O2 -static-libgcc -static-libstdc++ -o tests\mapping_probe_gate_tests.exe tests\mapping_probe_gate_tests.cpp
+if %errorlevel% neq 0 exit /b %errorlevel%
+
+echo [NativeTests] Running mapping_probe_gate_tests.exe...
+tests\mapping_probe_gate_tests.exe
+if %errorlevel% neq 0 exit /b %errorlevel%
+
 echo [NativeTests] Building block_esp_tests.exe...
 "%GPP%" -m64 -std=c++11 -O2 -static-libgcc -static-libstdc++ -o tests\block_esp_tests.exe tests\block_esp_tests.cpp
 if %errorlevel% neq 0 exit /b %errorlevel%
@@ -72,6 +104,14 @@ if %errorlevel% neq 0 exit /b %errorlevel%
 
 echo [NativeTests] Running classfile_entry_injector_tests.exe...
 tests\classfile_entry_injector_tests.exe
+if %errorlevel% neq 0 exit /b %errorlevel%
+
+echo [NativeTests] Building effect_check_rewriter_tests.exe...
+"%GPP%" -m64 -std=c++11 -O2 -static-libgcc -static-libstdc++ -o tests\effect_check_rewriter_tests.exe tests\effect_check_rewriter_tests.cpp
+if %errorlevel% neq 0 exit /b %errorlevel%
+
+echo [NativeTests] Running effect_check_rewriter_tests.exe...
+tests\effect_check_rewriter_tests.exe
 if %errorlevel% neq 0 exit /b %errorlevel%
 
 echo [NativeTests] Building aim_assist_projection_tests.exe...

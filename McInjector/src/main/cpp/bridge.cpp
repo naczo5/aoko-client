@@ -21,10 +21,12 @@
 #include "imgui_impl_win32.h"
 #include "imgui_impl_opengl3.h"
 #include "json_config_reader.h"
+#include "bounded_newline_buffer.h"
 #include "auto_rod_core.h"
 #include "bridge_capabilities.h"
 #include "nick_hider.h"
 #include "nick_hider_jvmti.h"
+#include "anti_debuff_jvmti.h"
 #include "hud_layout.h"
 #include "block_esp_common.h"
 #include "fight_status_core.h"
@@ -32,6 +34,7 @@
 #include "silent_aura_aim.h"
 #include "kill_aura_core.h"
 #include "kill_aura_premotion.h"
+#include "native_perf_diagnostics.h"
 #include "jni_core/scoped_env.h"
 #include "jni_core/local_frame.h"
 #include "jni_core/matrix_reader.h"
@@ -104,17 +107,67 @@ public:
 
 // ===================== GLOBALS =====================
 JavaVM* g_jvm = nullptr;
-bool g_running = true;
+static volatile LONG g_running = 1;
+static bool IsBridgeRunning() {
+    return InterlockedCompareExchange(&g_running, 0, 0) != 0;
+}
 // Per-subsystem JNI locks (finer-grained than the old single JNI lock).
 // Render thread (SwapBuffers) holds g_renderJniMutex; LegoBridge thread holds
 // g_stateJniMutex.  Reach state is shared by the LegoBridge thread and WndProc,
 // so both reach paths serialize on g_stateJniMutex.
 static Mutex g_renderJniMutex;  // nametags / chest ESP / closest-player (render thread)
 static Mutex g_stateJniMutex;   // ReadGameState / reach / velocity (LegoBridge thread)
-SOCKET g_serverSocket = INVALID_SOCKET;
-SOCKET g_clientSocket = INVALID_SOCKET;
+static volatile SOCKET g_serverSocket = INVALID_SOCKET;
+static volatile SOCKET g_clientSocket = INVALID_SOCKET;
+static SOCKET AtomicSocketLoad(const volatile SOCKET* slot) {
+    return (SOCKET)(ULONG_PTR)InterlockedCompareExchangePointer(
+        reinterpret_cast<PVOID volatile*>(const_cast<volatile SOCKET*>(slot)), nullptr, nullptr);
+}
+static void AtomicSocketStore(volatile SOCKET* slot, SOCKET value) {
+    InterlockedExchangePointer(reinterpret_cast<PVOID volatile*>(slot), (PVOID)(ULONG_PTR)value);
+}
+static SOCKET AtomicSocketTake(volatile SOCKET* slot) {
+    for (;;) {
+        SOCKET current = AtomicSocketLoad(slot);
+        if (current == INVALID_SOCKET) return INVALID_SOCKET;
+        if ((SOCKET)(ULONG_PTR)InterlockedCompareExchangePointer(
+                reinterpret_cast<PVOID volatile*>(slot),
+                (PVOID)(ULONG_PTR)INVALID_SOCKET,
+                (PVOID)(ULONG_PTR)current) == current)
+            return current;
+    }
+}
 static volatile LONG g_heavyDiscoveryInProgress = 0;
+static HANDLE g_legacyMainThreadHandle = nullptr;
+static volatile LONG g_legacyDetachRequested = 0;
+static Mutex g_legacyDetachCleanupMutex;
+static volatile LONG g_legacyRenderCleanupRequested = 0;
+static volatile LONG g_legacyRenderCallbacksInFlight = 0;
 static void ResetAutoRodLegacyJniCaches(JNIEnv* env);
+
+class LegacyRenderCallbackLease {
+    bool active_;
+public:
+    LegacyRenderCallbackLease() : active_(false) {
+        if (InterlockedCompareExchange(&g_legacyRenderCleanupRequested, 0, 0) != 0) return;
+        InterlockedIncrement(&g_legacyRenderCallbacksInFlight);
+        if (InterlockedCompareExchange(&g_legacyRenderCleanupRequested, 0, 0) == 0) {
+            active_ = true;
+        } else {
+            InterlockedDecrement(&g_legacyRenderCallbacksInFlight);
+        }
+    }
+    ~LegacyRenderCallbackLease() {
+        if (active_) InterlockedDecrement(&g_legacyRenderCallbacksInFlight);
+    }
+    bool Active() const { return active_; }
+};
+
+static void WaitForLegacyRenderCallbacks()
+{
+    while (InterlockedCompareExchange(&g_legacyRenderCallbacksInFlight, 0, 0) != 0)
+        Sleep(1);
+}
 
 // Rendering
 static GLuint g_fontTexture = 0;
@@ -153,6 +206,7 @@ struct Config {
     bool fightStatus = false;
     bool nametagShowHealth = true;
     bool nametagShowArmor = true;
+    bool nametagShowHeldItem = true;
     bool nametagHideVanilla = false;
     int nametagMaxCount = 8;
     bool chestEsp = false;
@@ -352,6 +406,7 @@ static bool TryPopAutoRodRequest(AutoRodRequest* out) {
 }
 static lc::HudLayout g_hudLayout = lc::HudLayout::DefaultLayout();
 static lc::HudEditorState g_hudEditor;
+static Mutex g_hudEditorMutex;
 
 // ── Block ESP / X-ray shared state (legacy 1.8.9) ──
 struct BlockEspData18 { double x, y, z; unsigned int color; double dist; };
@@ -454,6 +509,8 @@ static float g_glyphAdvance[128] = {};
 // Hook
 typedef BOOL(WINAPI* SwapBuffersFn)(HDC);
 static SwapBuffersFn g_origSwapBuffers = nullptr;
+static void* g_legacyIatSwapSlot = nullptr;
+static void* g_legacyIatSwapOriginal = nullptr;
 
 
 // JNI cached refs
@@ -696,7 +753,7 @@ static DWORD     g_killAuraNextResolveMs = 0;
 static DWORD     g_killAuraNextPremotionRefreshMs = 0;
 static int g_lastHurtTime = 0;
 
-// ---- AntiDebuff (module-owned; removes debuff visuals client-side) ----
+// ---- AntiDebuff (module-owned; removes nausea and suppresses blindness rendering) ----
 // 1.8.9: EntityLivingBase.removePotionEffect(int id). Potion IDs: blindness=15, nausea/confusion=9.
 static jmethodID g_removePotionEffectMethod = nullptr;
 static bool g_antiDebuffMethodResolved = false;
@@ -711,6 +768,7 @@ static jmethodID g_isPotionActiveMethod = nullptr; // EntityLivingBase.isPotionA
 static jobject   g_blindnessPotion = nullptr;      // global ref to static Potion.blindness
 static bool g_blindDetectResolved = false;
 static bool g_loggedBlindDetectFail = false;
+static bool g_blindRenderHookArmed = false;
 static bool g_reachClickPrevDown = false;
 static bool g_reachClickPrevSynthetic = false;
 static bool g_reachRawInputPrevDown = false;
@@ -810,6 +868,18 @@ struct FightStatusDrawSnapshot18 {
     bool hasProjectedAnchors = false;
     fightstatus::FightStatusResult result;
     float normalizedAdvantage = 0.0f;
+};
+
+struct ClosestPlayerDrawSnapshot18 {
+    bool valid = false;
+    std::string name;
+    std::string heldText;
+    float health = 20.0f;
+    int armorPoints = -1;
+    float distance = 0.0f;
+    double relativeX = 0.0;
+    double relativeZ = 0.0;
+    float localYaw = 0.0f;
 };
 
 static fightstatus::FightStatusTracker g_fightStatusTracker18;
@@ -979,6 +1049,106 @@ void InitLogPath(HMODULE hModule) {
 void Log(const std::string& msg) {
     std::ofstream f(g_logPath.c_str(), std::ios_base::app);
     f << "[Bridge] " << msg << std::endl;
+}
+
+static bool NativePerfDiagnosticsEnabled()
+{
+    char value[16] = {};
+    const DWORD length = GetEnvironmentVariableA(
+        "AOKO_PERF_DIAGNOSTICS",
+        value,
+        static_cast<DWORD>(sizeof(value)));
+    if (length == 0 || length >= sizeof(value)) return false;
+    return std::strcmp(value, "1") == 0 ||
+        _stricmp(value, "true") == 0;
+}
+
+static lc::NativePerfDiagnostics& GetNativePerfDiagnostics()
+{
+    static lc::NativePerfDiagnostics diagnostics(
+        NativePerfDiagnosticsEnabled(),
+        5000,
+        GetTickCount());
+    return diagnostics;
+}
+
+static void SetNativePerfDiagnosticsEnabled(bool enabled)
+{
+    GetNativePerfDiagnostics().SetEnabled(enabled, GetTickCount());
+}
+
+static unsigned long long NativePerfTimestamp()
+{
+    LARGE_INTEGER value = {};
+    QueryPerformanceCounter(&value);
+    return static_cast<unsigned long long>(value.QuadPart);
+}
+
+static void RecordNativePerfSince(
+    lc::NativePerfMetric metric,
+    unsigned long long started,
+    unsigned long long units = 0)
+{
+    lc::NativePerfDiagnostics& diagnostics = GetNativePerfDiagnostics();
+    if (!diagnostics.Enabled() || started == 0) return;
+    diagnostics.Record(metric, NativePerfTimestamp() - started, units);
+}
+
+class NativePerfScope
+{
+public:
+    explicit NativePerfScope(lc::NativePerfMetric metric)
+        : _metric(metric),
+          _started(GetNativePerfDiagnostics().Enabled()
+              ? NativePerfTimestamp()
+              : 0)
+    {
+    }
+
+    ~NativePerfScope()
+    {
+        RecordNativePerfSince(_metric, _started);
+    }
+
+private:
+    lc::NativePerfMetric _metric;
+    unsigned long long _started;
+};
+
+static void MaybeLogNativePerfDiagnostics()
+{
+    lc::NativePerfDiagnostics& diagnostics = GetNativePerfDiagnostics();
+    lc::NativePerfSummary summary;
+    if (!diagnostics.TryTakeSummary(GetTickCount(), summary)) return;
+
+    LARGE_INTEGER frequency = {};
+    QueryPerformanceFrequency(&frequency);
+    const double ticksToMs = frequency.QuadPart > 0
+        ? 1000.0 / static_cast<double>(frequency.QuadPart)
+        : 0.0;
+    static const char* names[lc::PERF_METRIC_COUNT] = {
+        "stateScan",
+        "playerRenderScan",
+        "chestRenderScan",
+        "blockScan",
+        "statePublish",
+        "overlayRender"
+    };
+
+    std::ostringstream line;
+    line << "[perf] family=legacy window=" << summary.windowMs << "ms";
+    for (int i = 0; i < lc::PERF_METRIC_COUNT; ++i) {
+        const lc::NativePerfMetricSnapshot& metric = summary.metrics[i];
+        if (metric.count == 0) continue;
+        line << " " << names[i]
+             << "{count=" << metric.count
+             << ",totalMs=" << (metric.totalTicks * ticksToMs)
+             << ",maxMs=" << (metric.maxTicks * ticksToMs);
+        if (metric.units != 0)
+            line << ",units=" << metric.units;
+        line << "}";
+    }
+    Log(line.str());
 }
 
 static void TraceValue(const char* fn, const char* key, const std::string& value) {
@@ -5161,13 +5331,9 @@ static void UpdateAntiDebuffLegacy(JNIEnv* env, const Config& cfg) {
     }
 
     if (g_removePotionEffectMethod) {
-        // Approach A (anticheat-safe): keep BLINDNESS (id 15) in the effect map so its
-        // client-side sprint and critical-hit gating stays in sync with the server.
-        // Stripping it would let you sprint/crit while the server still thinks you are
-        // blind -> movement/combat desync that anticheats flag. The blindness *fog* is a
-        // pure visual and is neutralized separately via the glFogf hook (see
-        // HookedGlFogf / g_blindFogSuppress). Nausea/Confusion (id 9) gates nothing, so
-        // removing it is anticheat-safe and clears the screen-warp fully.
+        // Nausea does not gate movement/combat. Blindness deliberately remains in the
+        // effect map so sprint and critical-hit checks stay synchronized with the server;
+        // its fog is suppressed separately by HookedGlFogf.
         static const int kIds[] = { 9 };
         for (int id : kIds) {
             env->CallVoidMethod(selfObj, g_removePotionEffectMethod, id);
@@ -5219,7 +5385,17 @@ static void UpdateAntiDebuffLegacy(JNIEnv* env, const Config& cfg) {
         }
     }
 
-    if (g_blindDetectResolved) {
+    if (g_blindDetectResolved && !g_blindRenderHookArmed) {
+        jobject gameLoader = EnsureGameClassLoader(env);
+        anti_debuff_jvmti::BindBlindness(env, g_blindnessPotion, g_isPotionActiveMethod);
+        g_blindRenderHookArmed = anti_debuff_jvmti::Arm(env, gameLoader);
+    }
+
+    if (g_blindRenderHookArmed) {
+        // EntityRenderer now receives false only for its blindness query. Do not also
+        // override ordinary world fog through the unreliable OpenGL export fallback.
+        InterlockedExchange(&g_blindFogSuppress, 0);
+    } else if (g_blindDetectResolved) {
         jboolean blind = env->CallBooleanMethod(selfObj, g_isPotionActiveMethod, g_blindnessPotion);
         if (env->ExceptionCheck()) { env->ExceptionClear(); blind = JNI_FALSE; }
         InterlockedExchange(&g_blindFogSuppress, blind ? 1 : 0);
@@ -6792,6 +6968,9 @@ static std::string BuildChestStealerStateJson(JNIEnv* env, bool enabled) {
         env->PopLocalFrame(nullptr);
         return "null";
     }
+    // A normal chest has at most 54 storage slots. Keep a small allowance for
+    // unusual container layouts while bounding JNI work and wire payload size.
+    if (chestSlotCount > 90) chestSlotCount = 90;
 
     std::ostringstream slotsJson;
     int count = 0;
@@ -7514,12 +7693,6 @@ GameState ReadGameState(JNIEnv* env) {
                                         jclass ic = env->GetObjectClass(item);
                                         std::string inm = GetClassNameFromClass(env, ic);
                                         
-                                        // Debug Log for Item Class (throttled)
-                                        static int itemLogCtr = 0;
-                                        if (itemLogCtr++ % 200 == 0) {
-                                            Log("Held Item Class: " + inm);
-                                        }
-
                                         if (inm.find("ItemBlock") != std::string::npos || 
                                             inm.find("Block") != std::string::npos ||
                                             inm.find("ItemReed") != std::string::npos || // Sugar Cane
@@ -7682,7 +7855,26 @@ GameState ReadGameState(JNIEnv* env) {
 }
 
 // ===================== DETACH =====================
-static void CleanupImGuiAndHooks() {
+static bool CleanupImGuiAndHooks() {
+    // Stop new render-hook entries before deleting the context/backend. Any
+    // callback that already entered holds a lease and is drained below.
+    InterlockedExchange(&g_legacyRenderCleanupRequested, 1);
+    if (g_legacyIatSwapSlot && g_legacyIatSwapOriginal) {
+        DWORD oldProt = 0;
+        if (!VirtualProtect(g_legacyIatSwapSlot, sizeof(void*), PAGE_EXECUTE_READWRITE, &oldProt)) {
+            Log("ERROR: could not make legacy SwapBuffers IAT writable; retaining bridge loaded.");
+            InterlockedExchange(&g_legacyRenderCleanupRequested, 0);
+            return false;
+        }
+        *(void**)g_legacyIatSwapSlot = g_legacyIatSwapOriginal;
+        FlushInstructionCache(GetCurrentProcess(), g_legacyIatSwapSlot, sizeof(void*));
+        VirtualProtect(g_legacyIatSwapSlot, sizeof(void*), oldProt, &oldProt);
+        g_legacyIatSwapSlot = nullptr;
+        g_legacyIatSwapOriginal = nullptr;
+    }
+    if (g_minhookInitialized) MH_DisableHook(MH_ALL_HOOKS);
+    WaitForLegacyRenderCallbacks();
+
     if (g_wndProcHookedHwnd && g_origWndProc) {
         SetWindowLongPtrA(g_wndProcHookedHwnd, GWLP_WNDPROC, (LONG_PTR)g_origWndProc);
         g_wndProcHookedHwnd = nullptr;
@@ -7716,6 +7908,7 @@ static void CleanupImGuiAndHooks() {
         MH_Uninitialize();
         g_minhookInitialized = false;
     }
+    return true;
 }
 
 static void ResetImGuiBackendsForReinit(const char* reason) {
@@ -7752,30 +7945,69 @@ static void ResetImGuiBackendsForReinit(const char* reason) {
     g_glInitialized = false;
 }
 
+static bool WaitForLegacyMainThreadExit(DWORD timeoutMs) {
+    if (!g_legacyMainThreadHandle) return true;
+    const DWORD result = WaitForSingleObject(g_legacyMainThreadHandle, timeoutMs);
+    if (result != WAIT_OBJECT_0) {
+        Log("Detach: legacy main thread did not stop; keeping bridge loaded for safety.");
+        return false;
+    }
+    CloseHandle(g_legacyMainThreadHandle);
+    g_legacyMainThreadHandle = nullptr;
+    return true;
+}
+
 extern "C" __declspec(dllexport) void Detach() {
+    if (InterlockedExchange(&g_legacyDetachRequested, 1) != 0) {
+        Log("Detach requested more than once; cleanup already in progress.");
+        return;
+    }
     Log("Detach requested");
     ResetFightStatusState18();
-    g_running = false;
+    InterlockedExchange(&g_running, 0);
 
-    if (g_clientSocket != INVALID_SOCKET) {
-        closesocket(g_clientSocket);
-        g_clientSocket = INVALID_SOCKET;
+    SOCKET clientSocket = AtomicSocketTake(&g_clientSocket);
+    if (clientSocket != INVALID_SOCKET) {
+        shutdown(clientSocket, SD_BOTH);
+        closesocket(clientSocket);
     }
-    if (g_serverSocket != INVALID_SOCKET) {
-        closesocket(g_serverSocket);
-        g_serverSocket = INVALID_SOCKET;
+    SOCKET serverSocket = AtomicSocketTake(&g_serverSocket);
+    if (serverSocket != INVALID_SOCKET) {
+        shutdown(serverSocket, SD_BOTH);
+        closesocket(serverSocket);
     }
     
-    CleanupImGuiAndHooks();
-    
-    // Restore SwapBuffers (simplified: just unhook IAT if possible, but honestly
-    // safely unhooking IAT without race conditions is hard. 
-    // For now we just stop rendering logic via g_running flag and let DLL stay loaded but dormant?)
-    // A true unload requires FreeLibraryAndExitThread.
-    
-    // Create a thread to free library safely
+    // Stop the server/render owner before touching ImGui or MinHook.  The
+    // previous path cleaned those resources immediately and unloaded 100 ms
+    // later, which could race ServerLoop or a SwapBuffers callback.
     CreateThread(nullptr, 0, [](LPVOID) -> DWORD {
-        Sleep(100);
+        if (!WaitForLegacyMainThreadExit(5000)) {
+            // Permit a later Detach call to retry after a transient server/JNI
+    // stall rather than permanently latching a failed teardown.
+            InterlockedExchange(&g_legacyDetachRequested, 0);
+            return 0;
+        }
+        LockGuard cleanupGuard(g_legacyDetachCleanupMutex);
+        JNIEnv* env = nullptr;
+        bool attached = false;
+        if (g_jvm && g_jvm->GetEnv((void**)&env, JNI_VERSION_1_8) != JNI_OK) {
+            if (g_jvm->AttachCurrentThread((void**)&env, nullptr) == JNI_OK)
+                attached = true;
+            else
+                env = nullptr;
+        }
+        if (!anti_debuff_jvmti::Shutdown(env)) {
+            if (attached && g_jvm) g_jvm->DetachCurrentThread();
+            InterlockedExchange(&g_legacyDetachRequested, 0);
+            return 0;
+        }
+        lc::ShutdownNickHiderJvmti(env);
+        ka_premotion::Shutdown(env);
+        if (attached && g_jvm) g_jvm->DetachCurrentThread();
+        if (!CleanupImGuiAndHooks()) {
+            InterlockedExchange(&g_legacyDetachRequested, 0);
+            return 0;
+        }
         FreeLibraryAndExitThread(GetModuleHandleA("bridge.dll"), 0);
         return 0;
     }, nullptr, 0, nullptr);
@@ -8931,6 +9163,13 @@ static bool ShouldHideWorldRenderModules(const GameState& state) {
 
 // ===================== HUD RENDERING =====================
 static void UpdateHudEditor(int winW, int winH) {
+    struct EditorElem { std::string id; ImVec2 tl; float w, h; };
+    static thread_local std::vector<EditorElem> elems;
+    lc::HudLayout layoutDraw;
+    std::string grabbedIdForDraw;
+
+    {
+    LockGuard hudLock(g_hudEditorMutex);
     if (!g_hudEditor.active) return;
     if (winW <= 0 || winH <= 0) return;
 
@@ -8945,8 +9184,7 @@ static void UpdateHudEditor(int winW, int winH) {
     bool mouseReleased = ImGui::IsMouseReleased(0);
 
     // Struct for editor-visible elements
-    struct EditorElem { std::string id; ImVec2 tl; float w, h; };
-    std::vector<EditorElem> elems;
+    elems.clear();
 
     lc::HudLayout layoutSnap;
     { LockGuard lk(g_configMutex); layoutSnap = g_hudLayout; }
@@ -9027,10 +9265,12 @@ static void UpdateHudEditor(int winW, int winH) {
         g_hudEditor.layoutDirty = true;
     }
 
-    // 4. Draw bounding boxes for each element
-    ImDrawList* fg = ImGui::GetForegroundDrawList();
-    lc::HudLayout layoutDraw;
+    // Snapshot the final layout and editor selection before releasing the
+    // editor mutex; ImGui draw calls must not hold it.
     { LockGuard lk(g_configMutex); layoutDraw = g_hudLayout; }
+    grabbedIdForDraw = g_hudEditor.grabbedId;
+    }
+    ImDrawList* fg = ImGui::GetForegroundDrawList();
     for (const auto& e : elems) {
         lc::HudElementLayout el = layoutDraw.Resolve(e.id);
         float sw = e.w; // already scaled
@@ -9038,7 +9278,7 @@ static void UpdateHudEditor(int winW, int winH) {
         ImVec2 tl = lc::HudElementPixelPos(el, sw, sh, winW, winH);
         ImVec2 br(tl.x + sw, tl.y + sh);
 
-        bool grabbed = (g_hudEditor.grabbedId == e.id);
+        bool grabbed = (grabbedIdForDraw == e.id);
         ImU32 boxCol = grabbed ? IM_COL32(255, 200, 50, 200) : IM_COL32(80, 180, 255, 140);
         fg->AddRect(tl, br, boxCol, 4.0f, 0, grabbed ? 2.0f : 1.5f);
 
@@ -9052,12 +9292,12 @@ static void UpdateHudEditor(int winW, int winH) {
     }
 }
 
-void RenderHUD(int winW, int winH) {
-
-    Config cfg; { LockGuard lk(g_configMutex); cfg = g_config; }
-
-    GameState state;
-    { LockGuard lk(g_stateMutex); state = g_gameState; }
+void RenderHUD(
+    int winW,
+    int winH,
+    const Config& cfg,
+    const GameState& state,
+    const lc::HudLayout& hudLayout) {
     if (ShouldHideWorldRenderModules(state)) {
         return;
     }
@@ -9071,8 +9311,9 @@ void RenderHUD(int winW, int winH) {
     ImGuiIO& io = ImGui::GetIO();
 
     struct ModLine { std::string text; ImU32 accent; float width; };
-    std::vector<ModLine> mods;
-    mods.reserve(16);
+    static thread_local std::vector<ModLine> mods;
+    mods.clear();
+    if (mods.capacity() < 32) mods.reserve(32);
 
     auto pushMod = [&](const std::string& text, ImU32 accent) {
         if (text.empty()) return;
@@ -9120,8 +9361,7 @@ void RenderHUD(int winW, int winH) {
     // HudElementPixelPos helper (same as the editor box and the other panels),
     // and all metrics are multiplied by the element scale. Previously scale was
     // ignored, so resizing the module list in the editor had no visible effect.
-    lc::HudElementLayout modLayout;
-    { LockGuard lk2(g_configMutex); modLayout = g_hudLayout.Resolve(lc::ELEM_MODULELIST); }
+    lc::HudElementLayout modLayout = hudLayout.Resolve(lc::ELEM_MODULELIST);
     const float scale = modLayout.scale;
 
     const float padX       = 8.0f * scale;
@@ -9220,7 +9460,8 @@ void RenderHUD(int winW, int winH) {
         if (hint.empty() || hint == "-") hint = "waiting for hint...";
         if (preview == "-") preview.clear();
 
-        std::vector<std::string> lines;
+        static thread_local std::vector<std::string> lines;
+        lines.clear();
         if (!preview.empty()) {
             std::stringstream pss(preview);
             std::string line;
@@ -9455,11 +9696,18 @@ bool WorldToScreen(const double x, const double y, const double z, const Matrix4
 
     return true;
 }
-void RenderNametags(int w, int h) {
+void RenderNametags(
+    int w,
+    int h,
+    const Config& config,
+    ClosestPlayerDrawSnapshot18* closestSnapshot) {
     TRACE_PATH("enter");
-   static bool warnedMissingMappings = false;
+    if (closestSnapshot)
+        *closestSnapshot = ClosestPlayerDrawSnapshot18();
+    static bool warnedMissingMappings = false;
     bool showHealth = true;
     bool showArmor = true;
+    bool showHeldItem = true;
     bool hideVanillaTags = false;
     bool nametagsEnabled = false;
     bool nickHiderEnabled = false;
@@ -9468,21 +9716,21 @@ void RenderNametags(int w, int h) {
     int nametagMaxCount = 8;
     std::string guiTheme = "Default";
     std::string nickHiderAlias;
-    {
-         LockGuard lk(g_configMutex);
-         nametagsEnabled = g_config.nametags;
-         nickHiderEnabled = g_config.nickHiderEnabled;
-         fightStatusEnabled = g_config.fightStatus;
-         nickHiderAlias = g_config.nickHiderAlias;
-         entityTelemetryNeeded = g_config.nametags || g_config.nickHiderEnabled || g_config.closestPlayerInfo || g_config.aimAssist || g_config.fightStatus || g_config.nametagHideVanilla || g_legacyNametagSuppressionActive;
-         TRACE_BRANCH("entityTelemetryNeeded", entityTelemetryNeeded);
-          if (!entityTelemetryNeeded) { ResetFightStatusState18(); return; }
-         showHealth = g_config.nametagShowHealth;
-         showArmor = g_config.nametagShowArmor;
-         hideVanillaTags = g_config.nametagHideVanilla;
-         nametagMaxCount = (std::max)(1, (std::min)(20, g_config.nametagMaxCount));
-         guiTheme = g_config.guiTheme;
-    }
+    nametagsEnabled = config.nametags;
+    nickHiderEnabled = config.nickHiderEnabled;
+    fightStatusEnabled = config.fightStatus;
+    nickHiderAlias = config.nickHiderAlias;
+    entityTelemetryNeeded = config.nametags || config.nickHiderEnabled ||
+        config.closestPlayerInfo || config.aimAssist || config.fightStatus ||
+        config.nametagHideVanilla || g_legacyNametagSuppressionActive;
+    TRACE_BRANCH("entityTelemetryNeeded", entityTelemetryNeeded);
+    if (!entityTelemetryNeeded) { ResetFightStatusState18(); return; }
+    showHealth = config.nametagShowHealth;
+    showArmor = config.nametagShowArmor;
+    showHeldItem = config.nametagShowHeldItem;
+    hideVanillaTags = config.nametagHideVanilla;
+    nametagMaxCount = (std::max)(1, (std::min)(20, config.nametagMaxCount));
+    guiTheme = config.guiTheme;
     OverlayTheme nametagTheme = ResolveOverlayTheme(guiTheme);
 
     // Default to empty telemetry each run so stale entities are not reused.
@@ -9565,7 +9813,6 @@ void RenderNametags(int w, int h) {
     static bool loggedCapturedMatrixFallback = false;
     static bool loggedUiMatrixReject = false;
     if (logctr++ % 600 == 0) {
-         Log("Matrix Debug - View[0]: " + std::to_string(view.m[0]) + " Proj[0]: " + std::to_string(proj.m[0]));
          if (!matrixProjectionUsable) Log("WARNING: Matrix projection unavailable.");
          if (usedCapturedMatrices && !loggedCapturedMatrixFallback) {
              loggedCapturedMatrixFallback = true;
@@ -9644,8 +9891,6 @@ void RenderNametags(int w, int h) {
         env->PopLocalFrame(nullptr);
         return;
     }
-    if (logctr % 600 == 0) Log("Entity List Size: " + std::to_string(size));
-    
     int count = 0;
 
     bool guiOpen = false; // Internal ClickGUI was removed; only Minecraft screens suppress tags.
@@ -9683,7 +9928,7 @@ void RenderNametags(int w, int h) {
     std::stringstream ss;
     ss << "[";
     constexpr int kEntityJsonCap = 20;
-    const int entityProcessCap = fightStatusEnabled
+    const int entityProcessCap = (fightStatusEnabled || config.closestPlayerInfo)
         ? (std::max)(1, size)
         : (hideVanillaTags || g_legacyNametagSuppressionActive)
         ? (std::max)(1, size)
@@ -9733,8 +9978,14 @@ void RenderNametags(int w, int h) {
     double localPX = 0.0, localPY = 0.0, localPZ = 0.0;
     bool haveLocalPos = false;
     FightStatusLocalSample18 fightSelf;
-    std::vector<FightStatusCandidate18> fightCandidates;
-    if (fightStatusEnabled) fightCandidates.reserve((size_t)(std::max)(0, size));
+    static thread_local std::vector<FightStatusCandidate18> fightCandidates;
+    fightCandidates.clear();
+    if (fightStatusEnabled &&
+        fightCandidates.capacity() < static_cast<size_t>((std::max)(0, size))) {
+        fightCandidates.reserve(static_cast<size_t>((std::max)(0, size)));
+    }
+    int closestPlayerIndex = -1;
+    double closestPlayerDistance = 99999.0;
     if (player) {
         localPX = env->GetDoubleField(player, g_posXField);
         localPY = env->GetDoubleField(player, g_posYField);
@@ -9860,7 +10111,8 @@ void RenderNametags(int w, int h) {
             }
         }
         int armorPoints = -1;
-        if ((fightStatusEnabled || (nametagsEnabled && showArmor)) && g_getTotalArmorValueMethod) {
+        if ((fightStatusEnabled || (config.closestPlayerInfo && showArmor) ||
+             (nametagsEnabled && showArmor)) && g_getTotalArmorValueMethod) {
             armorPoints = env->CallIntMethod(entity, g_getTotalArmorValueMethod);
             if (env->ExceptionCheck()) { env->ExceptionClear(); armorPoints = -1; }
         }
@@ -9875,6 +10127,20 @@ void RenderNametags(int w, int h) {
         double dy = iY - localPY;
         double dz = iZ - localPZ;
         double dist = sqrt(dx*dx + dy*dy + dz*dz);
+
+        if (closestSnapshot && config.closestPlayerInfo &&
+            dist < closestPlayerDistance && dist <= 96.0) {
+            closestPlayerDistance = dist;
+            closestPlayerIndex = i;
+            closestSnapshot->valid = true;
+            closestSnapshot->name = displayName;
+            closestSnapshot->health = health;
+            closestSnapshot->armorPoints = armorPoints;
+            closestSnapshot->distance = static_cast<float>(dist);
+            closestSnapshot->relativeX = dx;
+            closestSnapshot->relativeZ = dz;
+            closestSnapshot->localYaw = fallbackYaw;
+        }
 
         // Project (prefer matrix when stable, otherwise fallback to angle/FOV)
         float sX = 0, sY = 0;
@@ -9948,9 +10214,6 @@ void RenderNametags(int w, int h) {
         }
 
         if (projected) {
-             if (logctr % 600 == 0 && count == 0) {
-                 Log("Tagged: " + displayName + " SX: " + std::to_string(sX) + " SY: " + std::to_string(sY));
-             }
              if (dist > 48.0) {
                  env->DeleteLocalRef(entity);
                  continue;
@@ -10000,7 +10263,9 @@ void RenderNametags(int w, int h) {
                      statsText += armorBuf;
                  }
 
-                 std::string heldText = GetEntityHeldItemInfo(env, entity, nullptr);
+                 std::string heldText = showHeldItem
+                     ? GetEntityHeldItemInfo(env, entity, nullptr)
+                     : std::string();
 
                  int key = 0;
                  if (g_objectHashCodeMethod) {
@@ -10123,6 +10388,20 @@ void RenderNametags(int w, int h) {
 
         env->DeleteLocalRef(entity);
     }
+    if (closestSnapshot && closestSnapshot->valid && closestPlayerIndex >= 0) {
+        jobject closestEntity =
+            env->CallObjectMethod(startList, g_listGetMethod, closestPlayerIndex);
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            closestSnapshot->heldText.clear();
+        } else if (closestEntity) {
+            closestSnapshot->heldText = showHeldItem
+                ? GetEntityHeldItemInfo(env, closestEntity, nullptr)
+                : std::string();
+            env->DeleteLocalRef(closestEntity);
+        }
+    }
+
     UpdateFightStatusState18(GetTickCount(), fightStatusEnabled, guiOpen, fightSelf, fightCandidates);
     if (hideTeamObj) env->DeleteLocalRef(hideTeamObj);
     if (hideScoreboardObj) env->DeleteLocalRef(hideScoreboardObj);
@@ -10234,21 +10513,15 @@ static void RenderFightStatus(int w, int h) {
     drawText(prediction, midY + 3.0f, IM_COL32(235, 238, 245, 240), smallFont);
 }
 
-void RenderPixelPartyAssist(int w, int h) {
-    bool enabled = false;
-    bool closestAlso = false;
-    {
-        LockGuard lk(g_configMutex);
-        enabled = g_config.pixelPartyAssist;
-        closestAlso = g_config.closestPlayerInfo;
-    }
-    if (!enabled) return;
+void RenderPixelPartyAssist(
+    int w,
+    int h,
+    const Config& config,
+    const GameState& state) {
+    if (!config.pixelPartyAssist) return;
 
     PixelPartySnap ppSnap;
     { LockGuard lk(g_pixelPartyMutex); ppSnap = g_pixelPartySnap; }
-
-    GameState state;
-    { LockGuard lk(g_stateMutex); state = g_gameState; }
 
     char dirArrow = '^';
     if (ppSnap.targetFound) {
@@ -10293,7 +10566,7 @@ void RenderPixelPartyAssist(int w, int h) {
     contentH += padY;
 
     float cx = (float)w * 0.5f;
-    float bottomOffset = closestAlso ? 200.0f : 120.0f;
+    float bottomOffset = config.closestPlayerInfo ? 200.0f : 120.0f;
     float by = (float)h - bottomOffset;
     float rx = std::floor(cx - contentW * 0.5f);
     float ry = std::floor(by - contentH);
@@ -10319,130 +10592,37 @@ void RenderPixelPartyAssist(int w, int h) {
     }
 }
 
-void RenderClosestPlayerInfo(int w, int h) {
-    bool enabled = false;
-    bool showHealth = true;
-    bool showArmor = true;
-    std::string guiTheme = "Default";
-    {
-        LockGuard lk(g_configMutex);
-        enabled = g_config.closestPlayerInfo;
-        showHealth = g_config.nametagShowHealth;
-        showArmor = g_config.nametagShowArmor;
-        guiTheme = g_config.guiTheme;
-    }
-    if (!enabled) return;
-    if (!g_mapped || !g_mcInstance || !g_theWorldField || !g_listSizeMethod || !g_listGetMethod) return;
-    if (!g_thePlayerField || !g_posXField || !g_posYField || !g_posZField) return;
-
-    ScopedJNIEnv env(g_jvm);
-    if (!env) return;
-
-    TryResolveWorldMappings(env);
-    if (!g_playerEntitiesField) return;
-
-    if (env->ExceptionCheck()) { env->ExceptionClear(); return; }
-    if (env->PushLocalFrame(256) < 0) { env->ExceptionClear(); return; }
-
-    auto finish = [&]() {
-        env->PopLocalFrame(nullptr);
-    };
-
-    jobject world = env->GetObjectField(g_mcInstance, g_theWorldField);
-    if (!world) { finish(); return; }
-    jobject list = env->GetObjectField(world, g_playerEntitiesField);
-    if (!list) { finish(); return; }
-
-    jobject localPlayer = env->GetObjectField(g_mcInstance, g_thePlayerField);
-    if (!localPlayer) { finish(); return; }
-
-    double lpx = env->GetDoubleField(localPlayer, g_posXField);
-    double lpy = env->GetDoubleField(localPlayer, g_posYField);
-    double lpz = env->GetDoubleField(localPlayer, g_posZField);
-    float localYaw = 0.0f;
-    if (g_rotationYawField) localYaw = env->GetFloatField(localPlayer, g_rotationYawField);
-
-    int size = env->CallIntMethod(list, g_listSizeMethod);
-    if (env->ExceptionCheck()) { env->ExceptionClear(); finish(); return; }
-
-    int closestIndex = -1;
-    double bestDist = 99999.0;
-    double bestDx = 0.0, bestDz = 0.0;
-
-    for (int i = 0; i < size; i++) {
-        jobject entity = env->CallObjectMethod(list, g_listGetMethod, i);
-        if (env->ExceptionCheck()) { env->ExceptionClear(); break; }
-        if (!entity) continue;
-        if (env->IsSameObject(entity, localPlayer)) { env->DeleteLocalRef(entity); continue; }
-
-        double ex = env->GetDoubleField(entity, g_posXField);
-        double ey = env->GetDoubleField(entity, g_posYField);
-        double ez = env->GetDoubleField(entity, g_posZField);
-        double dx = ex - lpx;
-        double dy = ey - lpy;
-        double dz = ez - lpz;
-        double dist = std::sqrt(dx * dx + dy * dy + dz * dz);
-        if (dist < bestDist) {
-            std::string candidateName = GetStablePlayerName(env, entity);
-            if (!candidateName.empty() && !LooksLikeFakePlayerLine(candidateName)) {
-                bestDist = dist;
-                closestIndex = i;
-                bestDx = dx;
-                bestDz = dz;
-            }
-        }
-
-        env->DeleteLocalRef(entity);
-    }
-
-    if (closestIndex < 0 || bestDist > 96.0) { finish(); return; }
-
-    jobject closest = env->CallObjectMethod(list, g_listGetMethod, closestIndex);
-    if (env->ExceptionCheck()) { env->ExceptionClear(); finish(); return; }
-    if (!closest) { finish(); return; }
-
-    std::string name = GetStablePlayerName(env, closest);
-    if (name.empty() || LooksLikeFakePlayerLine(name)) {
-        finish();
-        return;
-    }
-
-    float health = 20.0f;
-    if (showHealth && g_getHealthMethod) {
-        health = env->CallFloatMethod(closest, g_getHealthMethod);
-        if (env->ExceptionCheck()) { env->ExceptionClear(); health = 20.0f; }
-    }
-
-    int armorPoints = -1;
-    if (showArmor && g_getTotalArmorValueMethod) {
-        armorPoints = env->CallIntMethod(closest, g_getTotalArmorValueMethod);
-        if (env->ExceptionCheck()) { env->ExceptionClear(); armorPoints = -1; }
-    }
-
-    std::string heldText = GetEntityHeldItemInfo(env, closest, nullptr);
-
-    std::string statsText;
-    if (showHealth) {
-        char hp[24];
-        float hpClamped = health < 0 ? 0 : (health > 40 ? 40 : health);
-        snprintf(hp, sizeof(hp), "%.0f HP", hpClamped);
-        statsText += hp;
-    }
-    if (showArmor && armorPoints >= 0) {
-        if (!statsText.empty()) statsText += " | ";
-        char ar[24];
-        snprintf(ar, sizeof(ar), "%d ARM", armorPoints);
-        statsText += ar;
-    }
+void RenderClosestPlayerInfo(
+    int w,
+    int h,
+    const Config& config,
+    const lc::HudLayout& hudLayout,
+    const ClosestPlayerDrawSnapshot18& snapshot) {
+    if (!config.closestPlayerInfo || !snapshot.valid) return;
+    const bool showHealth = config.nametagShowHealth;
+    const bool showArmor = config.nametagShowArmor;
+    const std::string& guiTheme = config.guiTheme;
+    const float health = snapshot.health;
+    const int armorPoints = snapshot.armorPoints;
+    const std::string& heldText = snapshot.heldText;
 
     char dirArrow = '^';
-    std::string dirText = RelativeDirectionText(localYaw, bestDx, bestDz);
+    std::string dirText = RelativeDirectionText(
+        snapshot.localYaw,
+        snapshot.relativeX,
+        snapshot.relativeZ);
     if (dirText == "Back") dirArrow = 'v';
     else if (dirText == "Left") dirArrow = '<';
     else if (dirText == "Right") dirArrow = '>';
 
     char nameRow[96];
-    snprintf(nameRow, sizeof(nameRow), "%c %s  %.0fm", dirArrow, name.c_str(), (float)bestDist);
+    snprintf(
+        nameRow,
+        sizeof(nameRow),
+        "%c %s  %.0fm",
+        dirArrow,
+        snapshot.name.c_str(),
+        snapshot.distance);
 
     std::string statsRow;
     if (showHealth) {
@@ -10472,8 +10652,8 @@ void RenderClosestPlayerInfo(int w, int h) {
     ImVec2 nameSz = ImGui::CalcTextSize(nameRow);
     ImVec2 statsSz = statsRow.empty() ? ImVec2(0, 0) : ImGui::CalcTextSize(statsRow.c_str());
 
-    lc::HudElementLayout cpLayout;
-    { LockGuard lkHud(g_configMutex); cpLayout = g_hudLayout.Resolve(lc::ELEM_CLOSESTPLAYER); }
+    lc::HudElementLayout cpLayout =
+        hudLayout.Resolve(lc::ELEM_CLOSESTPLAYER);
 
     float contentW = (std::max)(boxW, (std::max)(nameSz.x + padX * 2.0f, statsSz.x + padX * 2.0f));
     contentW *= cpLayout.scale;
@@ -10513,20 +10693,15 @@ void RenderClosestPlayerInfo(int w, int h) {
         ImU32 sCol = health <= 6.0f ? IM_COL32(255, 100, 100, 240) : IM_COL32(160, 200, 255, 230);
         fg->AddText(ImGui::GetFont(), smallSz, ImVec2(stx, curY), sCol, statsRow.c_str());
     }
-
-    finish();
 }
 
-void RenderChestESP(int w, int h) {
+void RenderChestESP(int w, int h, const Config& config) {
     TRACE_PATH("enter");
     static bool warnedChestMappings = false;
-    int chestEspMaxCount = 5;
-    {
-        LockGuard lk(g_configMutex);
-        TRACE_BRANCH("chestEspEnabled", g_config.chestEsp);
-        if (!g_config.chestEsp) return;
-        chestEspMaxCount = (std::max)(1, (std::min)(20, g_config.chestEspMaxCount));
-    }
+    TRACE_BRANCH("chestEspEnabled", config.chestEsp);
+    if (!config.chestEsp) return;
+    const int chestEspMaxCount =
+        (std::max)(1, (std::min)(20, config.chestEspMaxCount));
     bool mappedReady = (g_mapped && g_mcInstance);
     TRACE_BRANCH("mappedReady", mappedReady);
     if (!mappedReady) return;
@@ -10982,7 +11157,8 @@ static void UpdateBlockEspListLegacy(JNIEnv* env, const Config& cfg) {
 
     env->DeleteLocalRef(world);
 
-    std::vector<BlockEspData18> merged;
+    static thread_local std::vector<BlockEspData18> merged;
+    merged.clear();
     for (auto& kv : g_blockEspChunkCache18) {
         for (auto& h : kv.second.hits) {
             double ddx = h.x - px, ddy = h.y - py, ddz = h.z - pz;
@@ -10997,11 +11173,12 @@ static void UpdateBlockEspListLegacy(JNIEnv* env, const Config& cfg) {
     { LockGuard lk(g_blockEspListMutex); g_blockEspList.swap(merged); }
 }
 
-void RenderBlockESP(int w, int h) {
-    {
-        LockGuard lk(g_configMutex);
-        if (!g_config.blockEsp) return;
-    }
+void RenderBlockESP(
+    int w,
+    int h,
+    const Config& config,
+    const lc::HudLayout& hudLayout) {
+    if (!config.blockEsp) return;
     if (!g_mapped || !g_mcInstance) return;
     ScopedJNIEnv env(g_jvm);
     if (!env) return;
@@ -11011,14 +11188,15 @@ void RenderBlockESP(int w, int h) {
     if (!g_thePlayerField || !g_posXField || !g_posYField || !g_posZField) return;
     if (!g_activeRenderInfoClass || !g_modelViewField || !g_projectionField) return;
 
-    bool boxes, tracers, hud;
-    int maxCount;
-    { LockGuard lk(g_configMutex); boxes = g_config.blockEspBoxes; tracers = g_config.blockEspTracers; hud = g_config.blockEspHud; maxCount = g_config.blockEspMaxCount; }
+    const bool boxes = config.blockEspBoxes;
+    const bool tracers = config.blockEspTracers;
+    const bool hud = config.blockEspHud;
+    const int maxCount = config.blockEspMaxCount;
 
-    std::vector<BlockEspData18> blocks;
+    static thread_local std::vector<BlockEspData18> blocks;
     { LockGuard lk(g_blockEspListMutex); blocks = g_blockEspList; }
     if (blocks.empty()) return;
-    std::vector<lc::BlockEspTargetDef> targets;
+    static thread_local std::vector<lc::BlockEspTargetDef> targets;
     { LockGuard tlk(g_blockEspTargetsMutex); targets = g_blockEspTargets; }
 
     if (env->ExceptionCheck()) { env->ExceptionClear(); return; }
@@ -11044,7 +11222,8 @@ void RenderBlockESP(int w, int h) {
     ImDrawList* fg = ImGui::GetForegroundDrawList();
 
     struct ColorAgg18 { unsigned int color; int count; double nearest; float nsx, nsy; bool hasScreen; };
-    std::vector<ColorAgg18> aggs;
+    static thread_local std::vector<ColorAgg18> aggs;
+    aggs.clear();
     auto findAgg = [&](unsigned int col) -> ColorAgg18& {
         for (auto& a : aggs) if (a.color == col) return a;
         aggs.push_back({ col, 0, 1e9, 0, 0, false });
@@ -11104,7 +11283,10 @@ void RenderBlockESP(int w, int h) {
             return "Block";
         };
         const float padX = 8.0f, padY = 6.0f, rowH = ImGui::GetFontSize() + 4.0f, sw = 10.0f;
-        std::vector<std::string> rows; std::vector<unsigned int> rowColors;
+        static thread_local std::vector<std::string> rows;
+        static thread_local std::vector<unsigned int> rowColors;
+        rows.clear();
+        rowColors.clear();
         float maxTextW = 0.0f;
         for (const auto& a : aggs) {
             char buf[96];
@@ -11118,8 +11300,7 @@ void RenderBlockESP(int w, int h) {
         float contentW = (std::max)(titleW, sw + 6.0f + maxTextW) + padX * 2;
         float contentH = padY + rowH + rowH * (float)rows.size() + padY;
 
-        lc::HudElementLayout beLayout;
-        { LockGuard lk(g_configMutex); beLayout = g_hudLayout.Resolve(lc::ELEM_BLOCKESPLIST); }
+        lc::HudElementLayout beLayout = hudLayout.Resolve(lc::ELEM_BLOCKESPLIST);
         contentW *= beLayout.scale; contentH *= beLayout.scale;
         ImVec2 beTL = lc::HudElementPixelPos(beLayout, contentW, contentH, w, h);
         ImVec2 pMin(beTL.x, beTL.y), pMax(beTL.x + contentW, beTL.y + contentH);
@@ -11147,7 +11328,14 @@ void RenderBlockESP(int w, int h) {
 LRESULT CALLBACK HookedWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     // HUD editor: only intercept mouse when editor active AND a GUI/chat is open
     // (chat open = OS cursor is available, so dragging works naturally).
-    if (g_hudEditor.active) {
+    bool hudEditorActive = false;
+    bool hudEditorGrabbed = false;
+    {
+        LockGuard lk(g_hudEditorMutex);
+        hudEditorActive = g_hudEditor.active;
+        hudEditorGrabbed = !g_hudEditor.grabbedId.empty();
+    }
+    if (hudEditorActive) {
         bool chatOpen = false;
         { LockGuard lk(g_stateMutex); chatOpen = g_gameState.guiOpen; }
         if (chatOpen) {
@@ -11155,7 +11343,7 @@ LRESULT CALLBACK HookedWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
             if (isMouseMsg) {
                 ImGui_ImplWin32_WndProcHandler(hwnd, msg, wParam, lParam);
                 // Consume clicks while a drag is active so the game GUI doesn't react
-                if (!g_hudEditor.grabbedId.empty() || msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP) {
+                if (hudEditorGrabbed || msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP) {
                     return 0;
                 }
             }
@@ -11171,6 +11359,7 @@ LRESULT CALLBACK HookedWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     if (msg == WM_LBUTTONDOWN || rawInputClickEdge) {
         Config cfgSnapshot;
         {
+            LockGuard hudLock(g_hudEditorMutex);
             LockGuard lk(g_configMutex);
             cfgSnapshot = g_config;
         }
@@ -11280,6 +11469,8 @@ static void ConfigureImGuiFontAndStyle(HWND hwnd) {
 
 // ===================== SWAPBUFFERS HOOK =====================
 BOOL WINAPI HookedSwapBuffers(HDC hdc) {
+    LegacyRenderCallbackLease renderLease;
+    if (!renderLease.Active()) return CallOriginalSwapBuffers(hdc);
     if (!hdc) return CallOriginalSwapBuffers(hdc);
 
     HGLRC currentRc = wglGetCurrentContext();
@@ -11404,7 +11595,9 @@ BOOL WINAPI HookedSwapBuffers(HDC hdc) {
         s_wasNonChatMinecraftScreen = true;
     } else if (s_wasNonChatMinecraftScreen && g_imguiInitialized) {
         s_wasNonChatMinecraftScreen = false;
-        ResetImGuiBackendsForReinit("minecraft screen closed");
+        // The HWND and GL context remain valid when an inventory/menu closes.
+        // Skip this transition frame so Minecraft can restore its world state,
+        // but keep the expensive ImGui context, font atlas, and GL backend.
         return CallOriginalSwapBuffers(hdc);
     }
 
@@ -11415,35 +11608,63 @@ BOOL WINAPI HookedSwapBuffers(HDC hdc) {
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
 
-    UpdateHudEditor(w, h);
-    RenderHUD(w, h);
-    if (!ShouldHideWorldRenderModules(state)) {
-        TryLockGuard jniTry(g_renderJniMutex);
-        if (jniTry.owns_lock()) {
-            RenderNametags(w, h);
-            RenderFightStatus(w, h);
-            RenderClosestPlayerInfo(w, h);
-            RenderPixelPartyAssist(w, h);
-            RenderChestESP(w, h);
-            RenderBlockESP(w, h);
-        } else {
-            static DWORD nextJniBusyLogAt = 0;
-            DWORD now = GetTickCount();
-            if (now >= nextJniBusyLogAt) {
-                nextJniBusyLogAt = now + 15000;
-                bool heavy = (InterlockedCompareExchange(&g_heavyDiscoveryInProgress, 0, 0) != 0);
-                Log(std::string("Skipped world overlay frame: JNI busy")
-                    + (heavy ? " (heavy discovery active)" : ""));
+    {
+        NativePerfScope overlayPerf(lc::PERF_OVERLAY_RENDER);
+        UpdateHudEditor(w, h);
+        Config renderConfig;
+        lc::HudLayout renderHudLayout;
+        {
+            LockGuard hudLock(g_hudEditorMutex);
+            LockGuard lk(g_configMutex);
+            renderConfig = g_config;
+            renderHudLayout = g_hudLayout;
+        }
+
+        RenderHUD(w, h, renderConfig, state, renderHudLayout);
+        if (!ShouldHideWorldRenderModules(state)) {
+            TryLockGuard jniTry(g_renderJniMutex);
+            if (jniTry.owns_lock()) {
+                ClosestPlayerDrawSnapshot18 closestPlayerSnapshot;
+                {
+                    NativePerfScope playerPerf(lc::PERF_PLAYER_SCAN);
+                    RenderNametags(
+                        w,
+                        h,
+                        renderConfig,
+                        &closestPlayerSnapshot);
+                }
+                RenderFightStatus(w, h);
+                RenderClosestPlayerInfo(
+                    w,
+                    h,
+                    renderConfig,
+                    renderHudLayout,
+                    closestPlayerSnapshot);
+                RenderPixelPartyAssist(w, h, renderConfig, state);
+                {
+                    NativePerfScope chestPerf(lc::PERF_CHEST_SCAN);
+                    RenderChestESP(w, h, renderConfig);
+                }
+                RenderBlockESP(w, h, renderConfig, renderHudLayout);
+            } else {
+                static DWORD nextJniBusyLogAt = 0;
+                DWORD now = GetTickCount();
+                if (now >= nextJniBusyLogAt) {
+                    nextJniBusyLogAt = now + 15000;
+                    bool heavy = (InterlockedCompareExchange(&g_heavyDiscoveryInProgress, 0, 0) != 0);
+                    Log(std::string("Skipped world overlay frame: JNI busy")
+                        + (heavy ? " (heavy discovery active)" : ""));
+                }
             }
         }
-    }
 
-    ImGui::Render();
-    ImGuiIO& io = ImGui::GetIO();
-    if (io.DisplaySize.x > 1.0f && io.DisplaySize.y > 1.0f) {
-        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        ImGui::Render();
+        ImGuiIO& io = ImGui::GetIO();
+        if (io.DisplaySize.x > 1.0f && io.DisplaySize.y > 1.0f) {
+            ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        }
+        glFlush();
     }
-    glFlush();
 
     return CallOriginalSwapBuffers(hdc);
 }
@@ -11476,6 +11697,10 @@ bool PatchIAT(HMODULE hModule, const char* targetDll, const char* funcName, void
                 VirtualProtect(&firstThunk->u1.Function, sizeof(void*), PAGE_EXECUTE_READWRITE, &oldProt);
                 firstThunk->u1.Function = (ULONGLONG)hookFunc;
                 VirtualProtect(&firstThunk->u1.Function, sizeof(void*), oldProt, &oldProt);
+                if (strcmp(funcName, "SwapBuffers") == 0 && hookFunc == (void*)HookedSwapBuffers) {
+                    g_legacyIatSwapSlot = (void*)&firstThunk->u1.Function;
+                    g_legacyIatSwapOriginal = *origFunc;
+                }
                 return true;
             }
         }
@@ -11641,15 +11866,22 @@ void ParseConfig(const std::string& line) {
         return;
     }
     if (type == "config") {
+        const std::string perfDiagnostics = reader.GetString("perfDiagnostics");
+        if (!perfDiagnostics.empty())
+            SetNativePerfDiagnosticsEnabled(reader.GetBool("perfDiagnostics"));
+
+        {
         LockGuard lk(g_configMutex);
         g_config.armed = reader.GetBool("armed");
         g_config.clicking = reader.GetBool("clicking");
-        g_config.minCPS = reader.GetFloat("minCPS");
-        g_config.maxCPS = reader.GetFloat("maxCPS");
+        g_config.minCPS = lc::ClampFloat(reader.GetFloat("minCPS", g_config.minCPS), 1.0f, 25.0f);
+        g_config.maxCPS = lc::ClampFloat(reader.GetFloat("maxCPS", g_config.maxCPS), 1.0f, 25.0f);
+        if (g_config.maxCPS < g_config.minCPS) g_config.maxCPS = g_config.minCPS;
         g_config.leftClick = reader.GetBool("left");
         g_config.rightClick = reader.GetBool("right");
-        g_config.rightMinCPS = reader.GetFloat("rightMinCPS");
-        g_config.rightMaxCPS = reader.GetFloat("rightMaxCPS");
+        g_config.rightMinCPS = lc::ClampFloat(reader.GetFloat("rightMinCPS", g_config.rightMinCPS), 1.0f, 25.0f);
+        g_config.rightMaxCPS = lc::ClampFloat(reader.GetFloat("rightMaxCPS", g_config.rightMaxCPS), 1.0f, 25.0f);
+        if (g_config.rightMaxCPS < g_config.rightMinCPS) g_config.rightMaxCPS = g_config.rightMinCPS;
         g_config.rightBlockOnly = reader.GetBool("rightBlock");
         g_config.breakBlocks = reader.GetBool("breakBlocks");
         g_config.jitter = reader.GetBool("jitter");
@@ -11748,6 +11980,7 @@ void ParseConfig(const std::string& line) {
         if (fightStatusWasEnabled && !g_config.fightStatus) ResetFightStatusState18();
         g_config.nametagShowHealth = reader.GetBool("nametagShowHealth");
         g_config.nametagShowArmor = reader.GetBool("nametagShowArmor");
+        g_config.nametagShowHeldItem = reader.GetBool("nametagShowHeldItem", true);
         g_config.nametagHideVanilla = reader.GetBool("nametagHideVanilla");
         g_config.chestEsp = reader.GetBool("chestEsp");
         g_config.chestStealer = reader.GetBool("chestStealerEnabled");
@@ -11805,6 +12038,7 @@ void ParseConfig(const std::string& line) {
 
         g_config.nametagShowHealth = reader.GetBool("nametagShowHealth");
         g_config.nametagShowArmor = reader.GetBool("nametagShowArmor");
+        g_config.nametagShowHeldItem = reader.GetBool("nametagShowHeldItem", true);
         g_config.nametagHideVanilla = reader.GetBool("nametagHideVanilla");
 
         int nametagMaxCount = reader.GetInt("nametagMaxCount", -1);
@@ -11896,6 +12130,14 @@ void ParseConfig(const std::string& line) {
         g_config.pixelPartyAutoWalk = reader.GetBool("pixelPartyAutoWalk");
 
         g_config.hudEditor = reader.GetBool("hudEditor");
+        }
+
+        // HUD editor state is protected separately so the long configuration
+        // parse cannot block render/editor work. Keep the established HUD ->
+        // config lock order for this short reconciliation and layout snapshot.
+        {
+        LockGuard hudLock(g_hudEditorMutex);
+        LockGuard lk(g_configMutex);
         if (!g_config.hudEditor) {
             g_hudEditor.grabbedId.clear();
             g_hudEditor.mode = lc::HudEditorState::Mode::None;
@@ -11914,31 +12156,71 @@ void ParseConfig(const std::string& line) {
             }
             g_hudLayout = incoming;
         }
+        }
     }
 }
 
-bool TrySendCapabilities(SOCKET sock) {
-    if (sock == INVALID_SOCKET) return false;
+// Returns 1 when the complete line is queued, 0 when the caller should retry
+// after backpressure, and -1 for a terminal socket failure.
+int TrySendCapabilities(SOCKET sock, bool newConnection) {
+    if (sock == INVALID_SOCKET) return -1;
 
     const char* capabilitiesJson = lc::LegacyCapabilitiesJson();
-    int sent = send(sock, capabilitiesJson, (int)strlen(capabilitiesJson), 0);
-    if (sent == SOCKET_ERROR) {
-        int err = WSAGetLastError();
-        if (err == WSAEWOULDBLOCK) return false;
-        Log("Capabilities send failed, err=" + std::to_string(err));
-        return false;
+    const size_t payloadLength = strlen(capabilitiesJson);
+    static SOCKET pendingSocket = INVALID_SOCKET;
+    static size_t pendingOffset = 0;
+    if (newConnection || pendingSocket != sock) {
+        pendingSocket = sock;
+        pendingOffset = 0;
     }
+    while (pendingOffset < payloadLength) {
+        int sent = send(sock, capabilitiesJson + pendingOffset,
+                        (int)(payloadLength - pendingOffset), 0);
+        if (sent > 0) {
+            pendingOffset += (size_t)sent;
+            continue;
+        }
+        int err = WSAGetLastError();
+        if (sent == SOCKET_ERROR && err == WSAEWOULDBLOCK) return 0;
+        Log("Capabilities send failed, err=" + std::to_string(err));
+        pendingSocket = INVALID_SOCKET;
+        pendingOffset = 0;
+        return -1;
+    }
+    pendingSocket = INVALID_SOCKET;
+    pendingOffset = 0;
     return true;
+}
+
+// Preserve newline-delimited JSON framing even when the nonblocking socket is
+// temporarily backpressured.  A timeout drops this complete line; it never
+// publishes a truncated JSON document that would poison the receive buffer.
+static int SendJsonLine(SOCKET sock, const std::string& line) {
+    size_t offset = 0;
+    while (offset < line.size()) {
+        int sent = send(sock, line.data() + offset, (int)(line.size() - offset), 0);
+        if (sent > 0) { offset += (size_t)sent; continue; }
+        if (sent == 0) return -1;
+        int err = WSAGetLastError();
+        if (err != WSAEWOULDBLOCK) return -1;
+        fd_set writable;
+        FD_ZERO(&writable);
+        FD_SET(sock, &writable);
+        timeval wait = { 0, 5000 };
+        if (select(0, nullptr, &writable, nullptr, &wait) <= 0) return -1;
+    }
+    return 1;
 }
 
 void ServerLoop() {
     WSADATA wsaData; WSAStartup(MAKEWORD(2, 2), &wsaData);
-    g_serverSocket = socket(AF_INET, SOCK_STREAM, 0);
-    int opt = 1; setsockopt(g_serverSocket, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
+    SOCKET serverSocket = socket(AF_INET, SOCK_STREAM, 0);
+    AtomicSocketStore(&g_serverSocket, serverSocket);
+    int opt = 1; setsockopt(serverSocket, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
     sockaddr_in addr = {}; addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = INADDR_ANY; addr.sin_port = htons(25590);
-    bind(g_serverSocket, (sockaddr*)&addr, sizeof(addr));
-    listen(g_serverSocket, 1);
+    bind(serverSocket, (sockaddr*)&addr, sizeof(addr));
+    listen(serverSocket, 1);
 
     // FIX: Force C locale for correct JSON float formatting (dots not commas)
     setlocale(LC_NUMERIC, "C"); 
@@ -11947,6 +12229,7 @@ void ServerLoop() {
     args.version = JNI_VERSION_1_8; args.name = (char*)"LegoBridge"; args.group = nullptr;
     g_jvm->AttachCurrentThread((void**)&env, &args);
     lc::InstallNickHiderJvmti(g_jvm, lc::NickHiderJvmtiGeneration::Legacy189, Log);
+    anti_debuff_jvmti::Install(g_jvm, Log);
     ka_premotion::Install(g_jvm, Log);
     ka_premotion::SetAttackHandler(KillAuraPremotionAttackHandler);
 
@@ -11954,21 +12237,35 @@ void ServerLoop() {
     bool mapped = DiscoverMappings(env);
     Log(mapped ? "Discovery OK" : "Discovery FAILED");
 
-    while (g_running) {
+    while (IsBridgeRunning()) {
         Log("Waiting for client...");
-        g_clientSocket = accept(g_serverSocket, nullptr, nullptr);
-        if (g_clientSocket == INVALID_SOCKET) { if (!g_running) break; continue; }
+        SOCKET clientSocket = accept(serverSocket, nullptr, nullptr);
+        AtomicSocketStore(&g_clientSocket, clientSocket);
+        if (clientSocket == INVALID_SOCKET) { if (!IsBridgeRunning()) break; continue; }
         Log("Client connected");
 
         // Set non-blocking for reading config from C#
-        u_long mode = 1; ioctlsocket(g_clientSocket, FIONBIO, &mode);
+        u_long mode = 1; ioctlsocket(clientSocket, FIONBIO, &mode);
 
-        std::string readBuf;
+        lc::BoundedNewlineBuffer readBuf(1024 * 1024);
+        std::vector<std::string> receivedConfigLines;
         bool capabilitiesSent = false;
-        while (g_running) {
+        bool capabilitiesAttempted = false;
+        while (IsBridgeRunning()) {
             if (!capabilitiesSent) {
-                capabilitiesSent = TrySendCapabilities(g_clientSocket);
+                const int capabilitiesResult = TrySendCapabilities(clientSocket, !capabilitiesAttempted);
+                capabilitiesSent = capabilitiesResult > 0;
+                capabilitiesAttempted = true;
                 if (capabilitiesSent) Log("Sent bridge capabilities packet");
+                // Keep the capability line contiguous on the newline-delimited
+                // stream.  A nonblocking send may have queued only a prefix;
+                // publishing state before the remainder would interleave two
+                // logical lines and poison the loader's receive buffer.
+                if (capabilitiesResult < 0) break;
+                if (!capabilitiesSent) {
+                    Sleep(1);
+                    continue;
+                }
             }
 
             
@@ -11982,8 +12279,11 @@ void ServerLoop() {
                 needEntityTelemetry = g_config.nametags || g_config.closestPlayerInfo || g_config.aimAssist || g_config.fightStatus;
                 cfgSnapshot = g_config;
             }
+            anti_debuff_jvmti::SetEnabled(cfgSnapshot.antiDebuffEnabled);
 
             // ALWAYS Read Game State to update global state (for block detection etc.)
+            const unsigned long long stateScanPerfStarted =
+                GetNativePerfDiagnostics().Enabled() ? NativePerfTimestamp() : 0;
             GameState state;
             {
                 LockGuard jniLk(g_stateJniMutex);
@@ -12011,14 +12311,18 @@ void ServerLoop() {
                 if (cfgSnapshot.killAura) {
                     UpdateKillAuraLegacy(env, cfgSnapshot);
                 }
-                if (cfgSnapshot.antiDebuffEnabled) {
+                static bool s_antiDebuffWasEnabled = false;
+                if (cfgSnapshot.antiDebuffEnabled || s_antiDebuffWasEnabled) {
                     UpdateAntiDebuffLegacy(env, cfgSnapshot);
+                    s_antiDebuffWasEnabled = cfgSnapshot.antiDebuffEnabled;
                 }
                 UpdateHitDelayFixLegacy(env, cfgSnapshot, state);
                 if (cfgSnapshot.blockEsp) {
+                    NativePerfScope blockScanPerf(lc::PERF_BLOCK_SCAN);
                     UpdateBlockEspListLegacy(env, cfgSnapshot);
                 }
             }
+            RecordNativePerfSince(lc::PERF_SCAN_LOOP, stateScanPerfStarted);
             if (!cfgSnapshot.reachEnabled) {
                 g_reachAllowCurrentClick = false;
                 g_reachCurrentClickRange = 3.0;
@@ -12034,6 +12338,8 @@ void ServerLoop() {
             { LockGuard lk(g_stateMutex); g_gameState = state; }
 
             // Standard Logic: Build JSON from state
+            const unsigned long long statePublishPerfStarted =
+                GetNativePerfDiagnostics().Enabled() ? NativePerfTimestamp() : 0;
             std::string jsonToSend = "{";
             jsonToSend += "\"mapped\":" + std::string(state.mapped ? "true" : "false") + ",";
             jsonToSend += "\"inWorld\":" + std::string(state.inWorld ? "true" : "false") + ",";
@@ -12089,6 +12395,7 @@ void ServerLoop() {
             }
             jsonToSend += entitiesJson;
             {
+                LockGuard hudLock(g_hudEditorMutex);
                 LockGuard lk(g_configMutex);
                 if (g_hudEditor.layoutDirty) {
                     jsonToSend += ",\"hudLayout\":";
@@ -12101,11 +12408,12 @@ void ServerLoop() {
             // Send if we have data
             if (!jsonToSend.empty()) {
                 LockGuard lk(g_socketMutex);
-                int sent = send(g_clientSocket, jsonToSend.c_str(), (int)jsonToSend.length(), 0);
-                if (sent == SOCKET_ERROR) {
-                   if (WSAGetLastError() != WSAEWOULDBLOCK) break; 
-                }
+                if (SendJsonLine(clientSocket, jsonToSend) < 0) break;
             }
+            RecordNativePerfSince(
+                lc::PERF_STATE_PUBLISH,
+                statePublishPerfStarted,
+                static_cast<unsigned long long>(jsonToSend.size()));
             
             // Keep telemetry responsive without pegging CPU.
             // 14ms (~71 Hz) avoids JNI mutex contention with the render thread
@@ -12121,14 +12429,18 @@ void ServerLoop() {
             }
             // Read config from C# (non-blocking)
             char buf[2048];
-            int r = recv(g_clientSocket, buf, sizeof(buf) - 1, 0);
+            int r = recv(clientSocket, buf, sizeof(buf) - 1, 0);
             if (r > 0) {
-                buf[r] = 0; readBuf += buf;
-                size_t pos;
-                while ((pos = readBuf.find('\n')) != std::string::npos) {
-                    std::string line = readBuf.substr(0, pos);
-                    readBuf.erase(0, pos + 1);
-                    if (!line.empty()) ParseConfig(line);
+                receivedConfigLines.clear();
+                size_t discarded = readBuf.Append(
+                    buf,
+                    static_cast<size_t>(r),
+                    &receivedConfigLines);
+                if (discarded != 0)
+                    Log("Ignored oversized loader config message.");
+                for (size_t i = 0; i < receivedConfigLines.size(); ++i) {
+                    if (!receivedConfigLines[i].empty())
+                        ParseConfig(receivedConfigLines[i]);
                 }
             } else if (r == 0) {
                 break;
@@ -12137,6 +12449,7 @@ void ServerLoop() {
                 if (err != WSAEWOULDBLOCK) break;
             }
 
+            MaybeLogNativePerfDiagnostics();
             Sleep(needEntityTelemetry ? 10 : 25);
         }
         {
@@ -12145,7 +12458,8 @@ void ServerLoop() {
             ResetSpeedBridgeMovementTracking();
             AbortAutoRodLegacyTransaction(env, true);
         }
-        closesocket(g_clientSocket); g_clientSocket = INVALID_SOCKET;
+        SOCKET ownedClient = AtomicSocketTake(&g_clientSocket);
+        if (ownedClient != INVALID_SOCKET) closesocket(ownedClient);
         Log("Client disconnected");
     }
     {
@@ -12155,11 +12469,26 @@ void ServerLoop() {
         ResetAutoRodLegacyJniCaches(env);
         ResetFightStatusState18();
         HelperBridge::Unload(env);
-        lc::ShutdownNickHiderJvmti(env);
-        ka_premotion::Shutdown(env);
+        const bool antiDebuffSafeToUnload = anti_debuff_jvmti::Shutdown(env);
+        if (antiDebuffSafeToUnload) {
+            lc::ShutdownNickHiderJvmti(env);
+            ka_premotion::Shutdown(env);
+        } else {
+            Log("AntiDebuff teardown incomplete; shared JVMTI host remains loaded for a safe detach retry.");
+        }
+        if (g_blindnessPotion) {
+            env->DeleteGlobalRef(g_blindnessPotion);
+            g_blindnessPotion = nullptr;
+        }
+        g_isPotionActiveMethod = nullptr;
+        g_blindDetectResolved = false;
+        g_blindRenderHookArmed = false;
+        InterlockedExchange(&g_blindFogSuppress, 0);
     }
     g_jvm->DetachCurrentThread();
-    closesocket(g_serverSocket); WSACleanup();
+    SOCKET ownedServer = AtomicSocketTake(&g_serverSocket);
+    if (ownedServer != INVALID_SOCKET) closesocket(ownedServer);
+    WSACleanup();
 }
 
 // ===================== MAIN THREAD & DLLMAIN =====================
@@ -12192,7 +12521,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved) {
         std::ofstream f(g_logPath.c_str(), std::ios_base::trunc);
         f << "[Bridge] DLL_PROCESS_ATTACH" << std::endl; f.close();
         Log("Log path: " + g_logPath);
-        CreateThread(nullptr, 0, MainThread, nullptr, 0, nullptr);
+        g_legacyMainThreadHandle = CreateThread(nullptr, 0, MainThread, nullptr, 0, nullptr);
     } else if (reason == DLL_PROCESS_DETACH) {
         AbortAutoRodLegacyTransaction(nullptr, false);
         ResetFightStatusState18();

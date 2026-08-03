@@ -89,18 +89,22 @@ public class Clicker : INotifyPropertyChanged
     private const int PixelPartyTargetGraceMs = 160;
     private const uint INPUT_KEYBOARD = 1;
     private const uint KEYEVENTF_KEYUP = 0x0002;
+    private static readonly int MouseInputSize = Marshal.SizeOf<INPUT>();
+    private static readonly int KeyboardInputSize = Marshal.SizeOf<INPUT_KEY>();
     
     // State
     private bool _isArmed;
     private bool _isClicking;
     private bool _useLeftButton = true;
     private CancellationTokenSource? _clickCts;
-    private CancellationTokenSource? _aimAssistCts;
-    private CancellationTokenSource? _triggerbotCts;
     private Task? _clickTask;
-    private Task? _aimAssistTask;
-    private Task? _triggerbotTask;
     private readonly AimAssistMotionController _aimAssistMotionController = new();
+    private readonly OwnedAsyncLoop _aimAssistLoop = new(
+        "Aim Assist",
+        exception => Debug.WriteLine($"[Aim Assist] loop failed and will restart: {exception}"));
+    private readonly OwnedAsyncLoop _triggerbotLoop = new(
+        "Triggerbot",
+        exception => Debug.WriteLine($"[Triggerbot] loop failed and will restart: {exception}"));
     private int _panicInProgress;
     
     // Settings
@@ -124,6 +128,7 @@ public class Clicker : INotifyPropertyChanged
     private readonly INPUT[] _leftClickInputs;
     private readonly INPUT[] _rightClickInputs;
     private readonly INPUT[] _aimAssistMoveInput;
+    private readonly INPUT_KEY[] _pixelPartyKeyInput = new INPUT_KEY[1];
     
     public event PropertyChangedEventHandler? PropertyChanged;
     public event Action? StateChanged;
@@ -517,10 +522,7 @@ public class Clicker : INotifyPropertyChanged
 
     private void StartAimAssistLoop()
     {
-        if (_aimAssistCts != null) return;
-        var cts = new CancellationTokenSource();
-        _aimAssistCts = cts;
-        _aimAssistTask = Task.Run(() => AimAssistLoop(cts.Token));
+        _aimAssistLoop.Start(AimAssistLoop);
     }
 
     private CancellationTokenSource? _pixelPartyAssistInputCts;
@@ -567,13 +569,12 @@ public class Clicker : INotifyPropertyChanged
 
     private void SendPixelPartyKey(int vk, bool down)
     {
-        var input = new INPUT_KEY[1];
-        input[0].Type = INPUT_KEYBOARD;
-        input[0].U.Ki.WVk = (ushort)vk;
-        input[0].U.Ki.DwFlags = down ? 0u : KEYEVENTF_KEYUP;
         lock (_sendInputLock)
         {
-            SendInputKeyboard(1, input, Marshal.SizeOf<INPUT_KEY>());
+            _pixelPartyKeyInput[0].Type = INPUT_KEYBOARD;
+            _pixelPartyKeyInput[0].U.Ki.WVk = (ushort)vk;
+            _pixelPartyKeyInput[0].U.Ki.DwFlags = down ? 0u : KEYEVENTF_KEYUP;
+            SendInputKeyboard(1, _pixelPartyKeyInput, KeyboardInputSize);
         }
     }
 
@@ -614,7 +615,7 @@ public class Clicker : INotifyPropertyChanged
             _aimAssistMoveInput[0].Mi.Dy = 0;
             lock (_sendInputLock)
             {
-                SendInput(1, _aimAssistMoveInput, Marshal.SizeOf<INPUT>());
+                SendInput(1, _aimAssistMoveInput, MouseInputSize);
             }
 
             remaining -= moveX / gain;
@@ -623,39 +624,20 @@ public class Clicker : INotifyPropertyChanged
 
     private void StopAimAssistLoop()
     {
-        var cts = _aimAssistCts;
-        var task = _aimAssistTask;
-        _aimAssistCts = null;
-        _aimAssistTask = null;
         _aimAssistMotionController.Reset();
-        if (cts != null)
-        {
-            cts.Cancel();
-            _ = DisposeCtsWhenDoneAsync(cts, task);
-        }
+        _aimAssistLoop.Stop();
     }
 
     public bool IsUsingLeftButton => _useLeftButton;
 
     private void StartTriggerbotLoop()
     {
-        if (_triggerbotCts != null) return;
-        var cts = new CancellationTokenSource();
-        _triggerbotCts = cts;
-        _triggerbotTask = Task.Run(() => TriggerbotLoop(cts.Token));
+        _triggerbotLoop.Start(TriggerbotLoop);
     }
 
     private void StopTriggerbotLoop()
     {
-        var cts = _triggerbotCts;
-        var task = _triggerbotTask;
-        _triggerbotCts = null;
-        _triggerbotTask = null;
-        if (cts != null)
-        {
-            cts.Cancel();
-            _ = DisposeCtsWhenDoneAsync(cts, task);
-        }
+        _triggerbotLoop.Stop();
     }
 
     private static async Task DisposeCtsWhenDoneAsync(CancellationTokenSource cts, Task? task)
@@ -2434,7 +2416,7 @@ public class Clicker : INotifyPropertyChanged
 
     private async Task ClickLoop(CancellationToken token)
     {
-        var stopwatch = new Stopwatch();
+        long nextClickDeadline = 0;
         
         while (!token.IsCancellationRequested)
         {
@@ -2550,8 +2532,6 @@ public class Clicker : INotifyPropertyChanged
                 }
             }
             
-            stopwatch.Restart();
-            
             float minCps = _useLeftButton ? MinCPS : RightMinCPS;
             float maxCps = _useLeftButton ? MaxCPS : RightMaxCPS;
             if (minCps > maxCps) minCps = maxCps;
@@ -2576,19 +2556,17 @@ public class Clicker : INotifyPropertyChanged
             // Perform click
             StatsTracker.Instance.RecordClick(cps, _useLeftButton);
             PerformClick(_useLeftButton);
-            
-            // Drift Compensation
-            // Stop stopwatch to see how long click + logic took
-            stopwatch.Stop();
-            double elapsed = stopwatch.Elapsed.TotalMilliseconds;
-            
-            // Calculate remaining wait time, compensating for elapsed time
-            int waitTime = (int)(targetInterval - elapsed);
-            if (waitTime < 1) waitTime = 1; // Always yield at least a bit
+
+            ClickSchedule schedule = ClickDeadlineScheduler.ScheduleNext(
+                nextClickDeadline,
+                Stopwatch.GetTimestamp(),
+                targetInterval,
+                Stopwatch.Frequency);
+            nextClickDeadline = schedule.DeadlineTimestamp;
             
             try
             {
-                await Task.Delay(waitTime, token).ConfigureAwait(false);
+                await Task.Delay(schedule.DelayMilliseconds, token).ConfigureAwait(false);
             }
             catch (TaskCanceledException)
             {
@@ -2602,7 +2580,7 @@ public class Clicker : INotifyPropertyChanged
         INPUT[] inputs = leftButton ? _leftClickInputs : _rightClickInputs;
         lock (_sendInputLock)
         {
-            SendInput(2, inputs, Marshal.SizeOf<INPUT>());
+            SendInput(2, inputs, MouseInputSize);
         }
     }
 
@@ -2639,7 +2617,7 @@ public class Clicker : INotifyPropertyChanged
         _aimAssistMoveInput[0].Mi.Dy = move.MoveY;
         lock (_sendInputLock)
         {
-            SendInput(1, _aimAssistMoveInput, Marshal.SizeOf<INPUT>());
+            SendInput(1, _aimAssistMoveInput, MouseInputSize);
         }
     }
      

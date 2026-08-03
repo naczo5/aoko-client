@@ -18,6 +18,8 @@ public static class ChestStealerCoordinateMapper
         int clientHeight = clientRect.Bottom - clientRect.Top;
         if (state.ScreenWidth <= 0 || state.ScreenHeight <= 0 || clientWidth <= 0 || clientHeight <= 0)
             return false;
+        if (slot.X < 0 || slot.X >= state.ScreenWidth || slot.Y < 0 || slot.Y >= state.ScreenHeight)
+            return false;
 
         double scaleX = clientWidth / (double)state.ScreenWidth;
         double scaleY = clientHeight / (double)state.ScreenHeight;
