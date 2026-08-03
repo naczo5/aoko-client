@@ -1379,7 +1379,9 @@ bool DiscoverMappings(JNIEnv* env) {
             std::string name = cn; env->ReleaseStringUTFChars(jn, cn);
             if (name.find("java.") == 0 || name.find("sun.") == 0 || name.find("javax.") == 0 ||
                 name.find("com.sun.") == 0 || name.find("org.") == 0 || name.find("jdk.") == 0 ||
-                name.find("com.google.") == 0 || name.find("io.") == 0 || name[0] == '[') continue;
+                name.find("com.google.") == 0 || name.find("io.") == 0 || name[0] == '[' ||
+                name.find("MinecraftServer") != std::string::npos ||
+                name.find(".server.") != std::string::npos) continue;
 
             jobjectArray fields = (jobjectArray)env->CallObjectMethod(cls, mGetFields);
             if (!fields || env->ExceptionCheck()) { env->ExceptionClear(); continue; }
@@ -1411,6 +1413,8 @@ bool DiscoverMappings(JNIEnv* env) {
     jobjectArray mcFields = (jobjectArray)env->CallObjectMethod(mcClass, mGetFields);
     jsize mcFC = env->GetArrayLength(mcFields);
     jfieldID singletonField = nullptr;
+    jmethodID singletonGetter = nullptr;
+    std::string singletonGetterName;
     std::string playerType;
 
     for (int f = 0; f < mcFC; f++) {
@@ -1432,10 +1436,95 @@ bool DiscoverMappings(JNIEnv* env) {
             Log("Singleton: " + fn);
         }
     }
-    TRACE_BRANCH("singletonFieldResolved", singletonField != nullptr);
-    if (!singletonField) { Log("ERROR: No singleton"); jvmti->Deallocate((unsigned char*)classes); return false; }
 
-    jobject mcInst = env->GetStaticObjectField(mcClass, singletonField);
+    // Some Lunar/Forge class-loader combinations expose the client singleton
+    // through getMinecraft()/func_71410_x() instead of a self-typed static
+    // field. Accept the stable names first, then a zero-argument static method
+    // whose return type is the Minecraft class (the obfuscated method name).
+    if (!singletonField) {
+        const char* getterNames[] = {
+            "getMinecraft", "func_71410_x", "getInstance", "instance", nullptr
+        };
+        std::string returnSig = "()L" + mcName + ";";
+        std::replace(returnSig.begin(), returnSig.end(), '.', '/');
+        for (int i = 0; getterNames[i] && !singletonGetter; ++i) {
+            singletonGetter = env->GetStaticMethodID(mcClass, getterNames[i], returnSig.c_str());
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+                singletonGetter = nullptr;
+            } else if (singletonGetter) {
+                singletonGetterName = getterNames[i];
+            }
+        }
+
+        if (!singletonGetter) {
+            jobjectArray methods = (jobjectArray)env->CallObjectMethod(mcClass, mGetMethods);
+            if (methods && !env->ExceptionCheck()) {
+                jsize methodCount = env->GetArrayLength(methods);
+                for (jsize i = 0; i < methodCount && !singletonGetter; ++i) {
+                    jobject method = env->GetObjectArrayElement(methods, i);
+                    if (!method) continue;
+                    jint mod = env->CallIntMethod(method, mMMod);
+                    jclass ret = (jclass)env->CallObjectMethod(method, mMRet);
+                    jobjectArray params = (jobjectArray)env->CallObjectMethod(method, mMParams);
+                    if (env->ExceptionCheck()) {
+                        env->ExceptionClear();
+                        if (params) env->DeleteLocalRef(params);
+                        if (ret) env->DeleteLocalRef(ret);
+                        env->DeleteLocalRef(method);
+                        continue;
+                    }
+                    const bool zeroArgs = params && env->GetArrayLength(params) == 0;
+                    const bool returnsMinecraft = ret && GetClassNameFromClass(env, ret) == mcName;
+                    jboolean isStatic = JNI_FALSE;
+                    if (!env->ExceptionCheck()) {
+                        isStatic = env->CallStaticBooleanMethod(cMod, mIsStatic, mod);
+                        if (env->ExceptionCheck()) env->ExceptionClear();
+                    }
+                    if (isStatic == JNI_TRUE && zeroArgs && returnsMinecraft) {
+                        jstring methodName = (jstring)env->CallObjectMethod(method, mMName);
+                        if (methodName && !env->ExceptionCheck()) {
+                            const char* utfName = env->GetStringUTFChars(methodName, nullptr);
+                            singletonGetterName = utfName ? utfName : "";
+                            if (utfName) env->ReleaseStringUTFChars(methodName, utfName);
+                            singletonGetter = env->GetStaticMethodID(
+                                mcClass, singletonGetterName.c_str(), returnSig.c_str());
+                            if (env->ExceptionCheck()) {
+                                env->ExceptionClear();
+                                singletonGetter = nullptr;
+                                singletonGetterName.clear();
+                            }
+                            env->DeleteLocalRef(methodName);
+                        } else if (env->ExceptionCheck()) {
+                            env->ExceptionClear();
+                        }
+                    }
+                    if (params) env->DeleteLocalRef(params);
+                    if (ret) env->DeleteLocalRef(ret);
+                    env->DeleteLocalRef(method);
+                }
+                env->DeleteLocalRef(methods);
+            } else if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+            }
+        }
+        if (singletonGetter) Log("Singleton getter: " + singletonGetterName);
+    }
+    TRACE_BRANCH("singletonFieldResolved", singletonField != nullptr);
+    TRACE_BRANCH("singletonGetterResolved", singletonGetter != nullptr);
+    if (!singletonField && !singletonGetter) {
+        Log("ERROR: No singleton field or getter");
+        jvmti->Deallocate((unsigned char*)classes);
+        return false;
+    }
+
+    jobject mcInst = singletonField
+        ? env->GetStaticObjectField(mcClass, singletonField)
+        : env->CallStaticObjectMethod(mcClass, singletonGetter);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        mcInst = nullptr;
+    }
     TRACE_BRANCH("mcInstanceAvailable", mcInst != nullptr);
     if (!mcInst) { Log("ERROR: MC null"); jvmti->Deallocate((unsigned char*)classes); return false; }
     Log("Got MC instance");
