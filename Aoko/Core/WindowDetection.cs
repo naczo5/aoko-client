@@ -57,17 +57,17 @@ public static class WindowDetection
     private static readonly string[] GameTitles = { "Minecraft", "Lunar Client", "Badlion" };
 
     private static IntPtr _foundWindow = IntPtr.Zero;
-    private static IntPtr _customTargetHwnd = IntPtr.Zero;
+    private static IntPtr _targetHwnd = IntPtr.Zero;
     private static readonly List<WindowTarget> _selectableWindows = new();
 
-    public static void SetCustomTarget(IntPtr hwnd)
+    public static void SetTargetWindow(IntPtr hwnd)
     {
-        _customTargetHwnd = hwnd;
+        _targetHwnd = hwnd;
     }
 
-    public static void ClearCustomTarget()
+    public static void ClearTargetWindow()
     {
-        _customTargetHwnd = IntPtr.Zero;
+        _targetHwnd = IntPtr.Zero;
     }
 
     public static IntPtr GetForegroundWindowHandle() => GetForegroundWindow();
@@ -171,8 +171,8 @@ public static class WindowDetection
 
     public static IntPtr FindMinecraftWindow()
     {
-        if (_customTargetHwnd != IntPtr.Zero && IsWindow(_customTargetHwnd))
-            return _customTargetHwnd;
+        if (_targetHwnd != IntPtr.Zero && IsWindow(_targetHwnd))
+            return _targetHwnd;
 
         _foundWindow = IntPtr.Zero;
         EnumWindows(EnumWindowCallback, IntPtr.Zero);

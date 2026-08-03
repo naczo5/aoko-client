@@ -268,7 +268,7 @@ public sealed class DiscordRichPresenceService
         if (!connected && !injected)
         {
             details = $"aoko client • {version}";
-            stateLine = "Waiting for Lunar Client";
+            stateLine = "Waiting for Minecraft client";
         }
         else if (!connected)
         {
