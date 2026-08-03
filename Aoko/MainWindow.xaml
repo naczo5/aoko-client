@@ -254,15 +254,11 @@
                         TextWrapping="Wrap"
                         Margin="0,0,0,10"/>
 
-            <Button x:Name="InjectButton" Content="Inject into Lunar Client" Height="35"
+            <Button x:Name="InjectButton" Content="Inject" Height="35"
                     Style="{StaticResource DarkButton}" Click="InjectButton_Click"
                     FontSize="13" Margin="0,0,0,8" Cursor="Hand"/>
 
-            <Button x:Name="CustomInjectButton" Content="Custom Inject" Height="35"
-                    Style="{StaticResource DarkButton}" Click="CustomInjectButton_Click"
-                    FontSize="13" Margin="0,0,0,8" Cursor="Hand"/>
-
-            <TextBlock Text="Custom inject: pick any window (JVM processes listed first). Use for other Java clients."
+            <TextBlock Text="The Java/Minecraft client is detected automatically. If multiple clients are running, you can select one."
                        Foreground="{DynamicResource DimTextBrush}"
                        FontSize="10"
                        HorizontalAlignment="Center"

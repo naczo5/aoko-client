@@ -1060,23 +1060,54 @@ public partial class MainWindow : Window
     
     private async void InjectButton_Click(object sender, RoutedEventArgs e)
     {
-        await RunInjectionAsync();
+        SetInjectionButtonsEnabled(false);
+        InjectButton.Content = "Detecting...";
+        InjectionStatusText.Text = "Status: Detecting Java clients...";
+
+        IReadOnlyList<InjectionTarget> targets = await Task.Run(InjectionTargetDiscovery.ListTargets);
+        if (targets.Count == 0)
+        {
+            // This still lets the client reconnect to an already-running bridge and
+            // produces the normal error if no Java/Minecraft process exists.
+            await RunInjectionAsync();
+            return;
+        }
+
+        InjectionTarget? selectedTarget;
+        string selectedVersion = "auto";
+        if (targets.Count == 1)
+        {
+            selectedTarget = targets[0];
+        }
+        else
+        {
+            (selectedTarget, selectedVersion) = SelectInjectionTarget(targets);
+        }
+
+        if (selectedTarget == null)
+        {
+            SetInjectionButtonsEnabled(true);
+            InjectButton.Content = "Inject";
+            InjectionStatusText.Text = "Status: Not Injected";
+            return;
+        }
+
+        await RunInjectionAsync(
+            selectedVersion,
+            selectedTarget.ProcessId,
+            selectedTarget.Hwnd);
     }
 
-    private async void CustomInjectButton_Click(object sender, RoutedEventArgs e)
+    private (InjectionTarget? Target, string Version) SelectInjectionTarget(IReadOnlyList<InjectionTarget> targets)
     {
-        var picker = new WindowPickerDialog
+        var picker = new WindowPickerDialog(targets)
         {
             Owner = this
         };
 
-        if (picker.ShowDialog() != true || picker.SelectedTarget == null)
-            return;
-
-        await RunInjectionAsync(
-            picker.SelectedVersion,
-            picker.SelectedTarget.ProcessId,
-            picker.SelectedTarget.Hwnd);
+        return picker.ShowDialog() == true
+            ? (picker.SelectedTarget, picker.SelectedVersion)
+            : (null, "auto");
     }
 
     private async Task RunInjectionAsync(string version = "auto", int? targetPid = null, IntPtr? targetHwnd = null)
@@ -1093,7 +1124,7 @@ public partial class MainWindow : Window
         if (success)
             EnterControlMode();
 
-        InjectButton.Content = success ? "Connected" : "Inject into Lunar Client";
+        InjectButton.Content = success ? "Connected" : "Inject";
         SetInjectionButtonsEnabled(!success);
 
         UpdateGameStateUI();
@@ -1102,7 +1133,6 @@ public partial class MainWindow : Window
     private void SetInjectionButtonsEnabled(bool enabled)
     {
         InjectButton.IsEnabled = enabled;
-        CustomInjectButton.IsEnabled = enabled;
     }
 
     private void UpdateGameStateUI()
@@ -1140,7 +1170,7 @@ public partial class MainWindow : Window
                         if (!InjectButton.IsEnabled && !gs.IsInjected)
                         {
                             SetInjectionButtonsEnabled(true);
-                            InjectButton.Content = "Inject into Lunar Client";
+                            InjectButton.Content = "Inject";
                         }
                     }
 

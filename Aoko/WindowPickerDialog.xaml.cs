@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Windows;
 using System.Windows.Controls;
 using Aoko.Core;
@@ -6,20 +7,20 @@ namespace Aoko;
 
 public partial class WindowPickerDialog : Window
 {
-    public WindowTarget? SelectedTarget { get; private set; }
+    public InjectionTarget? SelectedTarget { get; private set; }
     public string SelectedVersion { get; private set; } = "auto";
 
-    public WindowPickerDialog()
+    public WindowPickerDialog(IReadOnlyList<InjectionTarget>? initialTargets = null)
     {
         InitializeComponent();
-        RefreshWindowList();
+        RefreshWindowList(initialTargets);
     }
 
-    private void RefreshWindowList()
+    private void RefreshWindowList(IReadOnlyList<InjectionTarget>? targets = null)
     {
-        var windows = WindowDetection.ListSelectableWindows();
-        WindowList.ItemsSource = windows;
-        if (windows.Count > 0)
+        var candidates = targets ?? InjectionTargetDiscovery.ListTargets();
+        WindowList.ItemsSource = candidates;
+        if (candidates.Count > 0)
             WindowList.SelectedIndex = 0;
     }
 
@@ -33,21 +34,21 @@ public partial class WindowPickerDialog : Window
 
     private void InjectButton_Click(object sender, RoutedEventArgs e)
     {
-        if (WindowList.SelectedItem is not WindowTarget target)
+        if (WindowList.SelectedItem is not InjectionTarget target)
         {
             MessageBox.Show(this,
-                "Select a window from the list.",
-                "No window selected",
+                "Select a Java process from the list.",
+                "No process selected",
                 MessageBoxButton.OK,
                 MessageBoxImage.Warning);
             return;
         }
 
-        if (!target.IsJvm)
+        if (!target.IsLikelyMinecraft)
         {
             MessageBoxResult confirm = MessageBox.Show(this,
-                "The selected process is not java/javaw. Injection will likely fail unless this is a Minecraft Java client.",
-                "Non-JVM target",
+                "A Minecraft/client marker was not found for this Java process. Injection may fail if it is not a Minecraft client.",
+                "Unidentified Java process",
                 MessageBoxButton.OKCancel,
                 MessageBoxImage.Warning);
             if (confirm != MessageBoxResult.OK)

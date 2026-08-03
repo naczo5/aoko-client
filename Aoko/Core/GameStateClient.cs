@@ -2,7 +2,6 @@ using System;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
-using System.Linq;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
@@ -49,7 +48,7 @@ public class GameStateClient : INotifyPropertyChanged
     private bool _isInjectionInProgress;
     private long _lastUiActionBarDispatchTicks;
     private int _reloadMappingsNonce;
-    private IntPtr _customTargetHwnd;
+    private IntPtr _targetHwnd;
     private volatile bool _suppressConfigPush = false;
     private long _configRevision = 1;
     private int _configChangeTrackingAttached;
@@ -200,7 +199,7 @@ public class GameStateClient : INotifyPropertyChanged
     // === Injection ===
 
     /// <summary>
-    /// Injects the agent into the running Minecraft/Lunar Client process.
+    /// Injects the agent into the selected Java/Minecraft client process.
     /// </summary>
     /// <summary>
     /// Connects to the agent, which should be loaded at startup via -javaagent.
@@ -217,9 +216,13 @@ public class GameStateClient : INotifyPropertyChanged
             return true;
         }
 
+        InjectionTarget? automaticTarget = targetPid.HasValue
+            ? null
+            : InjectionTargetDiscovery.FindBestTarget();
         var mcProcess = targetPid.HasValue
             ? ResolveInjectionTarget(targetPid)
-            : FindMinecraftProcess();
+            : ResolveInjectionTarget(automaticTarget?.ProcessId);
+        IntPtr? resolvedTargetHwnd = targetHwnd ?? automaticTarget?.Hwnd;
         string resolvedVersion = ResolveInjectionVersion(version, mcProcess);
         Log($"Resolved injection version: requested={version}, resolved={resolvedVersion}, title='{mcProcess?.MainWindowTitle ?? "<none>"}', pid={mcProcess?.Id.ToString() ?? "<none>"}");
         Capabilities = BridgeCapabilities.ForVersionFallback(resolvedVersion);
@@ -244,7 +247,7 @@ public class GameStateClient : INotifyPropertyChanged
                 {
                     IsInjected = true;
                     InjectedVersion = resolvedVersion;
-                    ApplyCustomInjectionTarget(targetHwnd);
+                    ApplyInjectionTargetWindow(resolvedTargetHwnd);
                     IsInjectionInProgress = false;
                     InjectionProgress = 100;
                     return true;
@@ -276,6 +279,7 @@ public class GameStateClient : INotifyPropertyChanged
             {
                 IsInjected = true;
                 InjectedVersion = resolvedVersion;
+                ApplyInjectionTargetWindow(resolvedTargetHwnd);
                 IsInjectionInProgress = false;
                 InjectionProgress = 100;
                 return true;
@@ -288,7 +292,7 @@ public class GameStateClient : INotifyPropertyChanged
         {
             StatusMessage = targetPid.HasValue
                 ? $"ERROR: Process PID {targetPid.Value} not found."
-                : "ERROR: Minecraft/Lunar not running.";
+                : "ERROR: No compatible Java/Minecraft process found.";
             IsInjectionInProgress = false;
             return false;
         }
@@ -351,7 +355,7 @@ public class GameStateClient : INotifyPropertyChanged
 
             IsInjected = true;
             InjectedVersion = resolvedVersion;
-            ApplyCustomInjectionTarget(targetHwnd);
+            ApplyInjectionTargetWindow(resolvedTargetHwnd);
             Log("Connected successfully!");
             IsInjectionInProgress = false;
             InjectionProgress = 100;
@@ -379,13 +383,13 @@ public class GameStateClient : INotifyPropertyChanged
         }
     }
 
-    private void ApplyCustomInjectionTarget(IntPtr? targetHwnd)
+    private void ApplyInjectionTargetWindow(IntPtr? targetHwnd)
     {
         if (!targetHwnd.HasValue || targetHwnd.Value == IntPtr.Zero)
             return;
 
-        _customTargetHwnd = targetHwnd.Value;
-        WindowDetection.SetCustomTarget(_customTargetHwnd);
+        _targetHwnd = targetHwnd.Value;
+        WindowDetection.SetTargetWindow(_targetHwnd);
     }
 
     private void Log(string message)
@@ -624,104 +628,12 @@ public class GameStateClient : INotifyPropertyChanged
         IsInjectionInProgress = false;
         InjectionProgress = 0;
         StatusMessage = "Not injected";
-        _customTargetHwnd = IntPtr.Zero;
-        WindowDetection.ClearCustomTarget();
+        _targetHwnd = IntPtr.Zero;
+        WindowDetection.ClearTargetWindow();
         Capabilities = BridgeCapabilities.ForVersionFallback(InjectedVersion);
     }
 
     // === Helpers ===
-
-    /// <summary>
-    /// Finds the Minecraft/Lunar Client Java process via OS process list.
-    /// This is more reliable than VirtualMachine.list() which requires same-JDK compatibility.
-    /// </summary>
-    private Process? FindMinecraftProcess()
-    {
-        string[] keywords = { ".lunarclient", "lunar", "minecraft" };
-        string[] titleKeywords = { "minecraft", "lunar client", "badlion" };
-
-        try
-        {
-            var javaProcesses = Process.GetProcesses()
-                .Where(p => p.ProcessName.Equals("javaw", StringComparison.OrdinalIgnoreCase)
-                         || p.ProcessName.Equals("java", StringComparison.OrdinalIgnoreCase))
-                .Where(p => p.Id != Environment.ProcessId)
-                .ToList();
-
-            int? bridgeListenerPid = TcpPortHelper.TryGetListeningProcessId(_port);
-            if (bridgeListenerPid.HasValue)
-            {
-                Process? bridged = javaProcesses.FirstOrDefault(p => p.Id == bridgeListenerPid.Value);
-                if (bridged != null)
-                {
-                    Debug.WriteLine($"[FindMinecraftProcess] Using bridge listener PID={bridged.Id}");
-                    return bridged;
-                }
-            }
-
-            IntPtr foregroundHwnd = WindowDetection.GetForegroundWindowHandle();
-            if (foregroundHwnd != IntPtr.Zero)
-            {
-                int foregroundPid = WindowDetection.GetWindowProcessId(foregroundHwnd);
-                Process? foregroundJava = javaProcesses.FirstOrDefault(p => p.Id == foregroundPid);
-                if (foregroundJava != null)
-                {
-                    Debug.WriteLine($"[FindMinecraftProcess] Using foreground Java PID={foregroundJava.Id}");
-                    return foregroundJava;
-                }
-            }
-
-            foreach (var proc in javaProcesses)
-            {
-                try
-                {
-                    string title = proc.MainWindowTitle;
-                    if (!string.IsNullOrWhiteSpace(title)
-                        && titleKeywords.Any(kw => title.Contains(kw, StringComparison.OrdinalIgnoreCase)))
-                    {
-                        Debug.WriteLine($"[FindMinecraftProcess] Found by title: PID={proc.Id} Title='{title}'");
-                        return proc;
-                    }
-                }
-                catch { }
-            }
-
-            foreach (var proc in javaProcesses)
-            {
-                try
-                {
-                    string? path = proc.MainModule?.FileName?.ToLower();
-                    if (path != null)
-                    {
-                        foreach (string kw in keywords)
-                        {
-                            if (path.Contains(kw))
-                            {
-                                Debug.WriteLine($"[FindMinecraftProcess] Found by path: PID={proc.Id} Path={proc.MainModule?.FileName}");
-                                return proc;
-                            }
-                        }
-                    }
-                }
-                catch
-                {
-                    // Can't access MainModule for some processes (access denied)
-                }
-            }
-
-            Process? fallback = javaProcesses.FirstOrDefault();
-            if (fallback != null)
-                Debug.WriteLine($"[FindMinecraftProcess] Fallback: PID={fallback.Id} Name={fallback.ProcessName}");
-
-            return fallback;
-        }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"[FindMinecraftProcess] Error: {ex.Message}");
-        }
-
-        return null;
-    }
 
     private static string ResolveInjectionVersion(string requestedVersion, Process? process)
     {
@@ -744,7 +656,7 @@ public class GameStateClient : INotifyPropertyChanged
             return fromTitle;
 
         // Launcher-settings fallback only when there is no process to inspect
-        // (avoids Custom Inject into Prism/vanilla picking an unrelated Lunar history version).
+        // (avoids a selected Prism/vanilla process picking an unrelated Lunar history version).
         if (process == null)
         {
             string? fromLunarSettings = TryResolveVersionFromLunarSettings();
