@@ -605,7 +605,7 @@
                                 <TextBlock Text="AntiDebuff" Foreground="{DynamicResource TextBrush}" FontSize="16" FontWeight="Bold" Margin="0,0,0,10" />
                                 <TextBlock x:Name="AntiDebuffAvailabilityText" Text="Available" Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,0,0,8"/>
                                 <CheckBox Content="Enable AntiDebuff" IsChecked="{Binding AntiDebuffEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
-                                <TextBlock Text="Removes debuff visuals client-side (Blindness, Nausea, and Darkness on modern versions). The server still considers you affected."
+                                <TextBlock Text="Suppresses Blindness only in the renderer while preserving its sprint/critical restrictions. Nausea and modern Darkness visuals are removed locally; the server still considers you affected."
                                            Foreground="{DynamicResource DimTextBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,8,0,0"/>
                             </StackPanel>
                         </Border>

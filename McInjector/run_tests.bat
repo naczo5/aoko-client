@@ -106,6 +106,14 @@ echo [NativeTests] Running classfile_entry_injector_tests.exe...
 tests\classfile_entry_injector_tests.exe
 if %errorlevel% neq 0 exit /b %errorlevel%
 
+echo [NativeTests] Building effect_check_rewriter_tests.exe...
+"%GPP%" -m64 -std=c++11 -O2 -static-libgcc -static-libstdc++ -o tests\effect_check_rewriter_tests.exe tests\effect_check_rewriter_tests.cpp
+if %errorlevel% neq 0 exit /b %errorlevel%
+
+echo [NativeTests] Running effect_check_rewriter_tests.exe...
+tests\effect_check_rewriter_tests.exe
+if %errorlevel% neq 0 exit /b %errorlevel%
+
 echo [NativeTests] Building aim_assist_projection_tests.exe...
 "%GPP%" -m64 -std=c++11 -O2 -static-libgcc -static-libstdc++ -o tests\aim_assist_projection_tests.exe tests\aim_assist_projection_tests.cpp
 if %errorlevel% neq 0 exit /b %errorlevel%

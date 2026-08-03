@@ -26,6 +26,7 @@
 #include "bridge_capabilities.h"
 #include "nick_hider.h"
 #include "nick_hider_jvmti.h"
+#include "anti_debuff_jvmti.h"
 #include "hud_layout.h"
 #include "block_esp_common.h"
 #include "fight_status_core.h"
@@ -752,7 +753,7 @@ static DWORD     g_killAuraNextResolveMs = 0;
 static DWORD     g_killAuraNextPremotionRefreshMs = 0;
 static int g_lastHurtTime = 0;
 
-// ---- AntiDebuff (module-owned; removes debuff visuals client-side) ----
+// ---- AntiDebuff (module-owned; removes nausea and suppresses blindness rendering) ----
 // 1.8.9: EntityLivingBase.removePotionEffect(int id). Potion IDs: blindness=15, nausea/confusion=9.
 static jmethodID g_removePotionEffectMethod = nullptr;
 static bool g_antiDebuffMethodResolved = false;
@@ -767,6 +768,7 @@ static jmethodID g_isPotionActiveMethod = nullptr; // EntityLivingBase.isPotionA
 static jobject   g_blindnessPotion = nullptr;      // global ref to static Potion.blindness
 static bool g_blindDetectResolved = false;
 static bool g_loggedBlindDetectFail = false;
+static bool g_blindRenderHookArmed = false;
 static bool g_reachClickPrevDown = false;
 static bool g_reachClickPrevSynthetic = false;
 static bool g_reachRawInputPrevDown = false;
@@ -5329,13 +5331,9 @@ static void UpdateAntiDebuffLegacy(JNIEnv* env, const Config& cfg) {
     }
 
     if (g_removePotionEffectMethod) {
-        // Approach A (anticheat-safe): keep BLINDNESS (id 15) in the effect map so its
-        // client-side sprint and critical-hit gating stays in sync with the server.
-        // Stripping it would let you sprint/crit while the server still thinks you are
-        // blind -> movement/combat desync that anticheats flag. The blindness *fog* is a
-        // pure visual and is neutralized separately via the glFogf hook (see
-        // HookedGlFogf / g_blindFogSuppress). Nausea/Confusion (id 9) gates nothing, so
-        // removing it is anticheat-safe and clears the screen-warp fully.
+        // Nausea does not gate movement/combat. Blindness deliberately remains in the
+        // effect map so sprint and critical-hit checks stay synchronized with the server;
+        // its fog is suppressed separately by HookedGlFogf.
         static const int kIds[] = { 9 };
         for (int id : kIds) {
             env->CallVoidMethod(selfObj, g_removePotionEffectMethod, id);
@@ -5387,7 +5385,17 @@ static void UpdateAntiDebuffLegacy(JNIEnv* env, const Config& cfg) {
         }
     }
 
-    if (g_blindDetectResolved) {
+    if (g_blindDetectResolved && !g_blindRenderHookArmed) {
+        jobject gameLoader = EnsureGameClassLoader(env);
+        anti_debuff_jvmti::BindBlindness(env, g_blindnessPotion, g_isPotionActiveMethod);
+        g_blindRenderHookArmed = anti_debuff_jvmti::Arm(env, gameLoader);
+    }
+
+    if (g_blindRenderHookArmed) {
+        // EntityRenderer now receives false only for its blindness query. Do not also
+        // override ordinary world fog through the unreliable OpenGL export fallback.
+        InterlockedExchange(&g_blindFogSuppress, 0);
+    } else if (g_blindDetectResolved) {
         jboolean blind = env->CallBooleanMethod(selfObj, g_isPotionActiveMethod, g_blindnessPotion);
         if (env->ExceptionCheck()) { env->ExceptionClear(); blind = JNI_FALSE; }
         InterlockedExchange(&g_blindFogSuppress, blind ? 1 : 0);
@@ -7980,6 +7988,22 @@ extern "C" __declspec(dllexport) void Detach() {
             return 0;
         }
         LockGuard cleanupGuard(g_legacyDetachCleanupMutex);
+        JNIEnv* env = nullptr;
+        bool attached = false;
+        if (g_jvm && g_jvm->GetEnv((void**)&env, JNI_VERSION_1_8) != JNI_OK) {
+            if (g_jvm->AttachCurrentThread((void**)&env, nullptr) == JNI_OK)
+                attached = true;
+            else
+                env = nullptr;
+        }
+        if (!anti_debuff_jvmti::Shutdown(env)) {
+            if (attached && g_jvm) g_jvm->DetachCurrentThread();
+            InterlockedExchange(&g_legacyDetachRequested, 0);
+            return 0;
+        }
+        lc::ShutdownNickHiderJvmti(env);
+        ka_premotion::Shutdown(env);
+        if (attached && g_jvm) g_jvm->DetachCurrentThread();
         if (!CleanupImGuiAndHooks()) {
             InterlockedExchange(&g_legacyDetachRequested, 0);
             return 0;
@@ -12205,6 +12229,7 @@ void ServerLoop() {
     args.version = JNI_VERSION_1_8; args.name = (char*)"LegoBridge"; args.group = nullptr;
     g_jvm->AttachCurrentThread((void**)&env, &args);
     lc::InstallNickHiderJvmti(g_jvm, lc::NickHiderJvmtiGeneration::Legacy189, Log);
+    anti_debuff_jvmti::Install(g_jvm, Log);
     ka_premotion::Install(g_jvm, Log);
     ka_premotion::SetAttackHandler(KillAuraPremotionAttackHandler);
 
@@ -12254,6 +12279,7 @@ void ServerLoop() {
                 needEntityTelemetry = g_config.nametags || g_config.closestPlayerInfo || g_config.aimAssist || g_config.fightStatus;
                 cfgSnapshot = g_config;
             }
+            anti_debuff_jvmti::SetEnabled(cfgSnapshot.antiDebuffEnabled);
 
             // ALWAYS Read Game State to update global state (for block detection etc.)
             const unsigned long long stateScanPerfStarted =
@@ -12285,8 +12311,10 @@ void ServerLoop() {
                 if (cfgSnapshot.killAura) {
                     UpdateKillAuraLegacy(env, cfgSnapshot);
                 }
-                if (cfgSnapshot.antiDebuffEnabled) {
+                static bool s_antiDebuffWasEnabled = false;
+                if (cfgSnapshot.antiDebuffEnabled || s_antiDebuffWasEnabled) {
                     UpdateAntiDebuffLegacy(env, cfgSnapshot);
+                    s_antiDebuffWasEnabled = cfgSnapshot.antiDebuffEnabled;
                 }
                 UpdateHitDelayFixLegacy(env, cfgSnapshot, state);
                 if (cfgSnapshot.blockEsp) {
@@ -12441,8 +12469,21 @@ void ServerLoop() {
         ResetAutoRodLegacyJniCaches(env);
         ResetFightStatusState18();
         HelperBridge::Unload(env);
-        lc::ShutdownNickHiderJvmti(env);
-        ka_premotion::Shutdown(env);
+        const bool antiDebuffSafeToUnload = anti_debuff_jvmti::Shutdown(env);
+        if (antiDebuffSafeToUnload) {
+            lc::ShutdownNickHiderJvmti(env);
+            ka_premotion::Shutdown(env);
+        } else {
+            Log("AntiDebuff teardown incomplete; shared JVMTI host remains loaded for a safe detach retry.");
+        }
+        if (g_blindnessPotion) {
+            env->DeleteGlobalRef(g_blindnessPotion);
+            g_blindnessPotion = nullptr;
+        }
+        g_isPotionActiveMethod = nullptr;
+        g_blindDetectResolved = false;
+        g_blindRenderHookArmed = false;
+        InterlockedExchange(&g_blindFogSuppress, 0);
     }
     g_jvm->DetachCurrentThread();
     SOCKET ownedServer = AtomicSocketTake(&g_serverSocket);

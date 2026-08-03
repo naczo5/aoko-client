@@ -38,6 +38,7 @@
 #include "bridge_capabilities.h"
 #include "nick_hider.h"
 #include "nick_hider_jvmti.h"
+#include "anti_debuff_jvmti.h"
 #include "hud_layout.h"
 #include "block_esp_common.h"
 #include "fight_status_core.h"
@@ -1072,8 +1073,9 @@ static bool      g_silentAuraSensResolved_121 = false;
 
 static jobject   g_lastAutoTotemWorld_121 = nullptr;   // Tracks world obj to detect transitions
 
-// ---- AntiDebuff (module-owned, version-gated; removes debuff visuals client-side) ----
+// ---- AntiDebuff (module-owned; render-only blindness + local nausea/darkness removal) ----
 static jmethodID g_removeEffect_121 = nullptr;        // LivingEntity.removeEffect(Holder<MobEffect>)
+static jmethodID g_hasEffect_121 = nullptr;           // LivingEntity.hasEffect(Holder<MobEffect>)
 static jclass    g_mobEffectsClass_121 = nullptr;     // MobEffects (Mojmap) / StatusEffects (Yarn)
 static jobject   g_effectBlindness_121 = nullptr;     // Holder<MobEffect> BLINDNESS
 static jobject   g_effectNausea_121   = nullptr;      // Holder<MobEffect> CONFUSION / NAUSEA
@@ -1081,6 +1083,7 @@ static jobject   g_effectDarkness_121 = nullptr;      // Holder<MobEffect> DARKN
 static bool      g_antiDebuffMethodsResolved = false;
 static bool      g_loggedAntiDebuffResolveFail_121 = false;
 static DWORD     g_lastAntiDebuffTickMs = 0;          // Throttle to ~20 tps
+static DWORD     g_nextAntiDebuffResolveMs_121 = 0;   // Retry partial/failed mappings without hot-looping
 
 
 
@@ -1546,12 +1549,18 @@ static jfieldID  g_javaHashMapTableField  = nullptr;
 static jfieldID  g_javaHMNodeValueField   = nullptr;
 static jfieldID  g_javaHMNodeNextField    = nullptr;
 static jfieldID  g_javaHMNodeKeyField     = nullptr; // Map key = BlockPos directly
+static Mutex     g_blockEspCacheMutex;
 // BlockPos coordinate methods (fallback when direct fields fail)
 static jmethodID g_blockPosGetX_121       = nullptr;
 static jmethodID g_blockPosGetY_121       = nullptr;
 static jmethodID g_blockPosGetZ_121       = nullptr;
-// World transition guard: skip chunk scanning while joining servers
-static DWORD g_worldTransitionEndMs = 0;
+// World transition guard: invalidate world-owned state immediately, then resume
+// once the new world has produced stable JNI/player/camera state. A fixed grace
+// period made normal server teleports feel like a full client pause and was not
+// sufficient on slower clients anyway.
+static bool g_worldTransitionActive = false;
+static bool g_worldTransitionRequiresWorld = true;
+static volatile LONG g_worldTransitionReadyPolls = 0;
 static Mutex g_worldTransitionMutex;
 
 // Chest detection helpers (mapping/obf-robust)
@@ -2499,7 +2508,9 @@ static void ExecuteAutoRodModern(JNIEnv* env);
 static void ResetModernJniRuntimeCaches121(JNIEnv* env, const char* reason);
 static bool TrackSuppressionWorldContext121(JNIEnv* env, jobject worldObj);
 static bool IsWorldTransitionActive();
-static void ScheduleWorldTransition(JNIEnv* env, const char* reason, DWORD durationMs);
+static bool WorldTransitionRequiresWorld();
+static void ScheduleWorldTransition(JNIEnv* env, const char* reason);
+static bool TryCompleteWorldTransition(JNIEnv* env, bool inWorldNow);
 static bool EnsureNametagSuppressionTeamMappings121(JNIEnv* env, jobject worldObj);
 static jobject GetScoreboard121(JNIEnv* env, jobject worldObj);
 static jobject EnsureNametagHideTeam121(JNIEnv* env, jobject scoreboardObj);
@@ -4447,8 +4458,14 @@ static jobject ResolvePickupClickType(JNIEnv* env) {
 }
 
 static void EnsureAntiDebuffJni(JNIEnv* env) {
-    if (!env || g_antiDebuffMethodsResolved) return;
+    if (!env) return;
     if (!g_gameClassLoader) return;
+
+    const DWORD nowMs = GetTickCount();
+    if (g_nextAntiDebuffResolveMs_121 != 0 &&
+        (LONG)(nowMs - g_nextAntiDebuffResolveMs_121) < 0) return;
+    g_nextAntiDebuffResolveMs_121 = nowMs + 5000;
+    const bool wasOperational = g_antiDebuffMethodsResolved;
 
     // Resolve LivingEntity.removeEffect(Holder<MobEffect>) -> boolean
     if (!g_removeEffect_121) {
@@ -4474,6 +4491,38 @@ static void EnsureAntiDebuffJni(JNIEnv* env) {
                 for (int si = 0; mSigs[si] && !g_removeEffect_121; si++) {
                     g_removeEffect_121 = env->GetMethodID(leCls, mNames[ni], mSigs[si]);
                     if (env->ExceptionCheck()) { env->ExceptionClear(); g_removeEffect_121 = nullptr; }
+                }
+            }
+            env->DeleteLocalRef(leCls);
+        }
+    }
+
+    // Used only by the fog-render callback. All non-blindness checks are delegated to
+    // this original method, and gameplay callers are never rewritten.
+    if (!g_hasEffect_121) {
+        const char* leNames[] = {
+            "net.minecraft.class_1309",
+            "net.minecraft.world.entity.LivingEntity",
+            nullptr
+        };
+        jclass leCls = nullptr;
+        for (int i = 0; leNames[i] && !leCls; i++) {
+            leCls = LoadClassWithLoader(env, g_gameClassLoader, leNames[i]);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); leCls = nullptr; }
+        }
+        if (leCls) {
+            const char* names[] = {
+                "method_6059", "hasEffect", "hasStatusEffect", "m_21023_", nullptr
+            };
+            const char* sigs[] = {
+                "(Lnet/minecraft/class_6880;)Z",
+                "(Lnet/minecraft/core/Holder;)Z",
+                nullptr
+            };
+            for (int ni = 0; names[ni] && !g_hasEffect_121; ni++) {
+                for (int si = 0; sigs[si] && !g_hasEffect_121; si++) {
+                    g_hasEffect_121 = env->GetMethodID(leCls, names[ni], sigs[si]);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_hasEffect_121 = nullptr; }
                 }
             }
             env->DeleteLocalRef(leCls);
@@ -4533,18 +4582,29 @@ static void EnsureAntiDebuffJni(JNIEnv* env) {
         }
     }
 
-    // Consider resolved once we can remove at least the always-present effects.
-    if (g_removeEffect_121 && g_effectBlindness_121 && g_effectNausea_121) {
+    // Resolve targets independently. Requiring every static field made one renamed or
+    // absent optional effect disable all otherwise valid removals on that runtime.
+    if (g_removeEffect_121 &&
+        (g_effectBlindness_121 || g_effectNausea_121 || g_effectDarkness_121)) {
         g_antiDebuffMethodsResolved = true;
-        Log(std::string("AntiDebuff: JNI resolved (removeEffect, BLINDNESS, NAUSEA")
-            + (g_effectDarkness_121 ? ", DARKNESS" : "") + ").");
+        if (!wasOperational) {
+            Log(std::string("AntiDebuff: JNI resolved (removeEffect")
+                + (g_effectBlindness_121 ? ", BLINDNESS" : "")
+                + (g_effectNausea_121 ? ", NAUSEA" : "")
+                + (g_effectDarkness_121 ? ", DARKNESS" : "") + ").");
+        }
     } else if (!g_loggedAntiDebuffResolveFail_121) {
         g_loggedAntiDebuffResolveFail_121 = true;
-        Log(std::string("AntiDebuff: JNI mappings unavailable - removeEffect=")
+        Log(std::string("AntiDebuff: local nausea/darkness removal mappings unavailable - removeEffect=")
             + (g_removeEffect_121 ? "1" : "0")
             + " blindness=" + (g_effectBlindness_121 ? "1" : "0")
             + " nausea=" + (g_effectNausea_121 ? "1" : "0")
-            + " (module disabled until mappings resolve).");
+            + " (render-only blindness hook resolves independently).");
+    }
+
+    if (g_effectBlindness_121 && g_hasEffect_121) {
+        anti_debuff_jvmti::BindBlindness(env, g_effectBlindness_121, g_hasEffect_121);
+        anti_debuff_jvmti::Arm(env, g_gameClassLoader);
     }
 }
 
@@ -4565,15 +4625,12 @@ static void UpdateAntiDebuff(JNIEnv* env, const Config& cfg) {
     if (env->ExceptionCheck()) { env->ExceptionClear(); selfObj = nullptr; }
     if (!selfObj) return;
 
-    // Approach A (anticheat-safe): do NOT strip BLINDNESS from the client effect map.
-    // Blindness gates sprinting and critical hits client-side (the game checks
-    // hasEffect(BLINDNESS) for both). Removing it would re-enable sprint/crits locally
-    // while the server still has the effect applied, producing a movement/combat desync
-    // that anticheats flag. Blindness must stay in the map so its gating matches the
-    // server; its fog is only a visual and is suppressed at the render layer instead.
-    // Nausea and Darkness gate no movement/combat, so removing them is anticheat-safe and
-    // fully clears their visuals (screen warp / darkening).
-    jobject targets[] = { g_effectNausea_121, g_effectDarkness_121 };
+    // Blindness remains in the effect map. The fog-class JVMTI rewrite suppresses only
+    // renderer hasEffect(BLINDNESS) calls, matching Vape's render-only behavior.
+    jobject targets[] = {
+        g_effectNausea_121,
+        g_effectDarkness_121
+    };
     for (jobject holder : targets) {
         if (!holder) continue;
         env->CallBooleanMethod(selfObj, g_removeEffect_121, holder);
@@ -4926,7 +4983,15 @@ static void UpdatePlayerListOverlay(JNIEnv* env) {
         return;
     }
 
-    TrackSuppressionWorldContext121(env, worldObj);
+    if (TrackSuppressionWorldContext121(env, worldObj)) {
+        // The world object changed during this producer pass. Do not continue
+        // walking entities or scoreboard state from the old context after the
+        // transition guard has invalidated its caches.
+        env->DeleteLocalRef(worldObj);
+        env->DeleteLocalRef(selfObj);
+        if (cfg.fightStatus) ResetFightStatusState121();
+        return;
+    }
 
     EnsureEntityMethods(env, selfObj);
     const std::string localAccountName = GetStablePlayerName(env, selfObj);
@@ -5569,6 +5634,34 @@ static bool EnsureChunkAccess(JNIEnv* env, jobject worldObj) {
         if (!logged) { Log("EnsureChunkAccess: no getChunk(II) method found on world class!"); logged = true; }
     }
     return found;
+}
+
+// Probe only the current chunk object before allowing the expensive chest/block
+// scanners to walk chunk internals. This deliberately does not inspect the
+// block-entity map: the scanners perform their own validated map resolution once
+// the object exists, and a failed probe simply retries on the next poll.
+static bool ProbeModernChunkObject(JNIEnv* env) {
+    if (!env || !g_mcInstance || !g_worldField_121) return false;
+
+    jobject worldObj = env->GetObjectField(g_mcInstance, g_worldField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); worldObj = nullptr; }
+    if (!worldObj) return false;
+
+    BgCamState camera;
+    { LockGuard lk(g_bgCamMutex); camera = g_bgCamState; }
+    if (!camera.camFound || !std::isfinite(camera.camX) || !std::isfinite(camera.camZ) ||
+        !EnsureChunkAccess(env, worldObj)) {
+        env->DeleteLocalRef(worldObj);
+        return false;
+    }
+
+    const int chunkX = (int)std::floor(camera.camX) >> 4;
+    const int chunkZ = (int)std::floor(camera.camZ) >> 4;
+    jobject chunkObj = env->CallObjectMethod(worldObj, g_worldGetChunkMethod_121, chunkX, chunkZ);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); chunkObj = nullptr; }
+    if (chunkObj) env->DeleteLocalRef(chunkObj);
+    env->DeleteLocalRef(worldObj);
+    return chunkObj != nullptr;
 }
 
 // Find the blockEntities Map field on WorldChunk (class_2818) or its parent class Chunk (class_2791).
@@ -6221,6 +6314,15 @@ static bool ScreenChainContainsClass121(const std::string& screenName, const cha
     return false;
 }
 
+static bool IsModernTransitionScreenName(const std::string& screenName) {
+    return screenName.find("LevelLoadingScreen") != std::string::npos
+        || screenName.find("ProgressScreen") != std::string::npos
+        || screenName.find("DeathScreen") != std::string::npos
+        || screenName.find("ConnectScreen") != std::string::npos
+        || screenName.find("ServerReconfigScreen") != std::string::npos
+        || screenName.find("ReceivingLevelScreen") != std::string::npos;
+}
+
 static bool IsModernContainerScreenName(const std::string& screenName) {
     if (ScreenChainContainsClass121(screenName, "InventoryScreen") ||
         ScreenChainContainsClass121(screenName, "CreativeModeInventoryScreen") ||
@@ -6777,6 +6879,11 @@ static void UpdateBlockEspList(JNIEnv* env) {
     DWORD now = GetTickCount();
     if (now - g_lastBlockEspScanMs < 120) return;
     if (IsWorldTransitionActive()) return;
+    // The fast-poll thread can invalidate this cache when it observes a loading
+    // screen. Keep the complete map operation on one synchronized ownership
+    // window so a transition cannot clear it during iteration or publication.
+    LockGuard blockCacheLock(g_blockEspCacheMutex);
+    if (IsWorldTransitionActive()) return;
     {
         std::string sn;
         { LockGuard lk(g_jniStateMtx); sn = g_jniScreenName; }
@@ -6925,50 +7032,117 @@ static void UpdateBlockEspList(JNIEnv* env) {
     { LockGuard lk(g_blockEspListMutex); g_blockEspList.swap(merged); }
 }
 
-static const DWORD kScreenTransitionGraceMs = 2500;
-static const DWORD kWorldContextTransitionGraceMs = 3000;
-// Same-connection teleports (e.g. Hypixel waiting room -> arena) keep the same
-// ClientLevel and show no loading screen, so the world-instance / loading-screen
-// guards never fire. We detect the position discontinuity instead and pause scans
-// long enough for the destination chunks + block entities to finish streaming in.
-static const DWORD kTeleportTransitionGraceMs = 4000;
+// Require a few complete background polls after the world/player/camera state is
+// valid. At the normal 50 ms scan cadence this is a short stability handshake,
+// not a blind multi-second pause.
+static const LONG kWorldTransitionStablePolls = 3;
 // Blocks moved between consecutive scan polls that imply a teleport rather than
 // normal movement. Sprint/elytra is well under ~2 blocks per 50ms poll, so 24 is safe.
 static const double kTeleportJumpBlocks = 24.0;
 
 static bool IsWorldTransitionActive() {
-    const DWORD now = GetTickCount();
     LockGuard lk(g_worldTransitionMutex);
-    return static_cast<LONG>(g_worldTransitionEndMs - now) > 0;
+    return g_worldTransitionActive;
 }
 
-static void ScheduleWorldTransition(JNIEnv* env, const char* reason, DWORD durationMs) {
+static bool WorldTransitionRequiresWorld() {
+    LockGuard lk(g_worldTransitionMutex);
+    return g_worldTransitionRequiresWorld;
+}
+
+static void ScheduleWorldTransition(JNIEnv* env, const char* reason) {
     // Suspend Premotion BEFORE teardown: ServerReconfig/config-phase still
     // invokes NativePacketHook.onPacket while C03/player JNI may be deleted.
     ka_premotion::SuspendForWorldChange(env);
     ClearAutoRodQueue();
 
     DWORD now = GetTickCount();
+    const bool requiresWorld = !(reason && std::strcmp(reason, "reload-mappings") == 0);
     {
         LockGuard lk(g_worldTransitionMutex);
-        const LONG remainingMs = static_cast<LONG>(g_worldTransitionEndMs - now);
-        if (remainingMs <= 0 || durationMs > static_cast<DWORD>(remainingMs))
-            g_worldTransitionEndMs = now + durationMs;
+        const bool wasActive = g_worldTransitionActive;
+        g_worldTransitionActive = true;
+        if (!wasActive) g_worldTransitionRequiresWorld = requiresWorld;
+        else if (requiresWorld) g_worldTransitionRequiresWorld = true;
     }
+    InterlockedExchange(&g_worldTransitionReadyPolls, 0);
 
     { LockGuard lk(g_playerListMutex); g_playerList.clear(); }
     ResetFightStatusState121();
     { LockGuard lk(g_chestListMutex); g_chestList.clear(); }
     { LockGuard lk(g_blockEspListMutex); g_blockEspList.clear(); }
-    g_blockEspChunkCache.clear();
+    { LockGuard lk(g_blockEspCacheMutex); g_blockEspChunkCache.clear(); }
     { LockGuard lk(g_bgCamMutex); g_bgCamState = BgCamState(); }
 
     static DWORD s_lastLogMs = 0;
     if (reason && *reason && (now - s_lastLogMs >= 1000)) {
         s_lastLogMs = now;
-        Log(std::string("World transition: pausing overlay/scans for ") + std::to_string(durationMs)
-            + "ms (" + reason + ")");
+        Log(std::string("World transition: invalidated overlay/scans (") + reason + ")");
     }
+}
+
+static bool TryCompleteWorldTransition(JNIEnv* env, bool inWorldNow) {
+    if (!env || !IsWorldTransitionActive()) return false;
+
+    const bool requiresWorld = WorldTransitionRequiresWorld();
+    std::string screenName;
+    { LockGuard lk(g_jniStateMtx); screenName = g_jniScreenName; }
+    if (IsModernTransitionScreenName(screenName)) {
+        InterlockedExchange(&g_worldTransitionReadyPolls, 0);
+        return false;
+    }
+
+    if (!g_stateJniReady || (requiresWorld && !inWorldNow)) {
+        InterlockedExchange(&g_worldTransitionReadyPolls, 0);
+        return false;
+    }
+
+    if (requiresWorld) {
+        if (!g_mcInstance || !g_worldField_121 || !g_playerField_121) {
+            InterlockedExchange(&g_worldTransitionReadyPolls, 0);
+            return false;
+        }
+
+        jobject worldObj = env->GetObjectField(g_mcInstance, g_worldField_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); worldObj = nullptr; }
+        jobject playerObj = env->GetObjectField(g_mcInstance, g_playerField_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); playerObj = nullptr; }
+        const bool objectsReady = worldObj && playerObj;
+        if (worldObj) env->DeleteLocalRef(worldObj);
+        if (playerObj) env->DeleteLocalRef(playerObj);
+        if (!objectsReady) {
+            InterlockedExchange(&g_worldTransitionReadyPolls, 0);
+            return false;
+        }
+
+        BgCamState camera;
+        { LockGuard lk(g_bgCamMutex); camera = g_bgCamState; }
+        // Matrix availability is optional: the renderer has an angle-based
+        // projection fallback. Camera position is the actual readiness signal
+        // needed before world/chunk scans resume.
+        if (!camera.camFound || !std::isfinite(camera.camX) ||
+            !std::isfinite(camera.camY) || !std::isfinite(camera.camZ)) {
+            InterlockedExchange(&g_worldTransitionReadyPolls, 0);
+            return false;
+        }
+    }
+
+    const LONG readyPolls = InterlockedIncrement(&g_worldTransitionReadyPolls);
+    if (readyPolls < kWorldTransitionStablePolls) return false;
+
+    bool completed = false;
+    {
+        LockGuard lk(g_worldTransitionMutex);
+        if (g_worldTransitionActive) {
+            g_worldTransitionActive = false;
+            completed = true;
+        }
+    }
+    if (completed) {
+        InterlockedExchange(&g_worldTransitionReadyPolls, 0);
+        Log("World transition: world/player/camera state stable; resuming bridge modules.");
+    }
+    return completed;
 }
 
 static std::string CallTextToString(JNIEnv* env, jobject textObj) {
@@ -9441,7 +9615,7 @@ static bool TrackSuppressionWorldContext121(JNIEnv* env, jobject worldObj) {
     }
     if (changed) {
         ResetNametagSuppressionCaches121(env, "world-context-changed");
-        ScheduleWorldTransition(env, "world-context-changed", kWorldContextTransitionGraceMs);
+        ScheduleWorldTransition(env, "world-context-changed");
         if (g_lastNametagSuppressionWorld_121) {
             env->DeleteGlobalRef(g_lastNametagSuppressionWorld_121);
         }
@@ -10291,6 +10465,7 @@ static void ResetAutoTotemCaches(JNIEnv* env) {
     g_antiDebuffMethodsResolved = false;
     g_loggedAntiDebuffResolveFail_121 = false;
     g_lastAntiDebuffTickMs = 0;
+    g_nextAntiDebuffResolveMs_121 = 0;
 }
 
 static void CleanupJniGlobals(JNIEnv* env) {
@@ -10500,7 +10675,7 @@ static void ResetModernJniRuntimeCaches121(JNIEnv* env, const char* reason) {
     g_lastPlayerListUpdateMs = 0;
     g_lastClosestUpdateMs = 0;
     g_lastChestScanMs = 0;
-    ScheduleWorldTransition(env, "reload-mappings", 1000);
+    ScheduleWorldTransition(env, "reload-mappings");
 
     {
         LockGuard lk(g_playerListMutex);
@@ -10613,6 +10788,12 @@ extern "C" __declspec(dllexport) void Detach() {
         // These hooks may have been installed before mapping discovery started;
         // own their final shutdown here as well as in the normal worker exit
         // path so a failed/partial startup cannot leave callbacks in the DLL.
+        if (!anti_debuff_jvmti::Shutdown(env)) {
+            Log("Detach aborted: AntiDebuff renderer bytecode could not be restored safely.");
+            if (attached && g_jvm) g_jvm->DetachCurrentThread();
+            InterlockedExchange(&g_detachRequested121, 0);
+            return 0;
+        }
         lc::ShutdownNickHiderJvmti(env);
         ka_premotion::Shutdown(env);
         CleanupImGuiAndHooks();
@@ -11985,15 +12166,9 @@ static void UpdateJniState() {
         g_lastLoggedScreen = screenName;
         // Only block modules for actual world transitions (loading/connecting/dying),
         // not for regular GUI screens like inventory, chat, or pause.
-        bool isTransitionScreen =
-            screenName.find("LevelLoadingScreen") != std::string::npos
-            || screenName.find("ProgressScreen") != std::string::npos
-            || screenName.find("DeathScreen") != std::string::npos
-            || screenName.find("ConnectScreen") != std::string::npos
-            || screenName.find("ServerReconfigScreen") != std::string::npos
-            || screenName.find("ReceivingLevelScreen") != std::string::npos;
+        bool isTransitionScreen = IsModernTransitionScreenName(screenName);
         if (isTransitionScreen)
-            ScheduleWorldTransition(env, "loading-screen", kScreenTransitionGraceMs);
+            ScheduleWorldTransition(env, "loading-screen");
         // NOTE: avoid forcing per-screen cache resets here; it causes remap thrash and
         // prevents mapping convergence on some runtimes.
     }
@@ -13184,7 +13359,10 @@ static DWORD WINAPI FastPollThreadProc(LPVOID) {
             if (g_stateJniReady) {
                 UpdateJniState();
                 ExecuteAutoRodModern(env);
-                if (!IsWorldTransitionActive()) ReadCameraState(env);
+                // Camera validity is part of the transition readiness handshake;
+                // continue sampling it while modules remain gated so recovery is
+                // based on the new frame state instead of elapsed time.
+                ReadCameraState(env);
             }
         }
         Sleep(5); // 200Hz poll
@@ -13208,6 +13386,8 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
     // (arena teleports) that bypass the loading-screen / world-instance guards.
     double lastScanX = 0, lastScanY = 0, lastScanZ = 0;
     bool lastScanPosValid = false;
+    jobject lastObservedPlayer = nullptr;
+    bool hadLivePlayer = false;
     while (IsBridgeRunning121()) {
         const unsigned long long scanLoopPerfStarted =
             GetNativePerfDiagnostics().Enabled() ? NativePerfTimestamp() : 0;
@@ -13219,6 +13399,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
         }
         Config cfg;
         { LockGuard lk(g_configMutex); cfg = g_config; }
+        anti_debuff_jvmti::SetEnabled(cfg.antiDebuffEnabled);
 
         bool forcedRemap = (InterlockedExchange(&g_forceGlobalJniRemap_121, 0) != 0);
         TRACE261_BRANCH("forcedGlobalRemapPulse", forcedRemap);
@@ -13263,26 +13444,53 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
             }
             { LockGuard lk(g_jniStateMtx); g_jniInWorld = inWorldNow; }
             if (g_stateJniReady && inWorldNow) {
+                // A respawn/reconnect can replace the local player while retaining
+                // the same ClientLevel. Treat that exactly like a world switch so
+                // Premotion never keeps a stale player global reference.
+                jobject playerObj = g_playerField_121
+                    ? env->GetObjectField(g_mcInstance, g_playerField_121) : nullptr;
+                if (env->ExceptionCheck()) { env->ExceptionClear(); playerObj = nullptr; }
+                if (playerObj) {
+                    bool playerChanged = false;
+                    if (lastObservedPlayer) {
+                        playerChanged = env->IsSameObject(playerObj, lastObservedPlayer) == JNI_FALSE;
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); playerChanged = false; }
+                    }
+                    if (!hadLivePlayer) {
+                        ScheduleWorldTransition(env, "world-entered");
+                    } else if (playerChanged) {
+                        ScheduleWorldTransition(env, "player-instance-changed");
+                    }
+                    if (lastObservedPlayer) env->DeleteGlobalRef(lastObservedPlayer);
+                    lastObservedPlayer = env->NewGlobalRef(playerObj);
+                    env->DeleteLocalRef(playerObj);
+                    hadLivePlayer = true;
+                } else {
+                    if (lastObservedPlayer) {
+                        env->DeleteGlobalRef(lastObservedPlayer);
+                        lastObservedPlayer = nullptr;
+                    }
+                    hadLivePlayer = false;
+                }
+
                 // Detect same-world teleports (e.g. Hypixel waiting room -> arena) that show
                 // no loading screen and keep the same world instance, so no other guard fires.
                 // A large position jump means the destination chunks are streaming in; pause
-                // chunk/block-entity scans until they settle to avoid racing the game thread.
-                //
-                // IMPORTANT: only run while NOT already in a transition. ScheduleWorldTransition
-                // zeroes g_bgCamState, and ReadCameraState is skipped during the grace, so any
-                // comparison against the camera while paused would see a fake origin<->real jump
-                // and re-arm the grace forever (permanent dead overlay). Re-seed on the first
-                // valid poll after any grace ends so it can't feed itself.
+                // chunk/block-entity scans until the new camera/world state is stable.
                 if (IsWorldTransitionActive()) {
                     lastScanPosValid = false;
                 } else {
-                    double cx, cy, cz;
-                    { LockGuard lk(g_bgCamMutex); cx = g_bgCamState.camX; cy = g_bgCamState.camY; cz = g_bgCamState.camZ; }
-                    bool camValid = (cx != 0.0 || cy != 0.0 || cz != 0.0);
+                    BgCamState camera;
+                    { LockGuard lk(g_bgCamMutex); camera = g_bgCamState; }
+                    const double cx = camera.camX;
+                    const double cy = camera.camY;
+                    const double cz = camera.camZ;
+                    const bool camValid = camera.camFound && std::isfinite(cx) &&
+                        std::isfinite(cy) && std::isfinite(cz);
                     if (camValid && lastScanPosValid) {
                         double jdx = cx - lastScanX, jdy = cy - lastScanY, jdz = cz - lastScanZ;
                         if (jdx*jdx + jdy*jdy + jdz*jdz > kTeleportJumpBlocks * kTeleportJumpBlocks) {
-                            ScheduleWorldTransition(env, "teleport-jump", kTeleportTransitionGraceMs);
+                            ScheduleWorldTransition(env, "teleport-jump");
                         }
                     }
                     if (camValid) {
@@ -13299,7 +13507,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                         if (!g_lastAutoTotemWorld_121 || env->IsSameObject(worldObj, g_lastAutoTotemWorld_121) == JNI_FALSE) {
                             if (env->ExceptionCheck()) env->ExceptionClear();
                             if (g_lastAutoTotemWorld_121) {
-                                ScheduleWorldTransition(env, "world-instance-changed", kWorldContextTransitionGraceMs);
+                                ScheduleWorldTransition(env, "world-instance-changed");
                             }
                             ResetAutoRodModernCaches(env);
                             ResetAutoTotemCaches(env);
@@ -13310,6 +13518,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                     }
                 }
 
+                TryCompleteWorldTransition(env, inWorldNow);
                 if (!IsWorldTransitionActive()) {
                     // Periodic diagnostic for chest esp config state
                     static DWORD s_cfgLogMs = 0;
@@ -13353,6 +13562,9 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                         UpdateClosestPlayerOverlay(env);
                     if (cfg.pixelPartyAssist)
                         UpdatePixelPartyAssist(env, cfg);
+                    const bool chunkScansEnabled = cfg.chestEsp || cfg.chestStealer || cfg.blockEsp;
+                    const bool chunkScanReady = !chunkScansEnabled ||
+                        (!IsWorldTransitionActive() && ProbeModernChunkObject(env));
                     static bool s_fightStatusWasEnabled = false;
                     if (!cfg.fightStatus && s_fightStatusWasEnabled) ResetFightStatusState121();
                     s_fightStatusWasEnabled = cfg.fightStatus;
@@ -13379,7 +13591,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                             producerNowMs,
                             lastChestEspScanMs,
                             lc::kChestEspScanIntervalMs);
-                    if (chestEspScanEnabled && chestEspScanDue) {
+                    if (chestEspScanEnabled && chestEspScanDue && chunkScanReady) {
                         NativePerfScope chestScanPerf(lc::PERF_CHEST_SCAN);
                         UpdateChestList(env);
                         lastChestEspScanMs = producerNowMs;
@@ -13392,7 +13604,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                             producerNowMs,
                             lastBlockEspScanMs,
                             lc::kBlockEspScanIntervalMs);
-                    if (cfg.blockEsp && blockEspScanDue) {
+                    if (cfg.blockEsp && blockEspScanDue && chunkScanReady) {
                         NativePerfScope blockScanPerf(lc::PERF_BLOCK_SCAN);
                         UpdateBlockEspList(env);
                         lastBlockEspScanMs = producerNowMs;
@@ -13400,9 +13612,16 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                     blockEspScanWasEnabled = cfg.blockEsp;
                 }
             } else if (g_stateJniReady && !inWorldNow) {
+                if (hadLivePlayer)
+                    ScheduleWorldTransition(env, "left-world");
                 ResetAutoRodModernCaches(env);
                 // Left world — reset caches so next world gets fresh JNI lookups
                 lastScanPosValid = false;
+                hadLivePlayer = false;
+                if (lastObservedPlayer) {
+                    env->DeleteGlobalRef(lastObservedPlayer);
+                    lastObservedPlayer = nullptr;
+                }
                 ResetAutoTotemCaches(env);
                 DeleteGlobalRefSafe(env, g_lastAutoTotemWorld_121);
                 if (g_nametagSuppressionActive_121 || !g_modifiedTeamVisibility_121.empty() || !g_lcHideTagsMembers_121.empty()) {
@@ -13414,13 +13633,23 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                 ResetFightStatusState121();
                 { LockGuard lk2(g_chestListMutex); g_chestList.clear(); }
                 { LockGuard lkb(g_blockEspListMutex); g_blockEspList.clear(); }
-                g_blockEspChunkCache.clear();
+                { LockGuard lkCache(g_blockEspCacheMutex); g_blockEspChunkCache.clear(); }
                 { LockGuard lk3(g_bgCamMutex); g_bgCamState = BgCamState(); }
                 { LockGuard lk4(g_pixelPartyMutex); g_pixelPartySnap = PixelPartySnap121(); }
+                // Mapping-only reloads are allowed to complete in menus; genuine
+                // world transitions remain active until a world is present again.
+                TryCompleteWorldTransition(env, false);
             }
         } else {
+            if (hadLivePlayer)
+                ScheduleWorldTransition(env, "jni-not-ready");
             ResetAutoRodModernCaches(env);
             lastScanPosValid = false;
+            hadLivePlayer = false;
+            if (lastObservedPlayer) {
+                env->DeleteGlobalRef(lastObservedPlayer);
+                lastObservedPlayer = nullptr;
+            }
             if (g_nametagSuppressionActive_121 || !g_modifiedTeamVisibility_121.empty() || !g_lcHideTagsMembers_121.empty()) {
                 ResetNametagSuppressionCaches121(env, "jni-not-ready");
             }
@@ -13430,17 +13659,23 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
             ResetFightStatusState121();
             { LockGuard lk2(g_chestListMutex); g_chestList.clear(); }
             { LockGuard lkb(g_blockEspListMutex); g_blockEspList.clear(); }
-            g_blockEspChunkCache.clear();
+            { LockGuard lkCache(g_blockEspCacheMutex); g_blockEspChunkCache.clear(); }
             { LockGuard lk3(g_bgCamMutex); g_bgCamState = BgCamState(); }
         }
         RecordNativePerfSince(lc::PERF_SCAN_LOOP, scanLoopPerfStarted);
         MaybeLogNativePerfDiagnostics();
         Sleep((cfg.aimAssist || cfg.triggerbot || cfg.killAura) ? 5 : 50); // fast poll for latency-sensitive combat
     }
+    if (lastObservedPlayer) env->DeleteGlobalRef(lastObservedPlayer);
     ReleaseSpeedBridgeSneak121(env);
     ResetSpeedBridgeMovementTracking121();
-    lc::ShutdownNickHiderJvmti(env);
-    ka_premotion::Shutdown(env);
+    const bool antiDebuffSafeToUnload = anti_debuff_jvmti::Shutdown(env);
+    if (antiDebuffSafeToUnload) {
+        lc::ShutdownNickHiderJvmti(env);
+        ka_premotion::Shutdown(env);
+    } else {
+        Log("AntiDebuff teardown incomplete; shared JVMTI host remains loaded for a safe detach retry.");
+    }
     g_jvm->DetachCurrentThread();
     return 0;
 }
@@ -15141,6 +15376,7 @@ glfw_done:;
         }
         if (denv) {
             lc::InstallNickHiderJvmti(g_jvm, lc::NickHiderJvmtiGeneration::Modern121, Log);
+            anti_debuff_jvmti::Install(g_jvm, Log);
             ka_premotion::Install(g_jvm, Log);
             ka_premotion::SetAttackHandler(KillAuraPremotionAttackHandler121);
             // Retry discovery a few times (MC may not be fully loaded yet)
