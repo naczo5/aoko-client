@@ -206,8 +206,9 @@ therefore their usecase (like private or anarchy servers).
 
 ## TODO
 
-- [ ] make antidebuff work correctly on modern versions
-
+- [ ] Fix name hider
+- [ ] Improve Speedbridge delay
+- [ ] Move keybinds to module cards
 
 ## Support
 
