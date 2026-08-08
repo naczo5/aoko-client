@@ -68,9 +68,6 @@ public partial class MainWindow : Window
     {
         ["autoclicker"] = "AutoClicker",
         ["rightclick"] = "Right Click",
-        ["jitter"] = "Jitter",
-        ["clickinchests"] = "Click in Chests",
-        ["breakblocks"] = "Break Blocks",
         ["aimassist"] = "Aim Assist",
         ["triggerbot"] = "Triggerbot",
         ["killaura"] = "Kill Aura",
@@ -385,6 +382,7 @@ public partial class MainWindow : Window
         KeybindAutoRodButton.IsEnabled = autoRodSupported;
         AutoRodActionBindButton.IsEnabled = autoRodSupported;
         KeybindAntiDebuffButton.IsEnabled = antiDebuffSupported;
+        KeybindHitDelayFixButton.IsEnabled = hitDelayFixSupported;
         KeybindPanicButton.IsEnabled = true;
         ReloadMappingsButton.IsEnabled = reloadMappingsSupported;
         ReloadMappingsAvailabilityText.Text = reloadMappingsSupported
@@ -1416,9 +1414,6 @@ public partial class MainWindow : Window
     {
         SetKeybindButtonContent(KeybindAutoclickerButton, "autoclicker");
         SetKeybindButtonContent(KeybindRightClickButton, "rightclick");
-        SetKeybindButtonContent(KeybindJitterButton, "jitter");
-        SetKeybindButtonContent(KeybindClickInChestsButton, "clickinchests");
-        SetKeybindButtonContent(KeybindBreakBlocksButton, "breakblocks");
         SetKeybindButtonContent(KeybindAimAssistButton, "aimassist");
         SetKeybindButtonContent(KeybindTriggerbotButton, "triggerbot");
         SetKeybindButtonContent(KeybindKillAuraButton, "killaura");
@@ -1446,17 +1441,16 @@ public partial class MainWindow : Window
 
     private void SetKeybindButtonContent(Button btn, string moduleId)
     {
-        string title = ModuleTitles.TryGetValue(moduleId, out string? n) ? n : moduleId;
         if (!IsModuleSupported(moduleId))
         {
-            btn.Content = $"{title}: {GetUnavailableModuleReason(moduleId)}";
+            btn.Content = GetUnavailableModuleReason(moduleId);
             return;
         }
 
         if (_pendingKeybindModuleId == moduleId)
-            btn.Content = $"{title}: [Press key...]";
+            btn.Content = "Bind: [Press key...]";
         else
-            btn.Content = $"{title}: {FormatVirtualKey(InputHooks.GetModuleKey(moduleId))}";
+            btn.Content = $"Bind: {FormatVirtualKey(InputHooks.GetModuleKey(moduleId))}";
     }
 
     private static string FormatVirtualKey(int vk)

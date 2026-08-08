@@ -15,7 +15,7 @@ public static class ModuleCatalog
     public enum Surfaces
     {
         None = 0,
-        /// <summary>Keybind button in MainWindow.xaml (Tag=id) plus ModuleTitles / UpdateKeybindButtons.</summary>
+        /// <summary>Keybind button in MainWindow.xaml (Tag=id) on each module card, plus ModuleTitles / UpdateKeybindButtons.</summary>
         KeybindGui = 1 << 0,
         /// <summary>InputHooks.ModuleKeys, Profile.ModuleKeys defaults, and ToggleModule switch.</summary>
         KeybindMaps = 1 << 1,
@@ -46,9 +46,13 @@ public static class ModuleCatalog
     [
         new("autoclicker", "AutoClicker", "cfg.armed", c => c.LeftClickEnabled),
         new("rightclick", "Right Click", "cfg.rightClick", c => c.RightClickEnabled),
-        new("jitter", "Jitter", "cfg.jitter", c => c.JitterEnabled),
-        new("clickinchests", "Click in Chests", "cfg.clickInChests", c => c.ClickInChests),
-        new("breakblocks", "Break Blocks", "cfg.breakBlocks", c => c.BreakBlocksEnabled),
+        // AutoClicker sub-settings — shown in overlay/RPC when active, but not keybindable modules.
+        new("jitter", "Jitter", "cfg.jitter", c => c.JitterEnabled,
+            Surfaces.DiscordRpc | Surfaces.OverlayList | Surfaces.Capability),
+        new("clickinchests", "Click in Chests", "cfg.clickInChests", c => c.ClickInChests,
+            Surfaces.DiscordRpc | Surfaces.OverlayList | Surfaces.Capability),
+        new("breakblocks", "Break Blocks", "cfg.breakBlocks", c => c.BreakBlocksEnabled,
+            Surfaces.DiscordRpc | Surfaces.OverlayList | Surfaces.Capability),
         new("aimassist", "Aim Assist", "cfg.aimAssist", c => c.AimAssistEnabled),
         new("triggerbot", "Triggerbot", "cfg.triggerbot", c => c.TriggerbotEnabled),
         new("killaura", "Kill Aura", "cfg.killAura", c => c.KillAuraEnabled, DevOnly: true),

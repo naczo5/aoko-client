@@ -16,7 +16,7 @@
  *   { type:'modstyles' }                         // Settings only
  *
  * Card shape:
- *   { title, toggle:{on,main}|null, status:{armed,available}|text|null,
+ *   { title, toggle:{on,main}|null, keybind:true|false, status:{armed,available}|text|null,
  *     desc, controls:[...] }
  */
 window.AOKO_PREVIEW_DATA = {
@@ -37,6 +37,7 @@ window.AOKO_PREVIEW_DATA = {
         {
           title: 'AutoClicker',
           toggle: { on: true, main: true },
+          keybind: true,
           status: { armed: 'Armed', available: 'Disarmed' },
           controls: [
             { type: 'slider', label: 'Min CPS', min: 1, max: 25, value: 12, step: 1, decimals: 0 },
@@ -50,6 +51,7 @@ window.AOKO_PREVIEW_DATA = {
         },
         {
           title: 'Right Click',
+          keybind: true,
           controls: [
             { type: 'switch', label: 'Enable Right Click', on: false, main: true },
             { type: 'slider', label: 'Right Min CPS', min: 1, max: 25, value: 13, step: 1, decimals: 0 },
@@ -60,6 +62,7 @@ window.AOKO_PREVIEW_DATA = {
         {
           title: 'Aim Assist',
           toggle: { on: true, main: true },
+          keybind: true,
           status: 'Available',
           controls: [
             { type: 'slider', label: 'FOV', min: 1, max: 180, value: 45, step: 1, decimals: 0, gate: true },
@@ -70,6 +73,7 @@ window.AOKO_PREVIEW_DATA = {
         {
           title: 'Triggerbot',
           toggle: { on: false, main: true },
+          keybind: true,
           status: 'Available',
           controls: [
             { type: 'slider', label: 'Cooldown Threshold (%)', min: 1, max: 100, value: 80, step: 1, decimals: 0, gate: true },
@@ -82,6 +86,7 @@ window.AOKO_PREVIEW_DATA = {
         {
           title: 'Kill Aura',
           toggle: { on: false, main: true },
+          keybind: true,
           status: 'Available',
           controls: [
             { type: 'slider', label: 'Min CPS', min: 1, max: 25, value: 10, step: 1, decimals: 0, gate: true },
@@ -100,6 +105,7 @@ window.AOKO_PREVIEW_DATA = {
         {
           title: 'Nametags',
           toggle: { on: true, main: true },
+          keybind: true,
           controls: [
             { type: 'checks', gate: true, items: [
               { label: 'Show Health', checked: true },
@@ -113,6 +119,7 @@ window.AOKO_PREVIEW_DATA = {
         {
           title: 'Chest ESP',
           toggle: { on: true, main: true },
+          keybind: true,
           controls: [
             { type: 'slider', label: 'Chest Count', min: 1, max: 20, value: 10, step: 1, decimals: 0, gate: true },
           ],
@@ -120,6 +127,7 @@ window.AOKO_PREVIEW_DATA = {
         {
           title: 'Block ESP (X-ray)',
           toggle: { on: false, main: true },
+          keybind: true,
           controls: [
             { type: 'checks', gate: true, items: [
               { label: 'Boxes', checked: true },
@@ -134,6 +142,7 @@ window.AOKO_PREVIEW_DATA = {
         {
           title: 'Closest Player',
           toggle: { on: true, main: true },
+          keybind: true,
           controls: [
             { type: 'note', text: 'Includes 4-way direction arrow (^, v, <, >).' },
           ],
@@ -141,6 +150,7 @@ window.AOKO_PREVIEW_DATA = {
         {
           title: 'Fight Status',
           toggle: { on: false, main: true },
+          keybind: true,
           controls: [
             { type: 'note', text: 'Shows recent fight health and damage status in-game.' },
           ],
@@ -162,6 +172,7 @@ window.AOKO_PREVIEW_DATA = {
         },
         {
           title: 'AntiDebuff',
+          keybind: true,
           status: 'Available',
           controls: [
             { type: 'switch', label: 'Enable AntiDebuff', on: false, main: true },
@@ -177,6 +188,7 @@ window.AOKO_PREVIEW_DATA = {
         {
           title: 'SpeedBridge',
           toggle: { on: false, main: true },
+          keybind: true,
           status: 'Available',
           controls: [
             { type: 'slider', label: 'Safety', min: 20, max: 250, value: 150, step: 1, decimals: 0, gate: true },
@@ -198,6 +210,7 @@ window.AOKO_PREVIEW_DATA = {
         {
           title: 'GTB Helper',
           toggle: { on: false, main: true },
+          keybind: true,
           controls: [
             { type: 'note', text: 'Hypixel Guess The Build helper using action-bar hints.' },
           ],
@@ -205,6 +218,7 @@ window.AOKO_PREVIEW_DATA = {
         {
           title: 'Pixel Party Assist',
           toggle: { on: false, main: true },
+          keybind: true,
           controls: [
             { type: 'note', text: 'Hypixel Pixel Party: finds the closest matching terracotta on the floor.' },
             { type: 'slider', label: 'Scan radius (blocks)', min: 8, max: 48, value: 24, step: 1, decimals: 0, gate: true },
@@ -214,6 +228,7 @@ window.AOKO_PREVIEW_DATA = {
         },
         {
           title: 'Chest Stealer',
+          keybind: true,
           status: 'Available',
           controls: [
             { type: 'switch', label: 'Enable Chest Stealer', on: false, main: true },
@@ -222,6 +237,7 @@ window.AOKO_PREVIEW_DATA = {
         },
         {
           title: 'Nick Hider',
+          keybind: true,
           status: 'Available',
           controls: [
             { type: 'switch', label: 'Enable Nick Hider', on: false, main: true },
@@ -230,6 +246,7 @@ window.AOKO_PREVIEW_DATA = {
         },
         {
           title: 'Hit Delay Fix',
+          keybind: true,
           status: 'Available',
           controls: [
             { type: 'switch', label: 'Enable Hit Delay Fix', on: false, main: true },
@@ -238,22 +255,10 @@ window.AOKO_PREVIEW_DATA = {
         },
         {
           title: 'Panic',
+          keybind: true,
           controls: [
             { type: 'note', text: 'Immediately disables modules, hides UI/overlay settings, disconnects, and closes the loader. Best-effort only.' },
             { type: 'button', label: 'Trigger Panic Now' },
-            { type: 'note', text: "You can also bind Panic in Module Keybinds." },
-          ],
-        },
-        {
-          title: 'Module Keybinds',
-          controls: [
-            { type: 'note', text: 'Click a button, then press a key (Esc = unbind).' },
-            { type: 'keybinds', items: [
-              'Autoclicker', 'Right Click', 'Jitter', 'Click in Chests', 'Break Blocks',
-              'Aim Assist', 'Triggerbot', 'Kill Aura', 'SpeedBridge', 'GTB Helper', 'Pixel Party',
-              'Nametags', 'Chest ESP', 'Chest Stealer', 'Block ESP', 'Closest Player', 'Fight Status',
-              'Reach', 'Velocity', 'AutoTotem', 'AntiDebuff', 'Nick Hider', 'Hit Delay Fix', 'Panic',
-            ] },
           ],
         },
       ],
@@ -264,6 +269,7 @@ window.AOKO_PREVIEW_DATA = {
       cards: [
         {
           title: 'Reach',
+          keybind: true,
           status: 'Available',
           controls: [
             { type: 'switch', label: 'Enable Reach', on: false, main: true },
@@ -274,6 +280,7 @@ window.AOKO_PREVIEW_DATA = {
         },
         {
           title: 'Velocity',
+          keybind: true,
           status: 'Available',
           controls: [
             { type: 'note', text: 'idk if you should use it outside of singleplayer' },
@@ -285,6 +292,7 @@ window.AOKO_PREVIEW_DATA = {
         },
         {
           title: 'AutoTotem',
+          keybind: true,
           status: 'Available',
           controls: [
             { type: 'switch', label: 'Enable AutoTotem', on: false, main: true },

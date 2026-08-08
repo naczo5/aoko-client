@@ -203,7 +203,7 @@ body.aoko-noscroll { overflow: hidden; }
   justify-content: space-between;
   gap: 12px;
 }
-.aoko-card-title { color: var(--w-text); font-size: 1.05rem; font-weight: 700; }
+.aoko-card-title { color: var(--w-text); font-size: 1.05rem; font-weight: 700; flex: 1; min-width: 0; }
 .aoko-status { color: var(--w-accent); font-size: 0.78rem; margin-top: 4px; }
 
 /* toggle switch */
@@ -359,6 +359,12 @@ body.aoko-noscroll { overflow: hidden; }
 .aoko-btn:active { transform: translateY(1px); }
 .aoko-btn:focus-visible { outline: 2px solid var(--w-accent); outline-offset: 2px; }
 .aoko-btnrow { display: flex; flex-wrap: wrap; gap: 8px; }
+.aoko-keybind-btn {
+  flex: none;
+  min-width: 7.5rem;
+  padding: 4px 10px;
+  font-size: 0.75rem;
+}
 
 /* note */
 .aoko-note { color: var(--w-muted); font-size: 0.8rem; line-height: 1.55; margin-top: 10px; }

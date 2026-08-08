@@ -42,7 +42,6 @@ public static class InputHooks
     private const int VK_MBUTTON = 0x04;
     private const int VK_XBUTTON1 = 0x05;
     private const int VK_XBUTTON2 = 0x06;
-    private const int VK_OEM_3 = 0xC0; // Backtick key
     private const uint LLMHF_INJECTED = 0x00000001;
     
     [StructLayout(LayoutKind.Sequential)]
@@ -79,9 +78,6 @@ public static class InputHooks
     {
         ["autoclicker"]      = 0,
         ["rightclick"]       = 0,
-        ["jitter"]           = 0,
-        ["clickinchests"]    = 0,
-        ["breakblocks"]      = 0,
         ["aimassist"]        = 0,
         ["triggerbot"]       = 0,
         ["killaura"]         = 0,
@@ -109,6 +105,8 @@ public static class InputHooks
 
     public static bool SetModuleKey(string moduleId, int vk)
     {
+        if (!ModuleKeys.ContainsKey(moduleId))
+            return false;
         if (vk > 0 && vk == AutoRodActionKey)
             return false;
 
@@ -229,9 +227,6 @@ public static class InputHooks
         {
             case "autoclicker":      c.ToggleArmed(); break;
             case "rightclick":       c.RightClickEnabled = !c.RightClickEnabled; break;
-            case "jitter":           c.JitterEnabled = !c.JitterEnabled; break;
-            case "clickinchests":    c.ClickInChests = !c.ClickInChests; break;
-            case "breakblocks":      c.BreakBlocksEnabled = !c.BreakBlocksEnabled; break;
             case "aimassist":        c.AimAssistEnabled = !c.AimAssistEnabled; break;
             case "triggerbot":       c.TriggerbotEnabled = !c.TriggerbotEnabled; break;
             case "killaura":         c.KillAuraEnabled = !c.KillAuraEnabled; break;
