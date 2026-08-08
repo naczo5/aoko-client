@@ -96,6 +96,7 @@ static void Log(const std::string& msg);
 static jclass LoadClassWithLoader(JNIEnv* env, jobject cl, const char* name);
 static std::string GetClassNameFromClass(JNIEnv* env, jclass cls);
 static std::string CallTextToString(JNIEnv* env, jobject textObj);
+static std::string GetStablePlayerName(JNIEnv* env, jobject playerObj);
 static bool LooksLikeFakePlayerLine(const std::string& name);
 static bool IsWorldTransitionActive();
 
@@ -1624,6 +1625,17 @@ static jmethodID g_itemStackGetMaxDamage_121 = nullptr; // ItemStack.getMaxDamag
 static jclass    g_gameProfileClass_121 = nullptr; // com.mojang.authlib.GameProfile
 static jmethodID g_getGameProfile_121 = nullptr;   // PlayerEntity.getGameProfile() -> GameProfile
 static jmethodID g_gameProfileGetName_121 = nullptr; // GameProfile.getName() -> String
+static jfieldID  g_gameProfileNameField_121 = nullptr;
+static jmethodID g_connGetPlayerInfoByName_121 = nullptr;
+static jmethodID g_connGetLocalGameProfile_121 = nullptr;
+static jmethodID g_playerInfoGetProfile_121 = nullptr;
+static std::string g_nickHiderOriginalProfileName_121;
+static bool g_nickHiderProfileAliasApplied_121 = false;
+static bool g_loggedModernNickHiderFallback_121 = false;
+static bool g_loggedModernNickHiderProfileReady_121 = false;
+static bool g_loggedModernNickHiderTabReady_121 = false;
+static bool g_loggedModernNickHiderLocalConnReady_121 = false;
+static bool g_loggedModernNickHiderProfileFailure_121 = false;
 
 static jclass    g_itemStackClass_121 = nullptr;
 
@@ -1633,8 +1645,6 @@ static int GetEntityArmor(JNIEnv* env, jobject entity) {
     if (env->ExceptionCheck()) { env->ExceptionClear(); return 0; }
     return armor;
 }
-
-static std::string CallTextToString(JNIEnv* env, jobject textObj); // forward decl
 
 static std::string GetHeldItemInfo(JNIEnv* env, jobject entity) {
     if (!env || !entity || !g_getMainHandStack_121 || !g_itemStackGetName_121) return "";
@@ -1673,32 +1683,415 @@ static std::string GetHeldItemInfo(JNIEnv* env, jobject entity) {
     return result;
 }
 
+static std::string ReadModernNickHiderJavaString(JNIEnv* env, jstring value) {
+    if (!env || !value) return "";
+    const char* chars = env->GetStringUTFChars(value, nullptr);
+    if (!chars) { if (env->ExceptionCheck()) env->ExceptionClear(); return ""; }
+    std::string result(chars);
+    env->ReleaseStringUTFChars(value, chars);
+    return result;
+}
+
 static void EnsureGameProfileCaches(JNIEnv* env, jobject anyPlayerObj) {
     if (!env) return;
+
     if (!g_gameProfileClass_121) {
-        jclass c = env->FindClass("com/mojang/authlib/GameProfile");
-        if (env->ExceptionCheck()) { env->ExceptionClear(); c = nullptr; }
-        if (c) { g_gameProfileClass_121 = (jclass)env->NewGlobalRef(c); env->DeleteLocalRef(c); }
+        jclass c = nullptr;
+        if (g_gameClassLoader) c = LoadClassWithLoader(env, g_gameClassLoader, "com.mojang.authlib.GameProfile");
+        if (!c) {
+            c = env->FindClass("com/mojang/authlib/GameProfile");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); c = nullptr; }
+        }
+        if (c) {
+            g_gameProfileClass_121 = (jclass)env->NewGlobalRef(c);
+            env->DeleteLocalRef(c);
+            Log("NickHider: GameProfile class resolved.");
+        }
     }
+
     if (g_gameProfileClass_121 && !g_gameProfileGetName_121) {
         g_gameProfileGetName_121 = env->GetMethodID(g_gameProfileClass_121, "getName", "()Ljava/lang/String;");
         if (env->ExceptionCheck()) { env->ExceptionClear(); g_gameProfileGetName_121 = nullptr; }
     }
-    if (!g_getGameProfile_121 && anyPlayerObj && g_gameProfileClass_121) {
+
+    if (g_gameProfileClass_121 && !g_gameProfileNameField_121) {
+        const char* fieldNames[] = { "name", nullptr };
+        for (int i = 0; fieldNames[i] && !g_gameProfileNameField_121; ++i) {
+            g_gameProfileNameField_121 = env->GetFieldID(g_gameProfileClass_121, fieldNames[i], "Ljava/lang/String;");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_gameProfileNameField_121 = nullptr; }
+        }
+        if (!g_gameProfileNameField_121) {
+            // Last resort: first declared non-static String field on GameProfile.
+            jclass cClass = env->FindClass("java/lang/Class");
+            jclass cField = env->FindClass("java/lang/reflect/Field");
+            jclass cMod = env->FindClass("java/lang/reflect/Modifier");
+            jclass cString = env->FindClass("java/lang/String");
+            if (cClass && cField && cMod && cString && !env->ExceptionCheck()) {
+                jmethodID mGetFields = env->GetMethodID(cClass, "getDeclaredFields", "()[Ljava/lang/reflect/Field;");
+                jmethodID mGetType = env->GetMethodID(cField, "getType", "()Ljava/lang/Class;");
+                jmethodID mGetName = env->GetMethodID(cField, "getName", "()Ljava/lang/String;");
+                jmethodID mGetMods = env->GetMethodID(cField, "getModifiers", "()I");
+                jmethodID mIsStatic = env->GetStaticMethodID(cMod, "isStatic", "(I)Z");
+                if (mGetFields && mGetType && mGetName && mGetMods && mIsStatic) {
+                    jobjectArray fields = (jobjectArray)env->CallObjectMethod(g_gameProfileClass_121, mGetFields);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); fields = nullptr; }
+                    const jsize count = fields ? env->GetArrayLength(fields) : 0;
+                    for (jsize i = 0; i < count && !g_gameProfileNameField_121; ++i) {
+                        jobject field = env->GetObjectArrayElement(fields, i);
+                        if (!field) continue;
+                        const jint mods = env->CallIntMethod(field, mGetMods);
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); env->DeleteLocalRef(field); continue; }
+                        if (env->CallStaticBooleanMethod(cMod, mIsStatic, mods)) {
+                            env->DeleteLocalRef(field);
+                            continue;
+                        }
+                        jclass type = (jclass)env->CallObjectMethod(field, mGetType);
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); type = nullptr; }
+                        const bool isString = type && env->IsSameObject(type, cString);
+                        if (type) env->DeleteLocalRef(type);
+                        if (!isString) { env->DeleteLocalRef(field); continue; }
+                        jstring jn = (jstring)env->CallObjectMethod(field, mGetName);
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); jn = nullptr; }
+                        const std::string fieldName = ReadModernNickHiderJavaString(env, jn);
+                        if (jn) env->DeleteLocalRef(jn);
+                        if (fieldName == "name" || fieldName.find("name") != std::string::npos || fieldName.find("Name") != std::string::npos) {
+                            g_gameProfileNameField_121 = env->GetFieldID(g_gameProfileClass_121, fieldName.c_str(), "Ljava/lang/String;");
+                            if (env->ExceptionCheck()) { env->ExceptionClear(); g_gameProfileNameField_121 = nullptr; }
+                            if (g_gameProfileNameField_121)
+                                Log("NickHider: GameProfile name field resolved as " + fieldName);
+                        }
+                        env->DeleteLocalRef(field);
+                    }
+                    if (fields) env->DeleteLocalRef(fields);
+                }
+            }
+            if (cClass) env->DeleteLocalRef(cClass);
+            if (cField) env->DeleteLocalRef(cField);
+            if (cMod) env->DeleteLocalRef(cMod);
+            if (cString) env->DeleteLocalRef(cString);
+            if (env->ExceptionCheck()) env->ExceptionClear();
+        }
+    }
+
+    if (!g_getGameProfile_121 && anyPlayerObj) {
         jclass pCls = env->GetObjectClass(anyPlayerObj);
         if (pCls && !env->ExceptionCheck()) {
-            // Common names across mappings
-            g_getGameProfile_121 = env->GetMethodID(pCls, "getGameProfile", "()Lcom/mojang/authlib/GameProfile;");
-            if (env->ExceptionCheck()) { env->ExceptionClear(); g_getGameProfile_121 = nullptr; }
-            if (!g_getGameProfile_121) {
-                g_getGameProfile_121 = env->GetMethodID(pCls, "method_7334", "()Lcom/mojang/authlib/GameProfile;");
+            const char* methodNames[] = { "getGameProfile", "method_7334", "m_36316_", nullptr };
+            for (int i = 0; methodNames[i] && !g_getGameProfile_121; ++i) {
+                g_getGameProfile_121 = env->GetMethodID(pCls, methodNames[i],
+                    "()Lcom/mojang/authlib/GameProfile;");
                 if (env->ExceptionCheck()) { env->ExceptionClear(); g_getGameProfile_121 = nullptr; }
             }
+
+            if (!g_getGameProfile_121) {
+                jclass cClass = env->FindClass("java/lang/Class");
+                jclass cMethod = env->FindClass("java/lang/reflect/Method");
+                jclass cMod = env->FindClass("java/lang/reflect/Modifier");
+                if (cClass && cMethod && cMod && !env->ExceptionCheck()) {
+                    jmethodID mGetMethods = env->GetMethodID(cClass, "getMethods", "()[Ljava/lang/reflect/Method;");
+                    jmethodID mGetName = env->GetMethodID(cMethod, "getName", "()Ljava/lang/String;");
+                    jmethodID mGetReturnType = env->GetMethodID(cMethod, "getReturnType", "()Ljava/lang/Class;");
+                    jmethodID mGetParamTypes = env->GetMethodID(cMethod, "getParameterTypes", "()[Ljava/lang/Class;");
+                    jmethodID mGetMods = env->GetMethodID(cMethod, "getModifiers", "()I");
+                    jmethodID mIsStatic = env->GetStaticMethodID(cMod, "isStatic", "(I)Z");
+                    if (mGetMethods && mGetName && mGetReturnType && mGetParamTypes && mGetMods && mIsStatic) {
+                        jobjectArray methods = (jobjectArray)env->CallObjectMethod(pCls, mGetMethods);
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); methods = nullptr; }
+                        const jsize count = methods ? env->GetArrayLength(methods) : 0;
+                        for (jsize i = 0; i < count && !g_getGameProfile_121; ++i) {
+                            jobject method = env->GetObjectArrayElement(methods, i);
+                            if (!method) continue;
+                            const jint mods = env->CallIntMethod(method, mGetMods);
+                            if (env->ExceptionCheck()) { env->ExceptionClear(); env->DeleteLocalRef(method); continue; }
+                            if (env->CallStaticBooleanMethod(cMod, mIsStatic, mods)) {
+                                env->DeleteLocalRef(method);
+                                continue;
+                            }
+                            jobjectArray params = (jobjectArray)env->CallObjectMethod(method, mGetParamTypes);
+                            if (env->ExceptionCheck()) { env->ExceptionClear(); params = nullptr; }
+                            const jsize paramCount = params ? env->GetArrayLength(params) : -1;
+                            if (params) env->DeleteLocalRef(params);
+                            if (paramCount != 0) { env->DeleteLocalRef(method); continue; }
+
+                            jclass ret = (jclass)env->CallObjectMethod(method, mGetReturnType);
+                            if (env->ExceptionCheck()) { env->ExceptionClear(); ret = nullptr; }
+                            const std::string retName = ret ? GetClassNameFromClass(env, ret) : "";
+                            if (ret && (retName == "com.mojang.authlib.GameProfile" ||
+                                        (retName.size() >= 11 &&
+                                         retName.compare(retName.size() - 11, 11, "GameProfile") == 0))) {
+                                if (!g_gameProfileClass_121) {
+                                    g_gameProfileClass_121 = (jclass)env->NewGlobalRef(ret);
+                                    Log("NickHider: GameProfile class resolved via getGameProfile return type.");
+                                }
+                                jstring jn = (jstring)env->CallObjectMethod(method, mGetName);
+                                if (env->ExceptionCheck()) { env->ExceptionClear(); jn = nullptr; }
+                                const std::string methodName = ReadModernNickHiderJavaString(env, jn);
+                                if (jn) env->DeleteLocalRef(jn);
+                                if (!methodName.empty()) {
+                                    std::string sig = "()L";
+                                    for (size_t n = 0; n < retName.size(); ++n)
+                                        sig.push_back(retName[n] == '.' ? '/' : retName[n]);
+                                    sig.push_back(';');
+                                    g_getGameProfile_121 = env->GetMethodID(pCls, methodName.c_str(), sig.c_str());
+                                    if (env->ExceptionCheck()) {
+                                        env->ExceptionClear();
+                                        g_getGameProfile_121 = nullptr;
+                                    }
+                                    if (g_getGameProfile_121)
+                                        Log("NickHider: getGameProfile resolved as " + methodName);
+                                }
+                            }
+                            if (ret) env->DeleteLocalRef(ret);
+                            env->DeleteLocalRef(method);
+                        }
+                        if (methods) env->DeleteLocalRef(methods);
+                    }
+                }
+                if (cClass) env->DeleteLocalRef(cClass);
+                if (cMethod) env->DeleteLocalRef(cMethod);
+                if (cMod) env->DeleteLocalRef(cMod);
+                if (env->ExceptionCheck()) env->ExceptionClear();
+            }
             env->DeleteLocalRef(pCls);
-        } else {
+        } else if (env->ExceptionCheck()) {
             env->ExceptionClear();
         }
     }
+
+    if (g_gameProfileClass_121 && !g_gameProfileGetName_121) {
+        g_gameProfileGetName_121 = env->GetMethodID(g_gameProfileClass_121, "getName", "()Ljava/lang/String;");
+        if (env->ExceptionCheck()) { env->ExceptionClear(); g_gameProfileGetName_121 = nullptr; }
+    }
+}
+
+static bool SetModernNickHiderProfileName(JNIEnv* env, jobject profile, const std::string& desired) {
+    if (!env || !profile || !g_gameProfileNameField_121 || desired.empty()) return false;
+    jstring replacement = env->NewStringUTF(desired.c_str());
+    if (!replacement) return false;
+    env->SetObjectField(profile, g_gameProfileNameField_121, replacement);
+    const bool ok = !env->ExceptionCheck();
+    if (!ok) env->ExceptionClear();
+    env->DeleteLocalRef(replacement);
+    return ok;
+}
+
+static void EnsureModernNickHiderConnectionCaches(JNIEnv* env, jobject connection) {
+    if (!env || !connection) return;
+    jclass connClass = env->GetObjectClass(connection);
+    if (!connClass || env->ExceptionCheck()) { env->ExceptionClear(); return; }
+
+    if (!g_connGetLocalGameProfile_121) {
+        const char* names[] = { "getLocalGameProfile", "getProfile", "method_2879", "m_105144_", nullptr };
+        for (int i = 0; names[i] && !g_connGetLocalGameProfile_121; ++i) {
+            g_connGetLocalGameProfile_121 = env->GetMethodID(connClass, names[i],
+                "()Lcom/mojang/authlib/GameProfile;");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_connGetLocalGameProfile_121 = nullptr; }
+        }
+    }
+
+    if (!g_connGetPlayerInfoByName_121) {
+        const char* names[] = { "getPlayerInfo", "getPlayerListEntry", "method_2874", "m_104949_", nullptr };
+        const char* sigs[] = {
+            "(Ljava/lang/String;)Lnet/minecraft/client/multiplayer/PlayerInfo;",
+            "(Ljava/lang/String;)Lnet/minecraft/client/network/PlayerListEntry;",
+            "(Ljava/lang/String;)Lnet/minecraft/class_640;",
+            nullptr
+        };
+        for (int i = 0; names[i] && !g_connGetPlayerInfoByName_121; ++i) {
+            for (int s = 0; sigs[s] && !g_connGetPlayerInfoByName_121; ++s) {
+                g_connGetPlayerInfoByName_121 = env->GetMethodID(connClass, names[i], sigs[s]);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_connGetPlayerInfoByName_121 = nullptr; }
+            }
+        }
+    }
+    env->DeleteLocalRef(connClass);
+}
+
+static jobject GetModernNickHiderTabProfile(JNIEnv* env, const std::string& originalName, const Config& cfg) {
+    if (!env || !g_mcInstance || originalName.empty()) return nullptr;
+    if (!g_getConnectionMethod_121) {
+        jclass mcCls = env->GetObjectClass(g_mcInstance);
+        if (mcCls) {
+            g_getConnectionMethod_121 = env->GetMethodID(mcCls, "getConnection",
+                "()Lnet/minecraft/client/multiplayer/ClientPacketListener;");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_getConnectionMethod_121 = nullptr; }
+            if (!g_getConnectionMethod_121) {
+                g_getConnectionMethod_121 = env->GetMethodID(mcCls, "method_1558",
+                    "()Lnet/minecraft/class_634;");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_getConnectionMethod_121 = nullptr; }
+            }
+            env->DeleteLocalRef(mcCls);
+        }
+    }
+    if (!g_getConnectionMethod_121) return nullptr;
+
+    jobject connection = env->CallObjectMethod(g_mcInstance, g_getConnectionMethod_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); connection = nullptr; }
+    if (!connection) return nullptr;
+    EnsureModernNickHiderConnectionCaches(env, connection);
+
+    jobject info = nullptr;
+    const std::string* lookupNames[2] = { &originalName, nullptr };
+    std::string aliasLookup;
+    if (cfg.nickHiderEnabled && !cfg.nickHiderAlias.empty() && cfg.nickHiderAlias != originalName) {
+        aliasLookup = cfg.nickHiderAlias;
+        lookupNames[1] = &aliasLookup;
+    }
+    for (int n = 0; n < 2 && !info; ++n) {
+        if (!lookupNames[n] || lookupNames[n]->empty() || !g_connGetPlayerInfoByName_121) continue;
+        jstring nameJava = env->NewStringUTF(lookupNames[n]->c_str());
+        info = nameJava
+            ? env->CallObjectMethod(connection, g_connGetPlayerInfoByName_121, nameJava) : nullptr;
+        if (env->ExceptionCheck()) { env->ExceptionClear(); info = nullptr; }
+        if (nameJava) env->DeleteLocalRef(nameJava);
+    }
+
+    jobject localProfile = nullptr;
+    if (g_connGetLocalGameProfile_121) {
+        localProfile = env->CallObjectMethod(connection, g_connGetLocalGameProfile_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); localProfile = nullptr; }
+    }
+    env->DeleteLocalRef(connection);
+
+    jobject tabProfile = nullptr;
+    if (info) {
+        jclass infoClass = env->GetObjectClass(info);
+        if (infoClass && !g_playerInfoGetProfile_121) {
+            const char* names[] = { "getProfile", "method_2966", "m_105312_", nullptr };
+            for (int i = 0; names[i] && !g_playerInfoGetProfile_121; ++i) {
+                g_playerInfoGetProfile_121 = env->GetMethodID(infoClass, names[i],
+                    "()Lcom/mojang/authlib/GameProfile;");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_playerInfoGetProfile_121 = nullptr; }
+            }
+        }
+        if (g_playerInfoGetProfile_121) {
+            tabProfile = env->CallObjectMethod(info, g_playerInfoGetProfile_121);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); tabProfile = nullptr; }
+        }
+        if (infoClass) env->DeleteLocalRef(infoClass);
+        env->DeleteLocalRef(info);
+    }
+
+    // Prefer tab PlayerInfo profile; fall back to connection localGameProfile.
+    if (tabProfile) {
+        if (localProfile) env->DeleteLocalRef(localProfile);
+        return tabProfile;
+    }
+    return localProfile;
+}
+
+static void ApplyModernNickHiderFallback(JNIEnv* env, const Config& cfg) {
+    if (!env || lc::HasJvmtiLocalVariables()) return;
+    if (!g_mcInstance || !g_playerField_121) return;
+
+    jobject player = env->GetObjectField(g_mcInstance, g_playerField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); player = nullptr; }
+    if (!player) return;
+
+    const bool applyAlias = cfg.nickHiderEnabled && !cfg.nickHiderAlias.empty();
+    if (applyAlias && g_nickHiderOriginalProfileName_121.empty()) {
+        const std::string fromGetName = GetStablePlayerName(env, player);
+        if (!fromGetName.empty() && fromGetName != cfg.nickHiderAlias)
+            g_nickHiderOriginalProfileName_121 = fromGetName;
+    }
+
+    EnsureGameProfileCaches(env, player);
+    if (!g_gameProfileClass_121 || !g_getGameProfile_121 || !g_gameProfileGetName_121 || !g_gameProfileNameField_121) {
+        if (cfg.nickHiderEnabled && !g_loggedModernNickHiderProfileFailure_121) {
+            g_loggedModernNickHiderProfileFailure_121 = true;
+            Log(std::string("NickHider fallback: modern GameProfile methods unresolved")
+                + " (class=" + (g_gameProfileClass_121 ? "yes" : "no")
+                + " getProfile=" + (g_getGameProfile_121 ? "yes" : "no")
+                + " getName=" + (g_gameProfileGetName_121 ? "yes" : "no")
+                + " nameField=" + (g_gameProfileNameField_121 ? "yes" : "no") + ").");
+        }
+        if (!applyAlias) g_nickHiderOriginalProfileName_121.clear();
+        g_nickHiderProfileAliasApplied_121 = applyAlias && !g_nickHiderOriginalProfileName_121.empty();
+        env->DeleteLocalRef(player);
+        return;
+    }
+
+    jobject profile = env->CallObjectMethod(player, g_getGameProfile_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); profile = nullptr; }
+    if (!profile) {
+        env->DeleteLocalRef(player);
+        return;
+    }
+
+    jstring currentJava = (jstring)env->CallObjectMethod(profile, g_gameProfileGetName_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); currentJava = nullptr; }
+    const std::string current = ReadModernNickHiderJavaString(env, currentJava);
+    if (currentJava) env->DeleteLocalRef(currentJava);
+    if (applyAlias && g_nickHiderOriginalProfileName_121.empty() && !current.empty() && current != cfg.nickHiderAlias)
+        g_nickHiderOriginalProfileName_121 = current;
+
+    const std::string desired = applyAlias ? cfg.nickHiderAlias : g_nickHiderOriginalProfileName_121;
+    bool localChanged = false;
+    if (!desired.empty() && current != desired)
+        localChanged = SetModernNickHiderProfileName(env, profile, desired);
+    else
+        localChanged = !desired.empty();
+
+    const std::string lookupName = !g_nickHiderOriginalProfileName_121.empty()
+        ? g_nickHiderOriginalProfileName_121 : current;
+    jobject tabOrLocalProfile = GetModernNickHiderTabProfile(env, lookupName, cfg);
+    bool tabChanged = false;
+    bool localConnChanged = false;
+    if (tabOrLocalProfile && !desired.empty()) {
+        // If tab profile is a different object from entity profile, mutate it too.
+        if (env->IsSameObject(tabOrLocalProfile, profile) == JNI_TRUE) {
+            localConnChanged = localChanged;
+        } else {
+            const bool changed = SetModernNickHiderProfileName(env, tabOrLocalProfile, desired);
+            // Heuristic: connection.getLocalGameProfile() vs PlayerInfo.getProfile().
+            if (g_connGetLocalGameProfile_121) localConnChanged = changed;
+            tabChanged = changed;
+        }
+        env->DeleteLocalRef(tabOrLocalProfile);
+    }
+
+    // Also mutate connection localGameProfile explicitly when available.
+    if (!desired.empty() && g_getConnectionMethod_121) {
+        jobject connection = env->CallObjectMethod(g_mcInstance, g_getConnectionMethod_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); connection = nullptr; }
+        if (connection) {
+            EnsureModernNickHiderConnectionCaches(env, connection);
+            if (g_connGetLocalGameProfile_121) {
+                jobject localGp = env->CallObjectMethod(connection, g_connGetLocalGameProfile_121);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); localGp = nullptr; }
+                if (localGp) {
+                    if (env->IsSameObject(localGp, profile) != JNI_TRUE) {
+                        if (SetModernNickHiderProfileName(env, localGp, desired))
+                            localConnChanged = true;
+                    }
+                    env->DeleteLocalRef(localGp);
+                }
+            }
+            env->DeleteLocalRef(connection);
+        }
+    }
+
+    if (applyAlias && localChanged && !g_loggedModernNickHiderProfileReady_121) {
+        g_loggedModernNickHiderProfileReady_121 = true;
+        Log("NickHider fallback: modern local profile alias applied.");
+    }
+    if (applyAlias && tabChanged && !g_loggedModernNickHiderTabReady_121) {
+        g_loggedModernNickHiderTabReady_121 = true;
+        Log("NickHider fallback: modern tab PlayerInfo alias applied.");
+    }
+    if (applyAlias && localConnChanged && !g_loggedModernNickHiderLocalConnReady_121) {
+        g_loggedModernNickHiderLocalConnReady_121 = true;
+        Log("NickHider fallback: modern connection localGameProfile alias applied.");
+    }
+    if (!g_loggedModernNickHiderFallback_121) {
+        g_loggedModernNickHiderFallback_121 = true;
+        Log("NickHider: modern JNI fallback active (JVMTI local-variable rewrite unavailable).");
+    }
+
+    g_nickHiderProfileAliasApplied_121 = applyAlias;
+    if (!applyAlias) g_nickHiderOriginalProfileName_121.clear();
+    env->DeleteLocalRef(profile);
+    env->DeleteLocalRef(player);
 }
 
 static std::string NormalizeNameSpaces(const std::string& in) {
@@ -3363,10 +3756,12 @@ static void UpdateSpeedBridgeDirection121(double posX, double posZ) {
 }
 
 static double SpeedBridgeSupportProbeDistance121(const Config& cfg) {
+    // Safety 20..250 → edge probe distance (linear). Lower = sneak later = faster.
+    // Min is 25% faster than the prior 0.12 floor (0.09); max keeps 0.45.
     double t = ((double)cfg.speedBridgeDelayMs - 20.0) / 230.0;
     if (t < 0.0) t = 0.0;
     if (t > 1.0) t = 1.0;
-    return 0.31 + (0.14 * t);
+    return 0.09 + (0.36 * t);
 }
 
 static void EnsureSpeedBridgeBlockProbeJni(JNIEnv* env, jobject worldObj, jobject stateObj) {
@@ -4994,7 +5389,9 @@ static void UpdatePlayerListOverlay(JNIEnv* env) {
     }
 
     EnsureEntityMethods(env, selfObj);
-    const std::string localAccountName = GetStablePlayerName(env, selfObj);
+    const std::string localAccountName = !g_nickHiderOriginalProfileName_121.empty()
+        ? g_nickHiderOriginalProfileName_121
+        : GetStablePlayerName(env, selfObj);
     lc::SetNickHiderJvmtiLocalName(localAccountName);
     bool suppressionMappingsReady = true;
     bool suppressionRestoreReady = true;
@@ -10671,6 +11068,17 @@ static void ResetModernJniRuntimeCaches121(JNIEnv* env, const char* reason) {
     g_itemStackGetMaxDamage_121 = nullptr;
     g_getGameProfile_121 = nullptr;
     g_gameProfileGetName_121 = nullptr;
+    g_gameProfileNameField_121 = nullptr;
+    g_connGetPlayerInfoByName_121 = nullptr;
+    g_connGetLocalGameProfile_121 = nullptr;
+    g_playerInfoGetProfile_121 = nullptr;
+    g_nickHiderOriginalProfileName_121.clear();
+    g_nickHiderProfileAliasApplied_121 = false;
+    g_loggedModernNickHiderFallback_121 = false;
+    g_loggedModernNickHiderProfileReady_121 = false;
+    g_loggedModernNickHiderTabReady_121 = false;
+    g_loggedModernNickHiderLocalConnReady_121 = false;
+    g_loggedModernNickHiderProfileFailure_121 = false;
 
     g_lastPlayerListUpdateMs = 0;
     g_lastClosestUpdateMs = 0;
@@ -13518,17 +13926,21 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                     }
                 }
 
-                TryCompleteWorldTransition(env, inWorldNow);
-                if (!IsWorldTransitionActive()) {
-                    // Periodic diagnostic for chest esp config state
-                    static DWORD s_cfgLogMs = 0;
-                    DWORD nowMs = GetTickCount();
-                    if (nowMs - s_cfgLogMs > 10000) {
-                        s_cfgLogMs = nowMs;
-                        Log("ScanThread cfg: chestEsp=" + std::to_string(cfg.chestEsp) + " nametags=" + std::to_string(cfg.nametags) + " closestPlayer=" + std::to_string(cfg.closestPlayer) + " hideVanilla=" + std::to_string(cfg.nametagHideVanilla));
-                    }
+                    TryCompleteWorldTransition(env, inWorldNow);
+                    if (!IsWorldTransitionActive()) {
+                        // Periodic diagnostic for chest esp config state
+                        static DWORD s_cfgLogMs = 0;
+                        DWORD nowMs = GetTickCount();
+                        if (nowMs - s_cfgLogMs > 10000) {
+                            s_cfgLogMs = nowMs;
+                            Log("ScanThread cfg: chestEsp=" + std::to_string(cfg.chestEsp) + " nametags=" + std::to_string(cfg.nametags) + " closestPlayer=" + std::to_string(cfg.closestPlayer) + " hideVanilla=" + std::to_string(cfg.nametagHideVanilla));
+                        }
 
-                    static bool s_reachWasEnabled = false;
+                        if (cfg.nickHiderEnabled || g_nickHiderProfileAliasApplied_121) {
+                            ApplyModernNickHiderFallback(env, cfg);
+                        }
+
+                        static bool s_reachWasEnabled = false;
                     if (cfg.reachEnabled || s_reachWasEnabled) {
                         UpdateReach(env, cfg);
                         s_reachWasEnabled = cfg.reachEnabled;
@@ -13664,7 +14076,8 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
         }
         RecordNativePerfSince(lc::PERF_SCAN_LOOP, scanLoopPerfStarted);
         MaybeLogNativePerfDiagnostics();
-        Sleep((cfg.aimAssist || cfg.triggerbot || cfg.killAura) ? 5 : 50); // fast poll for latency-sensitive combat
+        // 5ms (~200Hz) for latency-sensitive modules; otherwise 50ms.
+        Sleep((cfg.aimAssist || cfg.triggerbot || cfg.killAura || cfg.speedBridge) ? 5 : 50);
     }
     if (lastObservedPlayer) env->DeleteGlobalRef(lastObservedPlayer);
     ReleaseSpeedBridgeSneak121(env);

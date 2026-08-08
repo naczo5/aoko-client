@@ -1182,9 +1182,6 @@ public class GameStateClient : INotifyPropertyChanged
                     // Per-module keybinds
                     keybindAutoclicker   = InputHooks.GetModuleKey("autoclicker"),
                     keybindRightClick    = InputHooks.GetModuleKey("rightclick"),
-                    keybindJitter        = InputHooks.GetModuleKey("jitter"),
-                    keybindClickInChests = InputHooks.GetModuleKey("clickinchests"),
-                    keybindBreakBlocks   = InputHooks.GetModuleKey("breakblocks"),
                     keybindAimAssist     = InputHooks.GetModuleKey("aimassist"),
                     keybindTriggerbot    = InputHooks.GetModuleKey("triggerbot"),
                     keybindKillAura      = InputHooks.GetModuleKey("killaura"),

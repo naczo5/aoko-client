@@ -221,6 +221,10 @@
       }
       head.appendChild(tg);
     }
+    if (card.keybind) {
+      var bindBtn = el('button', 'aoko-btn aoko-keybind-btn', { type: 'button', text: 'Bind: Unbound', title: 'Click, then press a key (Esc = unbind)' });
+      head.appendChild(bindBtn);
+    }
     wrap.appendChild(head);
 
     // status sub-label (coral)

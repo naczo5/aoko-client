@@ -295,7 +295,10 @@
                     <StackPanel Margin="12">
                         <Border Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
                             <StackPanel>
-                                <CheckBox Content="AutoClicker" IsChecked="{Binding IsArmed, Mode=OneWay}" Style="{StaticResource ModuleSwitch}" Click="ToggleArmed_Click"/>
+                                <DockPanel>
+                                    <Button x:Name="KeybindAutoclickerButton" Tag="autoclicker" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
+                                    <CheckBox Content="AutoClicker" IsChecked="{Binding IsArmed, Mode=OneWay}" Style="{StaticResource ModuleSwitch}" Click="ToggleArmed_Click"/>
+                                </DockPanel>
                                 <TextBlock Text="{Binding StatusText}" Foreground="{DynamicResource AccentBrush}" FontSize="12" Margin="0,4,0,10" />
 
                                 <DockPanel>
@@ -320,7 +323,10 @@
 
                         <Border Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
                             <StackPanel>
-                                <TextBlock Text="Right Click" Foreground="{DynamicResource TextBrush}" FontSize="16" FontWeight="Bold" />
+                                <DockPanel>
+                                    <Button x:Name="KeybindRightClickButton" Tag="rightclick" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
+                                    <TextBlock Text="Right Click" Foreground="{DynamicResource TextBrush}" FontSize="16" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </DockPanel>
                                 <CheckBox Content="Enable Right Click" IsChecked="{Binding RightClickEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}" Margin="0,8,0,10"/>
 
                                 <DockPanel>
@@ -341,7 +347,10 @@
 
                         <Border x:Name="AimAssistCard" Style="{StaticResource ControlCardStyle}">
                             <StackPanel>
-                                <CheckBox Content="Aim Assist" IsChecked="{Binding AimAssistEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                <DockPanel>
+                                    <Button x:Name="KeybindAimAssistButton" Tag="aimassist" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
+                                    <CheckBox Content="Aim Assist" IsChecked="{Binding AimAssistEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                </DockPanel>
                                 <TextBlock x:Name="AimAssistAvailabilityText" Text="Available" Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,6,0,0"/>
 
                                 <DockPanel Margin="0,10,0,0">
@@ -372,7 +381,10 @@
 
                         <Border x:Name="TriggerbotCard" Style="{StaticResource ControlCardStyle}" Margin="0,12,0,0">
                             <StackPanel>
-                                <CheckBox Content="Triggerbot" IsChecked="{Binding TriggerbotEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                <DockPanel>
+                                    <Button x:Name="KeybindTriggerbotButton" Tag="triggerbot" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
+                                    <CheckBox Content="Triggerbot" IsChecked="{Binding TriggerbotEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                </DockPanel>
                                 <TextBlock x:Name="TriggerbotAvailabilityText" Text="Available" Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,6,0,0"/>
 
                                 <DockPanel Margin="0,10,0,0">
@@ -413,7 +425,10 @@
 
                         <Border x:Name="AutoRodCard" Style="{StaticResource ControlCardStyle}" Margin="0,12,0,0">
                             <StackPanel>
-                                <CheckBox Content="Auto Rod" IsChecked="{Binding AutoRodEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                <DockPanel>
+                                    <Button x:Name="KeybindAutoRodButton" Tag="autorod" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
+                                    <CheckBox Content="Auto Rod" IsChecked="{Binding AutoRodEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                </DockPanel>
                                 <TextBlock x:Name="AutoRodAvailabilityText" Text="Available" Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,6,0,0"/>
                                 <DockPanel Margin="0,10,0,0">
                                     <TextBlock Text="Slot mode" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left"/>
@@ -446,7 +461,10 @@
 
                         <Border x:Name="HitDelayFixCard" Style="{StaticResource ControlCardStyle}" Margin="0,12,0,0">
                             <StackPanel>
-                                <TextBlock Text="Hit Delay Fix" Foreground="{DynamicResource TextBrush}" FontSize="16" FontWeight="Bold" Margin="0,0,0,10"/>
+                                <DockPanel Margin="0,0,0,10">
+                                    <Button x:Name="KeybindHitDelayFixButton" Tag="hitdelayfix" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
+                                    <TextBlock Text="Hit Delay Fix" Foreground="{DynamicResource TextBrush}" FontSize="16" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </DockPanel>
                                 <TextBlock x:Name="HitDelayFixAvailabilityText" Text="Available" Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,0,0,8"/>
                                 <CheckBox Content="Enable Hit Delay Fix" IsChecked="{Binding HitDelayFixEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
                                 <TextBlock Text="Resets the client-side delay after a miss. It does not change weapon attack strength or send packets."
@@ -463,7 +481,10 @@
                     <StackPanel Margin="12">
                         <Border Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
                             <StackPanel>
-                                <CheckBox Content="Nametags" IsChecked="{Binding NametagsEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                <DockPanel>
+                                    <Button x:Name="KeybindNametagsButton" Tag="nametags" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
+                                    <CheckBox Content="Nametags" IsChecked="{Binding NametagsEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                </DockPanel>
                                 <WrapPanel Margin="0,10,0,0">
                                     <CheckBox Content="Show Health" IsChecked="{Binding NametagShowHealth, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,0,14,0"/>
                                     <CheckBox Content="Show Armor" IsChecked="{Binding NametagShowArmor, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,0,14,0"/>
@@ -482,7 +503,10 @@
 
                         <Border Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
                             <StackPanel>
-                                <CheckBox Content="Nick Hider" IsChecked="{Binding NickHiderEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                <DockPanel>
+                                    <Button x:Name="KeybindNickHiderButton" Tag="nickhider" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
+                                    <CheckBox Content="Nick Hider" IsChecked="{Binding NickHiderEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                </DockPanel>
                                 <TextBlock Text="Replaces your local account name in supported client HUD text only."
                                            Foreground="{DynamicResource DimTextBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,8,0,0"/>
                                 <DockPanel Margin="0,10,0,0">
@@ -495,7 +519,10 @@
 
                         <Border Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
                             <StackPanel>
-                                <CheckBox Content="Fight Status" IsChecked="{Binding FightStatusEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                <DockPanel>
+                                    <Button x:Name="KeybindFightStatusButton" Tag="fightstatus" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
+                                    <CheckBox Content="Fight Status" IsChecked="{Binding FightStatusEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                </DockPanel>
                                 <TextBlock Text="Shows recent fight health and damage status in-game."
                                            Foreground="{DynamicResource DimTextBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,8,0,0"/>
                             </StackPanel>
@@ -503,7 +530,10 @@
 
                         <Border Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
                             <StackPanel>
-                                <CheckBox Content="Chest ESP" IsChecked="{Binding ChestEspEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                <DockPanel>
+                                    <Button x:Name="KeybindChestEspButton" Tag="chestesp" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
+                                    <CheckBox Content="Chest ESP" IsChecked="{Binding ChestEspEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                </DockPanel>
                                 <DockPanel Margin="0,10,0,0">
                                     <TextBlock Text="Chest Count" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left" />
                                     <TextBlock Text="{Binding ChestEspMaxCount}" Foreground="{DynamicResource DimTextBrush}" FontSize="12" HorizontalAlignment="Right" DockPanel.Dock="Right" />
@@ -516,7 +546,10 @@
 
                         <Border Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
                             <StackPanel>
-                                <CheckBox Content="Block ESP (X-ray)" IsChecked="{Binding BlockEspEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                <DockPanel>
+                                    <Button x:Name="KeybindBlockEspButton" Tag="blockesp" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
+                                    <CheckBox Content="Block ESP (X-ray)" IsChecked="{Binding BlockEspEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                </DockPanel>
                                 <WrapPanel Margin="0,10,0,0">
                                     <CheckBox Content="Boxes" IsChecked="{Binding BlockEspBoxes, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,0,14,0"/>
                                     <CheckBox Content="Tracers" IsChecked="{Binding BlockEspTracers, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,0,14,0"/>
@@ -576,7 +609,10 @@
 
                         <Border Style="{StaticResource ControlCardStyle}">
                             <StackPanel>
-                                <CheckBox Content="Closest Player" IsChecked="{Binding ClosestPlayerInfoEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                <DockPanel>
+                                    <Button x:Name="KeybindClosestPlayerButton" Tag="closestplayer" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
+                                    <CheckBox Content="Closest Player" IsChecked="{Binding ClosestPlayerInfoEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                </DockPanel>
                                 <TextBlock Text="Includes 4-way direction arrow (^, v, &lt;, &gt;)." Foreground="{DynamicResource DimTextBrush}" FontSize="12" Margin="0,8,0,0"/>
                             </StackPanel>
                         </Border>
@@ -598,7 +634,10 @@
 
                         <Border x:Name="AntiDebuffCard" Style="{StaticResource ControlCardStyle}" Margin="0,12,0,0">
                             <StackPanel>
-                                <TextBlock Text="AntiDebuff" Foreground="{DynamicResource TextBrush}" FontSize="16" FontWeight="Bold" Margin="0,0,0,10" />
+                                <DockPanel Margin="0,0,0,10">
+                                    <Button x:Name="KeybindAntiDebuffButton" Tag="antidebuff" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
+                                    <TextBlock Text="AntiDebuff" Foreground="{DynamicResource TextBrush}" FontSize="16" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </DockPanel>
                                 <TextBlock x:Name="AntiDebuffAvailabilityText" Text="Available" Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,0,0,8"/>
                                 <CheckBox Content="Enable AntiDebuff" IsChecked="{Binding AntiDebuffEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
                                 <TextBlock Text="Suppresses Blindness only in the renderer while preserving its sprint/critical restrictions. Nausea and modern Darkness visuals are removed locally; the server still considers you affected."
@@ -614,7 +653,10 @@
                     <StackPanel Margin="12">
                         <Border x:Name="SpeedBridgeCard" Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
                             <StackPanel>
-                                <CheckBox Content="SpeedBridge" IsChecked="{Binding SpeedBridgeEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                <DockPanel>
+                                    <Button x:Name="KeybindSpeedBridgeButton" Tag="speedbridge" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
+                                    <CheckBox Content="SpeedBridge" IsChecked="{Binding SpeedBridgeEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                </DockPanel>
                                 <TextBlock x:Name="SpeedBridgeAvailabilityText" Text="Available" Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,6,0,0"/>
 
                                 <DockPanel Margin="0,10,0,0">
@@ -656,14 +698,20 @@
 
                         <Border x:Name="GtbHelperCard" Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
                             <StackPanel>
-                                <CheckBox Content="GTB Helper" IsChecked="{Binding GtbHelperEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                <DockPanel>
+                                    <Button x:Name="KeybindGtbHelperButton" Tag="gtbhelper" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
+                                    <CheckBox Content="GTB Helper" IsChecked="{Binding GtbHelperEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                </DockPanel>
                                 <TextBlock x:Name="GtbHelperAvailabilityText" Text="Hypixel Guess The Build helper using action-bar hints." Foreground="{DynamicResource DimTextBrush}" FontSize="12" Margin="0,8,0,0"/>
                             </StackPanel>
                         </Border>
 
                         <Border x:Name="PixelPartyAssistCard" Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
                             <StackPanel>
-                                <CheckBox Content="Pixel Party Assist" IsChecked="{Binding PixelPartyAssistEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                <DockPanel>
+                                    <Button x:Name="KeybindPixelPartyAssistButton" Tag="pixelpartyassist" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
+                                    <CheckBox Content="Pixel Party Assist" IsChecked="{Binding PixelPartyAssistEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                </DockPanel>
                                 <TextBlock x:Name="PixelPartyAssistAvailabilityText"
                                            Text="Hypixel Pixel Party: finds the closest matching terracotta on the floor."
                                            Foreground="{DynamicResource DimTextBrush}"
@@ -695,7 +743,10 @@
 
                         <Border x:Name="ChestStealerCard" Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
                             <StackPanel>
-                                <TextBlock Text="Chest Stealer" Foreground="{DynamicResource TextBrush}" FontSize="16" FontWeight="Bold" Margin="0,0,0,10" />
+                                <DockPanel Margin="0,0,0,10">
+                                    <Button x:Name="KeybindChestStealerButton" Tag="cheststealer" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
+                                    <TextBlock Text="Chest Stealer" Foreground="{DynamicResource TextBrush}" FontSize="16" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </DockPanel>
                                 <TextBlock x:Name="ChestStealerAvailabilityText" Text="Available" Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,0,0,8"/>
                                 <CheckBox Content="Enable Chest Stealer" IsChecked="{Binding ChestStealerEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
 
@@ -711,7 +762,10 @@
 
                         <Border Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
                             <StackPanel>
-                                <TextBlock Text="Panic" Foreground="{DynamicResource TextBrush}" FontSize="16" FontWeight="Bold"/>
+                                <DockPanel Margin="0,0,0,6">
+                                    <Button x:Name="KeybindPanicButton" Tag="panic" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
+                                    <TextBlock Text="Panic" Foreground="{DynamicResource TextBrush}" FontSize="16" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </DockPanel>
                                 <TextBlock Text="Immediately disables modules, hides UI/overlay settings, disconnects, and closes the loader. Best-effort only: this does not truly deinject while the game stays open."
                                            Foreground="{DynamicResource DimTextBrush}"
                                            FontSize="12"
@@ -721,11 +775,7 @@
                                         Click="PanicButton_Click"
                                         Style="{StaticResource DarkButton}"
                                         Width="170"
-                                        Margin="0,0,0,10"/>
-                                <TextBlock Text="You can also bind Panic in Module Keybinds."
-                                           Foreground="{DynamicResource DimTextBrush}"
-                                           FontSize="11"
-                                           TextWrapping="Wrap"/>
+                                        Margin="0,0,0,0"/>
                             </StackPanel>
                         </Border>
                     </StackPanel>
@@ -746,7 +796,10 @@
                                         <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
                                     </Style>
                                 </StackPanel.Resources>
-                                <CheckBox Content="Kill Aura" IsChecked="{Binding KillAuraEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                <DockPanel>
+                                    <Button x:Name="KeybindKillAuraButton" Tag="killaura" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
+                                    <CheckBox Content="Kill Aura" IsChecked="{Binding KillAuraEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                </DockPanel>
                                 <TextBlock x:Name="KillAuraAvailabilityText" Text="Available" Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,6,0,0"/>
                                 <Border Background="#33E0533D" BorderBrush="#E0533D" BorderThickness="1" CornerRadius="4" Padding="8,6" Margin="0,8,0,0">
                                     <TextBlock Foreground="#F0A090" FontSize="11" FontWeight="SemiBold" TextWrapping="Wrap"
@@ -819,7 +872,10 @@
 
                         <Border x:Name="ReachCard" Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
                             <StackPanel>
-                                <TextBlock Text="Reach" Foreground="{DynamicResource TextBrush}" FontSize="16" FontWeight="Bold" Margin="0,0,0,10" />
+                                <DockPanel Margin="0,0,0,10">
+                                    <Button x:Name="KeybindReachButton" Tag="reach" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
+                                    <TextBlock Text="Reach" Foreground="{DynamicResource TextBrush}" FontSize="16" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </DockPanel>
                                 <TextBlock x:Name="ReachAvailabilityText" Text="Available" Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,0,0,8"/>
                                 <CheckBox Content="Enable Reach" IsChecked="{Binding ReachEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
 
@@ -851,7 +907,10 @@
 
                         <Border x:Name="VelocityCard" Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
                             <StackPanel>
-                                <TextBlock Text="Velocity" Foreground="{DynamicResource TextBrush}" FontSize="16" FontWeight="Bold" Margin="0,0,0,10" />
+                                <DockPanel Margin="0,0,0,10">
+                                    <Button x:Name="KeybindVelocityButton" Tag="velocity" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
+                                    <TextBlock Text="Velocity" Foreground="{DynamicResource TextBrush}" FontSize="16" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </DockPanel>
                                 <TextBlock x:Name="VelocityAvailabilityText" Text="Available" Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,0,0,8"/>
                                 <TextBlock Text="idk if you should use it outside of singleplayer"
                                            Foreground="{DynamicResource DimTextBrush}"
@@ -887,7 +946,10 @@
 
                         <Border x:Name="AutoTotemCard" Style="{StaticResource ControlCardStyle}">
                             <StackPanel>
-                                <TextBlock Text="AutoTotem" Foreground="{DynamicResource TextBrush}" FontSize="16" FontWeight="Bold" Margin="0,0,0,10" />
+                                <DockPanel Margin="0,0,0,10">
+                                    <Button x:Name="KeybindAutoTotemButton" Tag="autototem" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
+                                    <TextBlock Text="AutoTotem" Foreground="{DynamicResource TextBrush}" FontSize="16" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </DockPanel>
                                 <TextBlock x:Name="AutoTotemAvailabilityText" Text="Available" Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,0,0,8"/>
                                 <CheckBox Content="Enable AutoTotem" IsChecked="{Binding AutoTotemEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
 
@@ -1321,41 +1383,6 @@
                                 <CheckBox Content="Dev Mode" IsChecked="{Binding DevMode, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}" Margin="0,8,0,0"/>
                                 <TextBlock Text="Shows unfinished modules (Kill Aura, …) in the GUI. Off by default."
                                            Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,4,0,0" TextWrapping="Wrap"/>
-                            </StackPanel>
-                        </Border>
-
-                        <Border Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
-                            <StackPanel>
-                                <TextBlock Text="Module Keybinds" Foreground="{DynamicResource TextBrush}" FontSize="16" FontWeight="Bold"/>
-                                <TextBlock Text="Click a button, then press a key (Esc = unbind)." Foreground="{DynamicResource DimTextBrush}" FontSize="12" Margin="0,4,0,10"/>
-                                <WrapPanel>
-                                    <Button x:Name="KeybindAutoclickerButton" Tag="autoclicker" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindRightClickButton" Tag="rightclick" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindJitterButton" Tag="jitter" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindClickInChestsButton" Tag="clickinchests" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindBreakBlocksButton" Tag="breakblocks" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindAimAssistButton" Tag="aimassist" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindTriggerbotButton" Tag="triggerbot" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindKillAuraButton" Tag="killaura" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"
-                                            Visibility="{Binding DevMode, Converter={StaticResource BooleanToVisibilityConverter}}"/>
-                                    <Button x:Name="KeybindSpeedBridgeButton" Tag="speedbridge" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindGtbHelperButton" Tag="gtbhelper" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindPixelPartyAssistButton" Tag="pixelpartyassist" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindNametagsButton" Tag="nametags" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindNickHiderButton" Tag="nickhider" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindChestEspButton" Tag="chestesp" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindChestStealerButton" Tag="cheststealer" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindBlockEspButton" Tag="blockesp" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindClosestPlayerButton" Tag="closestplayer" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindFightStatusButton" Tag="fightstatus" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindReachButton" Tag="reach" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindVelocityButton" Tag="velocity" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindAutoTotemButton" Tag="autototem" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindAutoRodButton" Tag="autorod" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindAntiDebuffButton" Tag="antidebuff" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindHitDelayFixButton" Tag="hitdelayfix" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                    <Button x:Name="KeybindPanicButton" Tag="panic" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" Margin="0,0,8,8" Width="170"/>
-                                </WrapPanel>
                             </StackPanel>
                         </Border>
                     </StackPanel>

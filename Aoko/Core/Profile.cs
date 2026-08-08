@@ -125,11 +125,8 @@ public class Profile
 
     public Dictionary<string, int> ModuleKeys { get; set; } = new()
     {
-        ["autoclicker"]      = 0xC0,
+        ["autoclicker"]      = 0,
         ["rightclick"]       = 0,
-        ["jitter"]           = 0,
-        ["clickinchests"]    = 0,
-        ["breakblocks"]      = 0,
         ["aimassist"]        = 0,
         ["triggerbot"]       = 0,
         ["killaura"]         = 0,
