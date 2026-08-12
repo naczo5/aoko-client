@@ -75,10 +75,10 @@ public class Profile
     public bool NametagShowArmor { get; set; } = true;
     public bool NametagShowHeldItem { get; set; } = true;
     public bool NametagHideVanilla { get; set; } = false;
-    public int NametagMaxCount { get; set; } = 8;
+    public int NametagRange { get; set; } = 4;
 
     public bool ChestEspEnabled { get; set; } = false;
-    public int ChestEspMaxCount { get; set; } = 5;
+    public int ChestEspRange { get; set; } = 4;
     public bool ChestStealerEnabled { get; set; } = false;
     public int ChestStealerDelayMs { get; set; } = 120;
 
@@ -512,9 +512,9 @@ public static class ProfileManager
             NametagShowArmor = clicker.NametagShowArmor,
             NametagShowHeldItem = clicker.NametagShowHeldItem,
             NametagHideVanilla = clicker.NametagHideVanilla,
-            NametagMaxCount = clicker.NametagMaxCount,
+            NametagRange = clicker.NametagRange,
             ChestEspEnabled = clicker.ChestEspEnabled,
-            ChestEspMaxCount = clicker.ChestEspMaxCount,
+            ChestEspRange = clicker.ChestEspRange,
             ChestStealerEnabled = clicker.ChestStealerEnabled,
             ChestStealerDelayMs = clicker.ChestStealerDelayMs,
 
@@ -640,9 +640,9 @@ public static class ProfileManager
         clicker.NametagShowArmor = profile.NametagShowArmor;
         clicker.NametagShowHeldItem = profile.NametagShowHeldItem;
         clicker.NametagHideVanilla = profile.NametagHideVanilla;
-        clicker.NametagMaxCount = profile.NametagMaxCount;
+        clicker.NametagRange = profile.NametagRange;
         clicker.ChestEspEnabled = profile.ChestEspEnabled;
-        clicker.ChestEspMaxCount = profile.ChestEspMaxCount;
+        clicker.ChestEspRange = profile.ChestEspRange;
         clicker.ChestStealerEnabled = profile.ChestStealerEnabled;
         clicker.ChestStealerDelayMs = profile.ChestStealerDelayMs;
 

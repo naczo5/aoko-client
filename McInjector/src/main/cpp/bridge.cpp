@@ -29,6 +29,8 @@
 #include "anti_debuff_jvmti.h"
 #include "hud_layout.h"
 #include "block_esp_common.h"
+#include "chest_esp_common.h"
+#include "chunk_scan_common.h"
 #include "bedplates_common.h"
 #include "bedplates_icons.h"
 #include "fight_status_core.h"
@@ -210,9 +212,9 @@ struct Config {
     bool nametagShowArmor = true;
     bool nametagShowHeldItem = true;
     bool nametagHideVanilla = false;
-    int nametagMaxCount = 8;
+    int nametagRange = 4; // chunks, clamp 1..8
     bool chestEsp = false;
-    int chestEspMaxCount = 5;
+    int chestEspRange = 4; // chunks, clamp 1..8
     bool chestStealer = false;
     int chestStealerDelayMs = 120;
     bool blockEsp = false;
@@ -9944,7 +9946,7 @@ void RenderNametags(
     bool nickHiderEnabled = false;
     bool fightStatusEnabled = false;
     bool entityTelemetryNeeded = false;
-    int nametagMaxCount = 8;
+    int nametagRange = 4;
     std::string guiTheme = "Default";
     std::string nickHiderAlias;
     nametagsEnabled = config.nametags;
@@ -9960,7 +9962,7 @@ void RenderNametags(
     showArmor = config.nametagShowArmor;
     showHeldItem = config.nametagShowHeldItem;
     hideVanillaTags = config.nametagHideVanilla;
-    nametagMaxCount = (std::max)(1, (std::min)(20, config.nametagMaxCount));
+    nametagRange = lc::ClampOverlayChunkRange(config.nametagRange);
     guiTheme = config.guiTheme;
     OverlayTheme nametagTheme = ResolveOverlayTheme(guiTheme);
 
@@ -10159,13 +10161,10 @@ void RenderNametags(
     std::stringstream ss;
     ss << "[";
     constexpr int kEntityJsonCap = 20;
-    const int entityProcessCap = (fightStatusEnabled || config.closestPlayerInfo)
+    const int entityProcessCap = (fightStatusEnabled || config.closestPlayerInfo ||
+        hideVanillaTags || g_legacyNametagSuppressionActive || nametagsEnabled)
         ? (std::max)(1, size)
-        : (hideVanillaTags || g_legacyNametagSuppressionActive)
-        ? (std::max)(1, size)
-        : nametagsEnabled
-            ? (std::max)(1, (std::min)(20, nametagMaxCount))
-            : kEntityJsonCap;
+        : kEntityJsonCap;
     bool suppressionAppliedThisPass = false;
     bool suppressionAttemptedThisPass = false;
     
@@ -10360,6 +10359,8 @@ void RenderNametags(
         double dy = iY - localPY;
         double dz = iZ - localPZ;
         double dist = sqrt(dx*dx + dy*dy + dz*dz);
+        const bool inNametagRange = lc::InChunkRange(
+            (int)std::floor(iX), (int)std::floor(iZ), localPX, localPZ, nametagRange);
 
         if (closestSnapshot && config.closestPlayerInfo &&
             dist < closestPlayerDistance && dist <= 96.0) {
@@ -10375,11 +10376,20 @@ void RenderNametags(
             closestSnapshot->localYaw = fallbackYaw;
         }
 
+        if (!nametagsEnabled && dist > 48.0 && !fightStatusEnabled) {
+            env->DeleteLocalRef(entity);
+            continue;
+        }
+
+        const bool wantNametagDraw = nametagsEnabled && inNametagRange;
+        const bool wantJsonSlot = count < kEntityJsonCap;
+        const bool wantProject = wantNametagDraw || fightStatusEnabled || wantJsonSlot;
+
         // Project (prefer matrix when stable, otherwise fallback to angle/FOV)
         float sX = 0, sY = 0;
         bool matrixProjected = false;
         float matrixSX = 0, matrixSY = 0;
-        if (matrixProjectionUsable) {
+        if (wantProject && matrixProjectionUsable) {
             matrixProjected = WorldToScreen(rX, rY + 2.3, rZ, view, proj, w, h, matrixSX, matrixSY);
         }
 
@@ -10438,7 +10448,7 @@ void RenderNametags(
         };
         float selectedAimX = aimSX;
         float selectedAimY = aimSY;
-        if (lc::aimassist::SelectClosestBodyPoint(
+        if (wantProject && lc::aimassist::SelectClosestBodyPoint(
                 iX, iY, iZ, w, h, projectAimBodyPoint,
                 &selectedAimX, &selectedAimY)) {
             aimSX = selectedAimX;
@@ -10447,10 +10457,6 @@ void RenderNametags(
         }
 
         if (projected) {
-             if (dist > 48.0) {
-                 env->DeleteLocalRef(entity);
-                 continue;
-             }
              if (sX < -64.0f || sX > (float)w + 64.0f || sY < -64.0f || sY > (float)h + 64.0f) {
                  env->DeleteLocalRef(entity);
                  continue;
@@ -10458,7 +10464,7 @@ void RenderNametags(
               if (!displayName.empty()) {
                   float hpClampedSimple = health < 0 ? 0 : (health > 40 ? 40 : health);
 
-                   if (!nametagsEnabled) {
+                   if (!nametagsEnabled || !inNametagRange) {
                        if (count < kEntityJsonCap) {
                            if (count > 0) ss << ",";
                            ss << "{";
@@ -10933,8 +10939,7 @@ void RenderChestESP(int w, int h, const Config& config) {
     static bool warnedChestMappings = false;
     TRACE_BRANCH("chestEspEnabled", config.chestEsp);
     if (!config.chestEsp) return;
-    const int chestEspMaxCount =
-        (std::max)(1, (std::min)(20, config.chestEspMaxCount));
+    const int chestEspRange = lc::ClampChestEspRange(config.chestEspRange);
     bool mappedReady = (g_mapped && g_mcInstance);
     TRACE_BRANCH("mappedReady", mappedReady);
     if (!mappedReady) return;
@@ -11065,8 +11070,9 @@ void RenderChestESP(int w, int h, const Config& config) {
         return;
     }
 
-    int drawn = 0;
-    for (int i = 0; i < size && drawn < chestEspMaxCount; i++) {
+    std::vector<lc::ChestEspCandidate> chests;
+    chests.reserve((size_t)(std::max)(0, size));
+    for (int i = 0; i < size; i++) {
         jobject te = env->CallObjectMethod(tileList, g_listGetMethod, i);
         if (env->ExceptionCheck()) { env->ExceptionClear(); break; }
         if (!te) continue;
@@ -11088,10 +11094,8 @@ void RenderChestESP(int w, int h, const Config& config) {
         }
 
         jobject posObj = env->GetObjectField(te, g_tileEntityPosField);
-        if (!posObj) {
-            env->DeleteLocalRef(te);
-            continue;
-        }
+        env->DeleteLocalRef(te);
+        if (!posObj) continue;
 
         int bx = env->CallIntMethod(posObj, g_blockPosGetX);
         int by = env->CallIntMethod(posObj, g_blockPosGetY);
@@ -11099,25 +11103,22 @@ void RenderChestESP(int w, int h, const Config& config) {
         env->DeleteLocalRef(posObj);
         if (env->ExceptionCheck()) {
             env->ExceptionClear();
-            env->DeleteLocalRef(te);
             continue;
         }
+        if (!lc::ChestEspInChunkRange(bx, bz, localPX, localPZ, chestEspRange)) continue;
 
-        double cx = (double)bx + 0.5;
-        double cy = (double)by + 0.5;
-        double cz = (double)bz + 0.5;
-        double dx = cx - localPX;
-        double dy = cy - localPY;
-        double dz = cz - localPZ;
-        double dist = sqrt(dx*dx + dy*dy + dz*dz);
-        if (dist > 64.0) {
-            env->DeleteLocalRef(te);
-            continue;
-        }
+        double dx = ((double)bx + 0.5) - localPX;
+        double dy = ((double)by + 0.5) - localPY;
+        double dz = ((double)bz + 0.5) - localPZ;
+        chests.push_back({ bx, by, bz, dx * dx + dy * dy + dz * dz });
+    }
+    lc::ChestEspSortNearestFirst(chests);
 
-        const double minX = (double)bx;
-        const double minY = (double)by;
-        const double minZ = (double)bz;
+    ImDrawList* fg = ImGui::GetForegroundDrawList();
+    for (const auto& chest : chests) {
+        const double minX = (double)chest.bx;
+        const double minY = (double)chest.by;
+        const double minZ = (double)chest.bz;
         const double maxX = minX + 1.0;
         const double maxY = minY + 1.0;
         const double maxZ = minZ + 1.0;
@@ -11141,25 +11142,18 @@ void RenderChestESP(int w, int h, const Config& config) {
             if (sy > bottom) bottom = sy;
         }
 
-        if (projected && right > left && bottom > top) {
-            left = (std::max)(left, 0.0f);
-            top = (std::max)(top, 0.0f);
-            right = (std::min)(right, (float)w);
-            bottom = (std::min)(bottom, (float)h);
-            if (right <= left || bottom <= top) {
-                env->DeleteLocalRef(te);
-                continue;
-            }
+        if (!projected || right <= left || bottom <= top) continue;
+        left = (std::max)(left, 0.0f);
+        top = (std::max)(top, 0.0f);
+        right = (std::min)(right, (float)w);
+        bottom = (std::min)(bottom, (float)h);
+        if (right <= left || bottom <= top) continue;
 
-            float t = (std::min)((float)(dist / 40.0), 1.0f);
-            ImU32 boxColor = IM_COL32(255, 165 + (int)(90 * t), 0 + (int)(80 * t), (int)(220 - 40 * t));
-            ImDrawList* fg = ImGui::GetForegroundDrawList();
-            fg->AddRectFilled(ImVec2(left, top), ImVec2(right, bottom), IM_COL32(0, 0, 0, 90));
-            fg->AddRect(ImVec2(left, top), ImVec2(right, bottom), boxColor, 0.0f, 0, 1.5f);
-            drawn++;
-        }
-
-        env->DeleteLocalRef(te);
+        const double dist = std::sqrt(chest.distSq);
+        float t = (std::min)((float)(dist / 40.0), 1.0f);
+        ImU32 boxColor = IM_COL32(255, 165 + (int)(90 * t), 0 + (int)(80 * t), (int)(220 - 40 * t));
+        fg->AddRectFilled(ImVec2(left, top), ImVec2(right, bottom), IM_COL32(0, 0, 0, 90));
+        fg->AddRect(ImVec2(left, top), ImVec2(right, bottom), boxColor, 0.0f, 0, 1.5f);
     }
 
     env->PopLocalFrame(nullptr);
@@ -11179,11 +11173,6 @@ static LONG g_blockEspTargetBlocksVersion18 = -1;
 
 struct BlockEspChunkCache18 { std::vector<BlockEspData18> hits; };
 static std::map<long long, BlockEspChunkCache18> g_blockEspChunkCache18;
-
-static long long BlockEspChunkKey18(int cx, int cz) {
-    return ((long long)(unsigned int)cx << 32) | (unsigned int)cz;
-}
-static int BlockEspAbsI18(int v) { return v < 0 ? -v : v; }
 
 static void EnsureBlockClass18(JNIEnv* env) {
     if (g_blockClass18) return;
@@ -11235,177 +11224,6 @@ static void EnsureBlockEspTargetBlocks18(JNIEnv* env) {
     g_blockEspTargetBlocksVersion18 = ver;
 }
 
-static void UpdateBlockEspListLegacy(JNIEnv* env, const Config& cfg) {
-    DWORD now = GetTickCount();
-    if (now - g_lastBlockEspScanMs < 120) return;
-    g_lastBlockEspScanMs = now;
-
-    if (!g_mcInstance || !g_theWorldField || !g_thePlayerField || !g_posXField || !g_posYField || !g_posZField) return;
-
-    EnsureBlockEspTargetBlocks18(env);
-    if (g_blockEspTargetBlocks18.empty()) {
-        { LockGuard lk(g_blockEspListMutex); g_blockEspList.clear(); }
-        g_blockEspChunkCache18.clear();
-        return;
-    }
-
-    int range = (std::max)(1, (std::min)(8, cfg.blockEspRange));
-    int maxCount = (std::max)(1, (std::min)(512, cfg.blockEspMaxCount));
-
-    jobject world = env->GetObjectField(g_mcInstance, g_theWorldField);
-    if (env->ExceptionCheck()) { env->ExceptionClear(); world = nullptr; }
-    if (!world) return;
-    jobject player = env->GetObjectField(g_mcInstance, g_thePlayerField);
-    if (env->ExceptionCheck()) { env->ExceptionClear(); player = nullptr; }
-    if (!player) { env->DeleteLocalRef(world); return; }
-
-    double px = env->GetDoubleField(player, g_posXField);
-    double py = env->GetDoubleField(player, g_posYField);
-    double pz = env->GetDoubleField(player, g_posZField);
-    env->DeleteLocalRef(player);
-
-    // Resolve chunk/storage methods lazily.
-    if (!g_worldGetChunk18) {
-        jclass wcls = env->GetObjectClass(world);
-        if (wcls) {
-            const char* names[] = { "getChunkFromChunkCoords", "func_72964_e", "getChunk", nullptr };
-            for (int i = 0; names[i] && !g_worldGetChunk18; i++) {
-                g_worldGetChunk18 = env->GetMethodID(wcls, names[i], "(II)Lnet/minecraft/world/chunk/Chunk;");
-                if (env->ExceptionCheck()) { env->ExceptionClear(); g_worldGetChunk18 = nullptr; }
-            }
-            env->DeleteLocalRef(wcls);
-        }
-    }
-    if (!g_worldGetChunk18) { env->DeleteLocalRef(world); return; }
-
-    int pcx = (int)std::floor(px) >> 4;
-    int pcz = (int)std::floor(pz) >> 4;
-
-    // Evict out-of-range cache entries.
-    for (auto it = g_blockEspChunkCache18.begin(); it != g_blockEspChunkCache18.end(); ) {
-        int ccx = (int)(it->first >> 32);
-        int ccz = (int)(it->first & 0xffffffff);
-        if (BlockEspAbsI18(ccx - pcx) > range || BlockEspAbsI18(ccz - pcz) > range)
-            it = g_blockEspChunkCache18.erase(it);
-        else ++it;
-    }
-
-    // Round-robin: scan at most one missing chunk per tick.
-    const int CHUNK_BUDGET = 1;
-    int scanned = 0;
-    for (int dx = -range; dx <= range && scanned < CHUNK_BUDGET; dx++) {
-        for (int dz = -range; dz <= range && scanned < CHUNK_BUDGET; dz++) {
-            int cx = pcx + dx, cz = pcz + dz;
-            long long key = BlockEspChunkKey18(cx, cz);
-            if (g_blockEspChunkCache18.find(key) != g_blockEspChunkCache18.end()) continue;
-
-            BlockEspChunkCache18 cache;
-            jobject chunk = env->CallObjectMethod(world, g_worldGetChunk18, cx, cz);
-            if (env->ExceptionCheck()) { env->ExceptionClear(); chunk = nullptr; }
-            if (!chunk) continue;
-
-            if (!g_chunkGetStorageArray18) {
-                jclass ccls = env->GetObjectClass(chunk);
-                if (ccls) {
-                    const char* names[] = { "getBlockStorageArray", "func_76587_i", nullptr };
-                    for (int i = 0; names[i] && !g_chunkGetStorageArray18; i++) {
-                        g_chunkGetStorageArray18 = env->GetMethodID(ccls, names[i], "()[Lnet/minecraft/world/chunk/storage/ExtendedBlockStorage;");
-                        if (env->ExceptionCheck()) { env->ExceptionClear(); g_chunkGetStorageArray18 = nullptr; }
-                    }
-                    env->DeleteLocalRef(ccls);
-                }
-            }
-            if (!g_chunkGetStorageArray18) { env->DeleteLocalRef(chunk); break; }
-
-            jobjectArray storages = (jobjectArray)env->CallObjectMethod(chunk, g_chunkGetStorageArray18);
-            if (env->ExceptionCheck()) { env->ExceptionClear(); storages = nullptr; }
-            if (storages) {
-                jsize nsec = env->GetArrayLength(storages);
-                for (jsize si = 0; si < nsec; si++) {
-                    jobject sec = env->GetObjectArrayElement(storages, si);
-                    if (env->ExceptionCheck()) { env->ExceptionClear(); sec = nullptr; }
-                    if (!sec) continue; // null = empty section in 1.8.9
-
-                    if (!g_storageGet18) {
-                        jclass scls = env->GetObjectClass(sec);
-                        if (scls) {
-                            if (!g_storageClass18) g_storageClass18 = (jclass)env->NewGlobalRef(scls);
-                            const char* names[] = { "get", "func_177485_a", nullptr };
-                            for (int i = 0; names[i] && !g_storageGet18; i++) {
-                                g_storageGet18 = env->GetMethodID(scls, names[i], "(III)Lnet/minecraft/block/state/IBlockState;");
-                                if (env->ExceptionCheck()) { env->ExceptionClear(); g_storageGet18 = nullptr; }
-                            }
-                            env->DeleteLocalRef(scls);
-                        }
-                    }
-                    if (g_storageGet18) {
-                        int sectionMinY = (int)si * 16;
-                        for (int ly = 0; ly < 16; ly++) {
-                            for (int lz = 0; lz < 16; lz++) {
-                                for (int lx = 0; lx < 16; lx++) {
-                                    jobject state = env->CallObjectMethod(sec, g_storageGet18, lx, ly, lz);
-                                    if (env->ExceptionCheck()) { env->ExceptionClear(); state = nullptr; }
-                                    if (!state) continue;
-                                    if (!g_blockStateGetBlockMethod) {
-                                        jclass stcls = env->GetObjectClass(state);
-                                        if (stcls) {
-                                            const char* names[] = { "getBlock", "func_177230_c", nullptr };
-                                            for (int i = 0; names[i] && !g_blockStateGetBlockMethod; i++) {
-                                                g_blockStateGetBlockMethod = env->GetMethodID(stcls, names[i], "()Lnet/minecraft/block/Block;");
-                                                if (env->ExceptionCheck()) { env->ExceptionClear(); g_blockStateGetBlockMethod = nullptr; }
-                                            }
-                                            env->DeleteLocalRef(stcls);
-                                        }
-                                    }
-                                    if (g_blockStateGetBlockMethod) {
-                                        jobject block = env->CallObjectMethod(state, g_blockStateGetBlockMethod);
-                                        if (env->ExceptionCheck()) { env->ExceptionClear(); block = nullptr; }
-                                        if (block) {
-                                            for (const auto& tb : g_blockEspTargetBlocks18) {
-                                                if (env->IsSameObject(tb.block, block)) {
-                                                    double wx = (double)cx * 16 + lx + 0.5;
-                                                    double wy = (double)sectionMinY + ly + 0.5;
-                                                    double wz = (double)cz * 16 + lz + 0.5;
-                                                    cache.hits.push_back({ wx, wy, wz, tb.color, 0.0 });
-                                                    break;
-                                                }
-                                            }
-                                            env->DeleteLocalRef(block);
-                                        }
-                                    }
-                                    env->DeleteLocalRef(state);
-                                }
-                            }
-                        }
-                    }
-                    env->DeleteLocalRef(sec);
-                }
-                env->DeleteLocalRef(storages);
-            }
-            env->DeleteLocalRef(chunk);
-            g_blockEspChunkCache18[key] = std::move(cache);
-            scanned++;
-        }
-    }
-
-    env->DeleteLocalRef(world);
-
-    static thread_local std::vector<BlockEspData18> merged;
-    merged.clear();
-    for (auto& kv : g_blockEspChunkCache18) {
-        for (auto& h : kv.second.hits) {
-            double ddx = h.x - px, ddy = h.y - py, ddz = h.z - pz;
-            BlockEspData18 d = h;
-            d.dist = std::sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
-            merged.push_back(d);
-        }
-    }
-    std::sort(merged.begin(), merged.end(),
-              [](const BlockEspData18& a, const BlockEspData18& b) { return a.dist < b.dist; });
-    if ((int)merged.size() > maxCount) merged.resize(maxCount);
-    { LockGuard lk(g_blockEspListMutex); g_blockEspList.swap(merged); }
-}
-
 // ===================== BED PLATES (legacy 1.8.9) =====================
 // Round-robin chunk scan (reusing the Block ESP chunk-section machinery) that
 // detects bed blocks, dedupes head/foot pairs, and samples nearby block ids
@@ -11443,23 +11261,120 @@ struct BedPlateCandidate18 { int x, y, z; };
 struct BedPlatesChunkCache18 { std::vector<BedPlateCandidate18> beds; };
 static std::map<long long, BedPlatesChunkCache18> g_bedPlatesChunkCache18;
 
-static void UpdateBedPlatesListLegacy(JNIEnv* env, const Config& cfg) {
+static void PublishBlockEspFromCache18(double px, double py, double pz, int maxCount) {
+    static thread_local std::vector<BlockEspData18> merged;
+    merged.clear();
+    for (auto& kv : g_blockEspChunkCache18) {
+        for (auto& h : kv.second.hits) {
+            double ddx = h.x - px, ddy = h.y - py, ddz = h.z - pz;
+            BlockEspData18 d = h;
+            d.dist = std::sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
+            merged.push_back(d);
+        }
+    }
+    std::sort(merged.begin(), merged.end(),
+              [](const BlockEspData18& a, const BlockEspData18& b) { return a.dist < b.dist; });
+    if ((int)merged.size() > maxCount) merged.resize(maxCount);
+    { LockGuard lk(g_blockEspListMutex); g_blockEspList.swap(merged); }
+}
+
+static void PublishBedPlatesFromCache18(JNIEnv* env, double px, double py, double pz, DWORD now, int scanned) {
+    static thread_local std::vector<BedPlateCandidate18> allBeds;
+    allBeds.clear();
+    for (auto& kv : g_bedPlatesChunkCache18)
+        for (auto& b : kv.second.beds) allBeds.push_back(b);
+
+    auto hasBedAt = [&](int x, int y, int z) -> bool {
+        for (auto& b : allBeds) if (b.x == x && b.y == y && b.z == z) return true;
+        return false;
+    };
+
+    struct CanonicalBed18 { int x, y, z; int facing; double dist; };
+    static thread_local std::vector<CanonicalBed18> canonical;
+    canonical.clear();
+    for (auto& b : allBeds) {
+        bool hasNegX = hasBedAt(b.x - 1, b.y, b.z);
+        bool hasNegZ = hasBedAt(b.x, b.y, b.z - 1);
+        if (!lc::BedPlatesIsCanonicalHalf(hasNegX, hasNegZ)) continue;
+        int ox = 0, oz = 0;
+        if (hasBedAt(b.x + 1, b.y, b.z)) ox = 1;
+        else if (hasBedAt(b.x - 1, b.y, b.z)) ox = -1;
+        else if (hasBedAt(b.x, b.y, b.z + 1)) oz = 1;
+        else if (hasBedAt(b.x, b.y, b.z - 1)) oz = -1;
+        int facing = (ox == 0 && oz == 0) ? 0 : lc::BedFacingFromFootOffset(ox, oz);
+        double ddx = ((double)b.x + 0.5) - px;
+        double ddy = (double)b.y - py;
+        double ddz = ((double)b.z + 0.5) - pz;
+        CanonicalBed18 cb;
+        cb.x = b.x; cb.y = b.y; cb.z = b.z; cb.facing = facing;
+        cb.dist = std::sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
+        canonical.push_back(cb);
+    }
+    std::sort(canonical.begin(), canonical.end(),
+              [](const CanonicalBed18& a, const CanonicalBed18& b) { return a.dist < b.dist; });
+    const size_t kMaxBedPlates = 32;
+    if (canonical.size() > kMaxBedPlates) canonical.resize(kMaxBedPlates);
+
+    std::vector<BedPlateRenderData> result;
+    result.reserve(canonical.size());
+    static thread_local std::vector<lc::BedPlateSample> samples;
+    for (auto& bed : canonical) {
+        lc::CollectBedPlateSamples(bed.x, bed.y, bed.z, bed.facing, samples);
+        lc::BedPlateCountState counts;
+        for (auto& s : samples) {
+            std::string id;
+            if (LegacyGetBlockIdAtAny(env, s.x, s.y, s.z, &id)) {
+                counts.incrementBlock(s.layer, id);
+            }
+        }
+        counts.sortLayersByFrequency();
+        std::vector<std::string> visible;
+        counts.collectVisibleBlockIds(visible);
+        BedPlateRenderData d;
+        d.x = bed.x; d.y = bed.y; d.z = bed.z;
+        d.dist = bed.dist;
+        d.blocks = visible;
+        result.push_back(std::move(d));
+    }
+
+    static DWORD s_lastBedDiagMs = 0;
+    if (now - s_lastBedDiagMs > 2000) {
+        s_lastBedDiagMs = now;
+        Log("BedPlates: halves=" + std::to_string(allBeds.size())
+            + " plates=" + std::to_string(result.size())
+            + " cachedChunks=" + std::to_string(g_bedPlatesChunkCache18.size())
+            + " scannedThisTick=" + std::to_string(scanned));
+    }
+
+    { LockGuard lk(g_bedPlateListMutex); g_bedPlateList.swap(result); }
+}
+
+static void UpdateSectionChunkScansLegacy(JNIEnv* env, const Config& cfg) {
+    DWORD now = GetTickCount();
+    if (!g_mcInstance || !g_theWorldField || !g_thePlayerField || !g_posXField || !g_posYField || !g_posZField) return;
+
+    EnsureBlockEspTargetBlocks18(env);
+    const bool blockOn = cfg.blockEsp && !g_blockEspTargetBlocks18.empty();
+    jobject bedBlock = cfg.bedPlates ? EnsureBedBlock18(env) : nullptr;
+    const bool bedsOn = cfg.bedPlates && bedBlock != nullptr;
+
+    if (!cfg.blockEsp || g_blockEspTargetBlocks18.empty()) {
+        { LockGuard lk(g_blockEspListMutex); g_blockEspList.clear(); }
+        g_blockEspChunkCache18.clear();
+    }
     if (!cfg.bedPlates) {
         { LockGuard lk(g_bedPlateListMutex); g_bedPlateList.clear(); }
         g_bedPlatesChunkCache18.clear();
-        return;
     }
+    if (!blockOn && !bedsOn) return;
 
-    DWORD now = GetTickCount();
-    if (now - g_lastBedPlatesScanMs < 200) return;
-    g_lastBedPlatesScanMs = now;
+    const bool blockDue = blockOn && (now - g_lastBlockEspScanMs >= 120);
+    const bool bedsDue = bedsOn && (now - g_lastBedPlatesScanMs >= 200);
+    if (!blockDue && !bedsDue) return;
 
-    if (!g_mcInstance || !g_theWorldField || !g_thePlayerField || !g_posXField || !g_posYField || !g_posZField) return;
-
-    jobject bedBlock = EnsureBedBlock18(env);
-    if (!bedBlock) return;
-
-    int range = (std::max)(1, (std::min)(8, cfg.bedPlatesRange));
+    int blockRange = lc::ClampChunkRange(cfg.blockEspRange);
+    int bedRange = lc::ClampChunkRange(cfg.bedPlatesRange);
+    int maxCount = (std::max)(1, (std::min)(512, cfg.blockEspMaxCount));
 
     jobject world = env->GetObjectField(g_mcInstance, g_theWorldField);
     if (env->ExceptionCheck()) { env->ExceptionClear(); world = nullptr; }
@@ -11488,40 +11403,31 @@ static void UpdateBedPlatesListLegacy(JNIEnv* env, const Config& cfg) {
 
     int pcx = (int)std::floor(px) >> 4;
     int pcz = (int)std::floor(pz) >> 4;
+    if (blockOn) lc::EvictChunksOutsideRange(g_blockEspChunkCache18, pcx, pcz, blockRange);
+    if (bedsOn) lc::EvictChunksOutsideRange(g_bedPlatesChunkCache18, pcx, pcz, bedRange);
 
-    for (auto it = g_bedPlatesChunkCache18.begin(); it != g_bedPlatesChunkCache18.end(); ) {
-        int ccx = (int)(it->first >> 32);
-        int ccz = (int)(it->first & 0xffffffff);
-        if (BlockEspAbsI18(ccx - pcx) > range || BlockEspAbsI18(ccz - pcz) > range)
-            it = g_bedPlatesChunkCache18.erase(it);
-        else ++it;
-    }
+    const int visitRange = lc::MaxEnabledChunkRange(blockOn, blockRange, bedsOn, bedRange);
+    const int budget = lc::CombinedSectionChunkBudget(blockOn, bedsOn);
+    std::vector<std::pair<int, int> > chunkOrder;
+    lc::BuildNearToFarChunkOffsets(visitRange, chunkOrder);
 
-    // Build a near-to-far chunk order so the player's chunk is scanned first.
-    static thread_local std::vector<std::pair<int, int> > chunkOrder;
-    chunkOrder.clear();
-    for (int dx = -range; dx <= range; dx++)
-        for (int dz = -range; dz <= range; dz++)
-            chunkOrder.push_back(std::make_pair(dx, dz));
-    std::sort(chunkOrder.begin(), chunkOrder.end(),
-              [](const std::pair<int, int>& a, const std::pair<int, int>& b) {
-                  int da = (a.first < 0 ? -a.first : a.first) + (a.second < 0 ? -a.second : a.second);
-                  int db = (b.first < 0 ? -b.first : b.first) + (b.second < 0 ? -b.second : b.second);
-                  return da < db;
-              });
-
-    const int CHUNK_BUDGET = 4;
     int scanned = 0;
-    for (size_t ci = 0; ci < chunkOrder.size() && scanned < CHUNK_BUDGET; ci++) {
+    for (size_t ci = 0; ci < chunkOrder.size() && scanned < budget; ci++) {
         int cx = pcx + chunkOrder[ci].first;
         int cz = pcz + chunkOrder[ci].second;
-        long long key = BlockEspChunkKey18(cx, cz);
-        if (g_bedPlatesChunkCache18.find(key) != g_bedPlatesChunkCache18.end()) continue;
+        long long key = lc::ChunkKey(cx, cz);
+        const bool needBlock = blockOn && lc::ChunkInChebyshevRange(cx, cz, pcx, pcz, blockRange)
+            && g_blockEspChunkCache18.find(key) == g_blockEspChunkCache18.end();
+        const bool needBeds = bedsOn && lc::ChunkInChebyshevRange(cx, cz, pcx, pcz, bedRange)
+            && g_bedPlatesChunkCache18.find(key) == g_bedPlatesChunkCache18.end();
+        if (!needBlock && !needBeds) continue;
 
-        BedPlatesChunkCache18 cache;
+        BlockEspChunkCache18 blockCache;
+        BedPlatesChunkCache18 bedCache;
         jobject chunk = env->CallObjectMethod(world, g_worldGetChunk18, cx, cz);
         if (env->ExceptionCheck()) { env->ExceptionClear(); chunk = nullptr; }
-        if (chunk) {
+        if (!chunk) continue;
+        {
             if (!g_chunkGetStorageArray18) {
                 jclass ccls = env->GetObjectClass(chunk);
                 if (ccls) {
@@ -11542,7 +11448,6 @@ static void UpdateBedPlatesListLegacy(JNIEnv* env, const Config& cfg) {
                         jobject sec = env->GetObjectArrayElement(storages, si);
                         if (env->ExceptionCheck()) { env->ExceptionClear(); sec = nullptr; }
                         if (!sec) continue;
-
                         if (!g_storageGet18) {
                             jclass scls = env->GetObjectClass(sec);
                             if (scls) {
@@ -11578,12 +11483,23 @@ static void UpdateBedPlatesListLegacy(JNIEnv* env, const Config& cfg) {
                                             jobject block = env->CallObjectMethod(state, g_blockStateGetBlockMethod);
                                             if (env->ExceptionCheck()) { env->ExceptionClear(); block = nullptr; }
                                             if (block) {
-                                                if (env->IsSameObject(block, bedBlock)) {
+                                                if (needBlock) {
+                                                    for (const auto& tb : g_blockEspTargetBlocks18) {
+                                                        if (env->IsSameObject(tb.block, block)) {
+                                                            double wx = (double)cx * 16 + lx + 0.5;
+                                                            double wy = (double)sectionMinY + ly + 0.5;
+                                                            double wz = (double)cz * 16 + lz + 0.5;
+                                                            blockCache.hits.push_back({ wx, wy, wz, tb.color, 0.0 });
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                                if (needBeds && env->IsSameObject(block, bedBlock)) {
                                                     BedPlateCandidate18 c;
                                                     c.x = (cx << 4) + lx;
                                                     c.y = sectionMinY + ly;
                                                     c.z = (cz << 4) + lz;
-                                                    cache.beds.push_back(c);
+                                                    bedCache.beds.push_back(c);
                                                 }
                                                 env->DeleteLocalRef(block);
                                             }
@@ -11600,82 +11516,16 @@ static void UpdateBedPlatesListLegacy(JNIEnv* env, const Config& cfg) {
             }
             env->DeleteLocalRef(chunk);
         }
-        g_bedPlatesChunkCache18[key] = std::move(cache);
+        if (needBlock) g_blockEspChunkCache18[key] = std::move(blockCache);
+        if (needBeds) g_bedPlatesChunkCache18[key] = std::move(bedCache);
         scanned++;
     }
 
     env->DeleteLocalRef(world);
-
-    static thread_local std::vector<BedPlateCandidate18> allBeds;
-    allBeds.clear();
-    for (auto& kv : g_bedPlatesChunkCache18)
-        for (auto& b : kv.second.beds) allBeds.push_back(b);
-
-    auto hasBedAt = [&](int x, int y, int z) -> bool {
-        for (auto& b : allBeds) if (b.x == x && b.y == y && b.z == z) return true;
-        return false;
-    };
-
-    struct CanonicalBed18 { int x, y, z; int facing; double dist; };
-    static thread_local std::vector<CanonicalBed18> canonical;
-    canonical.clear();
-    for (auto& b : allBeds) {
-        bool hasNegX = hasBedAt(b.x - 1, b.y, b.z);
-        bool hasNegZ = hasBedAt(b.x, b.y, b.z - 1);
-        if (!lc::BedPlatesIsCanonicalHalf(hasNegX, hasNegZ)) continue;
-        int ox = 0, oz = 0;
-        if (hasBedAt(b.x + 1, b.y, b.z)) ox = 1;
-        else if (hasBedAt(b.x - 1, b.y, b.z)) ox = -1;
-        else if (hasBedAt(b.x, b.y, b.z + 1)) oz = 1;
-        else if (hasBedAt(b.x, b.y, b.z - 1)) oz = -1;
-        // Unpaired → facing 0 (no foot expansion). Paired → Minecraft facing index.
-        int facing = (ox == 0 && oz == 0) ? 0 : lc::BedFacingFromFootOffset(ox, oz);
-        double ddx = ((double)b.x + 0.5) - px;
-        double ddy = (double)b.y - py;
-        double ddz = ((double)b.z + 0.5) - pz;
-        CanonicalBed18 cb;
-        cb.x = b.x; cb.y = b.y; cb.z = b.z; cb.facing = facing;
-        cb.dist = std::sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
-        canonical.push_back(cb);
-    }
-    std::sort(canonical.begin(), canonical.end(),
-              [](const CanonicalBed18& a, const CanonicalBed18& b) { return a.dist < b.dist; });
-    const size_t kMaxBedPlates = 32;
-    if (canonical.size() > kMaxBedPlates) canonical.resize(kMaxBedPlates);
-
-    std::vector<BedPlateRenderData> result;
-    result.reserve(canonical.size());
-    static thread_local std::vector<lc::BedPlateSample> samples;
-    for (auto& bed : canonical) {
-        lc::CollectBedPlateSamples(bed.x, bed.y, bed.z, bed.facing, samples);
-        lc::BedPlateCountState counts;
-        for (auto& s : samples) {
-            std::string id;
-            if (LegacyGetBlockIdAtAny(env, s.x, s.y, s.z, &id)) {
-                counts.incrementBlock(s.layer, id);
-            }
-        }
-        counts.sortLayersByFrequency();
-        std::vector<std::string> visible;
-        counts.collectVisibleBlockIds(visible);
-        // Always publish the plate — unprotected beds still get a distance/"Bed" callout.
-        BedPlateRenderData d;
-        d.x = bed.x; d.y = bed.y; d.z = bed.z;
-        d.dist = bed.dist;
-        d.blocks = visible;
-        result.push_back(std::move(d));
-    }
-
-    static DWORD s_lastBedDiagMs = 0;
-    if (now - s_lastBedDiagMs > 2000) {
-        s_lastBedDiagMs = now;
-        Log("BedPlates: halves=" + std::to_string(allBeds.size())
-            + " plates=" + std::to_string(result.size())
-            + " cachedChunks=" + std::to_string(g_bedPlatesChunkCache18.size())
-            + " scannedThisTick=" + std::to_string(scanned));
-    }
-
-    { LockGuard lk(g_bedPlateListMutex); g_bedPlateList.swap(result); }
+    if (blockDue) g_lastBlockEspScanMs = now;
+    if (bedsDue) g_lastBedPlatesScanMs = now;
+    if (blockOn) PublishBlockEspFromCache18(px, py, pz, maxCount);
+    if (bedsDue) PublishBedPlatesFromCache18(env, px, py, pz, now, scanned);
 }
 
 void RenderBlockESP(
@@ -12645,15 +12495,15 @@ void ParseConfig(const std::string& line) {
         g_config.nametagShowHeldItem = reader.GetBool("nametagShowHeldItem", true);
         g_config.nametagHideVanilla = reader.GetBool("nametagHideVanilla");
 
-        int nametagMaxCount = reader.GetInt("nametagMaxCount", -1);
-        if (nametagMaxCount < 1) nametagMaxCount = g_config.nametagMaxCount;
-        if (nametagMaxCount > 20) nametagMaxCount = 20;
-        g_config.nametagMaxCount = nametagMaxCount;
+        int nametagRange = reader.GetInt("nametagRange", -1);
+        if (nametagRange < 1) nametagRange = g_config.nametagRange;
+        if (nametagRange > 8) nametagRange = 8;
+        g_config.nametagRange = nametagRange;
 
-        int chestEspMaxCount = reader.GetInt("chestEspMaxCount", -1);
-        if (chestEspMaxCount < 1) chestEspMaxCount = g_config.chestEspMaxCount;
-        if (chestEspMaxCount > 20) chestEspMaxCount = 20;
-        g_config.chestEspMaxCount = chestEspMaxCount;
+        int chestEspRange = reader.GetInt("chestEspRange", -1);
+        if (chestEspRange < 1) chestEspRange = g_config.chestEspRange;
+        if (chestEspRange > 8) chestEspRange = 8;
+        g_config.chestEspRange = chestEspRange;
 
         int reachChance = reader.GetInt("reachChance", -1);
         if (reachChance < 1) reachChance = g_config.reachChance;
@@ -12925,11 +12775,10 @@ void ServerLoop() {
                     s_antiDebuffWasEnabled = cfgSnapshot.antiDebuffEnabled;
                 }
                 UpdateHitDelayFixLegacy(env, cfgSnapshot, state);
-                if (cfgSnapshot.blockEsp) {
-                    NativePerfScope blockScanPerf(lc::PERF_BLOCK_SCAN);
-                    UpdateBlockEspListLegacy(env, cfgSnapshot);
+                {
+                    NativePerfScope sectionScanPerf(lc::PERF_BLOCK_SCAN);
+                    UpdateSectionChunkScansLegacy(env, cfgSnapshot);
                 }
-                UpdateBedPlatesListLegacy(env, cfgSnapshot);
             }
             RecordNativePerfSince(lc::PERF_SCAN_LOOP, stateScanPerfStarted);
             if (!cfgSnapshot.reachEnabled) {

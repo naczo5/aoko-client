@@ -48,6 +48,50 @@ public sealed class LegacyRenderOptimizationTests
     }
 
     [Fact]
+    public void ChestEsp_SortsByDistanceAndUsesChunkRange()
+    {
+        string source = LegacyBridgeSource();
+        string renderer = Slice(
+            source,
+            "void RenderChestESP(",
+            "// ===================== BLOCK ESP");
+
+        Assert.Contains("ChestEspSortNearestFirst", renderer, StringComparison.Ordinal);
+        Assert.Contains("ChestEspInChunkRange", renderer, StringComparison.Ordinal);
+        Assert.Contains("chestEspRange", renderer, StringComparison.Ordinal);
+        Assert.DoesNotContain("chestEspMaxCount", renderer, StringComparison.Ordinal);
+        Assert.DoesNotContain("drawn < chestEspMaxCount", renderer, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Nametags_UseChunkRangeInsteadOfCountCap()
+    {
+        string source = LegacyBridgeSource();
+        string renderer = Slice(
+            source,
+            "void RenderNametags(",
+            "void RenderChestESP(");
+
+        Assert.Contains("nametagRange", renderer, StringComparison.Ordinal);
+        Assert.Contains("InChunkRange", renderer, StringComparison.Ordinal);
+        Assert.Contains("wantProject && matrixProjectionUsable", renderer, StringComparison.Ordinal);
+        Assert.DoesNotContain("nametagMaxCount", renderer, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SectionScans_ShareOneChunkVisitor()
+    {
+        string source = LegacyBridgeSource();
+        Assert.Contains("UpdateSectionChunkScansLegacy", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("UpdateBlockEspListLegacy", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("UpdateBedPlatesListLegacy", source, StringComparison.Ordinal);
+        Assert.Contains("CombinedSectionChunkBudget", source, StringComparison.Ordinal);
+        Assert.Contains("CombinedSectionChunkBudget(blockOn, bedsOn)", source, StringComparison.Ordinal);
+        Assert.Contains("if (!chunk) continue", source, StringComparison.Ordinal);
+        Assert.Contains("if (bedsDue) PublishBedPlatesFromCache18", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void HeldItemNametagSetting_IsParsedAndApplied()
     {
         string source = LegacyBridgeSource();

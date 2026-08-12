@@ -58,12 +58,28 @@ echo [NativeTests] Running mapping_probe_gate_tests.exe...
 tests\mapping_probe_gate_tests.exe
 if %errorlevel% neq 0 exit /b %errorlevel%
 
+echo [NativeTests] Building chunk_scan_tests.exe...
+"%GPP%" -m64 -std=c++11 -O2 -static-libgcc -static-libstdc++ -o tests\chunk_scan_tests.exe tests\chunk_scan_tests.cpp
+if %errorlevel% neq 0 exit /b %errorlevel%
+
+echo [NativeTests] Running chunk_scan_tests.exe...
+tests\chunk_scan_tests.exe
+if %errorlevel% neq 0 exit /b %errorlevel%
+
 echo [NativeTests] Building block_esp_tests.exe...
 "%GPP%" -m64 -std=c++11 -O2 -static-libgcc -static-libstdc++ -o tests\block_esp_tests.exe tests\block_esp_tests.cpp
 if %errorlevel% neq 0 exit /b %errorlevel%
 
 echo [NativeTests] Running block_esp_tests.exe...
 tests\block_esp_tests.exe
+if %errorlevel% neq 0 exit /b %errorlevel%
+
+echo [NativeTests] Building chest_esp_tests.exe...
+"%GPP%" -m64 -std=c++11 -O2 -static-libgcc -static-libstdc++ -o tests\chest_esp_tests.exe tests\chest_esp_tests.cpp
+if %errorlevel% neq 0 exit /b %errorlevel%
+
+echo [NativeTests] Running chest_esp_tests.exe...
+tests\chest_esp_tests.exe
 if %errorlevel% neq 0 exit /b %errorlevel%
 
 echo [NativeTests] Building bedplates_tests.exe...

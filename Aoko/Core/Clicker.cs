@@ -937,17 +937,17 @@ public class Clicker : INotifyPropertyChanged
         }
     }
 
-    private int _nametagMaxCount = 8;
-    public int NametagMaxCount
+    private int _nametagRange = 4;
+    public int NametagRange
     {
-        get => _nametagMaxCount;
+        get => _nametagRange;
         set
         {
-            int clamped = Math.Clamp(value, 1, 20);
-            if (_nametagMaxCount != clamped)
+            int clamped = Math.Clamp(value, 1, 8);
+            if (_nametagRange != clamped)
             {
-                _nametagMaxCount = clamped;
-                OnPropertyChanged(nameof(NametagMaxCount));
+                _nametagRange = clamped;
+                OnPropertyChanged(nameof(NametagRange));
                 StateChanged?.Invoke();
             }
         }
@@ -965,17 +965,17 @@ public class Clicker : INotifyPropertyChanged
         }
     }
 
-    private int _chestEspMaxCount = 5;
-    public int ChestEspMaxCount
+    private int _chestEspRange = 4;
+    public int ChestEspRange
     {
-        get => _chestEspMaxCount;
+        get => _chestEspRange;
         set
         {
-            int clamped = Math.Clamp(value, 1, 20);
-            if (_chestEspMaxCount != clamped)
+            int clamped = Math.Clamp(value, 1, 8);
+            if (_chestEspRange != clamped)
             {
-                _chestEspMaxCount = clamped;
-                OnPropertyChanged(nameof(ChestEspMaxCount));
+                _chestEspRange = clamped;
+                OnPropertyChanged(nameof(ChestEspRange));
                 StateChanged?.Invoke();
             }
         }

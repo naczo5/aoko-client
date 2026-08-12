@@ -41,6 +41,8 @@
 #include "anti_debuff_jvmti.h"
 #include "hud_layout.h"
 #include "block_esp_common.h"
+#include "chest_esp_common.h"
+#include "chunk_scan_common.h"
 #include "bedplates_common.h"
 #include "bedplates_icons.h"
 #include "fight_status_core.h"
@@ -239,8 +241,8 @@ struct Config {
     bool  nametagShowHeldItem = true;
     bool  supportsStatePatches = false;
     bool  nametagHideVanilla = false;
-    int   nametagMaxCount = 8;
-    int   chestEspMaxCount = 5;
+    int   nametagRange = 4; // chunks, clamp 1..8
+    int   chestEspRange = 4; // chunks, clamp 1..8
     bool  rightClick     = false;
     int   moduleListStyle = 0;
     bool  showLogo       = true;
@@ -483,8 +485,8 @@ static void ParseConfig(const std::string& line) {
     g_config.nametagArmor  = reader.GetBool("nametagShowArmor");
     g_config.nametagShowHeldItem = reader.GetBool("nametagShowHeldItem", true);
     g_config.nametagHideVanilla = reader.GetBool("nametagHideVanilla");
-    g_config.nametagMaxCount = lc::ClampInt(reader.GetInt("nametagMaxCount", g_config.nametagMaxCount), 1, 20);
-    g_config.chestEspMaxCount = lc::ClampInt(reader.GetInt("chestEspMaxCount", g_config.chestEspMaxCount), 1, 20);
+    g_config.nametagRange = lc::ClampInt(reader.GetInt("nametagRange", g_config.nametagRange), 1, 8);
+    g_config.chestEspRange = lc::ClampInt(reader.GetInt("chestEspRange", g_config.chestEspRange), 1, 8);
     g_config.chestStealerDelayMs = lc::ClampInt(reader.GetInt("chestStealerDelayMs", g_config.chestStealerDelayMs), 50, 500);
     g_config.blockEsp        = reader.GetBool("blockEspEnabled");
     g_config.blockEspBoxes   = reader.GetBool("blockEspBoxes", true);
@@ -1507,6 +1509,12 @@ struct ChestData121 {
 static std::vector<ChestData121> g_chestList;
 static Mutex g_chestListMutex;
 static DWORD g_lastChestScanMs = 0;
+struct ChestChunkCache121 { std::vector<ChestData121> hits; };
+static std::map<long long, ChestChunkCache121> g_chestChunkCache;
+
+static void ClearChestChunkCache121() {
+    g_chestChunkCache.clear();
+}
 
 // ── Block ESP / X-ray shared state ──
 struct BlockEspData121 { double x, y, z; unsigned int color; double dist; };
@@ -6904,7 +6912,8 @@ static void UpdateChestList(JNIEnv* env) {
 
     int pcx = (int)std::floor(sx) >> 4;
     int pcz = (int)std::floor(sz) >> 4;
-    const int RANGE = 4; // ±4 = 9×9 = 81 chunks (vs previous 17×17 = 289)
+    int RANGE = 4;
+    { LockGuard lk(g_configMutex); RANGE = lc::ClampChestEspRange(g_config.chestEspRange); }
 
     static DWORD lastLogMs = 0;
     bool shouldLog = (now - lastLogMs > 5000);
@@ -6917,14 +6926,22 @@ static void UpdateChestList(JNIEnv* env) {
     int chunksScanned = 0;
     int chunksWithBEMap = 0;
 
-    for (int dx = -RANGE; dx <= RANGE; dx++) {
-        for (int dz = -RANGE; dz <= RANGE; dz++) {
-            // Re-check transition guard inside the loop too
+    lc::EvictChunksOutsideRange(g_chestChunkCache, pcx, pcz, RANGE);
+    const int chestBudget = lc::ChestEspChunkScanBudget();
+    std::vector<std::pair<int, int> > chestOrder;
+    lc::BuildNearToFarChunkOffsets(RANGE, chestOrder);
+    for (size_t ci = 0; ci < chestOrder.size(); ci++) {
             if (IsWorldTransitionActive()) break;
-            jobject chunkObj = env->CallObjectMethod(worldObj, g_worldGetChunkMethod_121, pcx + dx, pcz + dz);
+            int ccx = pcx + chestOrder[ci].first;
+            int ccz = pcz + chestOrder[ci].second;
+            long long chestKey = lc::ChunkKey(ccx, ccz);
+            if (g_chestChunkCache.find(chestKey) != g_chestChunkCache.end()) continue;
+            if (chunksScanned >= chestBudget) continue;
+            jobject chunkObj = env->CallObjectMethod(worldObj, g_worldGetChunkMethod_121, ccx, ccz);
             if (env->ExceptionCheck()) { env->ExceptionClear(); continue; }
             if (!chunkObj) continue;
             chunksScanned++;
+            std::vector<ChestData121> chunkChests;
 
             if (!g_chunkBlockEntitiesMapField_121)
                 EnsureChunkBEMap(env, chunkObj);
@@ -7022,8 +7039,7 @@ static void UpdateChestList(JNIEnv* env) {
                                                     + " keyField=" + std::to_string(g_javaHMNodeKeyField ? 1 : 0));
                                             }
                                             if (gotPos) {
-                                                double ddx = cx2-sx, ddy = cy2-sy, ddz = cz2-sz;
-                                                localList.push_back({cx2, cy2, cz2, std::sqrt(ddx*ddx+ddy*ddy+ddz*ddz)});
+                                                chunkChests.push_back({cx2, cy2, cz2, 0.0});
                                             }
                                         }
                                         env->DeleteLocalRef(be);
@@ -7102,8 +7118,7 @@ static void UpdateChestList(JNIEnv* env) {
                                                 } else env->ExceptionClear();
                                             }
                                             if (gotPos) {
-                                                double ddx = cx2-sx, ddy = cy2-sy, ddz = cz2-sz;
-                                                localList.push_back({cx2, cy2, cz2, std::sqrt(ddx*ddx+ddy*ddy+ddz*ddz)});
+                                                chunkChests.push_back({cx2, cy2, cz2, 0.0});
                                             }
                                         }
                                         if (keyBp) env->DeleteLocalRef(keyBp);
@@ -7123,6 +7138,15 @@ static void UpdateChestList(JNIEnv* env) {
                 }
             }
             env->DeleteLocalRef(chunkObj);
+            g_chestChunkCache[chestKey].hits = std::move(chunkChests);
+    }
+
+    for (auto& kv : g_chestChunkCache) {
+        for (auto& h : kv.second.hits) {
+            ChestData121 d = h;
+            double ddx = d.x - sx, ddy = d.y - sy, ddz = d.z - sz;
+            d.dist = std::sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
+            localList.push_back(d);
         }
     }
 
@@ -7187,11 +7211,6 @@ static std::vector<BlockIdCacheEntry121> g_blockIdCache_121;
 struct BlockEspChunkCache121 { std::vector<BlockEspData121> hits; };
 static std::map<long long, BlockEspChunkCache121> g_blockEspChunkCache;
 static LONG g_blockEspCacheVersion = -1;
-
-static long long BlockEspChunkKey121(int cx, int cz) {
-    return ((long long)(unsigned int)cx << 32) | (unsigned int)(unsigned int)cz;
-}
-static int BlockEspAbsI(int v) { return v < 0 ? -v : v; }
 
 static void EnsureBlockEspSectionMappings(JNIEnv* env, jobject chunkObj, jobject worldObj) {
     if (!env) return;
@@ -7290,148 +7309,51 @@ static const std::string* BlockEspIdForBlock121(JNIEnv* env, jobject block) {
     return &g_blockIdCache_121.back().id;
 }
 
-static void UpdateBlockEspList(JNIEnv* env) {
-    DWORD now = GetTickCount();
-    if (now - g_lastBlockEspScanMs < 120) return;
-    if (IsWorldTransitionActive()) return;
-    // The fast-poll thread can invalidate this cache when it observes a loading
-    // screen. Keep the complete map operation on one synchronized ownership
-    // window so a transition cannot clear it during iteration or publication.
-    LockGuard blockCacheLock(g_blockEspCacheMutex);
-    if (IsWorldTransitionActive()) return;
-    {
-        std::string sn;
-        { LockGuard lk(g_jniStateMtx); sn = g_jniScreenName; }
-        if (sn.find("ContainerScreen") != std::string::npos ||
-            sn.find("AbstractContainerScreen") != std::string::npos) return;
-    }
-    g_lastBlockEspScanMs = now;
+struct BedPlateCandidate121 { int x, y, z; };
+struct BedPlatesChunkCache121 { std::vector<BedPlateCandidate121> beds; };
+static std::map<long long, BedPlatesChunkCache121> g_bedPlatesChunkCache;
+static Mutex g_bedPlatesCacheMutex;
 
-    std::vector<lc::BlockEspTargetDef> targets;
-    LONG version;
-    { LockGuard tlk(g_blockEspTargetsMutex); targets = g_blockEspTargets; version = g_blockEspTargetsVersion; }
-    int range, maxCount;
-    { LockGuard lk(g_configMutex); range = g_config.blockEspRange; maxCount = g_config.blockEspMaxCount; }
+static jclass g_javaLangClass_121 = nullptr;
+static jmethodID g_classGetName_121 = nullptr;
 
-    if (targets.empty()) {
-        { LockGuard lk(g_blockEspListMutex); g_blockEspList.clear(); }
-        g_blockEspChunkCache.clear();
-        return;
-    }
-    if (version != g_blockEspCacheVersion) {
-        g_blockEspChunkCache.clear();
-        g_blockEspCacheVersion = version;
-    }
-
-    if (!g_mcInstance || !g_worldField_121) return;
-    jobject worldObj = env->GetObjectField(g_mcInstance, g_worldField_121);
-    if (env->ExceptionCheck()) { env->ExceptionClear(); worldObj = nullptr; }
-    if (!worldObj) return;
-
-    double sx = 0, sy = 0, sz = 0;
-    { LockGuard lk(g_bgCamMutex); sx = g_bgCamState.camX; sy = g_bgCamState.camY; sz = g_bgCamState.camZ; }
-
-    if (!EnsureChunkAccess(env, worldObj)) { env->DeleteLocalRef(worldObj); return; }
-    EnsureChestStateDetectionCaches(env, nullptr); // resolves BlockState.getBlock + Block.getTranslationKey
-    EnsureBlockEspSectionMappings(env, nullptr, worldObj);
-
-    int pcx = (int)std::floor(sx) >> 4;
-    int pcz = (int)std::floor(sz) >> 4;
-
-    int bottomY = -64;
-    if (g_worldGetBottomY_121) {
-        int b = env->CallIntMethod(worldObj, g_worldGetBottomY_121);
-        if (env->ExceptionCheck()) env->ExceptionClear();
-        else if (b > -512 && b < 512) bottomY = b;
-    }
-
-    // Evict cache entries outside range.
-    for (auto it = g_blockEspChunkCache.begin(); it != g_blockEspChunkCache.end(); ) {
-        int ccx = (int)(it->first >> 32);
-        int ccz = (int)(it->first & 0xffffffff);
-        if (BlockEspAbsI(ccx - pcx) > range || BlockEspAbsI(ccz - pcz) > range)
-            it = g_blockEspChunkCache.erase(it);
-        else ++it;
-    }
-
-    // Round-robin: scan at most one missing chunk per tick to spread the one-time cost.
-    const int CHUNK_BUDGET = 1;
-    int scanned = 0;
-    for (int dx = -range; dx <= range && scanned < CHUNK_BUDGET; dx++) {
-        for (int dz = -range; dz <= range && scanned < CHUNK_BUDGET; dz++) {
-            if (IsWorldTransitionActive()) break;
-            int cx = pcx + dx, cz = pcz + dz;
-            long long key = BlockEspChunkKey121(cx, cz);
-            if (g_blockEspChunkCache.find(key) != g_blockEspChunkCache.end()) continue;
-
-            BlockEspChunkCache121 cache;
-            jobject chunkObj = env->CallObjectMethod(worldObj, g_worldGetChunkMethod_121, cx, cz);
-            if (env->ExceptionCheck()) { env->ExceptionClear(); chunkObj = nullptr; }
-            if (!chunkObj) continue;
-
-            if (!g_chunkGetSectionArray_121) EnsureBlockEspSectionMappings(env, chunkObj, worldObj);
-            if (!g_chunkGetSectionArray_121 || !g_sectionGetBlockState_121 || !g_stateGetBlock_121) {
-                env->DeleteLocalRef(chunkObj);
-                break; // mappings unavailable; bail this tick (feature degrades safely)
-            }
-
-            jobjectArray sections = (jobjectArray)env->CallObjectMethod(chunkObj, g_chunkGetSectionArray_121);
-            if (env->ExceptionCheck()) { env->ExceptionClear(); sections = nullptr; }
-            if (sections) {
-                jsize nsec = env->GetArrayLength(sections);
-                for (jsize si = 0; si < nsec; si++) {
-                    jobject sec = env->GetObjectArrayElement(sections, si);
-                    if (env->ExceptionCheck()) { env->ExceptionClear(); sec = nullptr; }
-                    if (!sec) continue;
-
-                    bool empty = false;
-                    if (g_sectionIsEmpty_121) {
-                        empty = env->CallBooleanMethod(sec, g_sectionIsEmpty_121) == JNI_TRUE;
-                        if (env->ExceptionCheck()) { env->ExceptionClear(); empty = false; }
-                    }
-                    if (!empty) {
-                        int sectionMinY = bottomY + (int)si * 16;
-                        for (int ly = 0; ly < 16; ly++) {
-                            for (int lz = 0; lz < 16; lz++) {
-                                for (int lx = 0; lx < 16; lx++) {
-                                    jobject state = env->CallObjectMethod(sec, g_sectionGetBlockState_121, lx, ly, lz);
-                                    if (env->ExceptionCheck()) { env->ExceptionClear(); state = nullptr; }
-                                    if (!state) continue;
-                                    jobject block = env->CallObjectMethod(state, g_stateGetBlock_121);
-                                    if (env->ExceptionCheck()) { env->ExceptionClear(); block = nullptr; }
-                                    if (block) {
-                                        const std::string* id = BlockEspIdForBlock121(env, block);
-                                        if (id && !id->empty()) {
-                                            for (const auto& tg : targets) {
-                                                if (tg.id == *id) {
-                                                    double wx = (double)cx * 16 + lx + 0.5;
-                                                    double wy = (double)sectionMinY + ly + 0.5;
-                                                    double wz = (double)cz * 16 + lz + 0.5;
-                                                    cache.hits.push_back({ wx, wy, wz, tg.color, 0.0 });
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                        env->DeleteLocalRef(block);
-                                    }
-                                    env->DeleteLocalRef(state);
-                                }
-                            }
-                        }
-                    }
-                    env->DeleteLocalRef(sec);
-                }
-                env->DeleteLocalRef(sections);
-            }
-            env->DeleteLocalRef(chunkObj);
-            g_blockEspChunkCache[key] = std::move(cache);
-            scanned++;
+static bool IsBedBlock121(JNIEnv* env, jobject block, const std::string* id) {
+    if (id && lc::IsBedBlockId(*id)) return true;
+    if (!block) return false;
+    jclass bcls = env->GetObjectClass(block);
+    if (!bcls) return false;
+    if (!g_javaLangClass_121) {
+        jclass classCls = env->FindClass("java/lang/Class");
+        if (env->ExceptionCheck()) { env->ExceptionClear(); classCls = nullptr; }
+        if (classCls) {
+            g_javaLangClass_121 = (jclass)env->NewGlobalRef(classCls);
+            env->DeleteLocalRef(classCls);
         }
     }
+    if (!g_classGetName_121 && g_javaLangClass_121) {
+        g_classGetName_121 = env->GetMethodID(g_javaLangClass_121, "getName", "()Ljava/lang/String;");
+        if (env->ExceptionCheck()) { env->ExceptionClear(); g_classGetName_121 = nullptr; }
+    }
+    bool isBed = false;
+    if (g_classGetName_121) {
+        jstring jn = (jstring)env->CallObjectMethod(bcls, g_classGetName_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); jn = nullptr; }
+        if (jn) {
+            const char* utf = env->GetStringUTFChars(jn, nullptr);
+            std::string cn = utf ? utf : "";
+            if (utf) env->ReleaseStringUTFChars(jn, utf);
+            env->DeleteLocalRef(jn);
+            if (cn.find("BedBlock") != std::string::npos
+                || (cn.size() >= 3 && cn.compare(cn.size() - 3, 3, "Bed") == 0)) {
+                isBed = true;
+            }
+        }
+    }
+    env->DeleteLocalRef(bcls);
+    return isBed;
+}
 
-    env->DeleteLocalRef(worldObj);
-
-    // Merge cached hits in range, compute distance, sort, cap.
+static void PublishBlockEspFromCache121(double sx, double sy, double sz, int maxCount) {
     std::vector<BlockEspData121> merged;
     for (auto& kv : g_blockEspChunkCache) {
         for (auto& h : kv.second.hits) {
@@ -7447,182 +7369,7 @@ static void UpdateBlockEspList(JNIEnv* env) {
     { LockGuard lk(g_blockEspListMutex); g_blockEspList.swap(merged); }
 }
 
-// ===================== BED PLATES SCAN (modern) =====================
-// Round-robin chunk scan (reusing the Block ESP chunk-section machinery) that
-// detects bed blocks, dedupes head/foot pairs, and samples nearby block ids
-// (via lc::CollectBedPlateSamples) for the on-screen callout.
-struct BedPlateCandidate121 { int x, y, z; };
-struct BedPlatesChunkCache121 { std::vector<BedPlateCandidate121> beds; };
-static std::map<long long, BedPlatesChunkCache121> g_bedPlatesChunkCache;
-static Mutex g_bedPlatesCacheMutex;
-
-static void UpdateBedPlatesList(JNIEnv* env) {
-    Config cfg;
-    { LockGuard lk(g_configMutex); cfg = g_config; }
-    if (!cfg.bedPlates) {
-        { LockGuard lk(g_bedPlateListMutex); g_bedPlateList.clear(); }
-        LockGuard cacheLk(g_bedPlatesCacheMutex);
-        g_bedPlatesChunkCache.clear();
-        return;
-    }
-
-    DWORD now = GetTickCount();
-    if (now - g_lastBedPlatesScanMs < lc::kBedPlatesScanIntervalMs) return;
-    if (IsWorldTransitionActive()) return;
-    LockGuard cacheLock(g_bedPlatesCacheMutex);
-    if (IsWorldTransitionActive()) return;
-    {
-        std::string sn;
-        { LockGuard lk(g_jniStateMtx); sn = g_jniScreenName; }
-        if (sn.find("ContainerScreen") != std::string::npos ||
-            sn.find("AbstractContainerScreen") != std::string::npos) return;
-    }
-    g_lastBedPlatesScanMs = now;
-
-    int range = lc::ClampInt(cfg.bedPlatesRange, 1, 8);
-
-    if (!g_mcInstance || !g_worldField_121) return;
-    jobject worldObj = env->GetObjectField(g_mcInstance, g_worldField_121);
-    if (env->ExceptionCheck()) { env->ExceptionClear(); worldObj = nullptr; }
-    if (!worldObj) return;
-
-    double sx = 0, sy = 0, sz = 0;
-    { LockGuard lk(g_bgCamMutex); sx = g_bgCamState.camX; sy = g_bgCamState.camY; sz = g_bgCamState.camZ; }
-
-    if (!EnsureChunkAccess(env, worldObj)) { env->DeleteLocalRef(worldObj); return; }
-    EnsureChestStateDetectionCaches(env, nullptr); // resolves BlockState.getBlock + Block.getTranslationKey
-    EnsureBlockEspSectionMappings(env, nullptr, worldObj);
-
-    int pcx = (int)std::floor(sx) >> 4;
-    int pcz = (int)std::floor(sz) >> 4;
-
-    int bottomY = -64;
-    if (g_worldGetBottomY_121) {
-        int b = env->CallIntMethod(worldObj, g_worldGetBottomY_121);
-        if (env->ExceptionCheck()) env->ExceptionClear();
-        else if (b > -512 && b < 512) bottomY = b;
-    }
-
-    for (auto it = g_bedPlatesChunkCache.begin(); it != g_bedPlatesChunkCache.end(); ) {
-        int ccx = (int)(it->first >> 32);
-        int ccz = (int)(it->first & 0xffffffff);
-        if (BlockEspAbsI(ccx - pcx) > range || BlockEspAbsI(ccz - pcz) > range)
-            it = g_bedPlatesChunkCache.erase(it);
-        else ++it;
-    }
-
-    // Near-to-far chunk order so the player's chunk is scanned first.
-    std::vector<std::pair<int, int> > chunkOrder;
-    chunkOrder.reserve((size_t)(2 * range + 1) * (size_t)(2 * range + 1));
-    for (int dx = -range; dx <= range; dx++)
-        for (int dz = -range; dz <= range; dz++)
-            chunkOrder.push_back(std::make_pair(dx, dz));
-    std::sort(chunkOrder.begin(), chunkOrder.end(),
-              [](const std::pair<int, int>& a, const std::pair<int, int>& b) {
-                  int da = (a.first < 0 ? -a.first : a.first) + (a.second < 0 ? -a.second : a.second);
-                  int db = (b.first < 0 ? -b.first : b.first) + (b.second < 0 ? -b.second : b.second);
-                  return da < db;
-              });
-
-    const int CHUNK_BUDGET = 4;
-    int scanned = 0;
-    for (size_t ci = 0; ci < chunkOrder.size() && scanned < CHUNK_BUDGET; ci++) {
-        if (IsWorldTransitionActive()) break;
-        int cx = pcx + chunkOrder[ci].first;
-        int cz = pcz + chunkOrder[ci].second;
-        long long key = BlockEspChunkKey121(cx, cz);
-        if (g_bedPlatesChunkCache.find(key) != g_bedPlatesChunkCache.end()) continue;
-
-        BedPlatesChunkCache121 cache;
-        jobject chunkObj = env->CallObjectMethod(worldObj, g_worldGetChunkMethod_121, cx, cz);
-        if (env->ExceptionCheck()) { env->ExceptionClear(); chunkObj = nullptr; }
-        if (chunkObj) {
-            if (!g_chunkGetSectionArray_121) EnsureBlockEspSectionMappings(env, chunkObj, worldObj);
-            if (g_chunkGetSectionArray_121 && g_sectionGetBlockState_121 && g_stateGetBlock_121) {
-                jobjectArray sections = (jobjectArray)env->CallObjectMethod(chunkObj, g_chunkGetSectionArray_121);
-                if (env->ExceptionCheck()) { env->ExceptionClear(); sections = nullptr; }
-                if (sections) {
-                    jsize nsec = env->GetArrayLength(sections);
-                    for (jsize si = 0; si < nsec; si++) {
-                        jobject sec = env->GetObjectArrayElement(sections, si);
-                        if (env->ExceptionCheck()) { env->ExceptionClear(); sec = nullptr; }
-                        if (!sec) continue;
-
-                        bool empty = false;
-                        if (g_sectionIsEmpty_121) {
-                            empty = env->CallBooleanMethod(sec, g_sectionIsEmpty_121) == JNI_TRUE;
-                            if (env->ExceptionCheck()) { env->ExceptionClear(); empty = false; }
-                        }
-                        if (!empty) {
-                            int sectionMinY = bottomY + (int)si * 16;
-                            for (int ly = 0; ly < 16; ly++) {
-                                for (int lz = 0; lz < 16; lz++) {
-                                    for (int lx = 0; lx < 16; lx++) {
-                                        jobject state = env->CallObjectMethod(sec, g_sectionGetBlockState_121, lx, ly, lz);
-                                        if (env->ExceptionCheck()) { env->ExceptionClear(); state = nullptr; }
-                                        if (!state) continue;
-                                        jobject block = env->CallObjectMethod(state, g_stateGetBlock_121);
-                                        if (env->ExceptionCheck()) { env->ExceptionClear(); block = nullptr; }
-                                        if (block) {
-                                            bool isBed = false;
-                                            const std::string* id = BlockEspIdForBlock121(env, block);
-                                            if (id && lc::IsBedBlockId(*id)) {
-                                                isBed = true;
-                                            } else {
-                                                // Class-name fallback (BedBlock) when translation key is empty/odd.
-                                                jclass bcls = env->GetObjectClass(block);
-                                                if (bcls) {
-                                                    jclass classCls = env->FindClass("java/lang/Class");
-                                                    if (env->ExceptionCheck()) { env->ExceptionClear(); classCls = nullptr; }
-                                                    jmethodID getName = classCls
-                                                        ? env->GetMethodID(classCls, "getName", "()Ljava/lang/String;")
-                                                        : nullptr;
-                                                    if (env->ExceptionCheck()) { env->ExceptionClear(); getName = nullptr; }
-                                                    if (getName) {
-                                                        jstring jn = (jstring)env->CallObjectMethod(bcls, getName);
-                                                        if (env->ExceptionCheck()) { env->ExceptionClear(); jn = nullptr; }
-                                                        if (jn) {
-                                                            const char* utf = env->GetStringUTFChars(jn, nullptr);
-                                                            std::string cn = utf ? utf : "";
-                                                            if (utf) env->ReleaseStringUTFChars(jn, utf);
-                                                            env->DeleteLocalRef(jn);
-                                                            if (cn.find("BedBlock") != std::string::npos
-                                                                || (cn.size() >= 3 && cn.compare(cn.size() - 3, 3, "Bed") == 0)) {
-                                                                isBed = true;
-                                                            }
-                                                        }
-                                                    }
-                                                    if (classCls) env->DeleteLocalRef(classCls);
-                                                    env->DeleteLocalRef(bcls);
-                                                }
-                                            }
-                                            if (isBed) {
-                                                BedPlateCandidate121 c;
-                                                c.x = (cx << 4) + lx;
-                                                c.y = sectionMinY + ly;
-                                                c.z = (cz << 4) + lz;
-                                                cache.beds.push_back(c);
-                                            }
-                                            env->DeleteLocalRef(block);
-                                        }
-                                        env->DeleteLocalRef(state);
-                                    }
-                                }
-                            }
-                        }
-                        env->DeleteLocalRef(sec);
-                    }
-                    env->DeleteLocalRef(sections);
-                }
-            }
-            env->DeleteLocalRef(chunkObj);
-        }
-        g_bedPlatesChunkCache[key] = std::move(cache);
-        scanned++;
-    }
-
-    env->DeleteLocalRef(worldObj);
-
+static void PublishBedPlatesFromCache121(JNIEnv* env, double sx, double sy, double sz, DWORD now, int scanned) {
     std::vector<BedPlateCandidate121> allBeds;
     for (auto& kv : g_bedPlatesChunkCache)
         for (auto& b : kv.second.beds) allBeds.push_back(b);
@@ -7673,7 +7420,6 @@ static void UpdateBedPlatesList(JNIEnv* env) {
         counts.sortLayersByFrequency();
         std::vector<std::string> visible;
         counts.collectVisibleBlockIds(visible);
-        // Always publish — unprotected beds still get a distance/"Bed" callout.
         BedPlateRenderData d;
         d.x = bed.x; d.y = bed.y; d.z = bed.z;
         d.dist = bed.dist;
@@ -7692,6 +7438,177 @@ static void UpdateBedPlatesList(JNIEnv* env) {
     }
 
     { LockGuard lk(g_bedPlateListMutex); g_bedPlateList.swap(result); }
+}
+
+// One section walk fills Block ESP and/or BedPlates for each visited chunk.
+static void UpdateSectionChunkScans(JNIEnv* env) {
+    Config cfg;
+    { LockGuard lk(g_configMutex); cfg = g_config; }
+
+    DWORD now = GetTickCount();
+    if (IsWorldTransitionActive()) return;
+
+    std::vector<lc::BlockEspTargetDef> targets;
+    LONG version;
+    { LockGuard tlk(g_blockEspTargetsMutex); targets = g_blockEspTargets; version = g_blockEspTargetsVersion; }
+    int blockRange = lc::ClampChunkRange(cfg.blockEspRange);
+    int bedRange = lc::ClampChunkRange(cfg.bedPlatesRange);
+    int maxCount = cfg.blockEspMaxCount;
+    if (maxCount < 1) maxCount = 1;
+    if (maxCount > 512) maxCount = 512;
+
+    const bool blockOn = cfg.blockEsp && !targets.empty();
+    const bool bedsOn = cfg.bedPlates;
+
+    if (!cfg.blockEsp || targets.empty()) {
+        { LockGuard lk(g_blockEspListMutex); g_blockEspList.clear(); }
+        { LockGuard lk(g_blockEspCacheMutex); g_blockEspChunkCache.clear(); }
+    }
+    if (!bedsOn) {
+        { LockGuard lk(g_bedPlateListMutex); g_bedPlateList.clear(); }
+        { LockGuard cacheLk(g_bedPlatesCacheMutex); g_bedPlatesChunkCache.clear(); }
+    }
+    if (!blockOn && !bedsOn) return;
+
+    const bool blockDue = blockOn && (now - g_lastBlockEspScanMs >= 120);
+    const bool bedsDue = bedsOn && (now - g_lastBedPlatesScanMs >= lc::kBedPlatesScanIntervalMs);
+    if (!blockDue && !bedsDue) return;
+
+    {
+        std::string sn;
+        { LockGuard lk(g_jniStateMtx); sn = g_jniScreenName; }
+        if (sn.find("ContainerScreen") != std::string::npos ||
+            sn.find("AbstractContainerScreen") != std::string::npos) return;
+    }
+
+    LockGuard blockCacheLock(g_blockEspCacheMutex);
+    LockGuard bedCacheLock(g_bedPlatesCacheMutex);
+    if (IsWorldTransitionActive()) return;
+
+    if (blockOn && version != g_blockEspCacheVersion) {
+        g_blockEspChunkCache.clear();
+        g_blockEspCacheVersion = version;
+    }
+
+    if (!g_mcInstance || !g_worldField_121) return;
+    jobject worldObj = env->GetObjectField(g_mcInstance, g_worldField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); worldObj = nullptr; }
+    if (!worldObj) return;
+
+    double sx = 0, sy = 0, sz = 0;
+    { LockGuard lk(g_bgCamMutex); sx = g_bgCamState.camX; sy = g_bgCamState.camY; sz = g_bgCamState.camZ; }
+
+    if (!EnsureChunkAccess(env, worldObj)) { env->DeleteLocalRef(worldObj); return; }
+    EnsureChestStateDetectionCaches(env, nullptr);
+    EnsureBlockEspSectionMappings(env, nullptr, worldObj);
+
+    int pcx = (int)std::floor(sx) >> 4;
+    int pcz = (int)std::floor(sz) >> 4;
+
+    int bottomY = -64;
+    if (g_worldGetBottomY_121) {
+        int b = env->CallIntMethod(worldObj, g_worldGetBottomY_121);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        else if (b > -512 && b < 512) bottomY = b;
+    }
+
+    if (blockOn) lc::EvictChunksOutsideRange(g_blockEspChunkCache, pcx, pcz, blockRange);
+    if (bedsOn) lc::EvictChunksOutsideRange(g_bedPlatesChunkCache, pcx, pcz, bedRange);
+
+    const int visitRange = lc::MaxEnabledChunkRange(blockOn, blockRange, bedsOn, bedRange);
+    const int budget = lc::CombinedSectionChunkBudget(blockOn, bedsOn);
+    std::vector<std::pair<int, int> > chunkOrder;
+    lc::BuildNearToFarChunkOffsets(visitRange, chunkOrder);
+
+    int scanned = 0;
+    for (size_t ci = 0; ci < chunkOrder.size() && scanned < budget; ci++) {
+        if (IsWorldTransitionActive()) break;
+        int cx = pcx + chunkOrder[ci].first;
+        int cz = pcz + chunkOrder[ci].second;
+        long long key = lc::ChunkKey(cx, cz);
+        const bool needBlock = blockOn && lc::ChunkInChebyshevRange(cx, cz, pcx, pcz, blockRange)
+            && g_blockEspChunkCache.find(key) == g_blockEspChunkCache.end();
+        const bool needBeds = bedsOn && lc::ChunkInChebyshevRange(cx, cz, pcx, pcz, bedRange)
+            && g_bedPlatesChunkCache.find(key) == g_bedPlatesChunkCache.end();
+        if (!needBlock && !needBeds) continue;
+
+        BlockEspChunkCache121 blockCache;
+        BedPlatesChunkCache121 bedCache;
+        jobject chunkObj = env->CallObjectMethod(worldObj, g_worldGetChunkMethod_121, cx, cz);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); chunkObj = nullptr; }
+        if (!chunkObj) continue;
+        if (!g_chunkGetSectionArray_121) EnsureBlockEspSectionMappings(env, chunkObj, worldObj);
+        if (!g_chunkGetSectionArray_121 || !g_sectionGetBlockState_121 || !g_stateGetBlock_121) {
+            env->DeleteLocalRef(chunkObj);
+            break;
+        }
+        {
+                jobjectArray sections = (jobjectArray)env->CallObjectMethod(chunkObj, g_chunkGetSectionArray_121);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); sections = nullptr; }
+                if (sections) {
+                    jsize nsec = env->GetArrayLength(sections);
+                    for (jsize si = 0; si < nsec; si++) {
+                        jobject sec = env->GetObjectArrayElement(sections, si);
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); sec = nullptr; }
+                        if (!sec) continue;
+                        bool empty = false;
+                        if (g_sectionIsEmpty_121) {
+                            empty = env->CallBooleanMethod(sec, g_sectionIsEmpty_121) == JNI_TRUE;
+                            if (env->ExceptionCheck()) { env->ExceptionClear(); empty = false; }
+                        }
+                        if (!empty) {
+                            int sectionMinY = bottomY + (int)si * 16;
+                            for (int ly = 0; ly < 16; ly++) {
+                                for (int lz = 0; lz < 16; lz++) {
+                                    for (int lx = 0; lx < 16; lx++) {
+                                        jobject state = env->CallObjectMethod(sec, g_sectionGetBlockState_121, lx, ly, lz);
+                                        if (env->ExceptionCheck()) { env->ExceptionClear(); state = nullptr; }
+                                        if (!state) continue;
+                                        jobject block = env->CallObjectMethod(state, g_stateGetBlock_121);
+                                        if (env->ExceptionCheck()) { env->ExceptionClear(); block = nullptr; }
+                                        if (block) {
+                                            const std::string* id = BlockEspIdForBlock121(env, block);
+                                            if (needBlock && id && !id->empty()) {
+                                                for (const auto& tg : targets) {
+                                                    if (tg.id == *id) {
+                                                        double wx = (double)cx * 16 + lx + 0.5;
+                                                        double wy = (double)sectionMinY + ly + 0.5;
+                                                        double wz = (double)cz * 16 + lz + 0.5;
+                                                        blockCache.hits.push_back({ wx, wy, wz, tg.color, 0.0 });
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            if (needBeds && IsBedBlock121(env, block, id)) {
+                                                BedPlateCandidate121 c;
+                                                c.x = (cx << 4) + lx;
+                                                c.y = sectionMinY + ly;
+                                                c.z = (cz << 4) + lz;
+                                                bedCache.beds.push_back(c);
+                                            }
+                                            env->DeleteLocalRef(block);
+                                        }
+                                        env->DeleteLocalRef(state);
+                                    }
+                                }
+                            }
+                        }
+                        env->DeleteLocalRef(sec);
+                    }
+                    env->DeleteLocalRef(sections);
+                }
+            env->DeleteLocalRef(chunkObj);
+        }
+        if (needBlock) g_blockEspChunkCache[key] = std::move(blockCache);
+        if (needBeds) g_bedPlatesChunkCache[key] = std::move(bedCache);
+        scanned++;
+    }
+
+    env->DeleteLocalRef(worldObj);
+    if (blockDue) g_lastBlockEspScanMs = now;
+    if (bedsDue) g_lastBedPlatesScanMs = now;
+    if (blockOn) PublishBlockEspFromCache121(sx, sy, sz, maxCount);
+    if (bedsDue) PublishBedPlatesFromCache121(env, sx, sy, sz, now, scanned);
 }
 
 // Require a few complete background polls after the world/player/camera state is
@@ -7732,6 +7649,7 @@ static void ScheduleWorldTransition(JNIEnv* env, const char* reason) {
     { LockGuard lk(g_playerListMutex); g_playerList.clear(); }
     ResetFightStatusState121();
     { LockGuard lk(g_chestListMutex); g_chestList.clear(); }
+    ClearChestChunkCache121();
     { LockGuard lk(g_blockEspListMutex); g_blockEspList.clear(); }
     { LockGuard lk(g_blockEspCacheMutex); g_blockEspChunkCache.clear(); }
     { LockGuard lk(g_bedPlateListMutex); g_bedPlateList.clear(); }
@@ -14053,9 +13971,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
     DWORD lastAutoRemapRetryMs = 0;
     DWORD lastNickHiderRefreshMs = 0;
     DWORD lastChestEspScanMs = 0;
-    DWORD lastBlockEspScanMs = 0;
     bool chestEspScanWasEnabled = false;
-    bool blockEspScanWasEnabled = false;
     bool entityProducerWasEnabled = false;
     // Teleport detection: track last scanned player position to catch same-world jumps
     // (arena teleports) that bypass the loading-screen / world-instance guards.
@@ -14277,21 +14193,9 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                     }
                     chestEspScanWasEnabled = chestEspScanEnabled;
 
-                    const bool blockEspScanDue =
-                        !blockEspScanWasEnabled ||
-                        lc::IsTelemetryIntervalDue(
-                            producerNowMs,
-                            lastBlockEspScanMs,
-                            lc::kBlockEspScanIntervalMs);
-                    if (cfg.blockEsp && blockEspScanDue && chunkScanReady) {
-                        NativePerfScope blockScanPerf(lc::PERF_BLOCK_SCAN);
-                        UpdateBlockEspList(env);
-                        lastBlockEspScanMs = producerNowMs;
-                    }
-                    blockEspScanWasEnabled = cfg.blockEsp;
-
-                    if (chunkScanReady) {
-                        UpdateBedPlatesList(env);
+                    {
+                        NativePerfScope sectionScanPerf(lc::PERF_BLOCK_SCAN);
+                        UpdateSectionChunkScans(env);
                     }
                 }
             } else if (g_stateJniReady && !inWorldNow) {
@@ -14315,6 +14219,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                 { LockGuard lk(g_playerListMutex); g_playerList.clear(); }
                 ResetFightStatusState121();
                 { LockGuard lk2(g_chestListMutex); g_chestList.clear(); }
+                ClearChestChunkCache121();
                 { LockGuard lkb(g_blockEspListMutex); g_blockEspList.clear(); }
                 { LockGuard lkCache(g_blockEspCacheMutex); g_blockEspChunkCache.clear(); }
                 { LockGuard lk3(g_bgCamMutex); g_bgCamState = BgCamState(); }
@@ -14341,6 +14246,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
             { LockGuard lk(g_playerListMutex); g_playerList.clear(); }
             ResetFightStatusState121();
             { LockGuard lk2(g_chestListMutex); g_chestList.clear(); }
+            ClearChestChunkCache121();
             { LockGuard lkb(g_blockEspListMutex); g_blockEspList.clear(); }
             { LockGuard lkCache(g_blockEspCacheMutex); g_blockEspChunkCache.clear(); }
             { LockGuard lk3(g_bgCamMutex); g_bgCamState = BgCamState(); }
@@ -14903,7 +14809,7 @@ static void RenderOverlayPanels(
             bool renderNametags = TRACE261_IF("renderNametags", (!g_realGuiOpen && cfg.nametags && sharedCamFound));
             if (renderNametags) {
                 drawnTags = 0;
-                const int nametagRenderCap = (std::max)(1, (std::min)(20, cfg.nametagMaxCount));
+                const int nametagRange = lc::ClampOverlayChunkRange(cfg.nametagRange);
                 const float nametagLayoutScale =
                     hudLayout.Resolve(lc::ELEM_NAMETAGS).scale;
 
@@ -14919,8 +14825,9 @@ static void RenderOverlayPanels(
                     const int   winH = (int)io.DisplaySize.y;
 
                     for (const auto& it : playerSnap) {
-                        if (drawnTags >= nametagRenderCap) break;
                         if (LooksLikeFakePlayerLine(it.name)) continue;
+                        if (!lc::InChunkRange((int)std::floor(it.ex), (int)std::floor(it.ez),
+                                cam.x, cam.z, nametagRange)) continue;
 
                         // Centre of player's head
                         const LegoVec3 headPos = { it.ex, it.ey + 1.9, it.ez };
@@ -15097,26 +15004,24 @@ static void RenderOverlayPanels(
                     const ImU32 espBg       = IM_COL32(0, 0, 0, 90);
                     const float lineThick   = 1.5f;
 
-                    constexpr double kChestEspMaxRenderDist = 64.0;
-                    const size_t maxChestRenderCount = (size_t)(std::max)(1, (std::min)(20, cfg.chestEspMaxCount));
+                    const int chestEspRange = lc::ClampChestEspRange(cfg.chestEspRange);
                     struct RenderChestCandidate { const ChestData121* chest; double dist; };
                     static thread_local std::vector<RenderChestCandidate> renderChests;
                     renderChests.clear();
                     renderChests.reserve(chestSnapshot.size());
                     for (const auto& ch : chestSnapshot) {
+                        if (!lc::ChestEspInChunkRange((int)std::floor(ch.x), (int)std::floor(ch.z),
+                                espCam.x, espCam.z, chestEspRange)) continue;
                         double dx = ch.x - espCam.x;
                         double dy = ch.y - espCam.y;
                         double dz = ch.z - espCam.z;
                         double distNow = std::sqrt(dx*dx + dy*dy + dz*dz);
-                        if (distNow > kChestEspMaxRenderDist) continue;
                         renderChests.push_back({ &ch, distNow });
                     }
                     std::sort(renderChests.begin(), renderChests.end(),
                         [](const RenderChestCandidate& a, const RenderChestCandidate& b) {
                             return a.dist < b.dist;
                         });
-                    if (renderChests.size() > maxChestRenderCount)
-                        renderChests.resize(maxChestRenderCount);
 
                     for (const auto& candidate : renderChests) {
                         const auto& ch = *candidate.chest;
