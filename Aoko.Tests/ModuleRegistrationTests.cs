@@ -108,6 +108,7 @@ public class ModuleRegistrationTests
             ["chestesp"] = "chestEsp",
             ["cheststealer"] = "chestStealerEnabled",
             ["blockesp"] = "blockEspEnabled",
+            ["bedplates"] = "bedPlatesEnabled",
             ["reach"] = "reachEnabled",
             ["velocity"] = "velocityEnabled",
             ["autototem"] = "autoTotemEnabled",
@@ -368,6 +369,7 @@ public class ModuleRegistrationTests
             case "chestesp": clicker.ChestEspEnabled = enabled; return true;
             case "cheststealer": clicker.ChestStealerEnabled = enabled; return true;
             case "blockesp": clicker.BlockEspEnabled = enabled; return true;
+            case "bedplates": clicker.BedPlatesEnabled = enabled; return true;
             case "reach": clicker.ReachEnabled = enabled; return true;
             case "velocity": clicker.VelocityEnabled = enabled; return true;
             case "autototem": clicker.AutoTotemEnabled = enabled; return true;

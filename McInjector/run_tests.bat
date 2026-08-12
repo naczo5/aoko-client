@@ -66,6 +66,14 @@ echo [NativeTests] Running block_esp_tests.exe...
 tests\block_esp_tests.exe
 if %errorlevel% neq 0 exit /b %errorlevel%
 
+echo [NativeTests] Building bedplates_tests.exe...
+"%GPP%" -m64 -std=c++11 -O2 -static-libgcc -static-libstdc++ -o tests\bedplates_tests.exe tests\bedplates_tests.cpp
+if %errorlevel% neq 0 exit /b %errorlevel%
+
+echo [NativeTests] Running bedplates_tests.exe...
+tests\bedplates_tests.exe
+if %errorlevel% neq 0 exit /b %errorlevel%
+
 echo [NativeTests] Building nick_hider_tests.exe...
 "%GPP%" -m64 -std=c++11 -O2 -static-libgcc -static-libstdc++ -o tests\nick_hider_tests.exe tests\nick_hider_tests.cpp
 if %errorlevel% neq 0 exit /b %errorlevel%

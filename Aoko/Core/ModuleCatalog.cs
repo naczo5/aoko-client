@@ -66,6 +66,7 @@ public static class ModuleCatalog
         new("chestesp", "Chest ESP", "cfg.chestEsp", c => c.ChestEspEnabled),
         new("cheststealer", "Chest Stealer", "cfg.chestStealer", c => c.ChestStealerEnabled),
         new("blockesp", "Block ESP", "cfg.blockEsp", c => c.BlockEspEnabled),
+        new("bedplates", "BedPlates", "cfg.bedPlates", c => c.BedPlatesEnabled),
         new("reach", "Reach", "cfg.reachEnabled", c => c.ReachEnabled),
         new("velocity", "Velocity", "cfg.velocityEnabled", c => c.VelocityEnabled),
         new("autototem", "AutoTotem", "cfg.autoTotemEnabled", c => c.AutoTotemEnabled),

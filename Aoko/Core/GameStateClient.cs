@@ -1158,6 +1158,9 @@ public class GameStateClient : INotifyPropertyChanged
                     blockEspMaxCount = clicker.BlockEspMaxCount,
                     blockEspRange = clicker.BlockEspRange,
                     blockEspBlocks = clicker.BlockEspBlocksSerialized,
+                    bedPlatesEnabled = clicker.BedPlatesEnabled,
+                    bedPlatesShowDistance = clicker.BedPlatesShowDistance,
+                    bedPlatesRange = clicker.BedPlatesRange,
                     reachEnabled = clicker.ReachEnabled,
                     reachMin = clicker.ReachMin,
                     reachMax = clicker.ReachMax,
@@ -1193,6 +1196,7 @@ public class GameStateClient : INotifyPropertyChanged
                     keybindChestEsp      = InputHooks.GetModuleKey("chestesp"),
                     keybindChestStealer  = InputHooks.GetModuleKey("cheststealer"),
                     keybindBlockEsp      = InputHooks.GetModuleKey("blockesp"),
+                    keybindBedPlates     = InputHooks.GetModuleKey("bedplates"),
                     keybindPixelPartyAssist = InputHooks.GetModuleKey("pixelpartyassist"),
                     keybindAutoRod = InputHooks.GetModuleKey("autorod"),
                     hudEditor = clicker.HudEditorActive,
@@ -1403,6 +1407,12 @@ public class GameStateClient : INotifyPropertyChanged
                     break;
                 case "toggleBlockEspHud":
                     clicker.BlockEspHud = !clicker.BlockEspHud;
+                    break;
+                case "toggleBedPlates":
+                    clicker.BedPlatesEnabled = !clicker.BedPlatesEnabled;
+                    break;
+                case "toggleBedPlatesShowDistance":
+                    clicker.BedPlatesShowDistance = !clicker.BedPlatesShowDistance;
                     break;
                 case "setChestStealerDelayMs":
                     clicker.ChestStealerDelayMs = (int)(node?["value"]?.GetValue<float>() ?? 120f);

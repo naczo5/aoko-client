@@ -90,6 +90,10 @@ public class Profile
     public int BlockEspRange { get; set; } = 4;
     public List<BlockEspTargetData> BlockEspTargets { get; set; } = BlockEspTargetData.BuildDefaults();
 
+    public bool BedPlatesEnabled { get; set; } = false;
+    public bool BedPlatesShowDistance { get; set; } = true;
+    public int BedPlatesRange { get; set; } = 4;
+
     public bool ReachEnabled { get; set; } = false;
     public float ReachMin { get; set; } = 3.0f;
     public float ReachMax { get; set; } = 3.0f;
@@ -140,6 +144,7 @@ public class Profile
         ["chestesp"]         = 0,
         ["cheststealer"]     = 0,
         ["blockesp"]         = 0,
+        ["bedplates"]        = 0,
         ["reach"]            = 0,
         ["velocity"]         = 0,
         ["autototem"]        = 0,
@@ -521,6 +526,10 @@ public static class ProfileManager
             BlockEspRange = clicker.BlockEspRange,
             BlockEspTargets = BuildBlockEspTargetData(clicker.BlockEspTargets),
 
+            BedPlatesEnabled = clicker.BedPlatesEnabled,
+            BedPlatesShowDistance = clicker.BedPlatesShowDistance,
+            BedPlatesRange = clicker.BedPlatesRange,
+
             ReachEnabled = clicker.ReachEnabled,
             ReachMin = clicker.ReachMin,
             ReachMax = clicker.ReachMax,
@@ -644,6 +653,10 @@ public static class ProfileManager
         clicker.BlockEspMaxCount = profile.BlockEspMaxCount;
         clicker.BlockEspRange = profile.BlockEspRange;
         clicker.BlockEspTargets = BuildBlockEspTargets(profile.BlockEspTargets);
+
+        clicker.BedPlatesEnabled = profile.BedPlatesEnabled;
+        clicker.BedPlatesShowDistance = profile.BedPlatesShowDistance;
+        clicker.BedPlatesRange = profile.BedPlatesRange;
 
         clicker.ReachEnabled = profile.ReachEnabled;
         clicker.ReachMin = profile.ReachMin;

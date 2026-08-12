@@ -487,6 +487,7 @@ public class Clicker : INotifyPropertyChanged
             ChestEspEnabled = false;
             ChestStealerEnabled = false;
             BlockEspEnabled = false;
+            BedPlatesEnabled = false;
             ReachEnabled = false;
             VelocityEnabled = false;
             AutoTotemEnabled = false;
@@ -1151,6 +1152,48 @@ public class Clicker : INotifyPropertyChanged
 
     /// <summary>Encodes the enabled targets as the delimited wire string sent to the bridge.</summary>
     public string BlockEspBlocksSerialized => BlockEspConfig.Serialize(_blockEspTargets);
+
+    // === BedPlates (block types around beds) ===
+
+    private bool _bedPlatesEnabled;
+    public bool BedPlatesEnabled
+    {
+        get => _bedPlatesEnabled;
+        set
+        {
+            if (_bedPlatesEnabled == value) return;
+            _bedPlatesEnabled = value;
+            OnPropertyChanged(nameof(BedPlatesEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _bedPlatesShowDistance = true;
+    public bool BedPlatesShowDistance
+    {
+        get => _bedPlatesShowDistance;
+        set
+        {
+            if (_bedPlatesShowDistance == value) return;
+            _bedPlatesShowDistance = value;
+            OnPropertyChanged(nameof(BedPlatesShowDistance));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private int _bedPlatesRange = 4;
+    public int BedPlatesRange
+    {
+        get => _bedPlatesRange;
+        set
+        {
+            int clamped = Math.Clamp(value, 1, 8);
+            if (_bedPlatesRange == clamped) return;
+            _bedPlatesRange = clamped;
+            OnPropertyChanged(nameof(BedPlatesRange));
+            StateChanged?.Invoke();
+        }
+    }
 
     private bool _showModuleList = true;
     public bool ShowModuleList

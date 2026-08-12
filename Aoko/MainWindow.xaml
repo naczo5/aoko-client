@@ -610,6 +610,25 @@
                         <Border Style="{StaticResource ControlCardStyle}">
                             <StackPanel>
                                 <DockPanel>
+                                    <Button x:Name="KeybindBedPlatesButton" Tag="bedplates" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
+                                    <CheckBox Content="BedPlates" IsChecked="{Binding BedPlatesEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                </DockPanel>
+                                <TextBlock Text="Shows block types around beds." Foreground="{DynamicResource DimTextBrush}" FontSize="12" Margin="0,8,0,0"/>
+                                <CheckBox Content="Show distance" IsChecked="{Binding BedPlatesShowDistance, Mode=TwoWay}"
+                                          Style="{StaticResource DarkCheckBox}" Margin="0,10,0,0"/>
+                                <DockPanel Margin="0,10,0,0">
+                                    <TextBlock Text="Scan Range (chunks)" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left" />
+                                    <TextBlock Text="{Binding BedPlatesRange}" Foreground="{DynamicResource DimTextBrush}" FontSize="12" HorizontalAlignment="Right" DockPanel.Dock="Right" />
+                                </DockPanel>
+                                <Slider Minimum="1" Maximum="8" TickFrequency="1" IsSnapToTickEnabled="True"
+                                        Value="{Binding BedPlatesRange, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                        Style="{StaticResource DarkSlider}"/>
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource ControlCardStyle}">
+                            <StackPanel>
+                                <DockPanel>
                                     <Button x:Name="KeybindClosestPlayerButton" Tag="closestplayer" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
                                     <CheckBox Content="Closest Player" IsChecked="{Binding ClosestPlayerInfoEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
                                 </DockPanel>

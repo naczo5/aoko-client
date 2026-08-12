@@ -79,6 +79,7 @@ public partial class MainWindow : Window
         ["chestesp"] = "Chest ESP",
         ["cheststealer"] = "Chest Stealer",
         ["blockesp"] = "Block ESP",
+        ["bedplates"] = "BedPlates",
         ["closestplayer"] = "Closest Player",
         ["fightstatus"] = "Fight Status",
         ["reach"] = "Reach",
@@ -1425,6 +1426,7 @@ public partial class MainWindow : Window
         SetKeybindButtonContent(KeybindChestEspButton, "chestesp");
         SetKeybindButtonContent(KeybindChestStealerButton, "cheststealer");
         SetKeybindButtonContent(KeybindBlockEspButton, "blockesp");
+        SetKeybindButtonContent(KeybindBedPlatesButton, "bedplates");
         SetKeybindButtonContent(KeybindClosestPlayerButton, "closestplayer");
         SetKeybindButtonContent(KeybindFightStatusButton, "fightstatus");
         SetKeybindButtonContent(KeybindReachButton, "reach");

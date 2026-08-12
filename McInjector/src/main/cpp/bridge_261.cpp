@@ -41,6 +41,8 @@
 #include "anti_debuff_jvmti.h"
 #include "hud_layout.h"
 #include "block_esp_common.h"
+#include "bedplates_common.h"
+#include "bedplates_icons.h"
 #include "fight_status_core.h"
 #include "aim_assist_projection.h"
 #include "screen_projection.h"
@@ -225,6 +227,9 @@ struct Config {
     bool  blockEspHud    = true;
     int   blockEspMaxCount = 64;
     int   blockEspRange  = 4;
+    bool  bedPlates = false;
+    bool  bedPlatesShowDistance = true;
+    int   bedPlatesRange = 4; // chunks, clamp 1..8
     bool  showModuleList = true;
     bool  closestPlayer  = false;
     bool  fightStatus    = false;
@@ -507,6 +512,9 @@ static void ParseConfig(const std::string& line) {
             InterlockedIncrement(&g_blockEspTargetsVersion);
         }
     }
+    g_config.bedPlates = reader.GetBool("bedPlatesEnabled");
+    g_config.bedPlatesShowDistance = reader.GetBool("bedPlatesShowDistance", true);
+    g_config.bedPlatesRange = lc::ClampInt(reader.GetInt("bedPlatesRange", g_config.bedPlatesRange), 1, 8);
     g_config.rightClick    = reader.GetBool("right");
     g_config.rightMinCPS   = lc::ClampFloat(reader.GetFloat("rightMinCPS", g_config.rightMinCPS), 1.0f, 25.0f);
     g_config.rightMaxCPS   = lc::ClampFloat(reader.GetFloat("rightMaxCPS", g_config.rightMaxCPS), 1.0f, 25.0f);
@@ -1505,6 +1513,16 @@ struct BlockEspData121 { double x, y, z; unsigned int color; double dist; };
 static std::vector<BlockEspData121> g_blockEspList;
 static Mutex g_blockEspListMutex;
 static DWORD g_lastBlockEspScanMs = 0;
+
+// ── BedPlates shared state ──
+struct BedPlateRenderData {
+    int x, y, z;
+    double dist;
+    std::vector<std::string> blocks; // visible unique ids already sorted
+};
+static std::vector<BedPlateRenderData> g_bedPlateList;
+static Mutex g_bedPlateListMutex;
+static DWORD g_lastBedPlatesScanMs = 0;
 
 struct PixelPartySnap121 {
     bool active = false;
@@ -7429,6 +7447,253 @@ static void UpdateBlockEspList(JNIEnv* env) {
     { LockGuard lk(g_blockEspListMutex); g_blockEspList.swap(merged); }
 }
 
+// ===================== BED PLATES SCAN (modern) =====================
+// Round-robin chunk scan (reusing the Block ESP chunk-section machinery) that
+// detects bed blocks, dedupes head/foot pairs, and samples nearby block ids
+// (via lc::CollectBedPlateSamples) for the on-screen callout.
+struct BedPlateCandidate121 { int x, y, z; };
+struct BedPlatesChunkCache121 { std::vector<BedPlateCandidate121> beds; };
+static std::map<long long, BedPlatesChunkCache121> g_bedPlatesChunkCache;
+static Mutex g_bedPlatesCacheMutex;
+
+static void UpdateBedPlatesList(JNIEnv* env) {
+    Config cfg;
+    { LockGuard lk(g_configMutex); cfg = g_config; }
+    if (!cfg.bedPlates) {
+        { LockGuard lk(g_bedPlateListMutex); g_bedPlateList.clear(); }
+        LockGuard cacheLk(g_bedPlatesCacheMutex);
+        g_bedPlatesChunkCache.clear();
+        return;
+    }
+
+    DWORD now = GetTickCount();
+    if (now - g_lastBedPlatesScanMs < lc::kBedPlatesScanIntervalMs) return;
+    if (IsWorldTransitionActive()) return;
+    LockGuard cacheLock(g_bedPlatesCacheMutex);
+    if (IsWorldTransitionActive()) return;
+    {
+        std::string sn;
+        { LockGuard lk(g_jniStateMtx); sn = g_jniScreenName; }
+        if (sn.find("ContainerScreen") != std::string::npos ||
+            sn.find("AbstractContainerScreen") != std::string::npos) return;
+    }
+    g_lastBedPlatesScanMs = now;
+
+    int range = lc::ClampInt(cfg.bedPlatesRange, 1, 8);
+
+    if (!g_mcInstance || !g_worldField_121) return;
+    jobject worldObj = env->GetObjectField(g_mcInstance, g_worldField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); worldObj = nullptr; }
+    if (!worldObj) return;
+
+    double sx = 0, sy = 0, sz = 0;
+    { LockGuard lk(g_bgCamMutex); sx = g_bgCamState.camX; sy = g_bgCamState.camY; sz = g_bgCamState.camZ; }
+
+    if (!EnsureChunkAccess(env, worldObj)) { env->DeleteLocalRef(worldObj); return; }
+    EnsureChestStateDetectionCaches(env, nullptr); // resolves BlockState.getBlock + Block.getTranslationKey
+    EnsureBlockEspSectionMappings(env, nullptr, worldObj);
+
+    int pcx = (int)std::floor(sx) >> 4;
+    int pcz = (int)std::floor(sz) >> 4;
+
+    int bottomY = -64;
+    if (g_worldGetBottomY_121) {
+        int b = env->CallIntMethod(worldObj, g_worldGetBottomY_121);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        else if (b > -512 && b < 512) bottomY = b;
+    }
+
+    for (auto it = g_bedPlatesChunkCache.begin(); it != g_bedPlatesChunkCache.end(); ) {
+        int ccx = (int)(it->first >> 32);
+        int ccz = (int)(it->first & 0xffffffff);
+        if (BlockEspAbsI(ccx - pcx) > range || BlockEspAbsI(ccz - pcz) > range)
+            it = g_bedPlatesChunkCache.erase(it);
+        else ++it;
+    }
+
+    // Near-to-far chunk order so the player's chunk is scanned first.
+    std::vector<std::pair<int, int> > chunkOrder;
+    chunkOrder.reserve((size_t)(2 * range + 1) * (size_t)(2 * range + 1));
+    for (int dx = -range; dx <= range; dx++)
+        for (int dz = -range; dz <= range; dz++)
+            chunkOrder.push_back(std::make_pair(dx, dz));
+    std::sort(chunkOrder.begin(), chunkOrder.end(),
+              [](const std::pair<int, int>& a, const std::pair<int, int>& b) {
+                  int da = (a.first < 0 ? -a.first : a.first) + (a.second < 0 ? -a.second : a.second);
+                  int db = (b.first < 0 ? -b.first : b.first) + (b.second < 0 ? -b.second : b.second);
+                  return da < db;
+              });
+
+    const int CHUNK_BUDGET = 4;
+    int scanned = 0;
+    for (size_t ci = 0; ci < chunkOrder.size() && scanned < CHUNK_BUDGET; ci++) {
+        if (IsWorldTransitionActive()) break;
+        int cx = pcx + chunkOrder[ci].first;
+        int cz = pcz + chunkOrder[ci].second;
+        long long key = BlockEspChunkKey121(cx, cz);
+        if (g_bedPlatesChunkCache.find(key) != g_bedPlatesChunkCache.end()) continue;
+
+        BedPlatesChunkCache121 cache;
+        jobject chunkObj = env->CallObjectMethod(worldObj, g_worldGetChunkMethod_121, cx, cz);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); chunkObj = nullptr; }
+        if (chunkObj) {
+            if (!g_chunkGetSectionArray_121) EnsureBlockEspSectionMappings(env, chunkObj, worldObj);
+            if (g_chunkGetSectionArray_121 && g_sectionGetBlockState_121 && g_stateGetBlock_121) {
+                jobjectArray sections = (jobjectArray)env->CallObjectMethod(chunkObj, g_chunkGetSectionArray_121);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); sections = nullptr; }
+                if (sections) {
+                    jsize nsec = env->GetArrayLength(sections);
+                    for (jsize si = 0; si < nsec; si++) {
+                        jobject sec = env->GetObjectArrayElement(sections, si);
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); sec = nullptr; }
+                        if (!sec) continue;
+
+                        bool empty = false;
+                        if (g_sectionIsEmpty_121) {
+                            empty = env->CallBooleanMethod(sec, g_sectionIsEmpty_121) == JNI_TRUE;
+                            if (env->ExceptionCheck()) { env->ExceptionClear(); empty = false; }
+                        }
+                        if (!empty) {
+                            int sectionMinY = bottomY + (int)si * 16;
+                            for (int ly = 0; ly < 16; ly++) {
+                                for (int lz = 0; lz < 16; lz++) {
+                                    for (int lx = 0; lx < 16; lx++) {
+                                        jobject state = env->CallObjectMethod(sec, g_sectionGetBlockState_121, lx, ly, lz);
+                                        if (env->ExceptionCheck()) { env->ExceptionClear(); state = nullptr; }
+                                        if (!state) continue;
+                                        jobject block = env->CallObjectMethod(state, g_stateGetBlock_121);
+                                        if (env->ExceptionCheck()) { env->ExceptionClear(); block = nullptr; }
+                                        if (block) {
+                                            bool isBed = false;
+                                            const std::string* id = BlockEspIdForBlock121(env, block);
+                                            if (id && lc::IsBedBlockId(*id)) {
+                                                isBed = true;
+                                            } else {
+                                                // Class-name fallback (BedBlock) when translation key is empty/odd.
+                                                jclass bcls = env->GetObjectClass(block);
+                                                if (bcls) {
+                                                    jclass classCls = env->FindClass("java/lang/Class");
+                                                    if (env->ExceptionCheck()) { env->ExceptionClear(); classCls = nullptr; }
+                                                    jmethodID getName = classCls
+                                                        ? env->GetMethodID(classCls, "getName", "()Ljava/lang/String;")
+                                                        : nullptr;
+                                                    if (env->ExceptionCheck()) { env->ExceptionClear(); getName = nullptr; }
+                                                    if (getName) {
+                                                        jstring jn = (jstring)env->CallObjectMethod(bcls, getName);
+                                                        if (env->ExceptionCheck()) { env->ExceptionClear(); jn = nullptr; }
+                                                        if (jn) {
+                                                            const char* utf = env->GetStringUTFChars(jn, nullptr);
+                                                            std::string cn = utf ? utf : "";
+                                                            if (utf) env->ReleaseStringUTFChars(jn, utf);
+                                                            env->DeleteLocalRef(jn);
+                                                            if (cn.find("BedBlock") != std::string::npos
+                                                                || (cn.size() >= 3 && cn.compare(cn.size() - 3, 3, "Bed") == 0)) {
+                                                                isBed = true;
+                                                            }
+                                                        }
+                                                    }
+                                                    if (classCls) env->DeleteLocalRef(classCls);
+                                                    env->DeleteLocalRef(bcls);
+                                                }
+                                            }
+                                            if (isBed) {
+                                                BedPlateCandidate121 c;
+                                                c.x = (cx << 4) + lx;
+                                                c.y = sectionMinY + ly;
+                                                c.z = (cz << 4) + lz;
+                                                cache.beds.push_back(c);
+                                            }
+                                            env->DeleteLocalRef(block);
+                                        }
+                                        env->DeleteLocalRef(state);
+                                    }
+                                }
+                            }
+                        }
+                        env->DeleteLocalRef(sec);
+                    }
+                    env->DeleteLocalRef(sections);
+                }
+            }
+            env->DeleteLocalRef(chunkObj);
+        }
+        g_bedPlatesChunkCache[key] = std::move(cache);
+        scanned++;
+    }
+
+    env->DeleteLocalRef(worldObj);
+
+    std::vector<BedPlateCandidate121> allBeds;
+    for (auto& kv : g_bedPlatesChunkCache)
+        for (auto& b : kv.second.beds) allBeds.push_back(b);
+
+    auto hasBedAt = [&](int x, int y, int z) -> bool {
+        for (auto& b : allBeds) if (b.x == x && b.y == y && b.z == z) return true;
+        return false;
+    };
+
+    struct CanonicalBed121 { int x, y, z; int facing; double dist; };
+    std::vector<CanonicalBed121> canonical;
+    for (auto& b : allBeds) {
+        bool hasNegX = hasBedAt(b.x - 1, b.y, b.z);
+        bool hasNegZ = hasBedAt(b.x, b.y, b.z - 1);
+        if (!lc::BedPlatesIsCanonicalHalf(hasNegX, hasNegZ)) continue;
+        int ox = 0, oz = 0;
+        if (hasBedAt(b.x + 1, b.y, b.z)) ox = 1;
+        else if (hasBedAt(b.x - 1, b.y, b.z)) ox = -1;
+        else if (hasBedAt(b.x, b.y, b.z + 1)) oz = 1;
+        else if (hasBedAt(b.x, b.y, b.z - 1)) oz = -1;
+        int facing = (ox == 0 && oz == 0) ? 0 : lc::BedFacingFromFootOffset(ox, oz);
+        double ddx = ((double)b.x + 0.5) - sx;
+        double ddy = (double)b.y - sy;
+        double ddz = ((double)b.z + 0.5) - sz;
+        CanonicalBed121 cb;
+        cb.x = b.x; cb.y = b.y; cb.z = b.z; cb.facing = facing;
+        cb.dist = std::sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
+        canonical.push_back(cb);
+    }
+    std::sort(canonical.begin(), canonical.end(),
+              [](const CanonicalBed121& a, const CanonicalBed121& b) { return a.dist < b.dist; });
+    const size_t kMaxBedPlates = 32;
+    if (canonical.size() > kMaxBedPlates) canonical.resize(kMaxBedPlates);
+
+    std::vector<BedPlateRenderData> result;
+    result.reserve(canonical.size());
+    std::vector<lc::BedPlateSample> samples;
+    for (auto& bed : canonical) {
+        lc::CollectBedPlateSamples(bed.x, bed.y, bed.z, bed.facing, samples);
+        lc::BedPlateCountState counts;
+        for (auto& s : samples) {
+            std::string descId;
+            if (GetBlockAt121IsNonAir(env, s.x, s.y, s.z, nullptr, &descId)) {
+                std::string id = lc::BlockEspNormalizeId(descId);
+                if (!id.empty()) counts.incrementBlock(s.layer, id);
+            }
+        }
+        counts.sortLayersByFrequency();
+        std::vector<std::string> visible;
+        counts.collectVisibleBlockIds(visible);
+        // Always publish — unprotected beds still get a distance/"Bed" callout.
+        BedPlateRenderData d;
+        d.x = bed.x; d.y = bed.y; d.z = bed.z;
+        d.dist = bed.dist;
+        d.blocks = visible;
+        result.push_back(std::move(d));
+    }
+
+    static DWORD s_lastBedDiagMs = 0;
+    if (now - s_lastBedDiagMs > 2000) {
+        s_lastBedDiagMs = now;
+        Log("BedPlates: halves=" + std::to_string(allBeds.size())
+            + " plates=" + std::to_string(result.size())
+            + " cachedChunks=" + std::to_string(g_bedPlatesChunkCache.size())
+            + " scannedThisTick=" + std::to_string(scanned)
+            + " translationKey=" + (g_blockGetTranslationKey_121 ? "1" : "0"));
+    }
+
+    { LockGuard lk(g_bedPlateListMutex); g_bedPlateList.swap(result); }
+}
+
 // Require a few complete background polls after the world/player/camera state is
 // valid. At the normal 50 ms scan cadence this is a short stability handshake,
 // not a blind multi-second pause.
@@ -7469,6 +7734,8 @@ static void ScheduleWorldTransition(JNIEnv* env, const char* reason) {
     { LockGuard lk(g_chestListMutex); g_chestList.clear(); }
     { LockGuard lk(g_blockEspListMutex); g_blockEspList.clear(); }
     { LockGuard lk(g_blockEspCacheMutex); g_blockEspChunkCache.clear(); }
+    { LockGuard lk(g_bedPlateListMutex); g_bedPlateList.clear(); }
+    { LockGuard lk(g_bedPlatesCacheMutex); g_bedPlatesChunkCache.clear(); }
     { LockGuard lk(g_bgCamMutex); g_bgCamState = BgCamState(); }
 
     static DWORD s_lastLogMs = 0;
@@ -13974,7 +14241,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                         UpdateClosestPlayerOverlay(env);
                     if (cfg.pixelPartyAssist)
                         UpdatePixelPartyAssist(env, cfg);
-                    const bool chunkScansEnabled = cfg.chestEsp || cfg.chestStealer || cfg.blockEsp;
+                    const bool chunkScansEnabled = cfg.chestEsp || cfg.chestStealer || cfg.blockEsp || cfg.bedPlates;
                     const bool chunkScanReady = !chunkScansEnabled ||
                         (!IsWorldTransitionActive() && ProbeModernChunkObject(env));
                     static bool s_fightStatusWasEnabled = false;
@@ -14022,6 +14289,10 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                         lastBlockEspScanMs = producerNowMs;
                     }
                     blockEspScanWasEnabled = cfg.blockEsp;
+
+                    if (chunkScanReady) {
+                        UpdateBedPlatesList(env);
+                    }
                 }
             } else if (g_stateJniReady && !inWorldNow) {
                 if (hadLivePlayer)
@@ -14511,7 +14782,7 @@ static void RenderOverlayPanels(
             Matrix4x4 sharedProj = {}, sharedView = {};
             bool sharedMatsOk = false;
 
-            if (cfg.nametags || cfg.chestEsp || cfg.blockEsp || cfg.fightStatus) {
+            if (cfg.nametags || cfg.chestEsp || cfg.blockEsp || cfg.fightStatus || cfg.bedPlates) {
                 BgCamState cs;
                 { LockGuard lk(g_bgCamMutex); cs = g_bgCamState; }
                 sharedCam      = { cs.camX, cs.camY, cs.camZ };
@@ -15095,6 +15366,68 @@ static void RenderOverlayPanels(
                 }
             } // cfg.blockEsp
 
+            // ── BedPlates: Vape-style distance + block icons above beds ──
+            bool renderBedPlates = TRACE261_IF("renderBedPlates", (!g_realGuiOpen && cfg.bedPlates && sharedCamFound));
+            if (renderBedPlates) {
+                static thread_local std::vector<BedPlateRenderData> plates;
+                { LockGuard lk(g_bedPlateListMutex); plates = g_bedPlateList; }
+
+                const int winWBed = (int)io.DisplaySize.x;
+                const int winHBed = (int)io.DisplaySize.y;
+                const bool showDist = cfg.bedPlatesShowDistance;
+                const ImU32 bedBg = IM_COL32(0, 0, 0, 150);
+                const ImU32 bedBorder = IM_COL32(45, 45, 45, 255);
+
+                for (const auto& plate : plates) {
+                    LegoVec3 target = { (double)plate.x + 0.5, (double)plate.y + 1.2, (double)plate.z + 0.5 };
+                    float psx = 0, psy = 0;
+                    bool ok = sharedMatsOk
+                        ? WorldToScreen(target, sharedCam, sharedView, sharedProj, winWBed, winHBed, &psx, &psy)
+                        : WorldToScreen_Angles(target, sharedCam, sharedYaw, sharedPitch, cpCamState.fov, winWBed, winHBed, &psx, &psy);
+                    if (!ok) continue;
+
+                    std::string distLine;
+                    if (showDist) {
+                        char db[32];
+                        snprintf(db, sizeof(db), "%.0fm", plate.dist);
+                        distLine = db;
+                    }
+                    ImVec2 distSz = distLine.empty() ? ImVec2(0, 0) : ImGui::CalcTextSize(distLine.c_str());
+
+                    int iconCount = (int)plate.blocks.size();
+                    float panelW = 0, panelH = 0, iconsY = 0;
+                    lc::BedPlateComputePanelSize(iconCount, showDist, distSz.x, &panelW, &panelH, &iconsY);
+
+                    float bx0 = std::floor(psx - panelW * 0.5f);
+                    float by0 = std::floor(psy - panelH);
+                    ImVec2 pMin(bx0, by0);
+                    ImVec2 pMax(bx0 + panelW, by0 + panelH);
+                    fg->AddRectFilled(pMin, pMax, bedBg, 6.0f);
+                    fg->AddRect(pMin, pMax, bedBorder, 6.0f, 0, 1.0f);
+
+                    if (!distLine.empty()) {
+                        float dtx = std::floor(bx0 + (panelW - distSz.x) * 0.5f);
+                        fg->AddText(ImVec2(dtx + 1, by0 + 2 + 1), IM_COL32(0, 0, 0, 200), distLine.c_str());
+                        fg->AddText(ImVec2(dtx, by0 + 2), IM_COL32(255, 255, 255, 255), distLine.c_str());
+                    }
+
+                    if (iconCount == 0) {
+                        float ix = bx0 + (panelW - lc::kBedPlateIconW) * 0.5f;
+                        float iy = by0 + iconsY;
+                        lc::BedPlateDrawIcon(fg, ix, iy, "red_bed");
+                    } else {
+                        float iconsW = (float)iconCount * lc::kBedPlateIconW
+                            + (float)(iconCount - 1) * lc::kBedPlateIconPad;
+                        float ix = bx0 + (panelW - iconsW) * 0.5f;
+                        float iy = by0 + iconsY;
+                        for (int i = 0; i < iconCount; i++) {
+                            lc::BedPlateDrawIcon(fg, ix, iy, plate.blocks[i]);
+                            ix += lc::kBedPlateIconW + lc::kBedPlateIconPad;
+                        }
+                    }
+                }
+            } // cfg.bedPlates
+
             bool renderGtbHelper = TRACE261_IF("renderGtbHelper", cfg.gtbHelper);
             if (renderGtbHelper) {
                 std::string hint = cfg.gtbHint;
@@ -15182,7 +15515,7 @@ static void RenderOverlayPanels(
             if (renderModuleList) {
                 // Module list (top-right) - original-like (right aligned colored bars)
                 struct ModLine { const char* text; ImU32 accent; float width; };
-                ModLine mods[24];
+                ModLine mods[32];
                 int modCount = 0;
 
                 auto pushMod = [&](const char* text, ImU32 accent) {
@@ -15222,6 +15555,7 @@ static void RenderOverlayPanels(
                 if (cfg.velocityEnabled) pushMod("Velocity", overlayTheme.accentTertiary);
                 if (cfg.autoTotemEnabled) pushMod("AutoTotem", overlayTheme.accentPrimary);
                 if (cfg.antiDebuffEnabled) pushMod("AntiDebuff", overlayTheme.accentPrimary);
+                if (cfg.bedPlates)     pushMod("BedPlates", overlayTheme.accentSecondary);
                 if (cfg.hitDelayFixEnabled) pushMod("Hit Delay Fix", overlayTheme.accentPrimary);
 
                 // Sort by width descending (staggered original look)
