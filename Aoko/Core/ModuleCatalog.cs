@@ -71,6 +71,7 @@ public static class ModuleCatalog
         new("velocity", "Velocity", "cfg.velocityEnabled", c => c.VelocityEnabled),
         new("autototem", "AutoTotem", "cfg.autoTotemEnabled", c => c.AutoTotemEnabled),
         new("autorod", "Auto Rod", "cfg.autoRodEnabled", c => c.AutoRodEnabled),
+        new("autotool", "AutoTool", "cfg.autoToolEnabled", c => c.AutoToolEnabled),
         new("antidebuff", "AntiDebuff", "cfg.antiDebuffEnabled", c => c.AntiDebuffEnabled),
         new("hitdelayfix", "Hit Delay Fix", "cfg.hitDelayFixEnabled", c => c.HitDelayFixEnabled),
 

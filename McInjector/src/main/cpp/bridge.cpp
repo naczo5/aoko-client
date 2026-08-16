@@ -23,6 +23,7 @@
 #include "json_config_reader.h"
 #include "bounded_newline_buffer.h"
 #include "auto_rod_core.h"
+#include "auto_tool_core.h"
 #include "bridge_capabilities.h"
 #include "nick_hider.h"
 #include "nick_hider_jvmti.h"
@@ -148,6 +149,8 @@ static Mutex g_legacyDetachCleanupMutex;
 static volatile LONG g_legacyRenderCleanupRequested = 0;
 static volatile LONG g_legacyRenderCallbacksInFlight = 0;
 static void ResetAutoRodLegacyJniCaches(JNIEnv* env);
+static void ResetAutoToolLegacyJniCaches(JNIEnv* env);
+static bool EnsureAutoRodLegacyMappings(JNIEnv* env, jobject player, bool needRodClass);
 
 class LegacyRenderCallbackLease {
     bool active_;
@@ -244,6 +247,14 @@ struct Config {
     bool autoRodVerifyForcedSlot = true;
     int autoRodExtensionTicks = autorod::kUseToRestoreTicks;
     bool autoRodHoldToExtend = false;
+    bool autoToolEnabled = false;
+    bool autoToolSwapWeapon = true;
+    bool autoToolInstantSwap = true;
+    int  autoToolSwapToDelay = 50;
+    bool autoToolSwapBack = false;
+    int  autoToolSwapBackDelay = 350;
+    bool autoToolRequireMouseDown = true;
+    bool autoToolOnlySneaking = false;
     bool showModuleList = true;
     int moduleListStyle = 0;
     bool showLogo = true;
@@ -263,6 +274,7 @@ struct Config {
     int keybindBlockEsp = 0;
     int keybindBedPlates = 0;
     int keybindAutoRod = 0;
+    int keybindAutoTool = 0;
     bool pixelPartyAssist = false;
     int pixelPartyScanRadius = 28;
     bool pixelPartyAutoLook = false;
@@ -1933,10 +1945,10 @@ bool DiscoverMappings(JNIEnv* env) {
     if (env->ExceptionCheck()) env->ExceptionClear();
 
     if (mopClass && !g_movingObjectTypeClass) {
-        jclass mopTypeLocal = env->FindClass("net/minecraft/util/MovingObjectPosition$MovingObjectType");
+        jclass mopTypeLocal = LoadClassWithLoader(env, gcl, "net.minecraft.util.MovingObjectPosition$MovingObjectType");
         if (!mopTypeLocal) {
-            env->ExceptionClear();
-            mopTypeLocal = LoadClassWithLoader(env, gcl, "net.minecraft.util.MovingObjectPosition$MovingObjectType");
+            mopTypeLocal = env->FindClass("net/minecraft/util/MovingObjectPosition$MovingObjectType");
+            if (env->ExceptionCheck()) env->ExceptionClear();
         }
         if (mopTypeLocal && !env->ExceptionCheck()) {
             g_movingObjectTypeClass = (jclass)env->NewGlobalRef(mopTypeLocal);
@@ -2245,10 +2257,16 @@ bool DiscoverMappings(JNIEnv* env) {
     }
 
     // ActiveRenderInfo Discovery (Dynamic)
-    g_activeRenderInfoClass = env->FindClass("net/minecraft/client/renderer/ActiveRenderInfo");
-    TRACE_BRANCH("activeRenderInfoCanonicalFindClassHit", g_activeRenderInfoClass != nullptr);
-    if (!g_activeRenderInfoClass) {
-        env->ExceptionClear();
+    jclass ariClass = LoadClassWithLoader(env, gcl, "net.minecraft.client.renderer.ActiveRenderInfo");
+    if (!ariClass) {
+        ariClass = env->FindClass("net/minecraft/client/renderer/ActiveRenderInfo");
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+    if (ariClass) {
+        g_activeRenderInfoClass = (jclass)env->NewGlobalRef(ariClass);
+        TRACE_BRANCH("activeRenderInfoCanonicalFindClassHit", true);
+        Log("Found ActiveRenderInfo class: net.minecraft.client.renderer.ActiveRenderInfo");
+    } else {
         Log("ActiveRenderInfo not found by name, scanning classes...");
         TRACE_PATH("scan-for-active-render-info");
         for (int i = 0; i < classCount; i++) {
@@ -2284,16 +2302,22 @@ bool DiscoverMappings(JNIEnv* env) {
                  break;
             }
         }
-    } else {
-        g_activeRenderInfoClass = (jclass)env->NewGlobalRef(g_activeRenderInfoClass);
     }
 
     if (g_activeRenderInfoClass) {
         g_modelViewField = env->GetStaticFieldID(g_activeRenderInfoClass, "MODELVIEW", "Ljava/nio/FloatBuffer;");
+        if (!g_modelViewField) {
+            env->ExceptionClear();
+            g_modelViewField = env->GetStaticFieldID(g_activeRenderInfoClass, "field_178812_b", "Ljava/nio/FloatBuffer;");
+        }
         TRACE_BRANCH("modelViewCanonicalHit", g_modelViewField != nullptr);
         if (!g_modelViewField) env->ExceptionClear();
         
         g_projectionField = env->GetStaticFieldID(g_activeRenderInfoClass, "PROJECTION", "Ljava/nio/FloatBuffer;");
+        if (!g_projectionField) {
+            env->ExceptionClear();
+            g_projectionField = env->GetStaticFieldID(g_activeRenderInfoClass, "field_178813_c", "Ljava/nio/FloatBuffer;");
+        }
         TRACE_BRANCH("projectionCanonicalHit", g_projectionField != nullptr);
         if (!g_projectionField) env->ExceptionClear();
         
@@ -2845,6 +2869,7 @@ static bool RunHeavyDiscovery(JNIEnv* env, const char* reason) {
     DWORD startedAt = GetTickCount();
     InterlockedExchange(&g_heavyDiscoveryInProgress, 1);
     ResetAutoRodLegacyJniCaches(env);
+    ResetAutoToolLegacyJniCaches(env);
     Log(std::string("Heavy mapping discovery start: ") + (reason ? reason : "unspecified"));
     bool ok = DiscoverMappings(env);
     DWORD elapsedMs = GetTickCount() - startedAt;
@@ -6617,6 +6642,370 @@ static void UpdateHitDelayFixLegacy(JNIEnv* env, const Config& cfg, const GameSt
     }
 }
 
+static autotool::AutoToolState g_autoToolState18;
+static jmethodID g_autoToolGetStrVsBlock18 = nullptr;
+static jmethodID g_autoToolGetItem18 = nullptr;
+static jmethodID g_autoToolGetIdFromItem18 = nullptr;
+static jmethodID g_autoToolGetEnchantmentLevel18 = nullptr;
+static jmethodID g_autoToolMopGetBlockPos18 = nullptr;
+static jfieldID  g_autoToolMopBlockPosField18 = nullptr;
+static jmethodID g_autoToolPlayerIsSneaking18 = nullptr;
+static jclass    g_autoToolItemClass18 = nullptr;
+static jclass    g_autoToolSwordClass18 = nullptr;
+static jclass    g_autoToolEnchantHelperClass18 = nullptr;
+
+static void ResetAutoToolLegacyJniCaches(JNIEnv* env) {
+    g_autoToolState18.Reset();
+    g_autoToolGetStrVsBlock18 = nullptr;
+    g_autoToolGetItem18 = nullptr;
+    g_autoToolGetIdFromItem18 = nullptr;
+    g_autoToolGetEnchantmentLevel18 = nullptr;
+    g_autoToolMopGetBlockPos18 = nullptr;
+    g_autoToolMopBlockPosField18 = nullptr;
+    g_autoToolPlayerIsSneaking18 = nullptr;
+    if (env) {
+        if (g_autoToolItemClass18) { env->DeleteGlobalRef(g_autoToolItemClass18); g_autoToolItemClass18 = nullptr; }
+        if (g_autoToolSwordClass18) { env->DeleteGlobalRef(g_autoToolSwordClass18); g_autoToolSwordClass18 = nullptr; }
+        if (g_autoToolEnchantHelperClass18) { env->DeleteGlobalRef(g_autoToolEnchantHelperClass18); g_autoToolEnchantHelperClass18 = nullptr; }
+    }
+}
+
+static bool EnsureAutoToolLegacyJni(JNIEnv* env, jobject player) {
+    if (!env || !player || !g_mcInstance) return false;
+    jobject gcl = EnsureGameClassLoader(env);
+    if (!gcl) return false;
+
+    if (!EnsureAutoRodLegacyMappings(env, player, false)) return false;
+
+    if (!g_autoToolGetStrVsBlock18 || !g_autoToolGetItem18) {
+        jclass stackCls = LoadClassWithLoader(env, gcl, "net.minecraft.item.ItemStack");
+        if (stackCls) {
+            if (!g_autoToolGetStrVsBlock18) {
+                const char* names[] = { "getStrVsBlock", "func_150997_a", nullptr };
+                for (int i = 0; names[i] && !g_autoToolGetStrVsBlock18; ++i) {
+                    g_autoToolGetStrVsBlock18 = env->GetMethodID(stackCls, names[i], "(Lnet/minecraft/block/Block;)F");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolGetStrVsBlock18 = nullptr; }
+                }
+            }
+            if (!g_autoToolGetItem18) {
+                const char* names[] = { "getItem", "func_77973_b", nullptr };
+                for (int i = 0; names[i] && !g_autoToolGetItem18; ++i) {
+                    g_autoToolGetItem18 = env->GetMethodID(stackCls, names[i], "()Lnet/minecraft/item/Item;");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolGetItem18 = nullptr; }
+                }
+            }
+            env->DeleteLocalRef(stackCls);
+        }
+    }
+
+    if (!g_autoToolItemClass18 || !g_autoToolGetIdFromItem18) {
+        jclass itemCls = LoadClassWithLoader(env, gcl, "net.minecraft.item.Item");
+        if (itemCls) {
+            if (!g_autoToolGetIdFromItem18) {
+                const char* names[] = { "getIdFromItem", "func_150891_a", nullptr };
+                for (int i = 0; names[i] && !g_autoToolGetIdFromItem18; ++i) {
+                    g_autoToolGetIdFromItem18 = env->GetStaticMethodID(itemCls, names[i], "(Lnet/minecraft/item/Item;)I");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolGetIdFromItem18 = nullptr; }
+                }
+            }
+            if (!g_autoToolItemClass18) {
+                g_autoToolItemClass18 = (jclass)env->NewGlobalRef(itemCls);
+            }
+            env->DeleteLocalRef(itemCls);
+        }
+    }
+
+    if (!g_autoToolSwordClass18) {
+        jclass swordCls = LoadClassWithLoader(env, gcl, "net.minecraft.item.ItemSword");
+        if (swordCls) {
+            g_autoToolSwordClass18 = (jclass)env->NewGlobalRef(swordCls);
+            env->DeleteLocalRef(swordCls);
+        }
+    }
+
+    if (!g_autoToolEnchantHelperClass18 || !g_autoToolGetEnchantmentLevel18) {
+        jclass enchCls = LoadClassWithLoader(env, gcl, "net.minecraft.enchantment.EnchantmentHelper");
+        if (enchCls) {
+            if (!g_autoToolGetEnchantmentLevel18) {
+                const char* names[] = { "getEnchantmentLevel", "func_77506_a", nullptr };
+                for (int i = 0; names[i] && !g_autoToolGetEnchantmentLevel18; ++i) {
+                    g_autoToolGetEnchantmentLevel18 = env->GetStaticMethodID(enchCls, names[i], "(ILnet/minecraft/item/ItemStack;)I");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolGetEnchantmentLevel18 = nullptr; }
+                }
+            }
+            if (!g_autoToolEnchantHelperClass18) {
+                g_autoToolEnchantHelperClass18 = (jclass)env->NewGlobalRef(enchCls);
+            }
+            env->DeleteLocalRef(enchCls);
+        }
+    }
+
+    if (!g_autoToolPlayerIsSneaking18) {
+        jclass playerCls = env->GetObjectClass(player);
+        if (playerCls) {
+            const char* names[] = { "isSneaking", "func_70093_af", nullptr };
+            for (int i = 0; names[i] && !g_autoToolPlayerIsSneaking18; ++i) {
+                g_autoToolPlayerIsSneaking18 = env->GetMethodID(playerCls, names[i], "()Z");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolPlayerIsSneaking18 = nullptr; }
+            }
+            env->DeleteLocalRef(playerCls);
+        }
+    }
+
+    if (!g_worldGetBlockStateMethod && g_theWorldField) {
+        jobject world = env->GetObjectField(g_mcInstance, g_theWorldField);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); world = nullptr; }
+        if (world) {
+            jclass worldCls = env->GetObjectClass(world);
+            if (worldCls) {
+                const char* names[] = { "getBlockState", "func_180495_p", nullptr };
+                for (int i = 0; names[i] && !g_worldGetBlockStateMethod; ++i) {
+                    g_worldGetBlockStateMethod = env->GetMethodID(worldCls, names[i], "(Lnet/minecraft/util/BlockPos;)Lnet/minecraft/block/state/IBlockState;");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_worldGetBlockStateMethod = nullptr; }
+                }
+                env->DeleteLocalRef(worldCls);
+            }
+            env->DeleteLocalRef(world);
+        }
+    }
+
+    if (!g_blockStateGetBlockMethod) {
+        jclass stateCls = LoadClassWithLoader(env, gcl, "net.minecraft.block.state.IBlockState");
+        if (stateCls) {
+            const char* names[] = { "getBlock", "func_177230_c", nullptr };
+            for (int i = 0; names[i] && !g_blockStateGetBlockMethod; ++i) {
+                g_blockStateGetBlockMethod = env->GetMethodID(stateCls, names[i], "()Lnet/minecraft/block/Block;");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_blockStateGetBlockMethod = nullptr; }
+            }
+            env->DeleteLocalRef(stateCls);
+        }
+    }
+
+    return g_autoToolGetStrVsBlock18 != nullptr && g_autoRodInventoryField18 != nullptr && g_autoRodCurrentItemField18 != nullptr;
+}
+
+static void UpdateAutoToolLegacy(JNIEnv* env, const Config& cfg, const GameState& state) {
+    if (!cfg.autoToolEnabled) {
+        g_autoToolState18.Reset();
+        return;
+    }
+
+    if (!state.inWorld || state.guiOpen || !g_mcInstance || !g_thePlayerField) {
+        return;
+    }
+
+    if (env->PushLocalFrame(24) < 0) return;
+
+    jobject player = env->GetObjectField(g_mcInstance, g_thePlayerField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); player = nullptr; }
+    if (!player || !EnsureAutoToolLegacyJni(env, player)) {
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    jobject inventory = env->GetObjectField(player, g_autoRodInventoryField18);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); inventory = nullptr; }
+    if (!inventory) {
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    int currentSlot = env->GetIntField(inventory, g_autoRodCurrentItemField18);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); currentSlot = 0; }
+
+    bool isSneaking = false;
+    if (g_autoToolPlayerIsSneaking18) {
+        isSneaking = env->CallBooleanMethod(player, g_autoToolPlayerIsSneaking18) != JNI_FALSE;
+        if (env->ExceptionCheck()) { env->ExceptionClear(); isSneaking = false; }
+    }
+
+    autotool::AutoToolInput input;
+    input.nowMs = GetTickCount();
+    input.inWorld = state.inWorld;
+    input.guiOpen = state.guiOpen;
+    input.mouseDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 || state.breakingBlock;
+    input.isSneaking = isSneaking;
+    input.currentSlot = currentSlot;
+    input.isBlockHit = false;
+    input.isEntityHit = false;
+    input.bestToolSlot = -1;
+    input.bestWeaponSlot = -1;
+
+    if (g_objectMouseOverField && g_typeOfHitField && g_enumNameMethod) {
+        jobject mop = env->GetObjectField(g_mcInstance, g_objectMouseOverField);
+        if (mop) {
+            jobject typeOfHit = env->GetObjectField(mop, g_typeOfHitField);
+            if (typeOfHit) {
+                jstring nameStr = (jstring)env->CallObjectMethod(typeOfHit, g_enumNameMethod);
+                if (nameStr && !env->ExceptionCheck()) {
+                    const char* nameChars = env->GetStringUTFChars(nameStr, nullptr);
+                    if (nameChars) {
+                        if (strcmp(nameChars, "BLOCK") == 0) {
+                            input.isBlockHit = true;
+                            // Resolve block at hit pos
+                            if (!g_autoToolMopGetBlockPos18 && !g_autoToolMopBlockPosField18) {
+                                jclass mopCls = env->GetObjectClass(mop);
+                                if (mopCls) {
+                                    const char* mNames[] = { "getBlockPos", "func_178782_a", nullptr };
+                                    for (int m = 0; mNames[m] && !g_autoToolMopGetBlockPos18; ++m) {
+                                        g_autoToolMopGetBlockPos18 = env->GetMethodID(mopCls, mNames[m], "()Lnet/minecraft/util/BlockPos;");
+                                        if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolMopGetBlockPos18 = nullptr; }
+                                    }
+                                    if (!g_autoToolMopGetBlockPos18) {
+                                        const char* fNames[] = { "blockPos", "field_178783_e", nullptr };
+                                        for (int f = 0; fNames[f] && !g_autoToolMopBlockPosField18; ++f) {
+                                            g_autoToolMopBlockPosField18 = env->GetFieldID(mopCls, fNames[f], "Lnet/minecraft/util/BlockPos;");
+                                            if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolMopBlockPosField18 = nullptr; }
+                                        }
+                                    }
+                                    env->DeleteLocalRef(mopCls);
+                                }
+                            }
+
+                            jobject blockPos = nullptr;
+                            if (g_autoToolMopGetBlockPos18) {
+                                blockPos = env->CallObjectMethod(mop, g_autoToolMopGetBlockPos18);
+                                if (env->ExceptionCheck()) { env->ExceptionClear(); blockPos = nullptr; }
+                            } else if (g_autoToolMopBlockPosField18) {
+                                blockPos = env->GetObjectField(mop, g_autoToolMopBlockPosField18);
+                                if (env->ExceptionCheck()) { env->ExceptionClear(); blockPos = nullptr; }
+                            }
+
+                            jobject world = g_theWorldField ? env->GetObjectField(g_mcInstance, g_theWorldField) : nullptr;
+                            if (env->ExceptionCheck()) { env->ExceptionClear(); world = nullptr; }
+
+                            if (blockPos && world && g_worldGetBlockStateMethod && g_blockStateGetBlockMethod) {
+                                jobject blockState = env->CallObjectMethod(world, g_worldGetBlockStateMethod, blockPos);
+                                if (env->ExceptionCheck()) { env->ExceptionClear(); blockState = nullptr; }
+                                if (blockState) {
+                                    jobject block = env->CallObjectMethod(blockState, g_blockStateGetBlockMethod);
+                                    if (env->ExceptionCheck()) { env->ExceptionClear(); block = nullptr; }
+                                    if (block) {
+                                        float bestSpeed = 1.0f;
+                                        int bestSlot = -1;
+                                        for (int i = 0; i < 9; ++i) {
+                                            jobject stack = env->CallObjectMethod(inventory, g_autoRodGetStackInSlot18, (jint)i);
+                                            if (env->ExceptionCheck()) { env->ExceptionClear(); stack = nullptr; }
+                                            if (!stack) continue;
+
+                                            float speed = env->CallFloatMethod(stack, g_autoToolGetStrVsBlock18, block);
+                                            if (env->ExceptionCheck()) { env->ExceptionClear(); speed = 1.0f; }
+
+                                            if (speed > 1.0f && g_autoToolEnchantHelperClass18 && g_autoToolGetEnchantmentLevel18) {
+                                                jint eff = env->CallStaticIntMethod(g_autoToolEnchantHelperClass18, g_autoToolGetEnchantmentLevel18, 32, stack);
+                                                if (env->ExceptionCheck()) { env->ExceptionClear(); eff = 0; }
+                                                if (eff > 0) speed += (float)(eff * eff + 1);
+                                            }
+
+                                            if (g_autoToolGetItem18 && g_autoToolSwordClass18) {
+                                                jobject item = env->CallObjectMethod(stack, g_autoToolGetItem18);
+                                                if (env->ExceptionCheck()) { env->ExceptionClear(); item = nullptr; }
+                                                if (item) {
+                                                    if (env->IsInstanceOf(item, g_autoToolSwordClass18) && speed <= 1.5f) {
+                                                        speed /= 2.0f;
+                                                    }
+                                                    env->DeleteLocalRef(item);
+                                                }
+                                            }
+
+                                            if (speed > bestSpeed) {
+                                                bestSpeed = speed;
+                                                bestSlot = i;
+                                            }
+                                            env->DeleteLocalRef(stack);
+                                        }
+                                        input.bestToolSlot = bestSlot;
+                                        env->DeleteLocalRef(block);
+                                    }
+                                    env->DeleteLocalRef(blockState);
+                                }
+                            }
+                            if (world) env->DeleteLocalRef(world);
+                            if (blockPos) env->DeleteLocalRef(blockPos);
+                        } else if (strcmp(nameChars, "ENTITY") == 0) {
+                            input.isEntityHit = true;
+                            if (cfg.autoToolSwapWeapon) {
+                                float bestDmg = 0.0f;
+                                int bestWeapon = -1;
+                                for (int i = 0; i < 9; ++i) {
+                                    jobject stack = env->CallObjectMethod(inventory, g_autoRodGetStackInSlot18, (jint)i);
+                                    if (env->ExceptionCheck()) { env->ExceptionClear(); stack = nullptr; }
+                                    if (!stack) continue;
+
+                                    jobject item = g_autoToolGetItem18 ? env->CallObjectMethod(stack, g_autoToolGetItem18) : nullptr;
+                                    if (env->ExceptionCheck()) { env->ExceptionClear(); item = nullptr; }
+                                    if (item) {
+                                        int itemId = (g_autoToolItemClass18 && g_autoToolGetIdFromItem18)
+                                            ? env->CallStaticIntMethod(g_autoToolItemClass18, g_autoToolGetIdFromItem18, item)
+                                            : 0;
+                                        if (env->ExceptionCheck()) { env->ExceptionClear(); itemId = 0; }
+
+                                        float baseDmg = 0.0f;
+                                        bool isSword = false;
+                                        switch (itemId) {
+                                            case 276: baseDmg = 7.0f; isSword = true; break; // Diamond Sword
+                                            case 267: baseDmg = 6.0f; isSword = true; break; // Iron Sword
+                                            case 272: baseDmg = 5.0f; isSword = true; break; // Stone Sword
+                                            case 268: baseDmg = 4.0f; isSword = true; break; // Wood Sword
+                                            case 283: baseDmg = 4.0f; isSword = true; break; // Gold Sword
+                                            case 279: baseDmg = 6.0f; break;                 // Diamond Axe
+                                            case 258: baseDmg = 5.0f; break;                 // Iron Axe
+                                            case 275: baseDmg = 4.0f; break;                 // Stone Axe
+                                            case 271: baseDmg = 3.0f; break;                 // Wood Axe
+                                            case 286: baseDmg = 3.0f; break;                 // Gold Axe
+                                            default:  baseDmg = 0.0f; break;
+                                        }
+
+                                        if (baseDmg > 0.0f) {
+                                            float totalDmg = baseDmg;
+                                            if (g_autoToolEnchantHelperClass18 && g_autoToolGetEnchantmentLevel18) {
+                                                jint sharp = env->CallStaticIntMethod(g_autoToolEnchantHelperClass18, g_autoToolGetEnchantmentLevel18, 16, stack);
+                                                if (env->ExceptionCheck()) { env->ExceptionClear(); sharp = 0; }
+                                                if (sharp > 0) totalDmg += (float)sharp * 1.25f;
+                                            }
+                                            if (isSword) totalDmg += 0.01f; // tiebreaker
+                                            if (totalDmg > bestDmg) {
+                                                bestDmg = totalDmg;
+                                                bestWeapon = i;
+                                            }
+                                        }
+                                        env->DeleteLocalRef(item);
+                                    }
+                                    env->DeleteLocalRef(stack);
+                                }
+                                input.bestWeaponSlot = bestWeapon;
+                            }
+                        }
+                        env->ReleaseStringUTFChars(nameStr, nameChars);
+                    }
+                    env->DeleteLocalRef(nameStr);
+                }
+                if (env->ExceptionCheck()) env->ExceptionClear();
+                env->DeleteLocalRef(typeOfHit);
+            }
+            env->DeleteLocalRef(mop);
+        }
+    }
+
+    autotool::AutoToolConfig coreCfg;
+    coreCfg.enabled = cfg.autoToolEnabled;
+    coreCfg.swapWeapon = cfg.autoToolSwapWeapon;
+    coreCfg.instantSwap = cfg.autoToolInstantSwap;
+    coreCfg.swapToDelayMs = cfg.autoToolSwapToDelay;
+    coreCfg.swapBack = cfg.autoToolSwapBack;
+    coreCfg.swapBackDelayMs = cfg.autoToolSwapBackDelay;
+    coreCfg.requireMouseDown = cfg.autoToolRequireMouseDown;
+    coreCfg.onlyWhileSneaking = cfg.autoToolOnlySneaking;
+
+    autotool::AutoToolAction action = autotool::UpdateAutoToolState(g_autoToolState18, coreCfg, input);
+    if (action.switchSlot && action.targetSlot >= 0 && action.targetSlot < 9) {
+        env->SetIntField(inventory, g_autoRodCurrentItemField18, action.targetSlot);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+
+    env->PopLocalFrame(nullptr);
+}
+
 static void LogChestStealerSkippedMenu(const std::string& title) {
     DWORD now = GetTickCount();
     if (now - g_lastChestStealerSkipLogMs < 5000) return;
@@ -9569,6 +9958,7 @@ void RenderHUD(
     if (cfg.killAura)          pushMod("Kill Aura", ToImU32(theme.accentSecondary));
     if (cfg.speedBridge)       pushMod("SpeedBridge", ToImU32(theme.accentPrimary));
     if (cfg.autoRodEnabled)    pushMod("Auto Rod", ToImU32(theme.accentPrimary));
+    if (cfg.autoToolEnabled)   pushMod("AutoTool", ToImU32(theme.accentPrimary));
     if (cfg.chestEsp)          pushMod("Chest ESP", ToImU32(theme.accentSecondary));
     if (cfg.blockEsp)          pushMod("Block ESP", ToImU32(theme.accentSecondary));
     if (cfg.chestStealer)      pushMod("Chest Stealer", ToImU32(theme.accentTertiary));
@@ -10312,6 +10702,20 @@ void RenderNametags(
         double rY = iY - vY;
         double rZ = iZ - vZ;
 
+        double dx = iX - localPX;
+        double dy = iY - localPY;
+        double dz = iZ - localPZ;
+        double dist = sqrt(dx*dx + dy*dy + dz*dz);
+        const bool inNametagRange = lc::InChunkRange(
+            (int)std::floor(iX), (int)std::floor(iZ), localPX, localPZ, nametagRange);
+        if (!lc::OverlayEntityNeedsFullScan(
+                nametagsEnabled, inNametagRange, fightStatusEnabled,
+                hideVanillaTags || g_legacyNametagSuppressionActive,
+                config.closestPlayerInfo, dist, count < kEntityJsonCap)) {
+            env->DeleteLocalRef(entity);
+            continue;
+        }
+
         // Name with fake/bot line filtering parity
         std::string stableName = GetStablePlayerName(env, entity);
         std::string displayName = lc::ReplaceNickHiderText(stableName, nickHiderEnabled, localAccountName, nickHiderAlias);
@@ -10355,15 +10759,9 @@ void RenderNametags(
             if (env->ExceptionCheck()) env->ExceptionClear();
             else hurtTimeAvailable = true;
         }
-        double dx = iX - localPX;
-        double dy = iY - localPY;
-        double dz = iZ - localPZ;
-        double dist = sqrt(dx*dx + dy*dy + dz*dz);
-        const bool inNametagRange = lc::InChunkRange(
-            (int)std::floor(iX), (int)std::floor(iZ), localPX, localPZ, nametagRange);
 
         if (closestSnapshot && config.closestPlayerInfo &&
-            dist < closestPlayerDistance && dist <= 96.0) {
+            dist < closestPlayerDistance && dist <= lc::kClosestPlayerMaxDist) {
             closestPlayerDistance = dist;
             closestPlayerIndex = i;
             closestSnapshot->valid = true;
@@ -10376,7 +10774,7 @@ void RenderNametags(
             closestSnapshot->localYaw = fallbackYaw;
         }
 
-        if (!nametagsEnabled && dist > 48.0 && !fightStatusEnabled) {
+        if (!nametagsEnabled && dist > lc::kEntityJsonMaxDist && !fightStatusEnabled) {
             env->DeleteLocalRef(entity);
             continue;
         }
@@ -10502,7 +10900,7 @@ void RenderNametags(
                      statsText += armorBuf;
                  }
 
-                 std::string heldText = showHeldItem
+                 std::string heldText = lc::NametagShouldFetchHeldItem(showHeldItem, dist)
                      ? GetEntityHeldItemInfo(env, entity, nullptr)
                      : std::string();
 
@@ -10627,6 +11025,7 @@ void RenderNametags(
 
         env->DeleteLocalRef(entity);
     }
+
     if (closestSnapshot && closestSnapshot->valid && closestPlayerIndex >= 0) {
         jobject closestEntity =
             env->CallObjectMethod(startList, g_listGetMethod, closestPlayerIndex);
@@ -11080,7 +11479,8 @@ void RenderChestESP(int w, int h, const Config& config) {
         bool isChest = false;
         if (g_tileEntityChestClass && env->IsInstanceOf(te, g_tileEntityChestClass)) isChest = true;
         if (!isChest && g_tileEntityEnderChestClass && env->IsInstanceOf(te, g_tileEntityEnderChestClass)) isChest = true;
-        if (!isChest) {
+        if (!isChest && lc::ChestEspNeedClassNameFallback(
+                g_tileEntityChestClass != nullptr, g_tileEntityEnderChestClass != nullptr)) {
             jclass teClass = env->GetObjectClass(te);
             if (teClass) {
                 std::string clsName = GetClassNameFromClass(env, teClass);
@@ -11110,7 +11510,9 @@ void RenderChestESP(int w, int h, const Config& config) {
         double dx = ((double)bx + 0.5) - localPX;
         double dy = ((double)by + 0.5) - localPY;
         double dz = ((double)bz + 0.5) - localPZ;
-        chests.push_back({ bx, by, bz, dx * dx + dy * dy + dz * dz });
+        const double distSq = dx * dx + dy * dy + dz * dz;
+        if (distSq != distSq) continue;
+        chests.push_back({ bx, by, bz, distSq });
     }
     lc::ChestEspSortNearestFirst(chests);
 
@@ -12477,6 +12879,14 @@ void ParseConfig(const std::string& line) {
             reader.GetInt("autoRodExtensionTicks", g_config.autoRodExtensionTicks),
             autorod::kMinExtensionTicks, autorod::kMaxExtensionTicks);
         g_config.autoRodHoldToExtend = reader.GetBool("autoRodHoldToExtend", false);
+        g_config.autoToolEnabled = reader.GetBool("autoToolEnabled");
+        g_config.autoToolSwapWeapon = reader.GetBool("autoToolSwapWeapon", true);
+        g_config.autoToolInstantSwap = reader.GetBool("autoToolInstantSwap", true);
+        g_config.autoToolSwapToDelay = lc::ClampInt(reader.GetInt("autoToolSwapToDelay", 50), 0, 500);
+        g_config.autoToolSwapBack = reader.GetBool("autoToolSwapBack", false);
+        g_config.autoToolSwapBackDelay = lc::ClampInt(reader.GetInt("autoToolSwapBackDelay", 350), 0, 1000);
+        g_config.autoToolRequireMouseDown = reader.GetBool("autoToolRequireMouseDown", true);
+        g_config.autoToolOnlySneaking = reader.GetBool("autoToolOnlySneaking", false);
 
         std::string showModuleListRaw = reader.GetString("showModuleList");
         g_config.showModuleList = showModuleListRaw.empty() ? true : (showModuleListRaw == "true");
@@ -12575,6 +12985,7 @@ void ParseConfig(const std::string& line) {
         { int v = reader.GetInt("keybindBlockEsp", -1);      if (v >= 0) g_config.keybindBlockEsp      = v; }
         { int v = reader.GetInt("keybindBedPlates", -1);     if (v >= 0) g_config.keybindBedPlates     = v; }
         { int v = reader.GetInt("keybindAutoRod", -1);       if (v >= 0) g_config.keybindAutoRod = lc::ClampInt(v, 0, 255); }
+        { int v = reader.GetInt("keybindAutoTool", -1);      if (v >= 0) g_config.keybindAutoTool = lc::ClampInt(v, 0, 255); }
 
         g_config.pixelPartyAssist = reader.GetBool("pixelPartyAssist");
         int ppRadius = reader.GetInt("pixelPartyScanRadius", g_config.pixelPartyScanRadius);
@@ -12775,6 +13186,7 @@ void ServerLoop() {
                     s_antiDebuffWasEnabled = cfgSnapshot.antiDebuffEnabled;
                 }
                 UpdateHitDelayFixLegacy(env, cfgSnapshot, state);
+                UpdateAutoToolLegacy(env, cfgSnapshot, state);
                 {
                     NativePerfScope sectionScanPerf(lc::PERF_BLOCK_SCAN);
                     UpdateSectionChunkScansLegacy(env, cfgSnapshot);
@@ -12926,6 +13338,7 @@ void ServerLoop() {
         ReleaseSpeedBridgeSneak(env);
         ResetSpeedBridgeMovementTracking();
         ResetAutoRodLegacyJniCaches(env);
+        ResetAutoToolLegacyJniCaches(env);
         ResetFightStatusState18();
         HelperBridge::Unload(env);
         const bool antiDebuffSafeToUnload = anti_debuff_jvmti::Shutdown(env);

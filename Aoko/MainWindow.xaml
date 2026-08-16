@@ -779,6 +779,47 @@
                             </StackPanel>
                         </Border>
 
+                        <Border x:Name="AutoToolCard" Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
+                            <StackPanel>
+                                <DockPanel Margin="0,0,0,10">
+                                    <Button x:Name="KeybindAutoToolButton" Tag="autotool" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
+                                    <TextBlock Text="AutoTool" Foreground="{DynamicResource TextBrush}" FontSize="16" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </DockPanel>
+                                <TextBlock x:Name="AutoToolAvailabilityText" Text="Available" Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,0,0,8"/>
+                                <CheckBox Content="Enable AutoTool" IsChecked="{Binding AutoToolEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                <TextBlock Text="Automatically swaps to the best tool in your hotbar when breaking blocks."
+                                           Foreground="{DynamicResource DimTextBrush}"
+                                           FontSize="12"
+                                           TextWrapping="Wrap"
+                                           Margin="0,6,0,10"/>
+
+                                <DockPanel Margin="0,8,0,0">
+                                    <TextBlock Text="Swap delay (ms)" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left" />
+                                    <TextBlock Text="{Binding AutoToolSwapToDelay}" Foreground="{DynamicResource DimTextBrush}" FontSize="12" HorizontalAlignment="Right" DockPanel.Dock="Right" />
+                                </DockPanel>
+                                <Slider Minimum="0" Maximum="500" TickFrequency="10" IsSnapToTickEnabled="True"
+                                        Value="{Binding AutoToolSwapToDelay, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                        Style="{StaticResource DarkSlider}"/>
+
+                                <CheckBox Content="Swap back to original item" IsChecked="{Binding AutoToolSwapBack, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,8,0,0"/>
+
+                                <DockPanel Margin="0,8,0,0">
+                                    <TextBlock Text="Swap back delay (ms)" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left" />
+                                    <TextBlock Text="{Binding AutoToolSwapBackDelay}" Foreground="{DynamicResource DimTextBrush}" FontSize="12" HorizontalAlignment="Right" DockPanel.Dock="Right" />
+                                </DockPanel>
+                                <Slider Minimum="0" Maximum="1000" TickFrequency="25" IsSnapToTickEnabled="True"
+                                        Value="{Binding AutoToolSwapBackDelay, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                        Style="{StaticResource DarkSlider}"/>
+
+                                <WrapPanel Margin="0,10,0,0">
+                                    <CheckBox Content="Swap weapon" IsChecked="{Binding AutoToolSwapWeapon, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,0,14,6"/>
+                                    <CheckBox Content="Instant weapon swap" IsChecked="{Binding AutoToolInstantSwap, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,0,14,6"/>
+                                    <CheckBox Content="Require mouse down" IsChecked="{Binding AutoToolRequireMouseDown, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,0,14,6"/>
+                                    <CheckBox Content="Only while sneaking" IsChecked="{Binding AutoToolOnlySneaking, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,0,14,6"/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </Border>
+
                         <Border Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
                             <StackPanel>
                                 <DockPanel Margin="0,0,0,6">

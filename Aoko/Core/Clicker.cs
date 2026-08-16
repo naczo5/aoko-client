@@ -492,6 +492,7 @@ public class Clicker : INotifyPropertyChanged
             VelocityEnabled = false;
             AutoTotemEnabled = false;
             AutoRodEnabled = false;
+            AutoToolEnabled = false;
             AntiDebuffEnabled = false;
             HitDelayFixEnabled = false;
 
@@ -1495,6 +1496,112 @@ public class Clicker : INotifyPropertyChanged
         {
             if (InputHooks.SetAutoRodActionKey(value))
                 OnPropertyChanged(nameof(AutoRodActionKey));
+        }
+    }
+
+    private bool _autoToolEnabled = false;
+    public bool AutoToolEnabled
+    {
+        get => _autoToolEnabled;
+        set
+        {
+            if (_autoToolEnabled == value) return;
+            _autoToolEnabled = value;
+            OnPropertyChanged(nameof(AutoToolEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _autoToolSwapWeapon = true;
+    public bool AutoToolSwapWeapon
+    {
+        get => _autoToolSwapWeapon;
+        set
+        {
+            if (_autoToolSwapWeapon == value) return;
+            _autoToolSwapWeapon = value;
+            OnPropertyChanged(nameof(AutoToolSwapWeapon));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _autoToolInstantSwap = true;
+    public bool AutoToolInstantSwap
+    {
+        get => _autoToolInstantSwap;
+        set
+        {
+            if (_autoToolInstantSwap == value) return;
+            _autoToolInstantSwap = value;
+            OnPropertyChanged(nameof(AutoToolInstantSwap));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private int _autoToolSwapToDelay = 50;
+    public int AutoToolSwapToDelay
+    {
+        get => _autoToolSwapToDelay;
+        set
+        {
+            int clamped = Math.Clamp(value, 0, 500);
+            if (_autoToolSwapToDelay == clamped) return;
+            _autoToolSwapToDelay = clamped;
+            OnPropertyChanged(nameof(AutoToolSwapToDelay));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _autoToolSwapBack = false;
+    public bool AutoToolSwapBack
+    {
+        get => _autoToolSwapBack;
+        set
+        {
+            if (_autoToolSwapBack == value) return;
+            _autoToolSwapBack = value;
+            OnPropertyChanged(nameof(AutoToolSwapBack));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private int _autoToolSwapBackDelay = 350;
+    public int AutoToolSwapBackDelay
+    {
+        get => _autoToolSwapBackDelay;
+        set
+        {
+            int clamped = Math.Clamp(value, 0, 1000);
+            if (_autoToolSwapBackDelay == clamped) return;
+            _autoToolSwapBackDelay = clamped;
+            OnPropertyChanged(nameof(AutoToolSwapBackDelay));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _autoToolRequireMouseDown = true;
+    public bool AutoToolRequireMouseDown
+    {
+        get => _autoToolRequireMouseDown;
+        set
+        {
+            if (_autoToolRequireMouseDown == value) return;
+            _autoToolRequireMouseDown = value;
+            OnPropertyChanged(nameof(AutoToolRequireMouseDown));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _autoToolOnlySneaking = false;
+    public bool AutoToolOnlySneaking
+    {
+        get => _autoToolOnlySneaking;
+        set
+        {
+            if (_autoToolOnlySneaking == value) return;
+            _autoToolOnlySneaking = value;
+            OnPropertyChanged(nameof(AutoToolOnlySneaking));
+            StateChanged?.Invoke();
         }
     }
 

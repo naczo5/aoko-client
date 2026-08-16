@@ -96,6 +96,7 @@ public static class InputHooks
         ["velocity"]         = 0,
         ["autototem"]        = 0,
         ["autorod"]          = 0,
+        ["autotool"]         = 0,
         ["antidebuff"]       = 0,
         ["hitdelayfix"]     = 0,
         ["panic"]            = 0,
@@ -246,6 +247,7 @@ public static class InputHooks
             case "velocity":         c.VelocityEnabled = !c.VelocityEnabled; break;
             case "autototem":        c.AutoTotemEnabled = !c.AutoTotemEnabled; break;
             case "autorod":          c.AutoRodEnabled = !c.AutoRodEnabled; break;
+            case "autotool":         c.AutoToolEnabled = !c.AutoToolEnabled; break;
             case "antidebuff":       c.AntiDebuffEnabled = !c.AntiDebuffEnabled; break;
             case "hitdelayfix":     c.HitDelayFixEnabled = !c.HitDelayFixEnabled; break;
             case "hudeditor":        c.HudEditorActive = !c.HudEditorActive; break;

@@ -35,6 +35,7 @@
 #include "json_config_reader.h"
 #include "bounded_newline_buffer.h"
 #include "auto_rod_core.h"
+#include "auto_tool_core.h"
 #include "bridge_capabilities.h"
 #include "nick_hider.h"
 #include "nick_hider_jvmti.h"
@@ -283,6 +284,15 @@ struct Config {
     int   autoRodExtensionTicks = autorod::kUseToRestoreTicks;
     bool  autoRodHoldToExtend = false;
     int   keybindAutoRod = 0;
+    bool  autoToolEnabled = false;
+    bool  autoToolSwapWeapon = true;
+    bool  autoToolInstantSwap = true;
+    int   autoToolSwapToDelay = 50;
+    bool  autoToolSwapBack = false;
+    int   autoToolSwapBackDelay = 350;
+    bool  autoToolRequireMouseDown = true;
+    bool  autoToolOnlySneaking = false;
+    int   keybindAutoTool = 0;
     bool  pixelPartyAssist = false;
     int   pixelPartyScanRadius = 28;
     bool  pixelPartyAutoLook = false;
@@ -563,6 +573,15 @@ static void ParseConfig(const std::string& line) {
         autorod::kMinExtensionTicks, autorod::kMaxExtensionTicks);
     g_config.autoRodHoldToExtend = reader.GetBool("autoRodHoldToExtend", false);
     g_config.keybindAutoRod = lc::ClampInt(reader.GetInt("keybindAutoRod", g_config.keybindAutoRod), 0, 255);
+    g_config.autoToolEnabled = reader.GetBool("autoToolEnabled");
+    g_config.autoToolSwapWeapon = reader.GetBool("autoToolSwapWeapon", true);
+    g_config.autoToolInstantSwap = reader.GetBool("autoToolInstantSwap", true);
+    g_config.autoToolSwapToDelay = lc::ClampInt(reader.GetInt("autoToolSwapToDelay", 50), 0, 500);
+    g_config.autoToolSwapBack = reader.GetBool("autoToolSwapBack", false);
+    g_config.autoToolSwapBackDelay = lc::ClampInt(reader.GetInt("autoToolSwapBackDelay", 350), 0, 1000);
+    g_config.autoToolRequireMouseDown = reader.GetBool("autoToolRequireMouseDown", true);
+    g_config.autoToolOnlySneaking = reader.GetBool("autoToolOnlySneaking", false);
+    g_config.keybindAutoTool = lc::ClampInt(reader.GetInt("keybindAutoTool", g_config.keybindAutoTool), 0, 255);
     g_config.pixelPartyAssist = reader.GetBool("pixelPartyAssist");
     g_config.pixelPartyScanRadius = lc::ClampInt(reader.GetInt("pixelPartyScanRadius", g_config.pixelPartyScanRadius), 8, 48);
     g_config.pixelPartyAutoLook = reader.GetBool("pixelPartyAutoLook");
@@ -2767,6 +2786,12 @@ static bool IsChestBlockEntity(JNIEnv* env, jobject be) {
         if (g_chestBlockEntityClasses[i] && env->IsInstanceOf(be, g_chestBlockEntityClasses[i])) return true;
     }
 
+    int resolvedTyped = 0;
+    for (int i = 0; i < 4; i++) {
+        if (g_chestBlockEntityClasses[i]) resolvedTyped++;
+    }
+    if (!lc::ChestEspNeedNameFallback(resolvedTyped, 4)) return false;
+
     // Fallback: detect chest-like block entities via BlockState -> Block translation key/class name.
     // This keeps Chest ESP resilient when class IDs shift across client remaps.
     EnsureChestStateDetectionCaches(env, be);
@@ -2923,6 +2948,7 @@ static void LogNametagSuppressionMissingMappings121(JNIEnv* env, jobject worldOb
 static void ResetNametagSuppressionCaches121(JNIEnv* env, const char* reason);
 static void ResetAutoTotemCaches(JNIEnv* env);
 static void ResetAutoRodModernCaches(JNIEnv* env);
+static void ResetAutoToolModernCaches(JNIEnv* env);
 static void ExecuteAutoRodModern(JNIEnv* env);
 static void ResetModernJniRuntimeCaches121(JNIEnv* env, const char* reason);
 static bool TrackSuppressionWorldContext121(JNIEnv* env, jobject worldObj);
@@ -5621,6 +5647,7 @@ static void UpdatePlayerListOverlay(JNIEnv* env) {
         }
         double dx = ex - sx, dy = ey - sy, dz = ez - sz;
         double dist = sqrt(dx*dx + dy*dy + dz*dz);
+        if (dist != dist) { env->DeleteLocalRef(entObj); continue; }
 
         lwList.push_back({entObj, dist, ex, ey, ez});
     }
@@ -5850,7 +5877,7 @@ static void UpdatePlayerListOverlay(JNIEnv* env) {
                 }
 
                 int armor = GetEntityArmor(env, lw.obj);
-                std::string held = needHeldItem
+                std::string held = lc::NametagShouldFetchHeldItem(needHeldItem, lw.dist)
                     ? GetHeldItemInfo(env, lw.obj)
                     : std::string();
                 appendPlayer(name, lw, hp, healthAvailable, absorption, armor,
@@ -11098,6 +11125,7 @@ static void ResetModernJniRuntimeCaches121(JNIEnv* env, const char* reason) {
     InterlockedIncrement(&g_mappingGeneration121);
 
     ResetAutoRodModernCaches(env);
+    ResetAutoToolModernCaches(env);
     CleanupJniGlobals(env);
     ResetNametagSuppressionCaches121(env, nullptr);
 
@@ -13943,6 +13971,377 @@ static void ExecuteAutoRodModern(JNIEnv* env) {
     env->PopLocalFrame(nullptr);
 }
 
+static autotool::AutoToolState g_autoToolState121;
+static jmethodID g_autoToolDestroySpeedMethod121 = nullptr;
+static jmethodID g_autoToolWorldGetBlockState121 = nullptr;
+static jmethodID g_autoToolBlockHitGetPosMethod121 = nullptr;
+static jfieldID  g_autoToolBlockHitPosField121 = nullptr;
+static jmethodID g_autoToolPlayerIsSneaking121 = nullptr;
+static jmethodID g_autoToolItemStackGetItem121 = nullptr;
+static jmethodID g_autoToolItemStackIsEmpty121 = nullptr;
+static jclass    g_autoToolSwordItemClass121 = nullptr;
+static jclass    g_autoToolAxeItemClass121 = nullptr;
+
+static void ResetAutoToolModernCaches(JNIEnv* env) {
+    g_autoToolState121.Reset();
+    g_autoToolDestroySpeedMethod121 = nullptr;
+    g_autoToolWorldGetBlockState121 = nullptr;
+    g_autoToolBlockHitGetPosMethod121 = nullptr;
+    g_autoToolBlockHitPosField121 = nullptr;
+    g_autoToolPlayerIsSneaking121 = nullptr;
+    g_autoToolItemStackGetItem121 = nullptr;
+    g_autoToolItemStackIsEmpty121 = nullptr;
+    if (env) {
+        if (g_autoToolSwordItemClass121) { env->DeleteGlobalRef(g_autoToolSwordItemClass121); g_autoToolSwordItemClass121 = nullptr; }
+        if (g_autoToolAxeItemClass121) { env->DeleteGlobalRef(g_autoToolAxeItemClass121); g_autoToolAxeItemClass121 = nullptr; }
+    }
+}
+
+static bool EnsureAutoToolModernMappings(JNIEnv* env, jobject player) {
+    if (!env || !player || !g_mcInstance) return false;
+
+    if (!EnsureAutoRodModernMappings(env, player, true)) return false;
+
+    if (!g_crosshairTargetField_121) {
+        jclass mcCls = env->GetObjectClass(g_mcInstance);
+        if (mcCls) {
+            EnsureCrosshairTargetField(env, mcCls);
+            env->DeleteLocalRef(mcCls);
+        }
+    }
+
+    if (!g_autoToolWorldGetBlockState121 && g_worldField_121) {
+        jobject world = env->GetObjectField(g_mcInstance, g_worldField_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); world = nullptr; }
+        if (world) {
+            jclass worldCls = env->GetObjectClass(world);
+            if (worldCls) {
+                const char* names[] = { "getBlockState", "method_8320", "m_8055_", nullptr };
+                const char* sigs[] = {
+                    "(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/state/BlockState;",
+                    "(Lnet/minecraft/class_2338;)Lnet/minecraft/class_2680;",
+                    nullptr
+                };
+                for (int ni = 0; names[ni] && !g_autoToolWorldGetBlockState121; ++ni) {
+                    for (int si = 0; sigs[si] && !g_autoToolWorldGetBlockState121; ++si) {
+                        g_autoToolWorldGetBlockState121 = env->GetMethodID(worldCls, names[ni], sigs[si]);
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolWorldGetBlockState121 = nullptr; }
+                    }
+                }
+                env->DeleteLocalRef(worldCls);
+            }
+            env->DeleteLocalRef(world);
+        }
+    }
+
+    if (!g_autoToolDestroySpeedMethod121 || !g_autoToolItemStackGetItem121 || !g_autoToolItemStackIsEmpty121) {
+        const char* stackClasses[] = {
+            "net.minecraft.world.item.ItemStack",
+            "net.minecraft.class_1799",
+            "net.minecraft.item.ItemStack",
+            nullptr
+        };
+        jclass stackCls = LoadAutoRodClass121(env, stackClasses);
+        if (stackCls) {
+            if (!g_autoToolDestroySpeedMethod121) {
+                const char* names[] = { "getDestroySpeed", "method_7924", "getMiningSpeedMultiplier", "m_41671_", nullptr };
+                const char* sigs[] = {
+                    "(Lnet/minecraft/world/level/block/state/BlockState;)F",
+                    "(Lnet/minecraft/class_2680;)F",
+                    nullptr
+                };
+                for (int ni = 0; names[ni] && !g_autoToolDestroySpeedMethod121; ++ni) {
+                    for (int si = 0; sigs[si] && !g_autoToolDestroySpeedMethod121; ++si) {
+                        g_autoToolDestroySpeedMethod121 = env->GetMethodID(stackCls, names[ni], sigs[si]);
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolDestroySpeedMethod121 = nullptr; }
+                    }
+                }
+            }
+            if (!g_autoToolItemStackGetItem121) {
+                const char* names[] = { "getItem", "method_7909", "m_41720_", nullptr };
+                const char* sigs[] = {
+                    "()Lnet/minecraft/world/item/Item;",
+                    "()Lnet/minecraft/class_1792;",
+                    "()Lnet/minecraft/item/Item;",
+                    nullptr
+                };
+                for (int ni = 0; names[ni] && !g_autoToolItemStackGetItem121; ++ni) {
+                    for (int si = 0; sigs[si] && !g_autoToolItemStackGetItem121; ++si) {
+                        g_autoToolItemStackGetItem121 = env->GetMethodID(stackCls, names[ni], sigs[si]);
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolItemStackGetItem121 = nullptr; }
+                    }
+                }
+            }
+            if (!g_autoToolItemStackIsEmpty121) {
+                const char* names[] = { "isEmpty", "method_7960", "m_41619_", nullptr };
+                for (int ni = 0; names[ni] && !g_autoToolItemStackIsEmpty121; ++ni) {
+                    g_autoToolItemStackIsEmpty121 = env->GetMethodID(stackCls, names[ni], "()Z");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolItemStackIsEmpty121 = nullptr; }
+                }
+            }
+            env->DeleteLocalRef(stackCls);
+        }
+    }
+
+    if (!g_autoToolSwordItemClass121) {
+        const char* swordClasses[] = {
+            "net.minecraft.world.item.SwordItem",
+            "net.minecraft.class_1829",
+            "net.minecraft.item.SwordItem",
+            nullptr
+        };
+        jclass swordCls = LoadAutoRodClass121(env, swordClasses);
+        if (swordCls) {
+            g_autoToolSwordItemClass121 = (jclass)env->NewGlobalRef(swordCls);
+            env->DeleteLocalRef(swordCls);
+        }
+    }
+
+    if (!g_autoToolAxeItemClass121) {
+        const char* axeClasses[] = {
+            "net.minecraft.world.item.AxeItem",
+            "net.minecraft.class_1743",
+            "net.minecraft.item.AxeItem",
+            nullptr
+        };
+        jclass axeCls = LoadAutoRodClass121(env, axeClasses);
+        if (axeCls) {
+            g_autoToolAxeItemClass121 = (jclass)env->NewGlobalRef(axeCls);
+            env->DeleteLocalRef(axeCls);
+        }
+    }
+
+    if (!g_autoToolPlayerIsSneaking121) {
+        jclass playerCls = env->GetObjectClass(player);
+        if (playerCls) {
+            const char* names[] = { "isShiftKeyDown", "isSneaking", "isCrouching", "method_5715", "method_18276", "m_6144_", "m_6047_", nullptr };
+            for (int ni = 0; names[ni] && !g_autoToolPlayerIsSneaking121; ++ni) {
+                g_autoToolPlayerIsSneaking121 = env->GetMethodID(playerCls, names[ni], "()Z");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolPlayerIsSneaking121 = nullptr; }
+            }
+            env->DeleteLocalRef(playerCls);
+        }
+    }
+
+    return g_autoRodGetInventory121 != nullptr && g_autoRodSelectedSlotField121 != nullptr && g_autoRodInventoryGetItem121 != nullptr;
+}
+
+static void UpdateAutoToolModern(JNIEnv* env, const Config& cfg) {
+    if (!cfg.autoToolEnabled) {
+        g_autoToolState121.Reset();
+        return;
+    }
+
+    if (!g_mcInstance || !g_playerField_121) {
+        return;
+    }
+
+    bool inWorld = false;
+    bool guiOpen = false;
+    bool breakingBlock = false;
+    {
+        LockGuard lk(g_jniStateMtx);
+        inWorld = g_jniInWorld;
+        guiOpen = g_jniGuiOpen;
+        breakingBlock = g_jniBreakingBlock;
+    }
+
+    if (!inWorld || guiOpen) {
+        return;
+    }
+
+    if (env->PushLocalFrame(24) < 0) return;
+
+    jobject player = env->GetObjectField(g_mcInstance, g_playerField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); player = nullptr; }
+    if (!player || !EnsureAutoToolModernMappings(env, player)) {
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    jobject inventory = env->CallObjectMethod(player, g_autoRodGetInventory121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); inventory = nullptr; }
+    if (!inventory) {
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    int currentSlot = env->GetIntField(inventory, g_autoRodSelectedSlotField121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); currentSlot = 0; }
+
+    bool isSneaking = false;
+    if (g_autoToolPlayerIsSneaking121) {
+        isSneaking = env->CallBooleanMethod(player, g_autoToolPlayerIsSneaking121) != JNI_FALSE;
+        if (env->ExceptionCheck()) { env->ExceptionClear(); isSneaking = false; }
+    }
+
+    autotool::AutoToolInput input;
+    input.nowMs = GetTickCount();
+    input.inWorld = inWorld;
+    input.guiOpen = guiOpen;
+    input.mouseDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 || breakingBlock;
+    input.isSneaking = isSneaking;
+    input.currentSlot = currentSlot;
+    input.isBlockHit = false;
+    input.isEntityHit = false;
+    input.bestToolSlot = -1;
+    input.bestWeaponSlot = -1;
+
+    jfieldID hitFld = g_crosshairTargetField_121;
+    if (hitFld) {
+        jobject hitObj = env->GetObjectField(g_mcInstance, hitFld);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); hitObj = nullptr; }
+        if (hitObj) {
+            int hitOrd = GetHitResultTypeOrdinal(env, hitObj);
+            if (hitOrd == 1) { // BLOCK
+                input.isBlockHit = true;
+                if (!g_autoToolBlockHitGetPosMethod121 && !g_autoToolBlockHitPosField121) {
+                    jclass hitCls = env->GetObjectClass(hitObj);
+                    if (hitCls) {
+                        const char* mNames[] = { "getBlockPos", "method_17777", "m_82425_", nullptr };
+                        const char* mSigs[] = {
+                            "()Lnet/minecraft/core/BlockPos;",
+                            "()Lnet/minecraft/class_2338;",
+                            nullptr
+                        };
+                        for (int ni = 0; mNames[ni] && !g_autoToolBlockHitGetPosMethod121; ++ni) {
+                            for (int si = 0; mSigs[si] && !g_autoToolBlockHitGetPosMethod121; ++si) {
+                                g_autoToolBlockHitGetPosMethod121 = env->GetMethodID(hitCls, mNames[ni], mSigs[si]);
+                                if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolBlockHitGetPosMethod121 = nullptr; }
+                            }
+                        }
+                        if (!g_autoToolBlockHitGetPosMethod121) {
+                            const char* fNames[] = { "blockPos", "field_17588", "f_82414_", nullptr };
+                            const char* fSigs[] = {
+                                "Lnet/minecraft/core/BlockPos;",
+                                "Lnet/minecraft/class_2338;",
+                                nullptr
+                            };
+                            for (int ni = 0; fNames[ni] && !g_autoToolBlockHitPosField121; ++ni) {
+                                for (int si = 0; fSigs[si] && !g_autoToolBlockHitPosField121; ++si) {
+                                    g_autoToolBlockHitPosField121 = env->GetFieldID(hitCls, fNames[ni], fSigs[si]);
+                                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolBlockHitPosField121 = nullptr; }
+                                }
+                            }
+                        }
+                        env->DeleteLocalRef(hitCls);
+                    }
+                }
+
+                jobject blockPos = nullptr;
+                if (g_autoToolBlockHitGetPosMethod121) {
+                    blockPos = env->CallObjectMethod(hitObj, g_autoToolBlockHitGetPosMethod121);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); blockPos = nullptr; }
+                } else if (g_autoToolBlockHitPosField121) {
+                    blockPos = env->GetObjectField(hitObj, g_autoToolBlockHitPosField121);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); blockPos = nullptr; }
+                }
+
+                jobject world = g_worldField_121 ? env->GetObjectField(g_mcInstance, g_worldField_121) : nullptr;
+                if (env->ExceptionCheck()) { env->ExceptionClear(); world = nullptr; }
+
+                if (blockPos && world && g_autoToolWorldGetBlockState121 && g_autoToolDestroySpeedMethod121) {
+                    jobject blockState = env->CallObjectMethod(world, g_autoToolWorldGetBlockState121, blockPos);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); blockState = nullptr; }
+                    if (blockState) {
+                        float bestSpeed = 1.0f;
+                        int bestSlot = -1;
+                        for (int i = 0; i < 9; ++i) {
+                            jobject stack = env->CallObjectMethod(inventory, g_autoRodInventoryGetItem121, (jint)i);
+                            if (env->ExceptionCheck()) { env->ExceptionClear(); stack = nullptr; }
+                            if (!stack) continue;
+
+                            if (g_autoToolItemStackIsEmpty121 && env->CallBooleanMethod(stack, g_autoToolItemStackIsEmpty121)) {
+                                env->DeleteLocalRef(stack);
+                                continue;
+                            }
+
+                            float speed = env->CallFloatMethod(stack, g_autoToolDestroySpeedMethod121, blockState);
+                            if (env->ExceptionCheck()) { env->ExceptionClear(); speed = 1.0f; }
+
+                            if (g_autoToolItemStackGetItem121 && g_autoToolSwordItemClass121) {
+                                jobject item = env->CallObjectMethod(stack, g_autoToolItemStackGetItem121);
+                                if (env->ExceptionCheck()) { env->ExceptionClear(); item = nullptr; }
+                                if (item) {
+                                    if (env->IsInstanceOf(item, g_autoToolSwordItemClass121) && speed <= 1.5f) {
+                                        speed /= 2.0f;
+                                    }
+                                    env->DeleteLocalRef(item);
+                                }
+                            }
+
+                            if (speed > bestSpeed) {
+                                bestSpeed = speed;
+                                bestSlot = i;
+                            }
+                            env->DeleteLocalRef(stack);
+                        }
+                        input.bestToolSlot = bestSlot;
+                        env->DeleteLocalRef(blockState);
+                    }
+                }
+                if (world) env->DeleteLocalRef(world);
+                if (blockPos) env->DeleteLocalRef(blockPos);
+            } else if (hitOrd == 2) { // ENTITY
+                input.isEntityHit = true;
+                if (cfg.autoToolSwapWeapon) {
+                    float bestScore = 0.0f;
+                    int bestWeapon = -1;
+                    for (int i = 0; i < 9; ++i) {
+                        jobject stack = env->CallObjectMethod(inventory, g_autoRodInventoryGetItem121, (jint)i);
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); stack = nullptr; }
+                        if (!stack) continue;
+
+                        if (g_autoToolItemStackIsEmpty121 && env->CallBooleanMethod(stack, g_autoToolItemStackIsEmpty121)) {
+                            env->DeleteLocalRef(stack);
+                            continue;
+                        }
+
+                        if (g_autoToolItemStackGetItem121) {
+                            jobject item = env->CallObjectMethod(stack, g_autoToolItemStackGetItem121);
+                            if (env->ExceptionCheck()) { env->ExceptionClear(); item = nullptr; }
+                            if (item) {
+                                float score = 0.0f;
+                                if (g_autoToolSwordItemClass121 && env->IsInstanceOf(item, g_autoToolSwordItemClass121)) {
+                                    score = 10.0f;
+                                } else if (g_autoToolAxeItemClass121 && env->IsInstanceOf(item, g_autoToolAxeItemClass121)) {
+                                    score = 8.0f;
+                                }
+                                if (score > bestScore) {
+                                    bestScore = score;
+                                    bestWeapon = i;
+                                }
+                                env->DeleteLocalRef(item);
+                            }
+                        }
+                        env->DeleteLocalRef(stack);
+                    }
+                    input.bestWeaponSlot = bestWeapon;
+                }
+            }
+            env->DeleteLocalRef(hitObj);
+        }
+    }
+
+    autotool::AutoToolConfig coreCfg;
+    coreCfg.enabled = cfg.autoToolEnabled;
+    coreCfg.swapWeapon = cfg.autoToolSwapWeapon;
+    coreCfg.instantSwap = cfg.autoToolInstantSwap;
+    coreCfg.swapToDelayMs = cfg.autoToolSwapToDelay;
+    coreCfg.swapBack = cfg.autoToolSwapBack;
+    coreCfg.swapBackDelayMs = cfg.autoToolSwapBackDelay;
+    coreCfg.requireMouseDown = cfg.autoToolRequireMouseDown;
+    coreCfg.onlyWhileSneaking = cfg.autoToolOnlySneaking;
+
+    autotool::AutoToolAction action = autotool::UpdateAutoToolState(g_autoToolState121, coreCfg, input);
+    if (action.switchSlot && action.targetSlot >= 0 && action.targetSlot < 9) {
+        env->SetIntField(inventory, g_autoRodSelectedSlotField121, action.targetSlot);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+
+    env->PopLocalFrame(nullptr);
+}
+
 static DWORD WINAPI FastPollThreadProc(LPVOID) {
     JNIEnv* env = nullptr;
     if (!g_jvm || g_jvm->AttachCurrentThread((void**)&env, nullptr) != JNI_OK) return 1;
@@ -13952,6 +14351,13 @@ static DWORD WINAPI FastPollThreadProc(LPVOID) {
             if (g_stateJniReady) {
                 UpdateJniState();
                 ExecuteAutoRodModern(env);
+                {
+                    Config cfg;
+                    { LockGuard lk(g_configMutex); cfg = g_config; }
+                    if (cfg.autoToolEnabled) {
+                        UpdateAutoToolModern(env, cfg);
+                    }
+                }
                 // Camera validity is part of the transition readiness handshake;
                 // continue sampling it while modules remain gated so recovery is
                 // based on the new frame state instead of elapsed time.
@@ -14102,6 +14508,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                             }
                             ResetAutoRodModernCaches(env);
                             ResetAutoTotemCaches(env);
+                            ResetAutoToolModernCaches(env);
                             if (g_lastAutoTotemWorld_121) env->DeleteGlobalRef(g_lastAutoTotemWorld_121);
                             g_lastAutoTotemWorld_121 = env->NewGlobalRef(worldObj);
                         }
@@ -14966,6 +15373,7 @@ static void RenderOverlayPanels(
                     LockGuard chestLk(g_chestListMutex);
                     chestSnapshot = g_chestList;
                 }
+
                 // Use shared camera data (same source as nametags – no redundant JNI fetch)
                 const LegoVec3   espCam   = sharedCam;
                 const float      espYaw   = sharedYaw;
@@ -15016,10 +15424,14 @@ static void RenderOverlayPanels(
                         double dy = ch.y - espCam.y;
                         double dz = ch.z - espCam.z;
                         double distNow = std::sqrt(dx*dx + dy*dy + dz*dz);
+                        if (distNow != distNow) continue;
                         renderChests.push_back({ &ch, distNow });
                     }
                     std::sort(renderChests.begin(), renderChests.end(),
                         [](const RenderChestCandidate& a, const RenderChestCandidate& b) {
+                            const bool aOk = a.dist == a.dist;
+                            const bool bOk = b.dist == b.dist;
+                            if (aOk != bOk) return aOk;
                             return a.dist < b.dist;
                         });
 
@@ -15447,6 +15859,7 @@ static void RenderOverlayPanels(
                 if (cfg.killAura)      pushMod("Kill Aura", overlayTheme.accentSecondary);
                 if (cfg.speedBridge)   pushMod("SpeedBridge", overlayTheme.accentPrimary);
                 if (cfg.autoRodEnabled) pushMod("Auto Rod", overlayTheme.accentPrimary);
+                if (cfg.autoToolEnabled) pushMod("AutoTool", overlayTheme.accentPrimary);
                 if (cfg.chestStealer)  pushMod("Chest Stealer", overlayTheme.accentTertiary);
                 if (cfg.chestEsp)      pushMod("Chest ESP", overlayTheme.accentSecondary);
                 if (cfg.blockEsp)      pushMod("Block ESP", overlayTheme.accentSecondary);

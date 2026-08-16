@@ -34,6 +34,43 @@ inline bool ChestEspInChunkRange(int blockX, int blockZ, double playerX, double 
     return InChunkRange(blockX, blockZ, playerX, playerZ, rangeChunks);
 }
 
+// Held-item JNI (ItemStack.getDisplayName) is only worth it up close.
+constexpr double kNametagHeldItemMaxDist = 24.0;
+constexpr double kEntityJsonMaxDist = 48.0;
+constexpr double kClosestPlayerMaxDist = 96.0;
+
+inline bool NametagShouldFetchHeldItem(bool showHeldItem, double dist) {
+    return showHeldItem && dist == dist && dist <= kNametagHeldItemMaxDist;
+}
+
+// String/class-name chest fallback is for mapping failures, not the per-tile hot path.
+inline bool ChestEspNeedNameFallback(int resolvedTypedCount, int requiredTypedCount) {
+    return resolvedTypedCount < requiredTypedCount;
+}
+
+inline bool ChestEspNeedClassNameFallback(bool haveChestClass, bool haveEnderChestClass) {
+    return ChestEspNeedNameFallback(
+        (haveChestClass ? 1 : 0) + (haveEnderChestClass ? 1 : 0), 2);
+}
+
+inline bool OverlayEntityNeedsFullScan(
+    bool nametagsEnabled,
+    bool inNametagRange,
+    bool fightStatusEnabled,
+    bool hideVanilla,
+    bool closestPlayerInfo,
+    double dist,
+    bool jsonSlotOpen)
+{
+    if (hideVanilla) return true;
+    if (dist != dist) return false;
+    if (fightStatusEnabled) return true;
+    if (nametagsEnabled && inNametagRange) return true;
+    if (closestPlayerInfo && dist <= kClosestPlayerMaxDist) return true;
+    if (jsonSlotOpen && dist <= kEntityJsonMaxDist) return true;
+    return false;
+}
+
 struct ChestEspCandidate {
     int bx;
     int by;
@@ -44,6 +81,9 @@ struct ChestEspCandidate {
 inline void ChestEspSortNearestFirst(std::vector<ChestEspCandidate>& items) {
     std::sort(items.begin(), items.end(),
         [](const ChestEspCandidate& a, const ChestEspCandidate& b) {
+            const bool aOk = a.distSq == a.distSq;
+            const bool bOk = b.distSq == b.distSq;
+            if (aOk != bOk) return aOk;
             return a.distSq < b.distSq;
         });
 }

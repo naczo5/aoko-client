@@ -120,6 +120,15 @@ public class Profile
     public bool AutoRodHoldToExtend { get; set; } = false;
     public int AutoRodActionKey { get; set; } = 0;
 
+    public bool AutoToolEnabled { get; set; } = false;
+    public bool AutoToolSwapWeapon { get; set; } = true;
+    public bool AutoToolInstantSwap { get; set; } = true;
+    public int AutoToolSwapToDelay { get; set; } = 50;
+    public bool AutoToolSwapBack { get; set; } = false;
+    public int AutoToolSwapBackDelay { get; set; } = 350;
+    public bool AutoToolRequireMouseDown { get; set; } = true;
+    public bool AutoToolOnlySneaking { get; set; } = false;
+
     public bool AntiDebuffEnabled { get; set; } = false;
     public bool HitDelayFixEnabled { get; set; } = false;
 
@@ -149,6 +158,7 @@ public class Profile
         ["velocity"]         = 0,
         ["autototem"]        = 0,
         ["autorod"]          = 0,
+        ["autotool"]         = 0,
         ["antidebuff"]       = 0,
         ["hitdelayfix"]     = 0,
         ["panic"]            = 0,
@@ -554,6 +564,15 @@ public static class ProfileManager
             AutoRodHoldToExtend = clicker.AutoRodHoldToExtend,
             AutoRodActionKey = InputHooks.AutoRodActionKey,
 
+            AutoToolEnabled = clicker.AutoToolEnabled,
+            AutoToolSwapWeapon = clicker.AutoToolSwapWeapon,
+            AutoToolInstantSwap = clicker.AutoToolInstantSwap,
+            AutoToolSwapToDelay = clicker.AutoToolSwapToDelay,
+            AutoToolSwapBack = clicker.AutoToolSwapBack,
+            AutoToolSwapBackDelay = clicker.AutoToolSwapBackDelay,
+            AutoToolRequireMouseDown = clicker.AutoToolRequireMouseDown,
+            AutoToolOnlySneaking = clicker.AutoToolOnlySneaking,
+
             AntiDebuffEnabled = clicker.AntiDebuffEnabled,
             HitDelayFixEnabled = clicker.HitDelayFixEnabled,
 
@@ -680,6 +699,15 @@ public static class ProfileManager
         clicker.AutoRodVerifyForcedSlot = profile.AutoRodVerifyForcedSlot;
         clicker.AutoRodExtensionTicks = profile.AutoRodExtensionTicks;
         clicker.AutoRodHoldToExtend = profile.AutoRodHoldToExtend;
+
+        clicker.AutoToolEnabled = profile.AutoToolEnabled;
+        clicker.AutoToolSwapWeapon = profile.AutoToolSwapWeapon;
+        clicker.AutoToolInstantSwap = profile.AutoToolInstantSwap;
+        clicker.AutoToolSwapToDelay = profile.AutoToolSwapToDelay;
+        clicker.AutoToolSwapBack = profile.AutoToolSwapBack;
+        clicker.AutoToolSwapBackDelay = profile.AutoToolSwapBackDelay;
+        clicker.AutoToolRequireMouseDown = profile.AutoToolRequireMouseDown;
+        clicker.AutoToolOnlySneaking = profile.AutoToolOnlySneaking;
 
         clicker.AntiDebuffEnabled = profile.AntiDebuffEnabled;
         clicker.HitDelayFixEnabled = profile.HitDelayFixEnabled;

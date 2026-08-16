@@ -1180,6 +1180,14 @@ public class GameStateClient : INotifyPropertyChanged
                     autoRodVerifyForcedSlot = clicker.AutoRodVerifyForcedSlot,
                     autoRodExtensionTicks = clicker.AutoRodExtensionTicks,
                     autoRodHoldToExtend = clicker.AutoRodHoldToExtend,
+                    autoToolEnabled = clicker.AutoToolEnabled,
+                    autoToolSwapWeapon = clicker.AutoToolSwapWeapon,
+                    autoToolInstantSwap = clicker.AutoToolInstantSwap,
+                    autoToolSwapToDelay = clicker.AutoToolSwapToDelay,
+                    autoToolSwapBack = clicker.AutoToolSwapBack,
+                    autoToolSwapBackDelay = clicker.AutoToolSwapBackDelay,
+                    autoToolRequireMouseDown = clicker.AutoToolRequireMouseDown,
+                    autoToolOnlySneaking = clicker.AutoToolOnlySneaking,
                     antiDebuffEnabled = clicker.AntiDebuffEnabled,
                     hitDelayFixEnabled = clicker.HitDelayFixEnabled,
                     // Per-module keybinds
@@ -1199,6 +1207,7 @@ public class GameStateClient : INotifyPropertyChanged
                     keybindBedPlates     = InputHooks.GetModuleKey("bedplates"),
                     keybindPixelPartyAssist = InputHooks.GetModuleKey("pixelpartyassist"),
                     keybindAutoRod = InputHooks.GetModuleKey("autorod"),
+                    keybindAutoTool = InputHooks.GetModuleKey("autotool"),
                     hudEditor = clicker.HudEditorActive,
                     hudLayout = clicker.HudLayout.ToJson()
                     };
