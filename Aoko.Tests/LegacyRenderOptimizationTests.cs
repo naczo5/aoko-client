@@ -24,9 +24,9 @@ public sealed class LegacyRenderOptimizationTests
         string renderer = Slice(
             source,
             "void RenderClosestPlayerInfo(",
-            "void RenderChestESP(");
+            "static void UpdateChestListLegacy(");
 
-        Assert.Contains("ClosestPlayerDrawSnapshot18& snapshot", renderer);
+        Assert.Contains("const ClosestPlayerDrawSnapshot18& snapshot", renderer);
         Assert.DoesNotContain("ScopedJNIEnv", renderer);
         Assert.DoesNotContain("CallObjectMethod", renderer);
     }
@@ -51,31 +51,30 @@ public sealed class LegacyRenderOptimizationTests
     public void ChestEsp_SortsByDistanceAndUsesChunkRange()
     {
         string source = LegacyBridgeSource();
-        string renderer = Slice(
+        string chestLogic = Slice(
             source,
-            "void RenderChestESP(",
+            "static void UpdateChestListLegacy(",
             "// ===================== BLOCK ESP");
 
-        Assert.Contains("ChestEspSortNearestFirst", renderer, StringComparison.Ordinal);
-        Assert.Contains("ChestEspInChunkRange", renderer, StringComparison.Ordinal);
-        Assert.Contains("chestEspRange", renderer, StringComparison.Ordinal);
-        Assert.DoesNotContain("chestEspMaxCount", renderer, StringComparison.Ordinal);
-        Assert.DoesNotContain("drawn < chestEspMaxCount", renderer, StringComparison.Ordinal);
+        Assert.Contains("ChestEspSortNearestFirst", chestLogic, StringComparison.Ordinal);
+        Assert.Contains("ChestEspInChunkRange", chestLogic, StringComparison.Ordinal);
+        Assert.Contains("chestEspRange", chestLogic, StringComparison.Ordinal);
+        Assert.DoesNotContain("chestEspMaxCount", chestLogic, StringComparison.Ordinal);
+        Assert.DoesNotContain("drawn < chestEspMaxCount", chestLogic, StringComparison.Ordinal);
     }
 
     [Fact]
     public void Nametags_UseChunkRangeInsteadOfCountCap()
     {
         string source = LegacyBridgeSource();
-        string renderer = Slice(
+        string nametagLogic = Slice(
             source,
-            "void RenderNametags(",
-            "void RenderChestESP(");
+            "static void UpdatePlayerListOverlayLegacy(",
+            "void RenderClosestPlayerInfo(");
 
-        Assert.Contains("nametagRange", renderer, StringComparison.Ordinal);
-        Assert.Contains("InChunkRange", renderer, StringComparison.Ordinal);
-        Assert.Contains("wantProject && matrixProjectionUsable", renderer, StringComparison.Ordinal);
-        Assert.DoesNotContain("nametagMaxCount", renderer, StringComparison.Ordinal);
+        Assert.Contains("nametagRange", nametagLogic, StringComparison.Ordinal);
+        Assert.Contains("InChunkRange", nametagLogic, StringComparison.Ordinal);
+        Assert.DoesNotContain("nametagMaxCount", nametagLogic, StringComparison.Ordinal);
     }
 
     [Fact]

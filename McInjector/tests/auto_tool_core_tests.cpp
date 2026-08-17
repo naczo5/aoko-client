@@ -111,7 +111,9 @@ int main()
     cfg.onlyWhileSneaking = true;
     input.isSneaking = false;
     input.isBlockHit = true;
+    input.isEntityHit = false;
     input.bestToolSlot = 4;
+    input.bestWeaponSlot = -1;
     input.nowMs = 3000;
 
     act = autotool::UpdateAutoToolState(state, cfg, input);
@@ -120,8 +122,62 @@ int main()
     input.isSneaking = true;
     input.nowMs = 3050;
     act = autotool::UpdateAutoToolState(state, cfg, input);
+    ExpectBool(false, act.switchSlot, "Swap delay still waits after sneaking starts");
+    input.nowMs = 3100;
+    act = autotool::UpdateAutoToolState(state, cfg, input);
     ExpectBool(true, act.switchSlot, "onlyWhileSneaking allows swap when sneaking");
     ExpectEq(4, act.targetSlot, "Swaps to slot 4");
+
+    // Test 8: While LMB stays held, a new block that needs a different tool swaps immediately
+    cfg.onlyWhileSneaking = false;
+    input.isSneaking = false;
+    input.currentSlot = 4;
+    input.isBlockHit = true;
+    input.isEntityHit = false;
+    input.bestToolSlot = 7;
+    input.bestWeaponSlot = -1;
+    input.mouseDown = true;
+    input.nowMs = 3101;
+    act = autotool::UpdateAutoToolState(state, cfg, input);
+    ExpectBool(true, act.switchSlot, "Held LMB retargets to a new block's tool without a second click");
+    ExpectEq(7, act.targetSlot, "Switches from slot 4 to slot 7 while mouse stays down");
+
+    // Test 9: Hovering a player swaps to the weapon without waiting for mouse down
+    state.Reset();
+    input.currentSlot = 0;
+    input.mouseDown = false;
+    input.isBlockHit = false;
+    input.isEntityHit = true;
+    input.bestToolSlot = -1;
+    input.bestWeaponSlot = 1;
+    input.nowMs = 4000;
+    act = autotool::UpdateAutoToolState(state, cfg, input);
+    ExpectBool(true, act.switchSlot, "Weapon swap on entity hover does not require mouse down");
+    ExpectEq(1, act.targetSlot, "Switches to weapon slot 1");
+
+    // Test 10: Entity + block at the same time prefers the weapon
+    state.Reset();
+    input.currentSlot = 2;
+    input.mouseDown = true;
+    input.isBlockHit = true;
+    input.isEntityHit = true;
+    input.bestToolSlot = 5;
+    input.bestWeaponSlot = 1;
+    input.nowMs = 5000;
+    act = autotool::UpdateAutoToolState(state, cfg, input);
+    ExpectBool(true, act.switchSlot, "PvP prefers weapon over the block behind the opponent");
+    ExpectEq(1, act.targetSlot, "Switches to weapon rather than mining tool");
+
+    // Test 11: Exclusive owner (Auto Rod) keeps the hotbar while LMB/autoclick stays down
+    input.currentSlot = 8;
+    input.pauseExclusive = true;
+    input.mouseDown = true;
+    input.isEntityHit = true;
+    input.bestWeaponSlot = 1;
+    input.nowMs = 5100;
+    act = autotool::UpdateAutoToolState(state, cfg, input);
+    ExpectBool(false, act.switchSlot, "pauseExclusive does not steal the rod slot while autoclicking");
+    input.pauseExclusive = false;
 
     if (g_failures != 0) {
         std::cerr << "Auto Tool core tests failed: " << g_failures << std::endl;

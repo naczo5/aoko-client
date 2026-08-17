@@ -13976,9 +13976,13 @@ static jmethodID g_autoToolDestroySpeedMethod121 = nullptr;
 static jmethodID g_autoToolWorldGetBlockState121 = nullptr;
 static jmethodID g_autoToolBlockHitGetPosMethod121 = nullptr;
 static jfieldID  g_autoToolBlockHitPosField121 = nullptr;
+static jmethodID g_autoToolBlockHitGetDir121 = nullptr;
+static jfieldID  g_autoToolBlockHitDirField121 = nullptr;
 static jmethodID g_autoToolPlayerIsSneaking121 = nullptr;
 static jmethodID g_autoToolItemStackGetItem121 = nullptr;
 static jmethodID g_autoToolItemStackIsEmpty121 = nullptr;
+static jmethodID g_autoToolAttackBlock121 = nullptr;
+static jmethodID g_autoToolCancelBreaking121 = nullptr;
 static jclass    g_autoToolSwordItemClass121 = nullptr;
 static jclass    g_autoToolAxeItemClass121 = nullptr;
 
@@ -13988,9 +13992,13 @@ static void ResetAutoToolModernCaches(JNIEnv* env) {
     g_autoToolWorldGetBlockState121 = nullptr;
     g_autoToolBlockHitGetPosMethod121 = nullptr;
     g_autoToolBlockHitPosField121 = nullptr;
+    g_autoToolBlockHitGetDir121 = nullptr;
+    g_autoToolBlockHitDirField121 = nullptr;
     g_autoToolPlayerIsSneaking121 = nullptr;
     g_autoToolItemStackGetItem121 = nullptr;
     g_autoToolItemStackIsEmpty121 = nullptr;
+    g_autoToolAttackBlock121 = nullptr;
+    g_autoToolCancelBreaking121 = nullptr;
     if (env) {
         if (g_autoToolSwordItemClass121) { env->DeleteGlobalRef(g_autoToolSwordItemClass121); g_autoToolSwordItemClass121 = nullptr; }
         if (g_autoToolAxeItemClass121) { env->DeleteGlobalRef(g_autoToolAxeItemClass121); g_autoToolAxeItemClass121 = nullptr; }
@@ -14123,7 +14131,50 @@ static bool EnsureAutoToolModernMappings(JNIEnv* env, jobject player) {
         }
     }
 
+    jobject gameMode = g_autoRodGameModeField121 ? env->GetObjectField(g_mcInstance, g_autoRodGameModeField121) : nullptr;
+    if (env->ExceptionCheck()) { env->ExceptionClear(); gameMode = nullptr; }
+    if (gameMode) {
+        jclass modeCls = env->GetObjectClass(gameMode);
+        if (modeCls) {
+            if (!g_autoToolCancelBreaking121) {
+                const char* names[] = { "cancelBlockBreaking", "stopDestroying", "method_2925", nullptr };
+                for (int i = 0; names[i] && !g_autoToolCancelBreaking121; ++i) {
+                    g_autoToolCancelBreaking121 = env->GetMethodID(modeCls, names[i], "()V");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolCancelBreaking121 = nullptr; }
+                }
+            }
+            if (!g_autoToolAttackBlock121) {
+                const char* names[] = { "attackBlock", "startDestroyBlock", "method_2910", nullptr };
+                const char* sigs[] = {
+                    "(Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/Direction;)Z",
+                    "(Lnet/minecraft/class_2338;Lnet/minecraft/class_2350;)Z",
+                    "(Lnet/minecraft/util/math/BlockPos;Lnet/minecraft/util/math/Direction;)Z",
+                    nullptr
+                };
+                for (int ni = 0; names[ni] && !g_autoToolAttackBlock121; ++ni) {
+                    for (int si = 0; sigs[si] && !g_autoToolAttackBlock121; ++si) {
+                        g_autoToolAttackBlock121 = env->GetMethodID(modeCls, names[ni], sigs[si]);
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolAttackBlock121 = nullptr; }
+                    }
+                }
+            }
+            env->DeleteLocalRef(modeCls);
+        }
+        env->DeleteLocalRef(gameMode);
+    }
+
     return g_autoRodGetInventory121 != nullptr && g_autoRodSelectedSlotField121 != nullptr && g_autoRodInventoryGetItem121 != nullptr;
+}
+
+static void ApplyAutoToolSlotModern(JNIEnv* env, jobject inventory, int targetSlot) {
+    if (!env || !inventory || !g_autoRodSelectedSlotField121) return;
+    env->SetIntField(inventory, g_autoRodSelectedSlotField121, targetSlot);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+}
+
+static bool IsAutoRodTransactionActive121() {
+    LockGuard transactionLock(g_autoRodTransactionMutex121);
+    return g_autoRodTransaction121.phase != AUTO_ROD_TRANSACTION_IDLE_121;
 }
 
 static void UpdateAutoToolModern(JNIEnv* env, const Config& cfg) {
@@ -14136,21 +14187,27 @@ static void UpdateAutoToolModern(JNIEnv* env, const Config& cfg) {
         return;
     }
 
+    if (IsAutoRodTransactionActive121()) {
+        return;
+    }
+
     bool inWorld = false;
     bool guiOpen = false;
     bool breakingBlock = false;
+    bool lookingAtEntity = false;
     {
         LockGuard lk(g_jniStateMtx);
         inWorld = g_jniInWorld;
         guiOpen = g_jniGuiOpen;
         breakingBlock = g_jniBreakingBlock;
+        lookingAtEntity = g_jniLookingAtEntity;
     }
 
     if (!inWorld || guiOpen) {
         return;
     }
 
-    if (env->PushLocalFrame(24) < 0) return;
+    if (env->PushLocalFrame(32) < 0) return;
 
     jobject player = env->GetObjectField(g_mcInstance, g_playerField_121);
     if (env->ExceptionCheck()) { env->ExceptionClear(); player = nullptr; }
@@ -14182,6 +14239,7 @@ static void UpdateAutoToolModern(JNIEnv* env, const Config& cfg) {
     input.mouseDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 || breakingBlock;
     input.isSneaking = isSneaking;
     input.currentSlot = currentSlot;
+    input.pauseExclusive = IsAutoRodTransactionActive121();
     input.isBlockHit = false;
     input.isEntityHit = false;
     input.bestToolSlot = -1;
@@ -14323,6 +14381,40 @@ static void UpdateAutoToolModern(JNIEnv* env, const Config& cfg) {
         }
     }
 
+    if (lookingAtEntity) input.isEntityHit = true;
+    if (input.isEntityHit && cfg.autoToolSwapWeapon && input.bestWeaponSlot < 0) {
+        float bestScore = 0.0f;
+        int bestWeapon = -1;
+        for (int i = 0; i < 9; ++i) {
+            jobject stack = env->CallObjectMethod(inventory, g_autoRodInventoryGetItem121, (jint)i);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); stack = nullptr; }
+            if (!stack) continue;
+            if (g_autoToolItemStackIsEmpty121 && env->CallBooleanMethod(stack, g_autoToolItemStackIsEmpty121)) {
+                env->DeleteLocalRef(stack);
+                continue;
+            }
+            if (g_autoToolItemStackGetItem121) {
+                jobject item = env->CallObjectMethod(stack, g_autoToolItemStackGetItem121);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); item = nullptr; }
+                if (item) {
+                    float score = 0.0f;
+                    if (g_autoToolSwordItemClass121 && env->IsInstanceOf(item, g_autoToolSwordItemClass121)) {
+                        score = 10.0f;
+                    } else if (g_autoToolAxeItemClass121 && env->IsInstanceOf(item, g_autoToolAxeItemClass121)) {
+                        score = 8.0f;
+                    }
+                    if (score > bestScore) {
+                        bestScore = score;
+                        bestWeapon = i;
+                    }
+                    env->DeleteLocalRef(item);
+                }
+            }
+            env->DeleteLocalRef(stack);
+        }
+        input.bestWeaponSlot = bestWeapon;
+    }
+
     autotool::AutoToolConfig coreCfg;
     coreCfg.enabled = cfg.autoToolEnabled;
     coreCfg.swapWeapon = cfg.autoToolSwapWeapon;
@@ -14335,8 +14427,7 @@ static void UpdateAutoToolModern(JNIEnv* env, const Config& cfg) {
 
     autotool::AutoToolAction action = autotool::UpdateAutoToolState(g_autoToolState121, coreCfg, input);
     if (action.switchSlot && action.targetSlot >= 0 && action.targetSlot < 9) {
-        env->SetIntField(inventory, g_autoRodSelectedSlotField121, action.targetSlot);
-        if (env->ExceptionCheck()) env->ExceptionClear();
+        ApplyAutoToolSlotModern(env, inventory, action.targetSlot);
     }
 
     env->PopLocalFrame(nullptr);

@@ -40,6 +40,7 @@
 #include "kill_aura_core.h"
 #include "kill_aura_premotion.h"
 #include "native_perf_diagnostics.h"
+#include "telemetry_schedule.h"
 #include "jni_core/scoped_env.h"
 #include "jni_core/local_frame.h"
 #include "jni_core/matrix_reader.h"
@@ -117,11 +118,29 @@ static bool IsBridgeRunning() {
     return InterlockedCompareExchange(&g_running, 0, 0) != 0;
 }
 // Per-subsystem JNI locks (finer-grained than the old single JNI lock).
-// Render thread (SwapBuffers) holds g_renderJniMutex; LegoBridge thread holds
+// Overlay scan / camera poll hold g_renderJniMutex; LegoBridge thread holds
 // g_stateJniMutex.  Reach state is shared by the LegoBridge thread and WndProc,
-// so both reach paths serialize on g_stateJniMutex.
-static Mutex g_renderJniMutex;  // nametags / chest ESP / closest-player (render thread)
+// so both reach paths serialize on g_stateJniMutex. The render thread is
+// draw-only and does not take either JNI mutex.
+static Mutex g_renderJniMutex;  // nametags / chest ESP / closest-player (overlay scan)
 static Mutex g_stateJniMutex;   // ReadGameState / reach / velocity (LegoBridge thread)
+static DWORD g_legacyMinecraftClientThreadId = 0;
+
+static bool IsLegacyMinecraftClientThread() {
+    return g_legacyMinecraftClientThreadId != 0
+        && GetCurrentThreadId() == g_legacyMinecraftClientThreadId;
+}
+
+static JNIEnv* TryGetLegacyClientJniEnv() {
+    if (!g_jvm || !IsLegacyMinecraftClientThread()) return nullptr;
+    JNIEnv* env = nullptr;
+    if (g_jvm->GetEnv((void**)&env, JNI_VERSION_1_8) == JNI_OK && env) return env;
+    env = nullptr;
+    if (g_jvm->GetEnv((void**)&env, JNI_VERSION_1_6) == JNI_OK && env) return env;
+    return nullptr;
+}
+static HANDLE g_legacyScanThreadHandle = nullptr;
+static HANDLE g_legacyFastPollThreadHandle = nullptr;
 static volatile SOCKET g_serverSocket = INVALID_SOCKET;
 static volatile SOCKET g_clientSocket = INVALID_SOCKET;
 static SOCKET AtomicSocketLoad(const volatile SOCKET* slot) {
@@ -475,7 +494,7 @@ static GameState g_gameState;
 static Mutex g_stateMutex;
 static Mutex g_socketMutex; // Protects socket writes
 static Mutex g_jsonMutex;   // Protects shared JSON buffer
-static std::string g_pendingJson; // Data from Render Thread
+static std::string g_pendingJson; // Entity telemetry projected on the render thread
 static unsigned long long g_lastEntitySeenMs = 0;
 
 struct PixelPartySnap {
@@ -847,6 +866,16 @@ static jfieldID g_viewerPosXField = nullptr;
 static jfieldID g_viewerPosYField = nullptr;
 static jfieldID g_viewerPosZField = nullptr;
 
+struct BgCamState18 {
+    double camX = 0, camY = 0, camZ = 0;
+    float yaw = 0, pitch = 0, fov = 70.0f;
+    bool camFound = false;
+    Matrix4x4 proj = {}, view = {};
+    bool matsOk = false;
+};
+static BgCamState18 g_bgCamState18 = {};
+static Mutex g_bgCamMutex18;
+
 struct TagSmoothingState {
     float x = 0.0f;
     float y = 0.0f;
@@ -893,9 +922,8 @@ struct FightStatusDrawSnapshot18 {
     std::uint64_t stableId = 0;
     std::string targetName;
     float distance = 0.0f;
-    float feetX = 0.0f, feetY = 0.0f;
-    float headX = 0.0f, headY = 0.0f;
-    bool hasProjectedAnchors = false;
+    double worldX = 0.0, worldY = 0.0, worldZ = 0.0;
+    bool hasWorldPos = false;
     fightstatus::FightStatusResult result;
     float normalizedAdvantage = 0.0f;
 };
@@ -911,6 +939,23 @@ struct ClosestPlayerDrawSnapshot18 {
     double relativeZ = 0.0;
     float localYaw = 0.0f;
 };
+
+struct OverlayPlayer18 {
+    std::string displayName;
+    std::string heldText;
+    double iX = 0, iY = 0, iZ = 0;
+    double dist = 0;
+    float health = 20.0f;
+    int armorPoints = -1;
+    int hashKey = 0;
+    bool inNametagRange = false;
+};
+static std::vector<OverlayPlayer18> g_overlayPlayers18;
+static Mutex g_overlayPlayersMutex18;
+static ClosestPlayerDrawSnapshot18 g_closestPlayerDraw18;
+static Mutex g_closestPlayerMutex18;
+static std::vector<lc::ChestEspCandidate> g_overlayChests18;
+static Mutex g_overlayChestsMutex18;
 
 static fightstatus::FightStatusTracker g_fightStatusTracker18;
 static std::unordered_map<std::uint64_t, FightStatusTargetObservation18> g_fightStatusObservations18;
@@ -1032,11 +1077,10 @@ static void UpdateFightStatusState18(DWORD now, bool enabled, bool menuOpen,
     snapshot.stableId = selected->stableId;
     snapshot.targetName = selected->displayName;
     snapshot.distance = selected->distance;
-    snapshot.feetX = selected->feetX;
-    snapshot.feetY = selected->feetY;
-    snapshot.headX = selected->headX;
-    snapshot.headY = selected->headY;
-    snapshot.hasProjectedAnchors = selected->hasProjectedAnchors;
+    snapshot.worldX = selected->x;
+    snapshot.worldY = selected->y;
+    snapshot.worldZ = selected->z;
+    snapshot.hasWorldPos = true;
     snapshot.result = result;
     snapshot.normalizedAdvantage = fightstatus::NormalizedLead(
         result.selfSurvivability, result.targetSurvivability);
@@ -6649,9 +6693,14 @@ static jmethodID g_autoToolGetIdFromItem18 = nullptr;
 static jmethodID g_autoToolGetEnchantmentLevel18 = nullptr;
 static jmethodID g_autoToolMopGetBlockPos18 = nullptr;
 static jfieldID  g_autoToolMopBlockPosField18 = nullptr;
+static jfieldID  g_autoToolMopSideHitField18 = nullptr;
 static jmethodID g_autoToolPlayerIsSneaking18 = nullptr;
+static jmethodID g_autoToolClickBlock18 = nullptr;
+static jmethodID g_autoToolResetBlockRemoving18 = nullptr;
+static jfieldID  g_autoToolCurrentPlayerItem18 = nullptr;
 static jclass    g_autoToolItemClass18 = nullptr;
 static jclass    g_autoToolSwordClass18 = nullptr;
+static jclass    g_autoToolAxeClass18 = nullptr;
 static jclass    g_autoToolEnchantHelperClass18 = nullptr;
 
 static void ResetAutoToolLegacyJniCaches(JNIEnv* env) {
@@ -6662,10 +6711,15 @@ static void ResetAutoToolLegacyJniCaches(JNIEnv* env) {
     g_autoToolGetEnchantmentLevel18 = nullptr;
     g_autoToolMopGetBlockPos18 = nullptr;
     g_autoToolMopBlockPosField18 = nullptr;
+    g_autoToolMopSideHitField18 = nullptr;
     g_autoToolPlayerIsSneaking18 = nullptr;
+    g_autoToolClickBlock18 = nullptr;
+    g_autoToolResetBlockRemoving18 = nullptr;
+    g_autoToolCurrentPlayerItem18 = nullptr;
     if (env) {
         if (g_autoToolItemClass18) { env->DeleteGlobalRef(g_autoToolItemClass18); g_autoToolItemClass18 = nullptr; }
         if (g_autoToolSwordClass18) { env->DeleteGlobalRef(g_autoToolSwordClass18); g_autoToolSwordClass18 = nullptr; }
+        if (g_autoToolAxeClass18) { env->DeleteGlobalRef(g_autoToolAxeClass18); g_autoToolAxeClass18 = nullptr; }
         if (g_autoToolEnchantHelperClass18) { env->DeleteGlobalRef(g_autoToolEnchantHelperClass18); g_autoToolEnchantHelperClass18 = nullptr; }
     }
 }
@@ -6723,6 +6777,14 @@ static bool EnsureAutoToolLegacyJni(JNIEnv* env, jobject player) {
         }
     }
 
+    if (!g_autoToolAxeClass18) {
+        jclass axeCls = LoadClassWithLoader(env, gcl, "net.minecraft.item.ItemAxe");
+        if (axeCls) {
+            g_autoToolAxeClass18 = (jclass)env->NewGlobalRef(axeCls);
+            env->DeleteLocalRef(axeCls);
+        }
+    }
+
     if (!g_autoToolEnchantHelperClass18 || !g_autoToolGetEnchantmentLevel18) {
         jclass enchCls = LoadClassWithLoader(env, gcl, "net.minecraft.enchantment.EnchantmentHelper");
         if (enchCls) {
@@ -6750,6 +6812,41 @@ static bool EnsureAutoToolLegacyJni(JNIEnv* env, jobject player) {
             }
             env->DeleteLocalRef(playerCls);
         }
+    }
+
+    jobject controller = nullptr;
+    if (g_autoRodControllerField18) {
+        controller = env->GetObjectField(g_mcInstance, g_autoRodControllerField18);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); controller = nullptr; }
+    }
+    if (controller) {
+        jclass controllerCls = env->GetObjectClass(controller);
+        if (controllerCls) {
+            if (!g_autoToolClickBlock18) {
+                const char* names[] = { "clickBlock", "func_180511_b", nullptr };
+                const char* sig = "(Lnet/minecraft/util/BlockPos;Lnet/minecraft/util/EnumFacing;)Z";
+                for (int i = 0; names[i] && !g_autoToolClickBlock18; ++i) {
+                    g_autoToolClickBlock18 = env->GetMethodID(controllerCls, names[i], sig);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolClickBlock18 = nullptr; }
+                }
+            }
+            if (!g_autoToolResetBlockRemoving18) {
+                const char* names[] = { "resetBlockRemoving", "func_78767_c", nullptr };
+                for (int i = 0; names[i] && !g_autoToolResetBlockRemoving18; ++i) {
+                    g_autoToolResetBlockRemoving18 = env->GetMethodID(controllerCls, names[i], "()V");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolResetBlockRemoving18 = nullptr; }
+                }
+            }
+            if (!g_autoToolCurrentPlayerItem18) {
+                const char* names[] = { "currentPlayerItem", "field_78777_l", nullptr };
+                for (int i = 0; names[i] && !g_autoToolCurrentPlayerItem18; ++i) {
+                    g_autoToolCurrentPlayerItem18 = env->GetFieldID(controllerCls, names[i], "I");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolCurrentPlayerItem18 = nullptr; }
+                }
+            }
+            env->DeleteLocalRef(controllerCls);
+        }
+        env->DeleteLocalRef(controller);
     }
 
     if (!g_worldGetBlockStateMethod && g_theWorldField) {
@@ -6784,6 +6881,79 @@ static bool EnsureAutoToolLegacyJni(JNIEnv* env, jobject player) {
     return g_autoToolGetStrVsBlock18 != nullptr && g_autoRodInventoryField18 != nullptr && g_autoRodCurrentItemField18 != nullptr;
 }
 
+static int FindBestAutoToolWeaponSlotLegacy(JNIEnv* env, jobject inventory) {
+    if (!env || !inventory || !g_autoRodGetStackInSlot18) return -1;
+    float bestDmg = 0.0f;
+    int bestWeapon = -1;
+    for (int i = 0; i < 9; ++i) {
+        jobject stack = env->CallObjectMethod(inventory, g_autoRodGetStackInSlot18, (jint)i);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); stack = nullptr; }
+        if (!stack) continue;
+
+        jobject item = g_autoToolGetItem18 ? env->CallObjectMethod(stack, g_autoToolGetItem18) : nullptr;
+        if (env->ExceptionCheck()) { env->ExceptionClear(); item = nullptr; }
+        if (item) {
+            float score = 0.0f;
+            const bool isSword = g_autoToolSwordClass18 && env->IsInstanceOf(item, g_autoToolSwordClass18);
+            const bool isAxe = g_autoToolAxeClass18 && env->IsInstanceOf(item, g_autoToolAxeClass18);
+            if (isSword) {
+                score = 10.0f;
+            } else if (isAxe) {
+                score = 8.0f;
+            } else if (g_autoToolItemClass18 && g_autoToolGetIdFromItem18) {
+                int itemId = env->CallStaticIntMethod(g_autoToolItemClass18, g_autoToolGetIdFromItem18, item);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); itemId = 0; }
+                switch (itemId) {
+                    case 276: score = 7.0f; break;
+                    case 267: score = 6.0f; break;
+                    case 272: score = 5.0f; break;
+                    case 268: score = 4.0f; break;
+                    case 283: score = 4.0f; break;
+                    case 279: score = 6.0f; break;
+                    case 258: score = 5.0f; break;
+                    case 275: score = 4.0f; break;
+                    case 271: score = 3.0f; break;
+                    case 286: score = 3.0f; break;
+                    default:  score = 0.0f; break;
+                }
+            }
+            if (score > 0.0f && g_autoToolEnchantHelperClass18 && g_autoToolGetEnchantmentLevel18) {
+                jint sharp = env->CallStaticIntMethod(g_autoToolEnchantHelperClass18, g_autoToolGetEnchantmentLevel18, 16, stack);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); sharp = 0; }
+                if (sharp > 0) score += (float)sharp * 1.25f;
+            }
+            if (isSword) score += 0.01f;
+            if (score > bestDmg) {
+                bestDmg = score;
+                bestWeapon = i;
+            }
+            env->DeleteLocalRef(item);
+        }
+        env->DeleteLocalRef(stack);
+    }
+    return bestWeapon;
+}
+
+static void ApplyAutoToolSlotLegacy(JNIEnv* env, jobject inventory, int targetSlot) {
+    if (!env || !inventory || !g_autoRodCurrentItemField18) return;
+    env->SetIntField(inventory, g_autoRodCurrentItemField18, targetSlot);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return; }
+
+    // Invalidate the controller's cached slot so the next client tick emits C09
+    // in vanilla packet order. Do not call syncCurrentPlayItem or clickBlock from
+    // this worker — off-thread START_DESTROY / held-item packets crash and flag.
+    jobject controller = nullptr;
+    if (g_autoRodControllerField18 && g_mcInstance) {
+        controller = env->GetObjectField(g_mcInstance, g_autoRodControllerField18);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); controller = nullptr; }
+    }
+    if (controller && g_autoToolCurrentPlayerItem18) {
+        env->SetIntField(controller, g_autoToolCurrentPlayerItem18, -1);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+    if (controller) env->DeleteLocalRef(controller);
+}
+
 static void UpdateAutoToolLegacy(JNIEnv* env, const Config& cfg, const GameState& state) {
     if (!cfg.autoToolEnabled) {
         g_autoToolState18.Reset();
@@ -6794,7 +6964,14 @@ static void UpdateAutoToolLegacy(JNIEnv* env, const Config& cfg, const GameState
         return;
     }
 
-    if (env->PushLocalFrame(24) < 0) return;
+    // Auto Rod writes the rod slot then waits two ticks to use. A held LMB
+    // autoclick makes Auto Tool snap back to the weapon in that window, which
+    // cancels the cast and can flag Grim for use/attack on the wrong item.
+    if (HasPendingAutoRodLegacyTransaction()) {
+        return;
+    }
+
+    if (env->PushLocalFrame(32) < 0) return;
 
     jobject player = env->GetObjectField(g_mcInstance, g_thePlayerField);
     if (env->ExceptionCheck()) { env->ExceptionClear(); player = nullptr; }
@@ -6826,6 +7003,7 @@ static void UpdateAutoToolLegacy(JNIEnv* env, const Config& cfg, const GameState
     input.mouseDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 || state.breakingBlock;
     input.isSneaking = isSneaking;
     input.currentSlot = currentSlot;
+    input.pauseExclusive = HasPendingAutoRodLegacyTransaction();
     input.isBlockHit = false;
     input.isEntityHit = false;
     input.bestToolSlot = -1;
@@ -6924,57 +7102,6 @@ static void UpdateAutoToolLegacy(JNIEnv* env, const Config& cfg, const GameState
                             if (blockPos) env->DeleteLocalRef(blockPos);
                         } else if (strcmp(nameChars, "ENTITY") == 0) {
                             input.isEntityHit = true;
-                            if (cfg.autoToolSwapWeapon) {
-                                float bestDmg = 0.0f;
-                                int bestWeapon = -1;
-                                for (int i = 0; i < 9; ++i) {
-                                    jobject stack = env->CallObjectMethod(inventory, g_autoRodGetStackInSlot18, (jint)i);
-                                    if (env->ExceptionCheck()) { env->ExceptionClear(); stack = nullptr; }
-                                    if (!stack) continue;
-
-                                    jobject item = g_autoToolGetItem18 ? env->CallObjectMethod(stack, g_autoToolGetItem18) : nullptr;
-                                    if (env->ExceptionCheck()) { env->ExceptionClear(); item = nullptr; }
-                                    if (item) {
-                                        int itemId = (g_autoToolItemClass18 && g_autoToolGetIdFromItem18)
-                                            ? env->CallStaticIntMethod(g_autoToolItemClass18, g_autoToolGetIdFromItem18, item)
-                                            : 0;
-                                        if (env->ExceptionCheck()) { env->ExceptionClear(); itemId = 0; }
-
-                                        float baseDmg = 0.0f;
-                                        bool isSword = false;
-                                        switch (itemId) {
-                                            case 276: baseDmg = 7.0f; isSword = true; break; // Diamond Sword
-                                            case 267: baseDmg = 6.0f; isSword = true; break; // Iron Sword
-                                            case 272: baseDmg = 5.0f; isSword = true; break; // Stone Sword
-                                            case 268: baseDmg = 4.0f; isSword = true; break; // Wood Sword
-                                            case 283: baseDmg = 4.0f; isSword = true; break; // Gold Sword
-                                            case 279: baseDmg = 6.0f; break;                 // Diamond Axe
-                                            case 258: baseDmg = 5.0f; break;                 // Iron Axe
-                                            case 275: baseDmg = 4.0f; break;                 // Stone Axe
-                                            case 271: baseDmg = 3.0f; break;                 // Wood Axe
-                                            case 286: baseDmg = 3.0f; break;                 // Gold Axe
-                                            default:  baseDmg = 0.0f; break;
-                                        }
-
-                                        if (baseDmg > 0.0f) {
-                                            float totalDmg = baseDmg;
-                                            if (g_autoToolEnchantHelperClass18 && g_autoToolGetEnchantmentLevel18) {
-                                                jint sharp = env->CallStaticIntMethod(g_autoToolEnchantHelperClass18, g_autoToolGetEnchantmentLevel18, 16, stack);
-                                                if (env->ExceptionCheck()) { env->ExceptionClear(); sharp = 0; }
-                                                if (sharp > 0) totalDmg += (float)sharp * 1.25f;
-                                            }
-                                            if (isSword) totalDmg += 0.01f; // tiebreaker
-                                            if (totalDmg > bestDmg) {
-                                                bestDmg = totalDmg;
-                                                bestWeapon = i;
-                                            }
-                                        }
-                                        env->DeleteLocalRef(item);
-                                    }
-                                    env->DeleteLocalRef(stack);
-                                }
-                                input.bestWeaponSlot = bestWeapon;
-                            }
                         }
                         env->ReleaseStringUTFChars(nameStr, nameChars);
                     }
@@ -6983,8 +7110,28 @@ static void UpdateAutoToolLegacy(JNIEnv* env, const Config& cfg, const GameState
                 if (env->ExceptionCheck()) env->ExceptionClear();
                 env->DeleteLocalRef(typeOfHit);
             }
+            if (!input.isEntityHit && g_entityHitField) {
+                jobject entityHit = env->GetObjectField(mop, g_entityHitField);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); entityHit = nullptr; }
+                if (entityHit) {
+                    input.isEntityHit = true;
+                    env->DeleteLocalRef(entityHit);
+                }
+            }
             env->DeleteLocalRef(mop);
         }
+    }
+
+    if (!input.isEntityHit && g_pointedEntityField && g_mcInstance) {
+        jobject pointed = env->GetObjectField(g_mcInstance, g_pointedEntityField);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); pointed = nullptr; }
+        if (pointed) {
+            input.isEntityHit = true;
+            env->DeleteLocalRef(pointed);
+        }
+    }
+    if (input.isEntityHit && cfg.autoToolSwapWeapon) {
+        input.bestWeaponSlot = FindBestAutoToolWeaponSlotLegacy(env, inventory);
     }
 
     autotool::AutoToolConfig coreCfg;
@@ -6999,8 +7146,7 @@ static void UpdateAutoToolLegacy(JNIEnv* env, const Config& cfg, const GameState
 
     autotool::AutoToolAction action = autotool::UpdateAutoToolState(g_autoToolState18, coreCfg, input);
     if (action.switchSlot && action.targetSlot >= 0 && action.targetSlot < 9) {
-        env->SetIntField(inventory, g_autoRodCurrentItemField18, action.targetSlot);
-        if (env->ExceptionCheck()) env->ExceptionClear();
+        ApplyAutoToolSlotLegacy(env, inventory, action.targetSlot);
     }
 
     env->PopLocalFrame(nullptr);
@@ -8420,6 +8566,19 @@ static void ResetImGuiBackendsForReinit(const char* reason) {
     g_glInitialized = false;
 }
 
+static bool WaitForOwnedThreadExit(HANDLE& handle, const char* name, DWORD timeoutMs) {
+    if (!handle) return true;
+    const DWORD result = WaitForSingleObject(handle, timeoutMs);
+    if (result != WAIT_OBJECT_0) {
+        Log(std::string("Detach: timed out waiting for ") + (name ? name : "worker") +
+            "; keeping bridge loaded for safety.");
+        return false;
+    }
+    CloseHandle(handle);
+    handle = nullptr;
+    return true;
+}
+
 static bool WaitForLegacyMainThreadExit(DWORD timeoutMs) {
     if (!g_legacyMainThreadHandle) return true;
     const DWORD result = WaitForSingleObject(g_legacyMainThreadHandle, timeoutMs);
@@ -8456,7 +8615,9 @@ extern "C" __declspec(dllexport) void Detach() {
     // previous path cleaned those resources immediately and unloaded 100 ms
     // later, which could race ServerLoop or a SwapBuffers callback.
     CreateThread(nullptr, 0, [](LPVOID) -> DWORD {
-        if (!WaitForLegacyMainThreadExit(5000)) {
+        if (!WaitForOwnedThreadExit(g_legacyScanThreadHandle, "overlay scan thread", 5000) ||
+            !WaitForOwnedThreadExit(g_legacyFastPollThreadHandle, "fast poll thread", 5000) ||
+            !WaitForLegacyMainThreadExit(5000)) {
             // Permit a later Detach call to retry after a transient server/JNI
     // stall rather than permanently latching a failed teardown.
             InterlockedExchange(&g_legacyDetachRequested, 0);
@@ -9080,14 +9241,16 @@ static jobject GetLegacyNickHiderTabProfile(JNIEnv* env, const std::string& orig
 
 static void ApplyLegacyNickHiderProfileFallback(JNIEnv* env, const Config& cfg) {
     if (!env || !g_mcInstance || !g_thePlayerField) return;
+    if (!IsLegacyMinecraftClientThread()) return;
+    const bool applyAlias = cfg.nickHiderEnabled && !cfg.nickHiderAlias.empty();
+    if (!applyAlias) return;
     jobject player = env->GetObjectField(g_mcInstance, g_thePlayerField);
     if (env->ExceptionCheck()) { env->ExceptionClear(); player = nullptr; }
     if (!player) return;
 
     // Always seed the original account name from getName() so chat rewrite can
     // proceed even when GameProfile mutation mappings are still resolving.
-    const bool applyAlias = cfg.nickHiderEnabled && !cfg.nickHiderAlias.empty();
-    if (applyAlias && g_nickHiderOriginalProfileName.empty()) {
+    if (g_nickHiderOriginalProfileName.empty()) {
         const std::string fromGetName = GetStablePlayerName(env, player);
         if (!fromGetName.empty() && fromGetName != cfg.nickHiderAlias)
             g_nickHiderOriginalProfileName = fromGetName;
@@ -9268,6 +9431,14 @@ static void ApplyLegacyNickHiderFallback(JNIEnv* env, const Config& cfg) {
     // denying can_access_local_variables, which leaves the text-rewrite interceptor idle.
     // Only skip the JNI profile/chat fallback when local-variable rewrite is actually usable.
     if (lc::HasJvmtiLocalVariables()) return;
+    // Patcher's tab overlay sorts NetworkPlayerInfo every HUD frame. Mutating
+    // GameProfile / playerInfoMap / tab display names from a worker thread makes
+    // that comparator unstable (TimSort "violates its general contract").
+    if (!IsLegacyMinecraftClientThread()) return;
+    if (!cfg.nickHiderEnabled) {
+        RestoreLegacyNickHiderTextMutations(env);
+        return;
+    }
     ApplyLegacyNickHiderProfileFallback(env, cfg);
     ApplyLegacyNickHiderChatFallback(env, cfg);
     if (!g_loggedLegacyNickHiderFallback) {
@@ -10294,6 +10465,98 @@ Matrix4x4 GetMatrix(JNIEnv* env, jfieldID field) {
     return m;
 }
 
+static BgCamState18 SnapshotBgCam18() {
+    LockGuard lk(g_bgCamMutex18);
+    return g_bgCamState18;
+}
+
+static BgCamState18 SnapshotOverlayCamera18() {
+    BgCamState18 cam = SnapshotBgCam18();
+    Matrix4x4 view = {}, proj = {};
+    if (TryUseCapturedRenderMatrices(view, proj) && !IsLikelyUiOrthoMatrix(view, proj)) {
+        cam.view = view;
+        cam.proj = proj;
+        cam.matsOk = true;
+    }
+    return cam;
+}
+
+static void ReadCameraState18(JNIEnv* env) {
+    if (!env || !g_mcInstance) return;
+    BgCamState18 cs = {};
+    cs.fov = 70.0f;
+
+    TryResolvePlayerCoreMappings(env);
+    TryResolveRenderMappings(env, false);
+
+    if (g_renderManagerField && g_viewerPosXField && g_viewerPosYField && g_viewerPosZField) {
+        jobject rm = env->GetObjectField(g_mcInstance, g_renderManagerField);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); rm = nullptr; }
+        if (rm) {
+            cs.camX = env->GetDoubleField(rm, g_viewerPosXField);
+            cs.camY = env->GetDoubleField(rm, g_viewerPosYField);
+            cs.camZ = env->GetDoubleField(rm, g_viewerPosZField);
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+            } else {
+                cs.camFound = std::isfinite(cs.camX) && std::isfinite(cs.camY) && std::isfinite(cs.camZ);
+            }
+            env->DeleteLocalRef(rm);
+        }
+    }
+    if (!cs.camFound && g_thePlayerField && g_posXField && g_posYField && g_posZField) {
+        jobject player = env->GetObjectField(g_mcInstance, g_thePlayerField);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); player = nullptr; }
+        if (player) {
+            cs.camX = env->GetDoubleField(player, g_posXField);
+            cs.camY = env->GetDoubleField(player, g_posYField) + 1.62;
+            cs.camZ = env->GetDoubleField(player, g_posZField);
+            if (!env->ExceptionCheck() && std::isfinite(cs.camX) && std::isfinite(cs.camY) && std::isfinite(cs.camZ))
+                cs.camFound = true;
+            else if (env->ExceptionCheck()) env->ExceptionClear();
+            env->DeleteLocalRef(player);
+        }
+    }
+
+    if (g_thePlayerField) {
+        jobject player = env->GetObjectField(g_mcInstance, g_thePlayerField);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); player = nullptr; }
+        if (player) {
+            if (g_rotationYawField) {
+                cs.yaw = env->GetFloatField(player, g_rotationYawField);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); cs.yaw = 0.0f; }
+            }
+            if (g_rotationPitchField) {
+                cs.pitch = env->GetFloatField(player, g_rotationPitchField);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); cs.pitch = 0.0f; }
+            }
+            env->DeleteLocalRef(player);
+        }
+    }
+    if (g_gameSettingsField && g_fovSettingField) {
+        jobject gs = env->GetObjectField(g_mcInstance, g_gameSettingsField);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); gs = nullptr; }
+        if (gs) {
+            float fov = env->GetFloatField(gs, g_fovSettingField);
+            if (!env->ExceptionCheck() && fov >= 10.0f && fov <= 170.0f) cs.fov = fov;
+            else if (env->ExceptionCheck()) env->ExceptionClear();
+            env->DeleteLocalRef(gs);
+        }
+    }
+
+    if (g_activeRenderInfoClass && g_modelViewField && g_projectionField) {
+        Matrix4x4 view = GetMatrix(env, g_modelViewField);
+        Matrix4x4 proj = GetMatrix(env, g_projectionField);
+        if (MatrixProjectionUsable(view, proj) && !IsLikelyUiOrthoMatrix(view, proj)) {
+            cs.view = view;
+            cs.proj = proj;
+            cs.matsOk = true;
+        }
+    }
+
+    { LockGuard lk(g_bgCamMutex18); g_bgCamState18 = cs; }
+}
+
 bool WorldToScreen(const double x, const double y, const double z, const Matrix4x4& view, const Matrix4x4& proj, int w, int h, float& outX, float& outY) {
     // 1. View Transformation
     float vX = x * view.m[0] + y * view.m[4] + z * view.m[8] + view.m[12];
@@ -10319,55 +10582,44 @@ bool WorldToScreen(const double x, const double y, const double z, const Matrix4
 
     return true;
 }
-void RenderNametags(
-    int w,
-    int h,
-    const Config& config,
-    ClosestPlayerDrawSnapshot18* closestSnapshot) {
+static void ClearLegacyOverlayPlayers() {
+    { LockGuard lk(g_overlayPlayersMutex18); g_overlayPlayers18.clear(); }
+    { LockGuard lk(g_closestPlayerMutex18); g_closestPlayerDraw18 = ClosestPlayerDrawSnapshot18(); }
+}
+
+static void UpdatePlayerListOverlayLegacy(JNIEnv* env, const Config& config) {
     TRACE_PATH("enter");
-    if (closestSnapshot)
-        *closestSnapshot = ClosestPlayerDrawSnapshot18();
     static bool warnedMissingMappings = false;
-    bool showHealth = true;
-    bool showArmor = true;
-    bool showHeldItem = true;
-    bool hideVanillaTags = false;
-    bool nametagsEnabled = false;
-    bool nickHiderEnabled = false;
-    bool fightStatusEnabled = false;
-    bool entityTelemetryNeeded = false;
-    int nametagRange = 4;
-    std::string guiTheme = "Default";
-    std::string nickHiderAlias;
-    nametagsEnabled = config.nametags;
-    nickHiderEnabled = config.nickHiderEnabled;
-    fightStatusEnabled = config.fightStatus;
-    nickHiderAlias = config.nickHiderAlias;
-    entityTelemetryNeeded = config.nametags || config.nickHiderEnabled ||
+    bool showHeldItem = config.nametagShowHeldItem;
+    bool hideVanillaTags = config.nametagHideVanilla;
+    bool nametagsEnabled = config.nametags;
+    bool nickHiderEnabled = config.nickHiderEnabled;
+    bool fightStatusEnabled = config.fightStatus;
+    std::string nickHiderAlias = config.nickHiderAlias;
+    bool entityTelemetryNeeded = config.nametags || config.nickHiderEnabled ||
         config.closestPlayerInfo || config.aimAssist || config.fightStatus ||
         config.nametagHideVanilla || g_legacyNametagSuppressionActive;
     TRACE_BRANCH("entityTelemetryNeeded", entityTelemetryNeeded);
-    if (!entityTelemetryNeeded) { ResetFightStatusState18(); return; }
-    showHealth = config.nametagShowHealth;
-    showArmor = config.nametagShowArmor;
-    showHeldItem = config.nametagShowHeldItem;
-    hideVanillaTags = config.nametagHideVanilla;
-    nametagRange = lc::ClampOverlayChunkRange(config.nametagRange);
-    guiTheme = config.guiTheme;
-    OverlayTheme nametagTheme = ResolveOverlayTheme(guiTheme);
-
-    // Default to empty telemetry each run so stale entities are not reused.
-    {
-        LockGuard lk(g_jsonMutex);
-        g_pendingJson = "[]";
+    if (!entityTelemetryNeeded) {
+        ResetFightStatusState18();
+        ClearLegacyOverlayPlayers();
+        return;
     }
-   bool mappedReady = (g_mapped && g_mcInstance);
-   TRACE_BRANCH("mappedReady", mappedReady);
-   if (!mappedReady) { if (fightStatusEnabled) ResetFightStatusState18(); return; }
+    const int nametagRange = lc::ClampOverlayChunkRange(config.nametagRange);
+    const bool showArmor = config.nametagShowArmor;
 
-    ScopedJNIEnv env(g_jvm);
-    TRACE_BRANCH("jniEnvAvailable", env != nullptr);
-    if (!env) { if (fightStatusEnabled) ResetFightStatusState18(); return; }
+    bool mappedReady = (g_mapped && g_mcInstance);
+    TRACE_BRANCH("mappedReady", mappedReady);
+    if (!mappedReady) {
+        if (fightStatusEnabled) ResetFightStatusState18();
+        ClearLegacyOverlayPlayers();
+        return;
+    }
+    if (!env) {
+        if (fightStatusEnabled) ResetFightStatusState18();
+        ClearLegacyOverlayPlayers();
+        return;
+    }
 
     TryResolveScreenFieldDirect(env);
     TryResolvePlayerCoreMappings(env);
@@ -10382,6 +10634,7 @@ void RenderNametags(
             Log("Nametags missing core/player mappings.");
         }
         if (fightStatusEnabled) ResetFightStatusState18();
+        ClearLegacyOverlayPlayers();
         return;
     }
 
@@ -10392,117 +10645,42 @@ void RenderNametags(
             Log("Nametags waiting for JNI world mappings.");
         }
         if (fightStatusEnabled) ResetFightStatusState18();
+        ClearLegacyOverlayPlayers();
         return;
     }
 
-    if ((!g_activeRenderInfoClass || !g_modelViewField || !g_projectionField) && !fightStatusEnabled) {
-        TRACE_PATH("missing-render-mappings");
-        if (!warnedMissingMappings) {
-            warnedMissingMappings = true;
-            Log("Nametags waiting for render mappings.");
-        }
-        return;
-    }
-
-   warnedMissingMappings = false;
-   g_tagFrameCounter++;
-
-    // Safety check: Don't render if we have pending exceptions
+    warnedMissingMappings = false;
     if (env->ExceptionCheck()) { env->ExceptionClear(); return; }
-    
-    // Ensure we can create local references (limit to 256 for this frame)
     if (env->PushLocalFrame(256) < 0) {
         env->ExceptionClear();
         return;
     }
-    
-    // Ensure C locale for dot decimals
-    setlocale(LC_NUMERIC, "C");
 
-    // 1. Get Matrices
-    Matrix4x4 view = GetMatrix(env, g_modelViewField);
-    Matrix4x4 proj = GetMatrix(env, g_projectionField);
-    bool matrixProjectionUsable = MatrixProjectionUsable(view, proj);
-    TRACE_BRANCH("matrixProjectionUsableInitial", matrixProjectionUsable);
-    bool usedCapturedMatrices = false;
-    if (!matrixProjectionUsable) {
-        TRACE_PATH("matrix-fallback-captured");
-        usedCapturedMatrices = TryUseCapturedRenderMatrices(view, proj);
-        matrixProjectionUsable = usedCapturedMatrices;
-    }
-    TRACE_BRANCH("matrixProjectionUsableAfterFallback", matrixProjectionUsable);
-
-    static int logctr = 0;
-    static bool loggedCapturedMatrixFallback = false;
-    static bool loggedUiMatrixReject = false;
-    if (logctr++ % 600 == 0) {
-         if (!matrixProjectionUsable) Log("WARNING: Matrix projection unavailable.");
-         if (usedCapturedMatrices && !loggedCapturedMatrixFallback) {
-             loggedCapturedMatrixFallback = true;
-             Log("Nametags using captured GL matrix fallback.");
-         }
-    }
-
-    if (matrixProjectionUsable && IsLikelyUiOrthoMatrix(view, proj)) {
-        TRACE_PATH("matrix-ui-ortho-rebind-attempt");
-        TryResolveRenderMappings(env, false);
-        view = GetMatrix(env, g_modelViewField);
-        proj = GetMatrix(env, g_projectionField);
-        matrixProjectionUsable = MatrixProjectionUsable(view, proj);
-        usedCapturedMatrices = false;
-        if (!matrixProjectionUsable) {
-            TRACE_PATH("matrix-ui-ortho-second-fallback");
-            usedCapturedMatrices = TryUseCapturedRenderMatrices(view, proj);
-            matrixProjectionUsable = usedCapturedMatrices;
-        }
-        if (matrixProjectionUsable && IsLikelyUiOrthoMatrix(view, proj)) {
-            matrixProjectionUsable = false;
-            if (!loggedUiMatrixReject) {
-                loggedUiMatrixReject = true;
-                Log("Nametags rejected UI-space matrix projection after rebind attempt.");
-            }
-        }
-    }
-
-    // 2. Get Partial Ticks
     float pt = 1.0f;
     if (g_timerField && g_renderPartialTicksField) {
         jobject timer = env->GetObjectField(g_mcInstance, g_timerField);
         if (timer) {
-             pt = env->GetFloatField(timer, g_renderPartialTicksField);
-             env->DeleteLocalRef(timer);
+            pt = env->GetFloatField(timer, g_renderPartialTicksField);
+            env->DeleteLocalRef(timer);
         }
     }
 
-    // 3. Get RenderManager Viewer Position (the matrix path expects camera-relative coords)
-    double vX = 0.0, vY = 0.0, vZ = 0.0;
-    if (g_renderManagerField && g_viewerPosXField && g_viewerPosYField && g_viewerPosZField) {
-        jobject rm = env->GetObjectField(g_mcInstance, g_renderManagerField);
-        if (rm) {
-            vX = env->GetDoubleField(rm, g_viewerPosXField);
-            vY = env->GetDoubleField(rm, g_viewerPosYField);
-            vZ = env->GetDoubleField(rm, g_viewerPosZField);
-            env->DeleteLocalRef(rm);
-        }
-    }
-
-    // 4. Iterate Entities
     jobject world = env->GetObjectField(g_mcInstance, g_theWorldField);
     if (!world) {
         if (fightStatusEnabled) ResetFightStatusState18();
         if (g_legacyNametagSuppressionActive || !g_hiddenNametagOriginalTeamByPlayerLegacy.empty() || g_lastLegacyNametagSuppressionWorld) {
             ResetLegacyNametagSuppressionState(env, "world-null");
         }
-        if (logctr % 600 == 0) Log("WARNING: World is null");
+        ClearLegacyOverlayPlayers();
         env->PopLocalFrame(nullptr);
         return;
     }
     TrackLegacySuppressionWorldContext(env, world);
-    
+
     jobject startList = env->GetObjectField(world, g_playerEntitiesField);
     if (!startList) {
         if (fightStatusEnabled) ResetFightStatusState18();
-        if (logctr % 600 == 0) Log("WARNING: playerEntities list is null");
+        ClearLegacyOverlayPlayers();
         env->PopLocalFrame(nullptr);
         return;
     }
@@ -10511,92 +10689,33 @@ void RenderNametags(
     if (env->ExceptionCheck()) {
         env->ExceptionClear();
         if (fightStatusEnabled) ResetFightStatusState18();
+        ClearLegacyOverlayPlayers();
         env->PopLocalFrame(nullptr);
         return;
     }
-    int count = 0;
 
-    bool guiOpen = false; // Internal ClickGUI was removed; only Minecraft screens suppress tags.
-    std::string screenName = "none";
+    bool guiOpen = false;
     if (g_currentScreenField) {
         jobject currentScreen = env->GetObjectField(g_mcInstance, g_currentScreenField);
         if (currentScreen) {
             guiOpen = true;
-            jclass cls = env->GetObjectClass(currentScreen);
-            if (cls) {
-                jclass cc = env->GetObjectClass(cls);
-                jmethodID mGetName = cc ? env->GetMethodID(cc, "getName", "()Ljava/lang/String;") : nullptr;
-                if (mGetName) {
-                    jstring jn = (jstring)env->CallObjectMethod(cls, mGetName);
-                    if (env->ExceptionCheck()) {
-                        env->ExceptionClear();
-                    } else if (jn) {
-                        const char* cn = env->GetStringUTFChars(jn, nullptr);
-                        if (cn) {
-                            screenName = cn;
-                            env->ReleaseStringUTFChars(jn, cn);
-                        } else if (env->ExceptionCheck()) {
-                            env->ExceptionClear();
-                        }
-                        env->DeleteLocalRef(jn);
-                    }
-                }
-                if (cc) env->DeleteLocalRef(cc);
-                env->DeleteLocalRef(cls);
-            }
             env->DeleteLocalRef(currentScreen);
         }
     }
 
-    std::stringstream ss;
-    ss << "[";
     constexpr int kEntityJsonCap = 20;
     const int entityProcessCap = (fightStatusEnabled || config.closestPlayerInfo ||
         hideVanillaTags || g_legacyNametagSuppressionActive || nametagsEnabled)
         ? (std::max)(1, size)
         : kEntityJsonCap;
-    bool suppressionAppliedThisPass = false;
-    bool suppressionAttemptedThisPass = false;
-    
-    // Get Local Player for distance & health debug
+
     jobject player = env->GetObjectField(g_mcInstance, g_thePlayerField);
     if (fightStatusEnabled && player) EnsureVelocityMappings(env, player);
     const std::string localAccountName = !g_nickHiderOriginalProfileName.empty()
         ? g_nickHiderOriginalProfileName
         : (player ? GetStablePlayerName(env, player) : "");
-    jobject hideScoreboardObj = nullptr;
-    jobject hideTeamObj = nullptr;
-    if ((hideVanillaTags || g_legacyNametagSuppressionActive) && !EnsureLegacyNametagTeamMappings(env, world) && !g_loggedLegacyNametagSuppressionUnavailable) {
-        g_loggedLegacyNametagSuppressionUnavailable = true;
-        Log("NametagHideVanilla: legacy team-visibility mappings unresolved; fail-open (vanilla nametags remain visible).");
-    }
-    if (!hideVanillaTags && g_legacyNametagSuppressionActive) {
-        jobject restoreScoreboard = GetLegacyScoreboard(env, world);
-        if (restoreScoreboard) {
-            RestoreLegacyVanillaNametagSuppression(env, restoreScoreboard);
-            env->DeleteLocalRef(restoreScoreboard);
-        } else {
-            g_hiddenNametagOriginalTeamByPlayerLegacy.clear();
-        }
-        g_legacyNametagSuppressionActive = false;
-    }
-    if (hideVanillaTags) {
-        hideScoreboardObj = GetLegacyScoreboard(env, world);
-        if (hideScoreboardObj) {
-            hideTeamObj = EnsureLegacyHideTeam(env, hideScoreboardObj);
-            if (!hideTeamObj && !g_loggedLegacyNametagSuppressionUnavailable) {
-                g_loggedLegacyNametagSuppressionUnavailable = true;
-                Log("NametagHideVanilla: legacy hide team unavailable; fail-open (vanilla nametags remain visible).");
-            }
-        } else if (!g_loggedLegacyNametagSuppressionUnavailable) {
-            g_loggedLegacyNametagSuppressionUnavailable = true;
-            Log("NametagHideVanilla: legacy scoreboard unavailable; fail-open (vanilla nametags remain visible).");
-        }
-    }
+
     float fallbackYaw = 0.0f;
-    float fallbackPitch = 0.0f;
-    float fallbackFov = 70.0f;
-    
     double localPX = 0.0, localPY = 0.0, localPZ = 0.0;
     bool haveLocalPos = false;
     FightStatusLocalSample18 fightSelf;
@@ -10606,8 +10725,12 @@ void RenderNametags(
         fightCandidates.capacity() < static_cast<size_t>((std::max)(0, size))) {
         fightCandidates.reserve(static_cast<size_t>((std::max)(0, size)));
     }
-    int closestPlayerIndex = -1;
+    ClosestPlayerDrawSnapshot18 closestSnap;
     double closestPlayerDistance = 99999.0;
+    std::vector<OverlayPlayer18> localPlayers;
+    localPlayers.reserve((size_t)(std::max)(0, size));
+    int count = 0;
+
     if (player) {
         localPX = env->GetDoubleField(player, g_posXField);
         localPY = env->GetDoubleField(player, g_posYField);
@@ -10641,35 +10764,16 @@ void RenderNametags(
             if (env->ExceptionCheck()) env->ExceptionClear();
             else fightSelf.hurtTimeAvailable = true;
         }
-    }
-    if (!haveLocalPos) {
-        if (fightStatusEnabled) ResetFightStatusState18();
-        env->DeleteLocalRef(startList);
-        env->DeleteLocalRef(world);
-        goto exit_frame;
-    }
-
-    if (player) {
         if (g_rotationYawField) {
             fallbackYaw = env->GetFloatField(player, g_rotationYawField);
             if (env->ExceptionCheck()) { env->ExceptionClear(); fallbackYaw = 0.0f; }
         }
-        if (g_rotationPitchField) {
-            fallbackPitch = env->GetFloatField(player, g_rotationPitchField);
-            if (env->ExceptionCheck()) { env->ExceptionClear(); fallbackPitch = 0.0f; }
-        }
     }
-    if (g_gameSettingsField && g_fovSettingField) {
-        jobject gs = env->GetObjectField(g_mcInstance, g_gameSettingsField);
-        if (gs) {
-            float fov = env->GetFloatField(gs, g_fovSettingField);
-            if (!env->ExceptionCheck() && fov >= 10.0f && fov <= 170.0f) {
-                fallbackFov = fov;
-            } else if (env->ExceptionCheck()) {
-                env->ExceptionClear();
-            }
-            env->DeleteLocalRef(gs);
-        }
+    if (!haveLocalPos) {
+        if (fightStatusEnabled) ResetFightStatusState18();
+        ClearLegacyOverlayPlayers();
+        env->PopLocalFrame(nullptr);
+        return;
     }
 
     for (int i = 0; i < size && count < entityProcessCap; i++) {
@@ -10679,33 +10783,24 @@ void RenderNametags(
             break;
         }
         if (!entity) continue;
-
         if (env->IsSameObject(entity, player)) {
             env->DeleteLocalRef(entity);
             continue;
         }
 
-        // Positions
         double ex = env->GetDoubleField(entity, g_posXField);
         double ey = env->GetDoubleField(entity, g_posYField);
         double ez = env->GetDoubleField(entity, g_posZField);
-        
         double lx = g_lastTickPosXField ? env->GetDoubleField(entity, g_lastTickPosXField) : ex;
         double ly = g_lastTickPosYField ? env->GetDoubleField(entity, g_lastTickPosYField) : ey;
         double lz = g_lastTickPosZField ? env->GetDoubleField(entity, g_lastTickPosZField) : ez;
-
-        // Interpolate
         double iX = lx + (ex - lx) * pt;
         double iY = ly + (ey - ly) * pt;
         double iZ = lz + (ez - lz) * pt;
-        double rX = iX - vX;
-        double rY = iY - vY;
-        double rZ = iZ - vZ;
-
         double dx = iX - localPX;
         double dy = iY - localPY;
         double dz = iZ - localPZ;
-        double dist = sqrt(dx*dx + dy*dy + dz*dz);
+        double dist = sqrt(dx * dx + dy * dy + dz * dz);
         const bool inNametagRange = lc::InChunkRange(
             (int)std::floor(iX), (int)std::floor(iZ), localPX, localPZ, nametagRange);
         if (!lc::OverlayEntityNeedsFullScan(
@@ -10716,21 +10811,13 @@ void RenderNametags(
             continue;
         }
 
-        // Name with fake/bot line filtering parity
         std::string stableName = GetStablePlayerName(env, entity);
         std::string displayName = lc::ReplaceNickHiderText(stableName, nickHiderEnabled, localAccountName, nickHiderAlias);
         if (stableName.empty() || displayName.empty() || LooksLikeFakePlayerLine(stableName) || LooksLikeFakePlayerLine(displayName)) {
             env->DeleteLocalRef(entity);
             continue;
         }
-        if (hideVanillaTags && hideScoreboardObj && hideTeamObj) {
-            suppressionAttemptedThisPass = true;
-            if (ApplyLegacyVanillaNametagSuppression(env, hideScoreboardObj, hideTeamObj, displayName)) {
-                suppressionAppliedThisPass = true;
-            }
-        }
-        
-        // Health
+
         float health = 20.0f;
         bool healthAvailable = false;
         if (g_getHealthMethod) {
@@ -10760,35 +10847,24 @@ void RenderNametags(
             else hurtTimeAvailable = true;
         }
 
-        if (closestSnapshot && config.closestPlayerInfo &&
+        std::string heldText;
+        if ((nametagsEnabled && inNametagRange && lc::NametagShouldFetchHeldItem(showHeldItem, dist)) ||
+            (config.closestPlayerInfo && showHeldItem && dist <= lc::kClosestPlayerMaxDist)) {
+            heldText = GetEntityHeldItemInfo(env, entity, nullptr);
+        }
+
+        if (config.closestPlayerInfo &&
             dist < closestPlayerDistance && dist <= lc::kClosestPlayerMaxDist) {
             closestPlayerDistance = dist;
-            closestPlayerIndex = i;
-            closestSnapshot->valid = true;
-            closestSnapshot->name = displayName;
-            closestSnapshot->health = health;
-            closestSnapshot->armorPoints = armorPoints;
-            closestSnapshot->distance = static_cast<float>(dist);
-            closestSnapshot->relativeX = dx;
-            closestSnapshot->relativeZ = dz;
-            closestSnapshot->localYaw = fallbackYaw;
-        }
-
-        if (!nametagsEnabled && dist > lc::kEntityJsonMaxDist && !fightStatusEnabled) {
-            env->DeleteLocalRef(entity);
-            continue;
-        }
-
-        const bool wantNametagDraw = nametagsEnabled && inNametagRange;
-        const bool wantJsonSlot = count < kEntityJsonCap;
-        const bool wantProject = wantNametagDraw || fightStatusEnabled || wantJsonSlot;
-
-        // Project (prefer matrix when stable, otherwise fallback to angle/FOV)
-        float sX = 0, sY = 0;
-        bool matrixProjected = false;
-        float matrixSX = 0, matrixSY = 0;
-        if (wantProject && matrixProjectionUsable) {
-            matrixProjected = WorldToScreen(rX, rY + 2.3, rZ, view, proj, w, h, matrixSX, matrixSY);
+            closestSnap.valid = true;
+            closestSnap.name = displayName;
+            closestSnap.health = health;
+            closestSnap.armorPoints = armorPoints;
+            closestSnap.distance = static_cast<float>(dist);
+            closestSnap.relativeX = dx;
+            closestSnap.relativeZ = dz;
+            closestSnap.localYaw = fallbackYaw;
+            closestSnap.heldText = showHeldItem ? heldText : std::string();
         }
 
         if (fightStatusEnabled) {
@@ -10805,297 +10881,277 @@ void RenderNametags(
             candidate.currentX = ex; candidate.currentY = ey; candidate.currentZ = ez;
             candidate.x = iX; candidate.y = iY; candidate.z = iZ;
             candidate.distance = (float)dist;
-            if (matrixProjectionUsable) {
-                candidate.hasProjectedAnchors =
-                    WorldToScreen(rX, rY, rZ, view, proj, w, h,
-                                  candidate.feetX, candidate.feetY) &&
-                    WorldToScreen(rX, rY + 1.8, rZ, view, proj, w, h,
-                                  candidate.headX, candidate.headY);
-            }
             fightCandidates.push_back(candidate);
         }
 
-        LegoVec3 camPos = { localPX, localPY + 1.62, localPZ };
-
-        bool projected = false;
-        if (matrixProjected) {
-            sX = matrixSX;
-            sY = matrixSY;
-            projected = true;
+        OverlayPlayer18 rec;
+        rec.displayName = displayName;
+        rec.heldText = heldText;
+        rec.iX = iX; rec.iY = iY; rec.iZ = iZ;
+        rec.dist = dist;
+        rec.health = health;
+        rec.armorPoints = armorPoints;
+        rec.inNametagRange = inNametagRange;
+        if (g_objectHashCodeMethod) {
+            rec.hashKey = env->CallIntMethod(entity, g_objectHashCodeMethod);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); rec.hashKey = 0; }
         }
-        // Do not use angle/FOV fallback here. On 1.8.9 this path can be misaligned and causes ghost tracking.
+        if (rec.hashKey == 0)
+            rec.hashKey = (int)(iX * 17.0 + iZ * 31.0) ^ i;
+        localPlayers.push_back(rec);
+        count++;
+        env->DeleteLocalRef(entity);
+    }
 
-        // Aim-assist target point: closest projected point on a player body box
-        // to the current crosshair center. Keep nametag anchor separate.
-        float aimSX = sX;
-        float aimSY = sY;
+    UpdateFightStatusState18(GetTickCount(), fightStatusEnabled, guiOpen, fightSelf, fightCandidates);
+    {
+        LockGuard lk(g_overlayPlayersMutex18);
+        g_overlayPlayers18.swap(localPlayers);
+    }
+    {
+        LockGuard lk(g_closestPlayerMutex18);
+        g_closestPlayerDraw18 = closestSnap;
+    }
+    env->PopLocalFrame(nullptr);
+}
+
+void RenderNametags(
+    int w,
+    int h,
+    const Config& config,
+    ClosestPlayerDrawSnapshot18* closestSnapshot) {
+    TRACE_PATH("enter");
+    if (closestSnapshot) {
+        LockGuard lk(g_closestPlayerMutex18);
+        *closestSnapshot = g_closestPlayerDraw18;
+    }
+
+    bool nametagsEnabled = config.nametags;
+    bool fightStatusEnabled = config.fightStatus;
+    bool entityTelemetryNeeded = config.nametags || config.nickHiderEnabled ||
+        config.closestPlayerInfo || config.aimAssist || config.fightStatus ||
+        config.nametagHideVanilla || g_legacyNametagSuppressionActive;
+    if (!entityTelemetryNeeded) return;
+
+    const bool showHealth = config.nametagShowHealth;
+    const bool showArmor = config.nametagShowArmor;
+    OverlayTheme nametagTheme = ResolveOverlayTheme(config.guiTheme);
+    BgCamState18 cam = SnapshotOverlayCamera18();
+    g_tagFrameCounter++;
+
+    static thread_local std::vector<OverlayPlayer18> players;
+    { LockGuard lk(g_overlayPlayersMutex18); players = g_overlayPlayers18; }
+
+    std::stringstream ss;
+    ss << "[";
+    constexpr int kEntityJsonCap = 20;
+    int count = 0;
+    const double vX = cam.camX, vY = cam.camY, vZ = cam.camZ;
+    const bool matsOk = cam.camFound && cam.matsOk;
+
+    for (const auto& rec : players) {
+        const bool wantNametagDraw = nametagsEnabled && rec.inNametagRange;
+        const bool wantJsonSlot = count < kEntityJsonCap;
+        const bool wantProject = wantNametagDraw || fightStatusEnabled || wantJsonSlot;
+        if (!wantProject) continue;
+
+        float sX = 0, sY = 0;
+        bool projected = false;
+        if (matsOk) {
+            projected = WorldToScreen(rec.iX - vX, rec.iY + 2.3 - vY, rec.iZ - vZ,
+                cam.view, cam.proj, w, h, sX, sY);
+        }
+
+        float aimSX = sX, aimSY = sY;
         bool aimProjected = projected;
         auto projectAimBodyPoint = [&](double worldX, double worldY, double worldZ,
                                        float* outX, float* outY) -> bool {
-            if (!matrixProjectionUsable) return false;
-            return WorldToScreen(
-                worldX - vX,
-                worldY - vY,
-                worldZ - vZ,
-                view,
-                proj,
-                w,
-                h,
-                *outX,
-                *outY);
+            if (!matsOk) return false;
+            return WorldToScreen(worldX - vX, worldY - vY, worldZ - vZ,
+                cam.view, cam.proj, w, h, *outX, *outY);
         };
-        float selectedAimX = aimSX;
-        float selectedAimY = aimSY;
+        float selectedAimX = aimSX, selectedAimY = aimSY;
         if (wantProject && lc::aimassist::SelectClosestBodyPoint(
-                iX, iY, iZ, w, h, projectAimBodyPoint,
+                rec.iX, rec.iY, rec.iZ, w, h, projectAimBodyPoint,
                 &selectedAimX, &selectedAimY)) {
             aimSX = selectedAimX;
             aimSY = selectedAimY;
             aimProjected = true;
         }
 
-        if (projected) {
-             if (sX < -64.0f || sX > (float)w + 64.0f || sY < -64.0f || sY > (float)h + 64.0f) {
-                 env->DeleteLocalRef(entity);
-                 continue;
-             }
-              if (!displayName.empty()) {
-                  float hpClampedSimple = health < 0 ? 0 : (health > 40 ? 40 : health);
+        if (!projected) continue;
+        if (sX < -64.0f || sX > (float)w + 64.0f || sY < -64.0f || sY > (float)h + 64.0f)
+            continue;
 
-                   if (!nametagsEnabled || !inNametagRange) {
-                       if (count < kEntityJsonCap) {
-                           if (count > 0) ss << ",";
-                           ss << "{";
-                           ss << "\"sx\":" << (aimProjected ? aimSX : sX) << ",";
-                           ss << "\"sy\":" << (aimProjected ? aimSY : sY) << ",";
-                           ss << "\"dist\":" << dist << ",";
-                           ss << "\"name\":\"" << JsonEscape(displayName) << "\",";
-                           ss << "\"hp\":" << hpClampedSimple;
-                           ss << "}";
-                      }
-                      count++;
-                      if (count >= entityProcessCap) {
-                          env->DeleteLocalRef(entity);
-                          break;
-                      }
-                      continue;
-                  }
-
-                 float hpClamped = health < 0 ? 0 : (health > 40 ? 40 : health);
-                 float hpBarValue = health < 0 ? 0 : (health > 20 ? 20 : health);
-                 float hpPct = hpBarValue / 20.0f;
-                 if (hpPct < 0.0f) hpPct = 0.0f;
-                 if (hpPct > 1.0f) hpPct = 1.0f;
-
-                 std::string statsText;
-                 if (showHealth) {
-                     char hpBuf[32];
-                     snprintf(hpBuf, sizeof(hpBuf), "%.0f HP", hpClamped);
-                     statsText += hpBuf;
-                 }
-                 if (showArmor && armorPoints >= 0) {
-                     if (!statsText.empty()) statsText += " | ";
-                     char armorBuf[32];
-                     snprintf(armorBuf, sizeof(armorBuf), "%d ARM", armorPoints);
-                     statsText += armorBuf;
-                 }
-
-                 std::string heldText = lc::NametagShouldFetchHeldItem(showHeldItem, dist)
-                     ? GetEntityHeldItemInfo(env, entity, nullptr)
-                     : std::string();
-
-                 int key = 0;
-                 if (g_objectHashCodeMethod) {
-                     key = env->CallIntMethod(entity, g_objectHashCodeMethod);
-                     if (env->ExceptionCheck()) { env->ExceptionClear(); key = 0; }
-                 }
-                 if (key == 0) {
-                     key = (int)(iX * 17.0 + iZ * 31.0) ^ i;
-                 }
-
-                 auto calcTextScaled = [](const char* text, float fontSize) -> ImVec2 {
-                     ImVec2 sz = ImGui::CalcTextSize(text ? text : "");
-                     float base = ImGui::GetFontSize();
-                     if (base <= 0.0f) base = 16.0f;
-                     float scale = fontSize / base;
-                     sz.x *= scale;
-                     sz.y *= scale;
-                     return sz;
-                 };
-
-                 float nameScale = 1.0f - (float)(dist / 64.0);
-                 if (nameScale < 0.65f) nameScale = 0.65f;
-                 if (nameScale > 1.0f) nameScale = 1.0f;
-                 const float nameFontSize = std::floor(ImGui::GetFontSize() * nameScale);
-                 const float infoFontSize = std::floor(nameFontSize * 0.85f);
-
-                 ImVec2 nameSz = calcTextScaled(displayName.c_str(), nameFontSize);
-                 ImVec2 statsSz = statsText.empty() ? ImVec2(0, 0) : calcTextScaled(statsText.c_str(), infoFontSize);
-                 ImVec2 itemSz = heldText.empty() ? ImVec2(0, 0) : calcTextScaled(heldText.c_str(), infoFontSize);
-
-                 float maxW = (std::max)(nameSz.x, (std::max)(statsSz.x, itemSz.x));
-                 float totalH = nameSz.y;
-                 if (statsSz.y > 0.0f) totalH += statsSz.y + 2.0f;
-                 if (itemSz.y > 0.0f) totalH += itemSz.y + 2.0f;
-
-                 float pad = std::floor(4.0f * nameScale);
-                 float px = std::floor(sX - maxW * 0.5f) - pad;
-                 float py = std::floor(sY - totalH - pad * 2.0f);
-                 auto& smooth = g_tagSmoothing[key];
-                 if (!smooth.init) {
-                     smooth.x = px;
-                     smooth.y = py;
-                     smooth.vx = 0.0f;
-                     smooth.vy = 0.0f;
-                     smooth.init = true;
-                 }
-                 else {
-                     float dxs = px - smooth.x;
-                     float dys = py - smooth.y;
-                     float deltaSq = dxs * dxs + dys * dys;
-
-                     if (deltaSq > 24000.0f) {
-                         smooth.x = px;
-                         smooth.y = py;
-                         smooth.vx = 0.0f;
-                         smooth.vy = 0.0f;
-                     }
-                     else {
-                         float blend = 0.12f;
-                         if (dist < 12.0) blend = 0.14f;
-                         if (deltaSq < 6.0f) blend = 0.22f;
-                         smooth.x += dxs * blend;
-                         smooth.y += dys * blend;
-                     }
-                 }
-                 smooth.lastFrame = g_tagFrameCounter;
-                 px = smooth.x;
-                 py = smooth.y;
-
-                 ImDrawList* fg = ImGui::GetForegroundDrawList();
-                 ImVec2 pMin(px, py);
-                 ImVec2 pMax(px + maxW + pad * 2.0f, py + totalH + pad * 2.0f + 2.0f);
-                 fg->AddRectFilled(pMin, pMax, IM_COL32(0, 0, 0, 160), 3.0f);
-
-                 float curY = py + pad;
-                 float centerX = px + (maxW + pad * 2.0f) * 0.5f;
-                 float nameX = std::floor(centerX - nameSz.x * 0.5f);
-                 fg->AddText(ImGui::GetFont(), nameFontSize, ImVec2(nameX + 1, curY + 1), IM_COL32(0, 0, 0, 255), displayName.c_str());
-                 fg->AddText(ImGui::GetFont(), nameFontSize, ImVec2(nameX, curY), ToImU32(nametagTheme.moduleText), displayName.c_str());
-                 curY += nameSz.y + 2.0f;
-
-                 if (!statsText.empty()) {
-                     float statsX = std::floor(centerX - statsSz.x * 0.5f);
-                     ImU32 statCol = hpClamped <= 8.0f ? IM_COL32(255, 100, 100, 250) : IM_COL32(200, 220, 255, 250);
-                     fg->AddText(ImGui::GetFont(), infoFontSize, ImVec2(statsX + 1, curY + 1), IM_COL32(0, 0, 0, 255), statsText.c_str());
-                     fg->AddText(ImGui::GetFont(), infoFontSize, ImVec2(statsX, curY), statCol, statsText.c_str());
-                     curY += statsSz.y + 2.0f;
-                 }
-
-                 if (!heldText.empty()) {
-                     float heldX = std::floor(centerX - itemSz.x * 0.5f);
-                     fg->AddText(ImGui::GetFont(), infoFontSize, ImVec2(heldX + 1, curY + 1), IM_COL32(0, 0, 0, 255), heldText.c_str());
-                     fg->AddText(ImGui::GetFont(), infoFontSize, ImVec2(heldX, curY), IM_COL32(255, 200, 80, 250), heldText.c_str());
-                 }
-
-                 if (showHealth) {
-                     float barW = (pMax.x - pMin.x) * hpPct;
-                     ImU32 hpCol = IM_COL32((int)(255 * (1.0f - hpPct)), (int)(220 * hpPct + 35), 60, 255);
-                     fg->AddRectFilled(ImVec2(pMin.x, pMax.y),
-                                       ImVec2(pMin.x + barW, pMax.y + std::floor(3.0f * nameScale)), hpCol);
-                 }
-                 if (count < kEntityJsonCap) {
-                     if (count > 0) ss << ",";
-                     ss << "{";
-                     ss << "\"sx\":" << (aimProjected ? aimSX : sX) << ",";
-                     ss << "\"sy\":" << (aimProjected ? aimSY : sY) << ",";
-                     ss << "\"dist\":" << dist << ",";
-                     ss << "\"name\":\"" << JsonEscape(displayName) << "\",";
-                     ss << "\"hp\":" << hpClamped;
-                     ss << "}";
-                 }
-
-                  count++;
-                  if (count >= entityProcessCap) {
-                      env->DeleteLocalRef(entity);
-                      break;
-                  }
-             }
+        float hpClamped = rec.health < 0 ? 0 : (rec.health > 40 ? 40 : rec.health);
+        if (!wantNametagDraw) {
+            if (count < kEntityJsonCap) {
+                if (count > 0) ss << ",";
+                ss << "{";
+                ss << "\"sx\":" << (aimProjected ? aimSX : sX) << ",";
+                ss << "\"sy\":" << (aimProjected ? aimSY : sY) << ",";
+                ss << "\"dist\":" << rec.dist << ",";
+                ss << "\"name\":\"" << JsonEscape(rec.displayName) << "\",";
+                ss << "\"hp\":" << hpClamped;
+                ss << "}";
+            }
+            count++;
+            continue;
         }
 
-        env->DeleteLocalRef(entity);
-    }
+        float hpBarValue = rec.health < 0 ? 0 : (rec.health > 20 ? 20 : rec.health);
+        float hpPct = hpBarValue / 20.0f;
+        if (hpPct < 0.0f) hpPct = 0.0f;
+        if (hpPct > 1.0f) hpPct = 1.0f;
 
-    if (closestSnapshot && closestSnapshot->valid && closestPlayerIndex >= 0) {
-        jobject closestEntity =
-            env->CallObjectMethod(startList, g_listGetMethod, closestPlayerIndex);
-        if (env->ExceptionCheck()) {
-            env->ExceptionClear();
-            closestSnapshot->heldText.clear();
-        } else if (closestEntity) {
-            closestSnapshot->heldText = showHeldItem
-                ? GetEntityHeldItemInfo(env, closestEntity, nullptr)
-                : std::string();
-            env->DeleteLocalRef(closestEntity);
+        std::string statsText;
+        if (showHealth) {
+            char hpBuf[32];
+            snprintf(hpBuf, sizeof(hpBuf), "%.0f HP", hpClamped);
+            statsText += hpBuf;
         }
-    }
+        if (showArmor && rec.armorPoints >= 0) {
+            if (!statsText.empty()) statsText += " | ";
+            char armorBuf[32];
+            snprintf(armorBuf, sizeof(armorBuf), "%d ARM", rec.armorPoints);
+            statsText += armorBuf;
+        }
 
-    UpdateFightStatusState18(GetTickCount(), fightStatusEnabled, guiOpen, fightSelf, fightCandidates);
-    if (hideTeamObj) env->DeleteLocalRef(hideTeamObj);
-    if (hideScoreboardObj) env->DeleteLocalRef(hideScoreboardObj);
-    if (hideVanillaTags && suppressionAppliedThisPass) {
-        g_legacyNametagSuppressionActive = true;
-    } else if (hideVanillaTags && suppressionAttemptedThisPass && !suppressionAppliedThisPass && !g_loggedLegacyNametagSuppressionUnavailable) {
-        g_loggedLegacyNametagSuppressionUnavailable = true;
-        Log("NametagHideVanilla: legacy player->hide-team assignment failed; fail-open on this runtime.");
-    }
-    
-    // Cleanup stale smoothing state
-    for (auto it = g_tagSmoothing.begin(); it != g_tagSmoothing.end(); ) {
-        if (g_tagFrameCounter - it->second.lastFrame > 45) {
-            it = g_tagSmoothing.erase(it);
+        auto calcTextScaled = [](const char* text, float fontSize) -> ImVec2 {
+            ImVec2 sz = ImGui::CalcTextSize(text ? text : "");
+            float base = ImGui::GetFontSize();
+            if (base <= 0.0f) base = 16.0f;
+            float scale = fontSize / base;
+            sz.x *= scale;
+            sz.y *= scale;
+            return sz;
+        };
+
+        float nameScale = 1.0f - (float)(rec.dist / 64.0);
+        if (nameScale < 0.65f) nameScale = 0.65f;
+        if (nameScale > 1.0f) nameScale = 1.0f;
+        const float nameFontSize = std::floor(ImGui::GetFontSize() * nameScale);
+        const float infoFontSize = std::floor(nameFontSize * 0.85f);
+        ImVec2 nameSz = calcTextScaled(rec.displayName.c_str(), nameFontSize);
+        ImVec2 statsSz = statsText.empty() ? ImVec2(0, 0) : calcTextScaled(statsText.c_str(), infoFontSize);
+        ImVec2 itemSz = rec.heldText.empty() ? ImVec2(0, 0) : calcTextScaled(rec.heldText.c_str(), infoFontSize);
+        float maxW = (std::max)(nameSz.x, (std::max)(statsSz.x, itemSz.x));
+        float totalH = nameSz.y;
+        if (statsSz.y > 0.0f) totalH += statsSz.y + 2.0f;
+        if (itemSz.y > 0.0f) totalH += itemSz.y + 2.0f;
+        float pad = std::floor(4.0f * nameScale);
+        float px = std::floor(sX - maxW * 0.5f) - pad;
+        float py = std::floor(sY - totalH - pad * 2.0f);
+        auto& smooth = g_tagSmoothing[rec.hashKey];
+        if (!smooth.init) {
+            smooth.x = px;
+            smooth.y = py;
+            smooth.vx = 0.0f;
+            smooth.vy = 0.0f;
+            smooth.init = true;
         } else {
+            float dxs = px - smooth.x;
+            float dys = py - smooth.y;
+            float deltaSq = dxs * dxs + dys * dys;
+            if (deltaSq > 24000.0f) {
+                smooth.x = px;
+                smooth.y = py;
+                smooth.vx = 0.0f;
+                smooth.vy = 0.0f;
+            } else {
+                float blend = 0.12f;
+                if (rec.dist < 12.0) blend = 0.14f;
+                if (deltaSq < 6.0f) blend = 0.22f;
+                smooth.x += dxs * blend;
+                smooth.y += dys * blend;
+            }
+        }
+        smooth.lastFrame = g_tagFrameCounter;
+        px = smooth.x;
+        py = smooth.y;
+
+        ImDrawList* fg = ImGui::GetForegroundDrawList();
+        ImVec2 pMin(px, py);
+        ImVec2 pMax(px + maxW + pad * 2.0f, py + totalH + pad * 2.0f + 2.0f);
+        fg->AddRectFilled(pMin, pMax, IM_COL32(0, 0, 0, 160), 3.0f);
+        float curY = py + pad;
+        float centerX = px + (maxW + pad * 2.0f) * 0.5f;
+        float nameX = std::floor(centerX - nameSz.x * 0.5f);
+        fg->AddText(ImGui::GetFont(), nameFontSize, ImVec2(nameX + 1, curY + 1), IM_COL32(0, 0, 0, 255), rec.displayName.c_str());
+        fg->AddText(ImGui::GetFont(), nameFontSize, ImVec2(nameX, curY), ToImU32(nametagTheme.moduleText), rec.displayName.c_str());
+        curY += nameSz.y + 2.0f;
+        if (!statsText.empty()) {
+            float statsX = std::floor(centerX - statsSz.x * 0.5f);
+            ImU32 statCol = hpClamped <= 8.0f ? IM_COL32(255, 100, 100, 250) : IM_COL32(200, 220, 255, 250);
+            fg->AddText(ImGui::GetFont(), infoFontSize, ImVec2(statsX + 1, curY + 1), IM_COL32(0, 0, 0, 255), statsText.c_str());
+            fg->AddText(ImGui::GetFont(), infoFontSize, ImVec2(statsX, curY), statCol, statsText.c_str());
+            curY += statsSz.y + 2.0f;
+        }
+        if (!rec.heldText.empty()) {
+            float heldX = std::floor(centerX - itemSz.x * 0.5f);
+            fg->AddText(ImGui::GetFont(), infoFontSize, ImVec2(heldX + 1, curY + 1), IM_COL32(0, 0, 0, 255), rec.heldText.c_str());
+            fg->AddText(ImGui::GetFont(), infoFontSize, ImVec2(heldX, curY), IM_COL32(255, 200, 80, 250), rec.heldText.c_str());
+        }
+        if (showHealth) {
+            float barW = (pMax.x - pMin.x) * hpPct;
+            ImU32 hpCol = IM_COL32((int)(255 * (1.0f - hpPct)), (int)(220 * hpPct + 35), 60, 255);
+            fg->AddRectFilled(ImVec2(pMin.x, pMax.y),
+                              ImVec2(pMin.x + barW, pMax.y + std::floor(3.0f * nameScale)), hpCol);
+        }
+        if (count < kEntityJsonCap) {
+            if (count > 0) ss << ",";
+            ss << "{";
+            ss << "\"sx\":" << (aimProjected ? aimSX : sX) << ",";
+            ss << "\"sy\":" << (aimProjected ? aimSY : sY) << ",";
+            ss << "\"dist\":" << rec.dist << ",";
+            ss << "\"name\":\"" << JsonEscape(rec.displayName) << "\",";
+            ss << "\"hp\":" << hpClamped;
+            ss << "}";
+        }
+        count++;
+    }
+
+    for (auto it = g_tagSmoothing.begin(); it != g_tagSmoothing.end(); ) {
+        if (g_tagFrameCounter - it->second.lastFrame > 45)
+            it = g_tagSmoothing.erase(it);
+        else
             ++it;
-        }
     }
-
-    // Close entities array
     ss << "]";
-
-    env->DeleteLocalRef(startList);
-    env->DeleteLocalRef(world);
-
-    // Store entities JSON for ServerLoop injection
     {
-        std::string json = ss.str();
-        {
-            LockGuard lk(g_jsonMutex);
-            g_pendingJson = json;
-        }
+        LockGuard lk(g_jsonMutex);
+        g_pendingJson = ss.str();
     }
-    
-exit_frame:
-    env->PopLocalFrame(nullptr);
 }
 
 static void RenderFightStatus(int w, int h) {
     FightStatusDrawSnapshot18 snapshot;
     { LockGuard lk(g_fightStatusMutex18); snapshot = g_fightStatusDrawSnapshot18; }
-    if (!snapshot.valid || snapshot.distance > 16.0f || !snapshot.hasProjectedAnchors) return;
+    if (!snapshot.valid || snapshot.distance > 16.0f || !snapshot.hasWorldPos) return;
 
-    const bool onScreen = snapshot.feetX >= 0.0f && snapshot.feetX <= w &&
-        snapshot.headX >= 0.0f && snapshot.headX <= w &&
-        snapshot.feetY >= 0.0f && snapshot.feetY <= h &&
-        snapshot.headY >= 0.0f && snapshot.headY <= h;
+    BgCamState18 cam = SnapshotOverlayCamera18();
+    if (!cam.camFound || !cam.matsOk) return;
+    float feetX = 0, feetY = 0, headX = 0, headY = 0;
+    const bool projected =
+        WorldToScreen(snapshot.worldX - cam.camX, snapshot.worldY - cam.camY, snapshot.worldZ - cam.camZ,
+            cam.view, cam.proj, w, h, feetX, feetY) &&
+        WorldToScreen(snapshot.worldX - cam.camX, snapshot.worldY + 1.8 - cam.camY, snapshot.worldZ - cam.camZ,
+            cam.view, cam.proj, w, h, headX, headY);
+    if (!projected) return;
+
+    const bool onScreen = feetX >= 0.0f && feetX <= w &&
+        headX >= 0.0f && headX <= w &&
+        feetY >= 0.0f && feetY <= h &&
+        headY >= 0.0f && headY <= h;
     if (!onScreen) return;
 
     ImDrawList* fg = ImGui::GetForegroundDrawList();
-    const float rawHeight = std::fabs(snapshot.feetY - snapshot.headY);
+    const float rawHeight = std::fabs(feetY - headY);
     const float barHeight = (std::max)(48.0f, (std::min)(110.0f, rawHeight));
-    const float centerY = (snapshot.feetY + snapshot.headY) * 0.5f;
+    const float centerY = (feetY + headY) * 0.5f;
     const float topY = centerY - barHeight * 0.5f;
     const float bottomY = centerY + barHeight * 0.5f;
-    const float bodyX = (snapshot.feetX + snapshot.headX) * 0.5f;
+    const float bodyX = (feetX + headX) * 0.5f;
     const float bodyHalfWidth = (std::max)(10.0f, rawHeight * (0.6f / 1.8f) * 0.5f);
     const float barWidth = 8.0f;
     const float gap = 7.0f;
@@ -11150,7 +11206,6 @@ static void RenderFightStatus(int w, int h) {
         stateColor, ImGui::GetFontSize());
     drawText(prediction, midY + 3.0f, IM_COL32(235, 238, 245, 240), smallFont);
 }
-
 void RenderPixelPartyAssist(
     int w,
     int h,
@@ -11333,25 +11388,24 @@ void RenderClosestPlayerInfo(
     }
 }
 
-void RenderChestESP(int w, int h, const Config& config) {
+static void UpdateChestListLegacy(JNIEnv* env, const Config& config) {
     TRACE_PATH("enter");
     static bool warnedChestMappings = false;
     TRACE_BRANCH("chestEspEnabled", config.chestEsp);
-    if (!config.chestEsp) return;
+    if (!config.chestEsp) {
+        LockGuard lk(g_overlayChestsMutex18);
+        g_overlayChests18.clear();
+        return;
+    }
     const int chestEspRange = lc::ClampChestEspRange(config.chestEspRange);
     bool mappedReady = (g_mapped && g_mcInstance);
     TRACE_BRANCH("mappedReady", mappedReady);
-    if (!mappedReady) return;
-
-    ScopedJNIEnv env(g_jvm);
-    TRACE_BRANCH("jniEnvAvailable", env != nullptr);
-    if (!env) return;
+    if (!mappedReady || !env) return;
 
     TryResolveScreenFieldDirect(env);
     TryResolvePlayerCoreMappings(env);
     TryResolveChestEspMappings(env);
     TryResolveWorldMappings(env);
-    TryResolveRenderMappings(env, false);
 
     if (!g_theWorldField || !g_listSizeMethod || !g_listGetMethod ||
         !g_thePlayerField || !g_posXField || !g_posYField || !g_posZField ||
@@ -11372,77 +11426,10 @@ void RenderChestESP(int w, int h, const Config& config) {
         }
         return;
     }
-    if (!g_activeRenderInfoClass || !g_modelViewField || !g_projectionField) {
-        TRACE_PATH("missing-render-mappings");
-        if (!warnedChestMappings) {
-            warnedChestMappings = true;
-            Log("ChestESP waiting for render mappings.");
-        }
-        return;
-    }
 
     warnedChestMappings = false;
-
     if (env->ExceptionCheck()) { env->ExceptionClear(); return; }
     if (env->PushLocalFrame(256) < 0) { env->ExceptionClear(); return; }
-
-    Matrix4x4 view = GetMatrix(env, g_modelViewField);
-    Matrix4x4 proj = GetMatrix(env, g_projectionField);
-    bool matrixProjectionUsable = MatrixProjectionUsable(view, proj);
-    TRACE_BRANCH("matrixProjectionUsableInitial", matrixProjectionUsable);
-    bool usedCapturedMatrices = false;
-    if (!matrixProjectionUsable) {
-        TRACE_PATH("matrix-fallback-captured");
-        usedCapturedMatrices = TryUseCapturedRenderMatrices(view, proj);
-        matrixProjectionUsable = usedCapturedMatrices;
-    }
-    TRACE_BRANCH("matrixProjectionUsableAfterFallback", matrixProjectionUsable);
-    static bool loggedChestCapturedMatrixFallback = false;
-    static bool loggedChestUiMatrixReject = false;
-    if (usedCapturedMatrices && !loggedChestCapturedMatrixFallback) {
-        loggedChestCapturedMatrixFallback = true;
-        Log("ChestESP using captured GL matrix fallback.");
-    }
-    if (matrixProjectionUsable && IsLikelyUiOrthoMatrix(view, proj)) {
-        TRACE_PATH("matrix-ui-ortho-rebind-attempt");
-        TryResolveRenderMappings(env, false);
-        view = GetMatrix(env, g_modelViewField);
-        proj = GetMatrix(env, g_projectionField);
-        matrixProjectionUsable = MatrixProjectionUsable(view, proj);
-        usedCapturedMatrices = false;
-        if (!matrixProjectionUsable) {
-            TRACE_PATH("matrix-ui-ortho-second-fallback");
-            usedCapturedMatrices = TryUseCapturedRenderMatrices(view, proj);
-            matrixProjectionUsable = usedCapturedMatrices;
-        }
-        if (matrixProjectionUsable && IsLikelyUiOrthoMatrix(view, proj)) {
-            matrixProjectionUsable = false;
-            if (!loggedChestUiMatrixReject) {
-                loggedChestUiMatrixReject = true;
-                Log("ChestESP rejected UI-space matrix projection after rebind attempt.");
-            }
-        }
-    }
-    if (!matrixProjectionUsable) {
-        static bool warnedChestMatrixUnavailable = false;
-        if (!warnedChestMatrixUnavailable) {
-            warnedChestMatrixUnavailable = true;
-            Log("ChestESP waiting for usable projection matrices.");
-        }
-        env->PopLocalFrame(nullptr);
-        return;
-    }
-
-    double vX = 0.0, vY = 0.0, vZ = 0.0;
-    if (g_renderManagerField && g_viewerPosXField && g_viewerPosYField && g_viewerPosZField) {
-        jobject rm = env->GetObjectField(g_mcInstance, g_renderManagerField);
-        if (rm) {
-            vX = env->GetDoubleField(rm, g_viewerPosXField);
-            vY = env->GetDoubleField(rm, g_viewerPosYField);
-            vZ = env->GetDoubleField(rm, g_viewerPosZField);
-            env->DeleteLocalRef(rm);
-        }
-    }
 
     jobject world = env->GetObjectField(g_mcInstance, g_theWorldField);
     if (!world) { env->PopLocalFrame(nullptr); return; }
@@ -11515,6 +11502,22 @@ void RenderChestESP(int w, int h, const Config& config) {
         chests.push_back({ bx, by, bz, distSq });
     }
     lc::ChestEspSortNearestFirst(chests);
+    { LockGuard lk(g_overlayChestsMutex18); g_overlayChests18.swap(chests); }
+    env->PopLocalFrame(nullptr);
+}
+
+void RenderChestESP(int w, int h, const Config& config) {
+    TRACE_PATH("enter");
+    TRACE_BRANCH("chestEspEnabled", config.chestEsp);
+    if (!config.chestEsp) return;
+
+    static thread_local std::vector<lc::ChestEspCandidate> chests;
+    { LockGuard lk(g_overlayChestsMutex18); chests = g_overlayChests18; }
+    if (chests.empty()) return;
+
+    BgCamState18 cam = SnapshotOverlayCamera18();
+    if (!cam.camFound || !cam.matsOk) return;
+    const double vX = cam.camX, vY = cam.camY, vZ = cam.camZ;
 
     ImDrawList* fg = ImGui::GetForegroundDrawList();
     for (const auto& chest : chests) {
@@ -11534,7 +11537,8 @@ void RenderChestESP(int w, int h, const Config& config) {
         bool projected = true;
         for (int c = 0; c < 8; c++) {
             float sx = 0.0f, sy = 0.0f;
-            if (!WorldToScreen(corners[c][0] - vX, corners[c][1] - vY, corners[c][2] - vZ, view, proj, w, h, sx, sy)) {
+            if (!WorldToScreen(corners[c][0] - vX, corners[c][1] - vY, corners[c][2] - vZ,
+                    cam.view, cam.proj, w, h, sx, sy)) {
                 projected = false;
                 break;
             }
@@ -11557,8 +11561,6 @@ void RenderChestESP(int w, int h, const Config& config) {
         fg->AddRectFilled(ImVec2(left, top), ImVec2(right, bottom), IM_COL32(0, 0, 0, 90));
         fg->AddRect(ImVec2(left, top), ImVec2(right, bottom), boxColor, 0.0f, 0, 1.5f);
     }
-
-    env->PopLocalFrame(nullptr);
 }
 
 // ===================== BLOCK ESP / X-RAY (legacy 1.8.9) =====================
@@ -11930,25 +11932,109 @@ static void UpdateSectionChunkScansLegacy(JNIEnv* env, const Config& cfg) {
     if (bedsDue) PublishBedPlatesFromCache18(env, px, py, pz, now, scanned);
 }
 
+static DWORD WINAPI FastPollThreadProc18(LPVOID) {
+    JNIEnv* env = JniEnv::Get(g_jvm);
+    if (!env) return 1;
+    while (IsBridgeRunning()) {
+        if (g_mapped && g_mcInstance) {
+            TryLockGuard jniTry(g_renderJniMutex);
+            if (jniTry.owns_lock())
+                ReadCameraState18(env);
+        }
+        Sleep(5);
+    }
+    JniEnv::DetachThisThread(g_jvm);
+    return 0;
+}
+
+static DWORD WINAPI OverlayScanThreadProc18(LPVOID) {
+    JNIEnv* env = JniEnv::Get(g_jvm);
+    if (!env) return 1;
+    DWORD lastChestEspScanMs = 0;
+    bool chestEspScanWasEnabled = false;
+    bool entityProducerWasEnabled = false;
+    while (IsBridgeRunning()) {
+        const unsigned long long scanLoopPerfStarted =
+            GetNativePerfDiagnostics().Enabled() ? NativePerfTimestamp() : 0;
+        Config cfg;
+        { LockGuard lk(g_configMutex); cfg = g_config; }
+        GameState stateSnap;
+        { LockGuard lk(g_stateMutex); stateSnap = g_gameState; }
+
+        const bool inWorld = stateSnap.inWorld && g_mapped && g_mcInstance;
+        {
+            LockGuard overlayJni(g_renderJniMutex);
+            if (inWorld && !ShouldHideWorldRenderModules(stateSnap)) {
+                ReadCameraState18(env);
+                const bool entityProducerEnabled =
+                    cfg.nametags || cfg.nickHiderEnabled || cfg.closestPlayerInfo ||
+                    cfg.aimAssist || cfg.fightStatus || cfg.nametagHideVanilla ||
+                    g_legacyNametagSuppressionActive;
+                if (entityProducerEnabled) {
+                    NativePerfScope playerScanPerf(lc::PERF_PLAYER_SCAN);
+                    UpdatePlayerListOverlayLegacy(env, cfg);
+                } else if (entityProducerWasEnabled) {
+                    ClearLegacyOverlayPlayers();
+                    ResetFightStatusState18();
+                }
+                entityProducerWasEnabled = entityProducerEnabled;
+
+                const DWORD nowMs = GetTickCount();
+                const bool chestEspScanEnabled = cfg.chestEsp;
+                const bool chestEspScanDue =
+                    !chestEspScanWasEnabled ||
+                    lc::IsTelemetryIntervalDue(nowMs, lastChestEspScanMs, lc::kChestEspScanIntervalMs);
+                if (chestEspScanEnabled && chestEspScanDue) {
+                    NativePerfScope chestScanPerf(lc::PERF_CHEST_SCAN);
+                    UpdateChestListLegacy(env, cfg);
+                    lastChestEspScanMs = nowMs;
+                } else if (!chestEspScanEnabled && chestEspScanWasEnabled) {
+                    UpdateChestListLegacy(env, cfg);
+                }
+                chestEspScanWasEnabled = chestEspScanEnabled;
+
+                {
+                    NativePerfScope sectionScanPerf(lc::PERF_BLOCK_SCAN);
+                    UpdateSectionChunkScansLegacy(env, cfg);
+                }
+            } else {
+                if (entityProducerWasEnabled) {
+                    ClearLegacyOverlayPlayers();
+                    ResetFightStatusState18();
+                }
+                entityProducerWasEnabled = false;
+                chestEspScanWasEnabled = false;
+                { LockGuard lk(g_overlayChestsMutex18); g_overlayChests18.clear(); }
+                { LockGuard lk(g_blockEspListMutex); g_blockEspList.clear(); }
+                { LockGuard lk(g_bedPlateListMutex); g_bedPlateList.clear(); }
+                { LockGuard lk(g_bgCamMutex18); g_bgCamState18 = BgCamState18(); }
+            }
+        }
+        RecordNativePerfSince(lc::PERF_SCAN_LOOP, scanLoopPerfStarted);
+        Sleep((cfg.aimAssist || cfg.killAura || cfg.speedBridge) ? 5 : 50);
+    }
+    JniEnv::DetachThisThread(g_jvm);
+    return 0;
+}
+
+static void StartBackgroundThreadsIfNeeded() {
+    static volatile LONG s_started = 0;
+    if (!g_jvm || InterlockedCompareExchange(&s_started, 1, 0) != 0) return;
+    g_legacyScanThreadHandle = CreateThread(nullptr, 0, OverlayScanThreadProc18, nullptr, 0, nullptr);
+    g_legacyFastPollThreadHandle = CreateThread(nullptr, 0, FastPollThreadProc18, nullptr, 0, nullptr);
+    Log("Background JNI threads started (camera poll + overlay scan).");
+}
+
 void RenderBlockESP(
     int w,
     int h,
     const Config& config,
     const lc::HudLayout& hudLayout) {
     if (!config.blockEsp) return;
-    if (!g_mapped || !g_mcInstance) return;
-    ScopedJNIEnv env(g_jvm);
-    if (!env) return;
-
-    TryResolvePlayerCoreMappings(env);
-    TryResolveRenderMappings(env, false);
-    if (!g_thePlayerField || !g_posXField || !g_posYField || !g_posZField) return;
-    if (!g_activeRenderInfoClass || !g_modelViewField || !g_projectionField) return;
 
     const bool boxes = config.blockEspBoxes;
     const bool tracers = config.blockEspTracers;
     const bool hud = config.blockEspHud;
-    const int maxCount = config.blockEspMaxCount;
 
     static thread_local std::vector<BlockEspData18> blocks;
     { LockGuard lk(g_blockEspListMutex); blocks = g_blockEspList; }
@@ -11956,25 +12042,11 @@ void RenderBlockESP(
     static thread_local std::vector<lc::BlockEspTargetDef> targets;
     { LockGuard tlk(g_blockEspTargetsMutex); targets = g_blockEspTargets; }
 
-    if (env->ExceptionCheck()) { env->ExceptionClear(); return; }
-    if (env->PushLocalFrame(64) < 0) { env->ExceptionClear(); return; }
-
-    Matrix4x4 view = GetMatrix(env, g_modelViewField);
-    Matrix4x4 proj = GetMatrix(env, g_projectionField);
-    bool usable = MatrixProjectionUsable(view, proj);
-    if (!usable) usable = TryUseCapturedRenderMatrices(view, proj);
-    if (!usable || IsLikelyUiOrthoMatrix(view, proj)) { env->PopLocalFrame(nullptr); return; }
-
-    double vX = 0, vY = 0, vZ = 0;
-    if (g_renderManagerField && g_viewerPosXField && g_viewerPosYField && g_viewerPosZField) {
-        jobject rm = env->GetObjectField(g_mcInstance, g_renderManagerField);
-        if (rm) {
-            vX = env->GetDoubleField(rm, g_viewerPosXField);
-            vY = env->GetDoubleField(rm, g_viewerPosYField);
-            vZ = env->GetDoubleField(rm, g_viewerPosZField);
-            env->DeleteLocalRef(rm);
-        }
-    }
+    BgCamState18 cam = SnapshotOverlayCamera18();
+    if (!cam.camFound || !cam.matsOk) return;
+    const Matrix4x4& view = cam.view;
+    const Matrix4x4& proj = cam.proj;
+    const double vX = cam.camX, vY = cam.camY, vZ = cam.camZ;
 
     ImDrawList* fg = ImGui::GetForegroundDrawList();
 
@@ -12076,45 +12148,21 @@ void RenderBlockESP(
             curY += rowH;
         }
     }
-
-    env->PopLocalFrame(nullptr);
 }
 
 // Vape-style world-space BedPlates callout: distance + block icons.
 void RenderBedPlates(int w, int h, const Config& config) {
     if (!config.bedPlates) return;
-    if (!g_mapped || !g_mcInstance) return;
-    ScopedJNIEnv env(g_jvm);
-    if (!env) return;
-
-    TryResolvePlayerCoreMappings(env);
-    TryResolveRenderMappings(env, false);
-    if (!g_thePlayerField || !g_posXField || !g_posYField || !g_posZField) return;
-    if (!g_activeRenderInfoClass || !g_modelViewField || !g_projectionField) return;
 
     static thread_local std::vector<BedPlateRenderData> plates;
     { LockGuard lk(g_bedPlateListMutex); plates = g_bedPlateList; }
     if (plates.empty()) return;
 
-    if (env->ExceptionCheck()) { env->ExceptionClear(); return; }
-    if (env->PushLocalFrame(64) < 0) { env->ExceptionClear(); return; }
-
-    Matrix4x4 view = GetMatrix(env, g_modelViewField);
-    Matrix4x4 proj = GetMatrix(env, g_projectionField);
-    bool usable = MatrixProjectionUsable(view, proj);
-    if (!usable) usable = TryUseCapturedRenderMatrices(view, proj);
-    if (!usable || IsLikelyUiOrthoMatrix(view, proj)) { env->PopLocalFrame(nullptr); return; }
-
-    double vX = 0, vY = 0, vZ = 0;
-    if (g_renderManagerField && g_viewerPosXField && g_viewerPosYField && g_viewerPosZField) {
-        jobject rm = env->GetObjectField(g_mcInstance, g_renderManagerField);
-        if (rm) {
-            vX = env->GetDoubleField(rm, g_viewerPosXField);
-            vY = env->GetDoubleField(rm, g_viewerPosYField);
-            vZ = env->GetDoubleField(rm, g_viewerPosZField);
-            env->DeleteLocalRef(rm);
-        }
-    }
+    BgCamState18 cam = SnapshotOverlayCamera18();
+    if (!cam.camFound || !cam.matsOk) return;
+    const Matrix4x4& view = cam.view;
+    const Matrix4x4& proj = cam.proj;
+    const double vX = cam.camX, vY = cam.camY, vZ = cam.camZ;
 
     ImDrawList* fg = ImGui::GetForegroundDrawList();
     const bool showDist = config.bedPlatesShowDistance;
@@ -12168,8 +12216,6 @@ void RenderBedPlates(int w, int h, const Config& config) {
             }
         }
     }
-
-    env->PopLocalFrame(nullptr);
 }
 
 // ===================== INPUT HOOK =====================
@@ -12316,11 +12362,64 @@ static void ConfigureImGuiFontAndStyle(HWND hwnd) {
     st.ScaleAllSizes(dpiScale);
 }
 
+static void ApplyLegacyNametagSuppressionOnClientThread(JNIEnv* env, const Config& cfg) {
+    if (!env || !IsLegacyMinecraftClientThread() || !g_mcInstance || !g_theWorldField) return;
+    jobject world = env->GetObjectField(g_mcInstance, g_theWorldField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); world = nullptr; }
+    if (!world) return;
+
+    if (!cfg.nametagHideVanilla) {
+        if (g_legacyNametagSuppressionActive) {
+            jobject restoreScoreboard = GetLegacyScoreboard(env, world);
+            if (restoreScoreboard) {
+                RestoreLegacyVanillaNametagSuppression(env, restoreScoreboard);
+                env->DeleteLocalRef(restoreScoreboard);
+            } else {
+                g_hiddenNametagOriginalTeamByPlayerLegacy.clear();
+            }
+            g_legacyNametagSuppressionActive = false;
+        }
+        env->DeleteLocalRef(world);
+        return;
+    }
+
+    if (!EnsureLegacyNametagTeamMappings(env, world)) {
+        env->DeleteLocalRef(world);
+        return;
+    }
+    jobject scoreboard = GetLegacyScoreboard(env, world);
+    jobject hideTeam = scoreboard ? EnsureLegacyHideTeam(env, scoreboard) : nullptr;
+    std::vector<OverlayPlayer18> players;
+    {
+        LockGuard lk(g_overlayPlayersMutex18);
+        players = g_overlayPlayers18;
+    }
+    bool applied = false;
+    if (scoreboard && hideTeam) {
+        for (size_t i = 0; i < players.size(); ++i) {
+            if (ApplyLegacyVanillaNametagSuppression(env, scoreboard, hideTeam, players[i].displayName))
+                applied = true;
+        }
+    }
+    if (applied) g_legacyNametagSuppressionActive = true;
+    if (hideTeam) env->DeleteLocalRef(hideTeam);
+    if (scoreboard) env->DeleteLocalRef(scoreboard);
+    env->DeleteLocalRef(world);
+}
+
+static void ApplyLegacyClientThreadOnlyJni(JNIEnv* env, const Config& cfg) {
+    if (!env) return;
+    ApplyLegacyNickHiderFallback(env, cfg);
+    ApplyLegacyNametagSuppressionOnClientThread(env, cfg);
+}
+
 // ===================== SWAPBUFFERS HOOK =====================
 BOOL WINAPI HookedSwapBuffers(HDC hdc) {
     LegacyRenderCallbackLease renderLease;
     if (!renderLease.Active()) return CallOriginalSwapBuffers(hdc);
     if (!hdc) return CallOriginalSwapBuffers(hdc);
+
+    g_legacyMinecraftClientThreadId = GetCurrentThreadId();
 
     HGLRC currentRc = wglGetCurrentContext();
     if (!currentRc) return CallOriginalSwapBuffers(hdc);
@@ -12469,43 +12568,29 @@ BOOL WINAPI HookedSwapBuffers(HDC hdc) {
             renderHudLayout = g_hudLayout;
         }
 
+        if (JNIEnv* clientEnv = TryGetLegacyClientJniEnv()) {
+            ApplyLegacyClientThreadOnlyJni(clientEnv, renderConfig);
+        }
+
         RenderHUD(w, h, renderConfig, state, renderHudLayout);
         if (!ShouldHideWorldRenderModules(state)) {
-            TryLockGuard jniTry(g_renderJniMutex);
-            if (jniTry.owns_lock()) {
-                ClosestPlayerDrawSnapshot18 closestPlayerSnapshot;
-                {
-                    NativePerfScope playerPerf(lc::PERF_PLAYER_SCAN);
-                    RenderNametags(
-                        w,
-                        h,
-                        renderConfig,
-                        &closestPlayerSnapshot);
-                }
-                RenderFightStatus(w, h);
-                RenderClosestPlayerInfo(
-                    w,
-                    h,
-                    renderConfig,
-                    renderHudLayout,
-                    closestPlayerSnapshot);
-                RenderPixelPartyAssist(w, h, renderConfig, state);
-                {
-                    NativePerfScope chestPerf(lc::PERF_CHEST_SCAN);
-                    RenderChestESP(w, h, renderConfig);
-                }
-                RenderBlockESP(w, h, renderConfig, renderHudLayout);
-                RenderBedPlates(w, h, renderConfig);
-            } else {
-                static DWORD nextJniBusyLogAt = 0;
-                DWORD now = GetTickCount();
-                if (now >= nextJniBusyLogAt) {
-                    nextJniBusyLogAt = now + 15000;
-                    bool heavy = (InterlockedCompareExchange(&g_heavyDiscoveryInProgress, 0, 0) != 0);
-                    Log(std::string("Skipped world overlay frame: JNI busy")
-                        + (heavy ? " (heavy discovery active)" : ""));
-                }
-            }
+            ClosestPlayerDrawSnapshot18 closestPlayerSnapshot;
+            RenderNametags(
+                w,
+                h,
+                renderConfig,
+                &closestPlayerSnapshot);
+            RenderFightStatus(w, h);
+            RenderClosestPlayerInfo(
+                w,
+                h,
+                renderConfig,
+                renderHudLayout,
+                closestPlayerSnapshot);
+            RenderPixelPartyAssist(w, h, renderConfig, state);
+            RenderChestESP(w, h, renderConfig);
+            RenderBlockESP(w, h, renderConfig, renderHudLayout);
+            RenderBedPlates(w, h, renderConfig);
         }
 
         ImGui::Render();
@@ -13164,7 +13249,6 @@ void ServerLoop() {
                         env->DeleteLocalRef(localPlayer);
                     }
                 }
-                ApplyLegacyNickHiderFallback(env, cfgSnapshot);
                 state = ReadGameState(env);
                 TrackAutoRodLegacyWorld(env);
                 ExecuteAutoRodLegacy(env, cfgSnapshot, state);
@@ -13187,10 +13271,6 @@ void ServerLoop() {
                 }
                 UpdateHitDelayFixLegacy(env, cfgSnapshot, state);
                 UpdateAutoToolLegacy(env, cfgSnapshot, state);
-                {
-                    NativePerfScope sectionScanPerf(lc::PERF_BLOCK_SCAN);
-                    UpdateSectionChunkScansLegacy(env, cfgSnapshot);
-                }
             }
             RecordNativePerfSince(lc::PERF_SCAN_LOOP, stateScanPerfStarted);
             if (!cfgSnapshot.reachEnabled) {
@@ -13375,8 +13455,8 @@ DWORD WINAPI MainThread(LPVOID lpParam) {
     if (res != JNI_OK || cnt == 0) { Log("ERROR: No JVM"); return 0; }
     Log("JVM found");
 
-    // Install rendering hook
     InstallSwapBuffersHook();
+    StartBackgroundThreadsIfNeeded();
 
     // Start TCP server
     Log("Starting server...");

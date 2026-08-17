@@ -171,11 +171,15 @@ public class AutoToolManagedTests
         Assert.Contains("autoToolSwapWeapon", legacy, StringComparison.Ordinal);
         Assert.Contains("UpdateAutoToolLegacy", legacy, StringComparison.Ordinal);
         Assert.Contains("ResetAutoToolLegacyJniCaches", legacy, StringComparison.Ordinal);
+        Assert.Contains("ApplyAutoToolSlotLegacy", legacy, StringComparison.Ordinal);
+        Assert.Contains("HasPendingAutoRodLegacyTransaction()", legacy, StringComparison.Ordinal);
 
         Assert.Contains("autoToolEnabled", modern, StringComparison.Ordinal);
         Assert.Contains("autoToolSwapWeapon", modern, StringComparison.Ordinal);
         Assert.Contains("UpdateAutoToolModern", modern, StringComparison.Ordinal);
         Assert.Contains("ResetAutoToolModernCaches", modern, StringComparison.Ordinal);
+        Assert.Contains("ApplyAutoToolSlotModern", modern, StringComparison.Ordinal);
+        Assert.Contains("IsAutoRodTransactionActive121()", modern, StringComparison.Ordinal);
     }
 
     [Fact]

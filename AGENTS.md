@@ -2,14 +2,19 @@
 
 ## Purpose
 
-Operating guide for coding agents working in `legoclickerC`. Build/test/lint commands, conventions, safety rules, and gotchas.
+Operating guide for coding agents working in `aoko-client` (`legoclickerC`). Build/test/lint commands, conventions, safety rules, and gotchas.
 
-## Reference priority
+## Reference Priority
 
-1. `GUIDE.md` — canonical architecture, version mappings (Yarn vs Mojmap), implementation guardrails.
-2. `.github/copilot-instructions.md` — lighter guidance, fully compatible with this file.
-3. `AGENTS/` — extended reference docs (mapping tables, crash-log locations, reach/velocity deep dives). Some files may be stale; verify against source.
-4. `README.md` — feature list and quick start.
+1. `.agents/skills/` — canonical procedural skills and architecture references:
+   - `packet-and-call-hygiene`: Exclusive resources (hotbar, use, attack, inventory) for AutoRod, AutoTool, KillAura, and other mutating modules — not combat-only.
+   - `java-to-jni-port`: Translate in-JVM Java (event buses, Mixins, mapping wrappers) into JNI/C#; unwrap to vanilla APIs.
+   - `add-client-module`: `ModuleCatalog` first, then UI / Profile / TCP / string-list capabilities / bridges.
+   - `diagnose-bridge-crash`: Root-cause runbook for JVM `hs_err` crash dumps and bridge debug logs.
+   - `release-verification`: PR compile gate vs `New-GitHubRelease.ps1` on `main`.
+   - `write-docs`: README, website/docs site, AGENTS.md, and skills stay aligned with current modules; silent on removals.
+   - `karpathy-guidelines`: Behavioral guidelines for simpler, surgical code changes.
+2. `README.md` — user-facing feature list and quick start.
 
 ## Repository Overview
 
@@ -17,7 +22,7 @@ Operating guide for coding agents working in `legoclickerC`. Build/test/lint com
 - `Aoko/Core/`: clicker engine, input hooks, profile persistence, TCP client, GTB solver.
 - `McInjector/`: native bridge DLLs (`bridge.dll` for 1.8.9, `bridge_261.dll` for 26.1 / 26.2 / 1.21.x).
 - `McInjector/src/main/cpp/`: JNI/Win32/OpenGL/Vulkan/ImGui/MinHook bridge sources.
-- `McInjector/src/main/java/`: **Unused/obsolete Java agent code. Ignore it.** The C++ bridges perform all JNI, rendering, and TCP duties themselves.
+- `McInjector/src/main/java/`: Unused/obsolete Java agent code (ignore). Bridges perform all JNI, rendering, and TCP duties themselves.
 
 ## Required Toolchain
 
@@ -28,132 +33,86 @@ Operating guide for coding agents working in `legoclickerC`. Build/test/lint com
 
 ## Build Commands
 
-Run from repository root. Prefer PowerShell for compound commands (avoids path/quoting issues).
+Run from repository root. Prefer PowerShell for compound commands.
 
 ### Native bridge builds
-
 - Build both bridges: `build_dll.bat`
 - Build 1.8.9 bridge only: `McInjector\build.bat`
 - Build 26.1 bridge only: `McInjector\build_261.bat`
-- `build_bridge.bat` is deprecated (prints a message and exits).
 
-Bridge build scripts auto-copy output to `Aoko\bin\Debug\`, `Release\`, and `publish\` folders. The csproj also includes `<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>` for the two bridge DLLs, so `dotnet build` picks them up from the project root `Aoko\` folder.
+Bridge build scripts auto-copy output to `Aoko\bin\Debug\`, `Release\`, and `publish\` folders. The csproj also preserves newest bridge DLLs from project root.
 
 ### C# loader builds
-
 - Debug build: `dotnet build Aoko\Aoko.csproj`
 - Release build: `dotnet build -c Release Aoko\Aoko.csproj`
-- Publish (self-contained single-file, used for distribution): `build_exe.bat`
-- Full release pipeline (bridges + publish): `build_release.bat`
-
-Note: the Release publish is self-contained (`SelfContained=true`, `PublishSingleFile=true`) with bridge DLLs excluded from the single file (`ExcludeFromSingleFile=true`).
+- Publish (self-contained single-file): `build_exe.bat`
+- Full local package (bridges + publish): `build_release.bat` (invoked by the GitHub release script; do not run it extra when publishing)
+- GitHub release: `.\scripts\New-GitHubRelease.ps1 -Version 0.x.y` from clean `main` (see `release-verification` skill)
 
 ### Run locally
+- Run app: `dotnet run --project Aoko\Aoko.csproj` (ensure existing `Aoko.exe` is closed).
 
-- Run app: `dotnet run --project Aoko\Aoko.csproj`
-- If `dotnet run` fails because `Aoko.exe` is locked, close the running app first.
-
-## Lint and Formatting
-
-No `.editorconfig` or `.clang-format` checked in. Practical quality gates:
+## Lint and Testing
 
 - C# compile gate: `dotnet build Aoko\Aoko.csproj`
 - Native compile gate: `McInjector\build_261.bat` and/or `McInjector\build.bat`
-- Optional formatting check (if `dotnet format` is installed):
-  `dotnet format Aoko\Aoko.csproj --verify-no-changes`
-
-## Test Commands
-
-C# tests use **xUnit** (`Aoko.Tests\`). Native harness tests are a standalone C++ exe.
-
 - Run all C# tests: `dotnet test Aoko.Tests\Aoko.Tests.csproj`
-- List tests: `dotnet test Aoko.Tests\Aoko.Tests.csproj --list-tests`
-- Run a single test: `dotnet test Aoko.Tests\Aoko.Tests.csproj --filter "FullyQualifiedName~Namespace.ClassName.TestName"`
-- Run one test class: `dotnet test Aoko.Tests\Aoko.Tests.csproj --filter "FullyQualifiedName~Namespace.ClassName"`
-- Run native tests: `McInjector\run_tests.bat`
+- Run native test harness: `McInjector\run_tests.bat`
 
 ## Debugging
 
-- Bridge debug logs are written to the DLL load directory:
+- Bridge debug logs:
   - `bridge_debug.log` (legacy 1.8.9 bridge)
   - `bridge_261_debug.log` (modern 26.1 / 1.21 bridge)
 - C# logging goes to `Debug.WriteLine`.
 - For JVM crash dumps, check `hs_err_pid*.log` in Lunar's working directory, `%USERPROFILE%\.lunarclient\`, or `%TEMP%`.
 
-## Architecture Notes
+## Architecture & Domain Safety Rules
 
 - Loader and bridge communicate over TCP on port `25590`.
-- Input simulation normally happens in C# via Win32 `SendInput`; bridge-side game interaction is allowed only when it is explicitly owned by a module, version-gated, validated, and kept out of raw packet spam or combat-only calls.
-- `bridge_261.cpp` uses Yarn-first, Mojmap-fallback class name arrays to support both 1.21 (obfuscated, Yarn mappings) and 26.1 (unobfuscated, Mojang mappings) from a single DLL.
-- `bridge.cpp` (1.8.9) now links the shared ImGui/OpenGL backend and MinHook sources. Do not assume legacy rendering is raw GL-only.
-- **Renderer auto-detect (`bridge_261.dll`):** the overlay renders through either OpenGL (`wglSwapBuffers` hook in `bridge_261.cpp`) or Vulkan (`render_backend.cpp` + `imgui/imgui_impl_vulkan.*`, for Lunar 26.2's Vulkan renderer). Whichever present path fires first wins the session (`RenderBackend_GetActiveKind()` / `vkoverlay::ArbitrateBackend`); the other path then no-ops its overlay. The ImGui context + Win32 platform + fonts are created renderer-neutrally (`EnsureImGuiContextNeutral` / `Bridge_EnsureImGuiPlatform`); only the renderer backend differs. Vulkan headers + the ImGui Vulkan backend are vendored under `McInjector/src/main/cpp/{vulkan,imgui}/` and loaded dynamically (`-DIMGUI_IMPL_VULKAN_NO_PROTOTYPES`, no `vulkan-1.lib` link). Kill-switch: `AOKO_BRIDGE261_VULKAN=0`. Pure helpers live in `vk_overlay_helpers.h` and are unit-tested in `tests/vk_overlay_tests.cpp` (`run_tests.bat`).
-- **Menu-injection compatibility (1.8.9):** mappings and features must recover correctly when injected while in menus/lobby, not only when already in a world.
-- Release publish `build_release.bat` copies DLLs from `McInjector\` (not `Aoko\`), so both bridges must be built first.
-
-## Coding Style
-
-### General
-- Match existing style in the touched file; do not reformat unrelated code.
-- Keep changes minimal. Avoid adding dependencies.
-
-### C# (.NET 8, nullable enabled)
-- File-scoped namespaces (`namespace X;`), 4-space indentation.
-- `PascalCase` for public types/methods/properties; `_camelCase` for private fields; `camelCase` for locals/parameters.
-- Remove unused usings. Group BCL namespaces before project namespaces.
-- Bindable state raises `PropertyChanged`. Use `CancellationToken` for background loops. Marshal to `Dispatcher` for UI updates.
-- Catch expected failures around I/O, process attach, and socket operations.
-
-### XAML/WPF
-- `DynamicResource`-based theming. Explicit bindings (`Mode=TwoWay`, `UpdateSourceTrigger=PropertyChanged` where needed).
-- Reuse styles from resources rather than repeating control properties.
-
-### C++ Bridge (C++11)
-- Keep include order stable. Use `Mutex`/`LockGuard` for shared globals.
-- Validate and clamp config values parsed from TCP JSON.
-- Keep render-thread (wglSwapBuffers hook) code lightweight; cache method/field IDs.
-- JNI: check nulls, clear exceptions, manage local refs/frames in loops.
-
-## Domain Safety Rules
-
-- Do NOT add raw packet spam or unrelated gameplay mutation in bridge code.
-- Do NOT call in-game combat methods (`attackEntity`, combat packet APIs, etc.) unless a feature explicitly owns that behavior and documents the risk.
-- Prefer observing state first. Use Win32 `SendInput` from C# for simulated input when it is reliable, but controlled bridge-side JNI/game interaction is allowed for modules that require it.
-- JNI writes and gameplay interactions must be narrow, validated, version-gated, and logged when mappings are unavailable. Keep overlays draw-only unless the selected module explicitly needs state interaction.
+- **Safety Rule:** Keep bridge code read-first. Do NOT add raw packet spam or unrelated gameplay mutation.
+- Input simulation normally happens in C# via Win32 `SendInput`. Controlled bridge-side JNI/game interaction is allowed only when explicitly owned by a module (consult `packet-and-call-hygiene` skill before touching combat/packet methods).
+- `bridge_261.cpp` uses Yarn-first, Mojmap-fallback arrays for dual-version 1.21 / 26.1 support.
+- **Renderer auto-detect (`bridge_261.dll`):** OpenGL (`wglSwapBuffers`) or Vulkan (`render_backend.cpp`). Whichever present path fires first claims the session (`RenderBackend_GetActiveKind()`). Kill-switch: `AOKO_BRIDGE261_VULKAN=0`.
+- Preserve menu-injection compatibility (1.8.9): recover mappings when entering a world after injecting in title screen/lobby.
 
 ## Configuration Sync
 
-When adding a setting, update ALL of:
-- `Clicker` property
-- `Profile` save/load mapping
-- `GameStateClient` config payload (if bridge-relevant)
-- `BridgeCapabilities.cs` and `bridge_capabilities.h` if version/module gating changes
-- `InputHooks` and keybind UI maps if a module gets a keybind
-- bridge parser/usage (if native overlay/module behavior depends on it)
+When adding or modifying a module or setting, start in `Aoko/Core/ModuleCatalog.cs`, then update every surface that entry requires (see `add-client-module` skill). Typical layers:
+1. `ModuleCatalog` registration (id, surfaces, overlay probe, DevOnly/ManagedOnly)
+2. `Clicker` property in `Clicker.cs`
+3. `Profile` save/load mapping in `Profile.cs`
+4. `GameStateClient` TCP **config** payload (C# → bridge)
+5. `BridgeCapabilities.cs` and `bridge_capabilities.h` **string lists** (not bitflags) if gating changes
+6. `InputHooks` and the keybind button on the module card if the module is keybindable
+7. Bridge `ParseConfig` / logic / overlay `pushMod` in `bridge.cpp` / `bridge_261.cpp`
+8. Inbound JVM fields: bridge JSON → `GameState.cs` plus the capabilities `state` list
+
+Hotbar, use-item, attack, or inventory modules must follow `packet-and-call-hygiene` (AutoRod/AutoTool exclusive slot lockouts). Overlay drawing stays draw-only unless the module owns mutation.
+
+## Coding Style
+
+- Match the touched file; do not reformat unrelated code. Keep changes minimal.
+- **C#:** file-scoped namespaces, 4-space indent, `PascalCase` public API, `_camelCase` private fields. Bindable state raises `PropertyChanged`. `CancellationToken` for loops. Marshal UI updates to the dispatcher. Clamp TCP-driven values.
+- **XAML:** `DynamicResource` theming, explicit `TwoWay` bindings.
+- **C++:** C++11, existing include order, `Mutex`/`LockGuard` for shared globals. Keep the swap-buffer/present hook light; cache JNI IDs. Check nulls, clear JNI exceptions, manage local refs in loops.
 
 ## High-Signal Gotchas
 
-- `JNIEnv*` is thread-local. Using it from an unattached thread will crash. Always `AttachCurrentThread` from non-render threads.
-- `build_bridge.bat` is a no-op stub. Use `McInjector\build.bat` or `McInjector\build_261.bat`.
-- The csproj auto-copies bridge DLLs from `Aoko\` root. Build scripts also copy into `bin\` folders. After a native rebuild, ensure the active run configuration has the latest DLL.
-- `bridge_261.cpp` fallback-array parsing: Yarn names are tried first, then Mojmap. Adding a new class lookup MUST follow the same pattern or dual-version support breaks.
+- `JNIEnv*` is thread-local. Never use across threads. Always call `AttachCurrentThread` from non-render worker threads.
+- `bridge_261.cpp` fallback-array parsing: Yarn names MUST be checked first, then Mojmap.
+- `build_release.bat` already runs `build_dll.bat` and copies DLLs from `McInjector\`. Everyday PRs do not need it. Publishing a GitHub release uses `scripts\New-GitHubRelease.ps1`, which calls `build_release.bat` itself.
 
-## Git
+## Git & Branch Policy
 
-### Branch action policy
-
-- `dev` is the working branch. Agents may run normal git actions on `dev` **without asking**: stage, commit, create/switch local branches, and merge feature branches into `dev`. If a remote tracking branch exists, pushing `dev` is allowed too.
-- `main` is protected. Do **NOT** commit, merge, rebase, push, or force-push to `main` unless the user explicitly asks or grants permission. Default to landing work on `dev` and let the user promote it to `main`.
-- Always confirm the current branch (`git rev-parse --abbrev-ref HEAD`) before committing. If you are on `main`, switch to `dev` (or ask the user) before making changes.
-- Destructive git operations (`reset --hard`, `clean -f`, `branch -D`, `push --force`) still require explicit user permission on **any** branch, including `dev`.
-- Only create commits when the work is complete and verified; keep unrelated concerns (e.g. line-ending normalization vs. source fixes) in separate commits.
-
-### Line endings
-
-- `.gitattributes` enforces LF in the repository with CRLF checkout on Windows (`* text=auto eol=crlf`). Let Git normalize; do not hand-convert endings.
-- If a diff shows a whole file changed but the content is identical (pure CRLF/LF churn), stop and run `git add --renormalize .` instead of committing the churn.
+- **`dev` is the working branch.** Agents may stage, commit, create/switch local branches, and merge into `dev`.
+- **`main` is protected.** Do NOT commit, merge, rebase, push, or force-push to `main` without explicit user permission.
+- Always confirm the current branch (`git rev-parse --abbrev-ref HEAD`) before committing.
+- Destructive git operations (`reset --hard`, `clean -f`, `branch -D`, `push --force`) require explicit permission on ANY branch.
+- `.gitattributes` enforces LF repo / CRLF checkout (`* text=auto eol=crlf`). Use `git add --renormalize .` if diff churns line endings.
 
 ## Agent Workflow
 
-- Before finishing, run the relevant build command(s).
+- Run relevant build command(s) and test suites before finishing.
 - Report exact commands run and results.
 - Do not revert unrelated user changes.

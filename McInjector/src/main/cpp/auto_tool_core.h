@@ -47,6 +47,9 @@ struct AutoToolInput {
     bool               isEntityHit    = false;
     int                bestToolSlot   = -1;
     int                bestWeaponSlot = -1;
+    // Auto Rod (and similar exclusive hotbar owners) must keep the selected
+    // slot for the whole cast. Freeze here so a held LMB cannot snap back.
+    bool               pauseExclusive = false;
 };
 
 struct AutoToolAction {
@@ -70,18 +73,26 @@ inline AutoToolAction UpdateAutoToolState(
         return { false, -1 };
     }
 
+    if (input.pauseExclusive) {
+        return { false, -1 };
+    }
+
     if (input.currentSlot < 0 || input.currentSlot >= kHotbarSlots) {
         return { false, -1 };
     }
 
     int desiredSlot = -1;
-    if (input.isBlockHit && input.bestToolSlot >= 0 && input.bestToolSlot < kHotbarSlots) {
-        desiredSlot = input.bestToolSlot;
-    } else if (input.isEntityHit && cfg.swapWeapon && input.bestWeaponSlot >= 0 && input.bestWeaponSlot < kHotbarSlots) {
+    // Prefer a weapon while an entity is under the crosshair so PvP is not
+    // overridden by a block behind / under the opponent.
+    if (input.isEntityHit && cfg.swapWeapon && input.bestWeaponSlot >= 0 && input.bestWeaponSlot < kHotbarSlots) {
         desiredSlot = input.bestWeaponSlot;
+    } else if (input.isBlockHit && input.bestToolSlot >= 0 && input.bestToolSlot < kHotbarSlots) {
+        desiredSlot = input.bestToolSlot;
     }
 
-    if (cfg.requireMouseDown && !input.mouseDown) {
+    // requireMouseDown applies to mining only. Weapon swaps happen on hover so a
+    // short PvP click is not missed by the poll loop.
+    if (cfg.requireMouseDown && !input.mouseDown && !input.isEntityHit) {
         desiredSlot = -1;
     }
     if (cfg.onlyWhileSneaking && !input.isSneaking) {
@@ -132,6 +143,11 @@ inline AutoToolAction UpdateAutoToolState(
         bool shouldSwap = (input.nowMs >= state.swapTimerMs) &&
                           (input.nowMs - state.swapTimerMs >= static_cast<unsigned long long>(cfg.swapToDelayMs));
         if (input.isEntityHit && cfg.swapWeapon && cfg.instantSwap) {
+            shouldSwap = true;
+        }
+        // Already mining: retarget as soon as the looked-at block needs a different tool.
+        // Waiting on swapToDelay here is what made held-LMB feel like it needed a re-click.
+        if (input.isBlockHit && input.mouseDown && (state.swapped || state.originalSlot != -1)) {
             shouldSwap = true;
         }
         if (shouldSwap) {

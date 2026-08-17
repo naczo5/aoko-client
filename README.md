@@ -113,21 +113,6 @@ Run from repository root unless noted.
 
 - `build_release.bat`
 
-### Create a GitHub release locally
-
-With [GitHub CLI](https://cli.github.com/) authenticated (`gh auth login`), the
-local release helper builds both bridges and the self-contained app, creates
-`Aoko.zip`, then uploads it as a GitHub release asset:
-
-```powershell
-.\scripts\New-GitHubRelease.ps1 -Version 0.10.2
-```
-
-It only runs from a clean, up-to-date `main` branch and refuses to reuse an
-existing tag. Add `-Draft` to create a draft for review; publish that draft in
-GitHub when ready. Publishing a stable release triggers the Scoop manifest
-workflow automatically.
-
 ## Tests
 
 - Run C# tests: `dotnet test Aoko.Tests\Aoko.Tests.csproj`
@@ -190,11 +175,6 @@ official Astro action and publishes it to GitHub Pages.
 - Input actions are usually sent through Win32 `SendInput`.
 - Bridge capabilities gate version-specific modules and controls.
 
-## Safety constraint used by this project
-
-- Bridge-side logic reads game state and may perform controlled, module-scoped JNI/game interactions for features that require them.
-- Do not add raw packet spam or unrelated in-game combat method calls.
-
 ## Contributions
 
 Pull requests are welcome for bug fixes and new modules.
@@ -205,9 +185,6 @@ Pull requests are welcome for bug fixes and new modules.
 therefore their usecase (like private or anarchy servers).
 
 ## TODO
-
-- [ ] make antidebuff work correctly on modern versions
-
 
 ## Support
 

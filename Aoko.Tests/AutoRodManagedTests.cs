@@ -262,6 +262,8 @@ public class AutoRodManagedTests
         Assert.Contains("SendAutoRodUseInput121", modern, StringComparison.Ordinal);
         Assert.Contains("autorod::kRestoreSettleTicks", legacy, StringComparison.Ordinal);
         Assert.Contains("autorod::kRestoreSettleTicks", modern, StringComparison.Ordinal);
+        Assert.Contains("HasPendingAutoRodLegacyTransaction()", legacy, StringComparison.Ordinal);
+        Assert.Contains("IsAutoRodTransactionActive121()", modern, StringComparison.Ordinal);
         Assert.DoesNotContain("CallBooleanMethod(\n                controller, g_autoRodSendUseItem18", legacy, StringComparison.Ordinal);
         Assert.DoesNotContain("gameMode, g_autoRodUseItem121, player, g_autoRodMainHand121", modern, StringComparison.Ordinal);
         Assert.DoesNotContain("CallVoidMethod(controller, g_autoRodSyncCurrentPlayItem18)", legacy, StringComparison.Ordinal);
