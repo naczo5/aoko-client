@@ -8,7 +8,7 @@ description: The panic action instantly disables every module and hides the clie
 When triggered, panic:
 
 - disarms the autoclicker and stops all clicking;
-- disables every module — aim assist, triggerbot, speedbridge, GTB helper, PixelParty assist, nametags, closest player, fight status, chest ESP, chest stealer, block ESP, reach, velocity, autototem, and antidebuff;
+- disables every module — aim assist, triggerbot, auto rod, autotool, speedbridge, GTB helper, PixelParty assist, nametags, closest player, fight status, chest ESP, chest stealer, block ESP, bedplates, reach, velocity, autototem, and antidebuff;
 - hides the in-game module list and logo;
 - disables Discord Rich Presence;
 - puts the loader window into a stealth mode;
@@ -16,7 +16,7 @@ When triggered, panic:
 
 ## Usage
 
-- Bind **panic** under the **Keybinds** tab (see [Profiles & keybinds](/aoko-client/profiles-keybinds/)).
+- Bind **panic** using the Panic keybind button in the external GUI (see [Profiles & keybinds](/aoko-client/profiles-keybinds/)).
 - Panic can be triggered from the GUI or its bound key.
 
 :::tip

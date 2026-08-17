@@ -7,7 +7,7 @@ description: Solves Guess-The-Build hints and shows candidate words in an overla
 
 ## Version support
 
-1.8.9 · 1.21.x · 26.1
+1.8.9 · 1.21.x · 26.1 · 26.2
 
 ## Settings
 

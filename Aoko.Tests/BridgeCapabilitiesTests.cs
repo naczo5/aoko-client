@@ -30,6 +30,7 @@ public class BridgeCapabilitiesTests
         Assert.True(caps.SupportsSetting("pixelpartyassist"));
         Assert.True(caps.SupportsStateField("pixelpartyyawdelta"));
         Assert.True(caps.SupportsSetting("cheststealerenabled"));
+        Assert.True(caps.SupportsSetting("cheststealermenucheck"));
         Assert.False(caps.SupportsModule("silentaura"));
         Assert.False(caps.SupportsSetting("silentaura"));
         Assert.False(caps.SupportsSetting("silentarange"));
@@ -83,6 +84,7 @@ public class BridgeCapabilitiesTests
         Assert.True(caps.SupportsModule("cheststealer"));
         Assert.True(caps.SupportsSetting("cheststealerenabled"));
         Assert.True(caps.SupportsSetting("cheststealerdelayms"));
+        Assert.True(caps.SupportsSetting("cheststealermenucheck"));
         Assert.True(caps.SupportsSetting("keybindcheststealer"));
         Assert.True(caps.SupportsStateField("cheststealerstate"));
     }

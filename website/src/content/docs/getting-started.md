@@ -36,7 +36,7 @@ Some modules are version-gated — for example, **Triggerbot**, **AutoTotem**, a
 2. Run `Aoko.exe`.
 3. Click **Inject**.
 4. Use the external GUI to enable and configure modules.
-5. Bind keys under the **Keybinds** tab to toggle modules in-game.
+5. Bind keys on each module card to toggle modules in-game.
 
 :::tip
 It is generally recommended to inject while already in a server/world so that every module initializes correctly.

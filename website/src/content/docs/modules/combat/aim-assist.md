@@ -7,7 +7,7 @@ description: Subtle mouse-movement aim assistance toward the closest target.
 
 ## Version support
 
-1.8.9 · 1.21.x · 26.1
+1.8.9 · 1.21.x · 26.1 · 26.2
 
 ## Settings
 

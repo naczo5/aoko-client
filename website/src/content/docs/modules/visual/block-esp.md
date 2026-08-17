@@ -7,7 +7,7 @@ description: Highlights configurable block types through walls, with boxes, trac
 
 ## Version support
 
-1.8.9 · 1.21.x · 26.1
+1.8.9 · 1.21.x · 26.1 · 26.2
 
 ## Settings
 

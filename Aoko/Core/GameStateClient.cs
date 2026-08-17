@@ -1151,6 +1151,7 @@ public class GameStateClient : INotifyPropertyChanged
                     chestEspRange = clicker.ChestEspRange,
                     chestStealerEnabled = clicker.ChestStealerEnabled,
                     chestStealerDelayMs = clicker.ChestStealerDelayMs,
+                    chestStealerMenuCheck = clicker.ChestStealerMenuCheck,
                     blockEspEnabled = clicker.BlockEspEnabled,
                     blockEspBoxes = clicker.BlockEspBoxes,
                     blockEspTracers = clicker.BlockEspTracers,
@@ -1188,6 +1189,7 @@ public class GameStateClient : INotifyPropertyChanged
                     autoToolSwapBackDelay = clicker.AutoToolSwapBackDelay,
                     autoToolRequireMouseDown = clicker.AutoToolRequireMouseDown,
                     autoToolOnlySneaking = clicker.AutoToolOnlySneaking,
+                    autoToolBedwarsMode = clicker.AutoToolBedwarsMode,
                     antiDebuffEnabled = clicker.AntiDebuffEnabled,
                     hitDelayFixEnabled = clicker.HitDelayFixEnabled,
                     // Per-module keybinds
@@ -1425,6 +1427,12 @@ public class GameStateClient : INotifyPropertyChanged
                     break;
                 case "setChestStealerDelayMs":
                     clicker.ChestStealerDelayMs = (int)(node?["value"]?.GetValue<float>() ?? 120f);
+                    break;
+                case "toggleChestStealerMenuCheck":
+                    clicker.ChestStealerMenuCheck = !clicker.ChestStealerMenuCheck;
+                    break;
+                case "setChestStealerMenuCheck":
+                    clicker.ChestStealerMenuCheck = node?["value"]?.GetValue<bool>() ?? true;
                     break;
                 case "setKeybind":
                     string? moduleId = node?["module"]?.GetValue<string>();

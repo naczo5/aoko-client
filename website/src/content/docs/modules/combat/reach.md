@@ -7,7 +7,7 @@ description: Extends your attack range with a configurable distance and hit chan
 
 ## Version support
 
-1.8.9 · 1.21.x · 26.1
+1.8.9 · 1.21.x · 26.1 · 26.2
 
 ## Settings
 

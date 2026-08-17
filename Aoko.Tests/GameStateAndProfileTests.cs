@@ -173,9 +173,28 @@ public class GameStateAndProfileTests
         Assert.True(profile.KillAuraWeaponsOnly);
         Assert.False(profile.ChestStealerEnabled);
         Assert.Equal(120, profile.ChestStealerDelayMs);
+        Assert.True(profile.ChestStealerMenuCheck);
         Assert.Equal(100, profile.ReachChance);
         Assert.True(profile.ModuleKeys.ContainsKey("autoclicker"));
         Assert.True(profile.ModuleKeys.ContainsKey("cheststealer"));
+    }
+
+    [Fact]
+    public void Profile_ChestStealerMenuCheck_DefaultsTrueAndRoundTrips()
+    {
+        var defaults = new Profile();
+        Assert.True(defaults.ChestStealerMenuCheck);
+
+        var profile = new Profile { ChestStealerMenuCheck = false };
+        var options = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+
+        string json = JsonSerializer.Serialize(profile, options);
+        JsonNode? node = JsonNode.Parse(json);
+        Profile? roundTripped = JsonSerializer.Deserialize<Profile>(json, options);
+
+        Assert.False(node!["chestStealerMenuCheck"]!.GetValue<bool>());
+        Assert.NotNull(roundTripped);
+        Assert.False(roundTripped!.ChestStealerMenuCheck);
     }
 
     [Fact]

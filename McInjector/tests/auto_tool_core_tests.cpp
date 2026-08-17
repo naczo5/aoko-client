@@ -179,6 +179,46 @@ int main()
     ExpectBool(false, act.switchSlot, "pauseExclusive does not steal the rod slot while autoclicking");
     input.pauseExclusive = false;
 
+    // Test 12: Bedwars mode prevents tool swap when punching chests
+    state.Reset();
+    cfg.bedwarsMode = true;
+    input.currentSlot = 0; // e.g. holding iron ingot in slot 0
+    input.mouseDown = true;
+    input.isBlockHit = true;
+    input.isChestHit = true;
+    input.isEntityHit = false;
+    input.bestToolSlot = 3; // e.g. axe in slot 3
+    input.bestWeaponSlot = -1;
+    input.nowMs = 6000;
+    act = autotool::UpdateAutoToolState(state, cfg, input);
+    ExpectBool(false, act.switchSlot, "Bedwars mode prevents tool swap when punching chests");
+
+    // Test 13: Disabling Bedwars mode allows tool swap on chests
+    cfg.bedwarsMode = false;
+    input.nowMs = 6050;
+    act = autotool::UpdateAutoToolState(state, cfg, input);
+    ExpectBool(false, act.switchSlot, "Swap delay begins when Bedwars mode is disabled");
+    ExpectBool(true, state.swapPending, "Swap is marked pending for chest tool");
+    input.nowMs = 6100; // 50ms elapsed
+    act = autotool::UpdateAutoToolState(state, cfg, input);
+    ExpectBool(true, act.switchSlot, "Disabling Bedwars mode allows swapping to axe on chests after delay");
+    ExpectEq(3, act.targetSlot, "Swaps to axe slot 3 when Bedwars mode is disabled");
+
+    // Test 14: Bedwars mode still allows weapon swap when an entity is under the crosshair
+    state.Reset();
+    cfg.bedwarsMode = true;
+    input.currentSlot = 0;
+    input.mouseDown = true;
+    input.isBlockHit = true;
+    input.isChestHit = true;
+    input.isEntityHit = true;
+    input.bestToolSlot = 3;
+    input.bestWeaponSlot = 1;
+    input.nowMs = 7000;
+    act = autotool::UpdateAutoToolState(state, cfg, input);
+    ExpectBool(true, act.switchSlot, "Bedwars mode does not block weapon swap when hitting entity on a chest");
+    ExpectEq(1, act.targetSlot, "Switches to weapon slot 1");
+
     if (g_failures != 0) {
         std::cerr << "Auto Tool core tests failed: " << g_failures << std::endl;
         return 1;

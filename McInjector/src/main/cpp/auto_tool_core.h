@@ -14,6 +14,7 @@ struct AutoToolConfig {
     int  swapBackDelayMs       = 350;
     bool requireMouseDown      = true;
     bool onlyWhileSneaking     = false;
+    bool bedwarsMode           = true;
 };
 
 struct AutoToolState {
@@ -44,6 +45,7 @@ struct AutoToolInput {
     bool               isSneaking     = false;
     int                currentSlot    = 0;
     bool               isBlockHit     = false;
+    bool               isChestHit     = false;
     bool               isEntityHit    = false;
     int                bestToolSlot   = -1;
     int                bestWeaponSlot = -1;
@@ -87,7 +89,12 @@ inline AutoToolAction UpdateAutoToolState(
     if (input.isEntityHit && cfg.swapWeapon && input.bestWeaponSlot >= 0 && input.bestWeaponSlot < kHotbarSlots) {
         desiredSlot = input.bestWeaponSlot;
     } else if (input.isBlockHit && input.bestToolSlot >= 0 && input.bestToolSlot < kHotbarSlots) {
-        desiredSlot = input.bestToolSlot;
+        // Bedwars mode: in Bedwars, players punch (left click) chests to quickly deposit
+        // resources (iron, gold, diamonds, emeralds). Prevent changing to a tool when
+        // punching chests so resource deposits are not interrupted by tool swaps.
+        if (!(cfg.bedwarsMode && input.isChestHit)) {
+            desiredSlot = input.bestToolSlot;
+        }
     }
 
     // requireMouseDown applies to mining only. Weapon swaps happen on hover so a

@@ -160,7 +160,8 @@ internal sealed class ChestStealerController
                         !WindowDetection.IsCursorVisible() ||
                         state.LastUpdate == DateTime.MinValue ||
                         (DateTime.Now - state.LastUpdate).TotalMilliseconds > FreshStateMs ||
-                        chest is not { Ready: true, Physical: true } ||
+                        chest is not { Ready: true } ||
+                        (clicker.ChestStealerMenuCheck && !chest.Physical) ||
                         chest.Slots.Count == 0)
                     {
                         ReleaseSyntheticShift();

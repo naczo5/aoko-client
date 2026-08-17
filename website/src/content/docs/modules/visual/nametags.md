@@ -7,7 +7,7 @@ description: Enhanced player tags showing health, armor, and held item.
 
 ## Version support
 
-1.8.9 · 1.21.x · 26.1 — note that **Held item** and **Max count** are only available on 1.21.x / 26.1.
+1.8.9 · 1.21.x · 26.1 · 26.2 — note that **Held item** and **Max count** are only available on 1.21.x / 26.1 / 26.2.
 
 ## Settings
 
@@ -15,9 +15,9 @@ description: Enhanced player tags showing health, armor, and held item.
 | ------- | ----------- | --------------- |
 | Show health | Displays each player's health on their tag. | On |
 | Show armor | Displays the player's armor tier. | On |
-| Show held item | Displays the player's currently held item. *(1.21.x / 26.1 only)* | On |
+| Show held item | Displays the player's currently held item. *(1.21.x / 26.1 / 26.2 only)* | On |
 | Hide vanilla | Hides the default game nametag so only the enhanced tag shows. | Off |
-| Max count | Maximum number of player tags rendered at once. *(1.21.x / 26.1 only)* | `1`–`20` / `8` |
+| Max count | Maximum number of player tags rendered at once. *(1.21.x / 26.1 / 26.2 only)* | `1`–`20` / `8` |
 
 ## Usage notes
 

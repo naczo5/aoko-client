@@ -121,6 +121,10 @@ Full table: `references/conflict_matrix.md`. Non-negotiable rules:
    `g_killAuraBlocking` is set.
 5. **C# `SendInput` vs native silent aim.** Physical camera (Aim Assist) and
    network yaw (KillAura) stay on separate paths.
+6. **Independent wall-clock Hz.** Each module's JNI cadence is its own interval in
+   `telemetry_schedule.h`. Do not `Sleep(moduleA || moduleB ? 5 : 50)` — enabling
+   one module must not run unrelated scans or `ReadGameState` faster. Do not bind
+   module ticks to `wglSwapBuffers` / present. Overlay drawing stays per-frame.
 
 When adding a module, list every resource it writes and every module that already
 writes those resources. If that list is empty, the design is unfinished.

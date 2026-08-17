@@ -224,6 +224,7 @@ struct Config {
     bool  chestEsp       = false;
     bool  chestStealer   = false;
     int   chestStealerDelayMs = 120;
+    bool  chestStealerMenuCheck = true;
     bool  blockEsp       = false;
     bool  blockEspBoxes  = true;
     bool  blockEspTracers = false;
@@ -292,6 +293,7 @@ struct Config {
     int   autoToolSwapBackDelay = 350;
     bool  autoToolRequireMouseDown = true;
     bool  autoToolOnlySneaking = false;
+    bool  autoToolBedwarsMode = true;
     int   keybindAutoTool = 0;
     bool  pixelPartyAssist = false;
     int   pixelPartyScanRadius = 28;
@@ -486,6 +488,7 @@ static void ParseConfig(const std::string& line) {
     }
     g_config.chestEsp      = reader.GetBool("chestEsp");
     g_config.chestStealer  = reader.GetBool("chestStealerEnabled");
+    g_config.chestStealerMenuCheck = reader.GetBool("chestStealerMenuCheck", true);
     std::string showModuleListRaw = reader.GetString("showModuleList");
     g_config.showModuleList = showModuleListRaw.empty() ? true : (showModuleListRaw == "true");
     g_config.closestPlayer = reader.GetBool("closestPlayerInfo");
@@ -581,6 +584,7 @@ static void ParseConfig(const std::string& line) {
     g_config.autoToolSwapBackDelay = lc::ClampInt(reader.GetInt("autoToolSwapBackDelay", 350), 0, 1000);
     g_config.autoToolRequireMouseDown = reader.GetBool("autoToolRequireMouseDown", true);
     g_config.autoToolOnlySneaking = reader.GetBool("autoToolOnlySneaking", false);
+    g_config.autoToolBedwarsMode = reader.GetBool("autoToolBedwarsMode", true);
     g_config.keybindAutoTool = lc::ClampInt(reader.GetInt("keybindAutoTool", g_config.keybindAutoTool), 0, 255);
     g_config.pixelPartyAssist = reader.GetBool("pixelPartyAssist");
     g_config.pixelPartyScanRadius = lc::ClampInt(reader.GetInt("pixelPartyScanRadius", g_config.pixelPartyScanRadius), 8, 48);
@@ -995,6 +999,8 @@ static jfieldID  g_chestStealerSlotIdField_121 = nullptr;
 static jfieldID  g_chestStealerSlotXField_121 = nullptr;
 static jfieldID  g_chestStealerSlotYField_121 = nullptr;
 static jmethodID g_chestStealerSlotHasStackMethod_121 = nullptr;
+static jmethodID g_chestStealerSlotGetStackMethod_121 = nullptr;
+static jmethodID g_itemStackHasCustomName_121 = nullptr;
 static DWORD     g_lastChestStealerMappingLogMs_121 = 0;
 static DWORD     g_lastChestStealerSkipLogMs_121 = 0;
 
@@ -6731,9 +6737,90 @@ static bool ResolveModernChestStealerSlotMappings(JNIEnv* env, jobject slotObj) 
             if (env->ExceptionCheck()) { env->ExceptionClear(); g_chestStealerSlotHasStackMethod_121 = nullptr; }
         }
     }
+    if (!g_chestStealerSlotGetStackMethod_121) {
+        const char* names[] = { "getItem", "getStack", "method_7677", "m_7993_", nullptr };
+        const char* sigs[] = {
+            "()Lnet/minecraft/world/item/ItemStack;",
+            "()Lnet/minecraft/class_1799;",
+            "()Lnet/minecraft/item/ItemStack;",
+            nullptr
+        };
+        for (int ni = 0; names[ni] && !g_chestStealerSlotGetStackMethod_121; ni++) {
+            for (int si = 0; sigs[si] && !g_chestStealerSlotGetStackMethod_121; si++) {
+                g_chestStealerSlotGetStackMethod_121 = env->GetMethodID(slotCls, names[ni], sigs[si]);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_chestStealerSlotGetStackMethod_121 = nullptr; }
+            }
+        }
+    }
     env->DeleteLocalRef(slotCls);
     return g_chestStealerSlotIdField_121 && g_chestStealerSlotXField_121 &&
         g_chestStealerSlotYField_121 && g_chestStealerSlotHasStackMethod_121;
+}
+
+static bool IsModernItemStackCustomNamed(JNIEnv* env, jobject stackObj) {
+    if (!env || !stackObj) return false;
+    if (!g_itemStackHasCustomName_121) {
+        jclass stackCls = env->GetObjectClass(stackObj);
+        if (stackCls) {
+            const char* names[] = { "hasCustomName", "method_7986", "m_41784_", nullptr };
+            for (int i = 0; names[i] && !g_itemStackHasCustomName_121; i++) {
+                g_itemStackHasCustomName_121 = env->GetMethodID(stackCls, names[i], "()Z");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_itemStackHasCustomName_121 = nullptr; }
+            }
+            env->DeleteLocalRef(stackCls);
+        }
+    }
+    if (g_itemStackHasCustomName_121) {
+        bool res = env->CallBooleanMethod(stackObj, g_itemStackHasCustomName_121) == JNI_TRUE;
+        if (env->ExceptionCheck()) { env->ExceptionClear(); return false; }
+        return res;
+    }
+    return false;
+}
+
+static std::string GetModernScreenTitle(JNIEnv* env, jobject screenObj) {
+    if (!env || !screenObj) return "";
+    jclass screenCls = env->GetObjectClass(screenObj);
+    if (!screenCls) return "";
+
+    jobject textObj = nullptr;
+    const char* methodNames[] = { "getTitle", "method_25440", "m_96636_", nullptr };
+    const char* sigs[] = {
+        "()Lnet/minecraft/network/chat/Component;",
+        "()Lnet/minecraft/text/Text;",
+        "()Lnet/minecraft/class_2561;",
+        nullptr
+    };
+    for (int ni = 0; methodNames[ni] && !textObj; ni++) {
+        for (int si = 0; sigs[si] && !textObj; si++) {
+            jmethodID mid = env->GetMethodID(screenCls, methodNames[ni], sigs[si]);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); mid = nullptr; }
+            if (mid) {
+                textObj = env->CallObjectMethod(screenObj, mid);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); textObj = nullptr; }
+            }
+        }
+    }
+
+    if (!textObj) {
+        const char* fieldNames[] = { "title", "field_22785", "f_96539_", nullptr };
+        for (int ni = 0; fieldNames[ni] && !textObj; ni++) {
+            for (int si = 0; sigs[si] && !textObj; si++) {
+                jfieldID fid = env->GetFieldID(screenCls, fieldNames[ni], sigs[si]);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); fid = nullptr; }
+                if (fid) {
+                    textObj = env->GetObjectField(screenObj, fid);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); textObj = nullptr; }
+                }
+            }
+        }
+    }
+    env->DeleteLocalRef(screenCls);
+
+    if (!textObj) return "";
+    std::string title = CallTextToString(env, textObj);
+    env->DeleteLocalRef(textObj);
+    return title;
 }
 
 static bool IsModernChestStealerPhysicalContainer() {
@@ -6785,7 +6872,7 @@ static bool IsModernContainerScreenName(const std::string& screenName) {
         ScreenChainContainsClass121(screenName, "class_476");
 }
 
-static std::string BuildModernChestStealerStateJson(JNIEnv* env, jobject screenObj, const std::string& screenName, bool enabled) {
+static std::string BuildModernChestStealerStateJson(JNIEnv* env, jobject screenObj, const std::string& screenName, bool enabled, bool menuCheck) {
     if (!enabled || !env || !screenObj || !IsModernContainerScreenName(screenName)) return "null";
     if (!ResolveModernChestStealerMappings(env, screenObj)) {
         LogChestStealerMappingMissing121(MissingChestStealerMappingDetail121());
@@ -6807,16 +6894,25 @@ static std::string BuildModernChestStealerStateJson(JNIEnv* env, jobject screenO
         return "null";
     }
 
-    bool physical = IsModernChestStealerPhysicalContainer();
-    if (!physical) {
-        LogChestStealerSkippedMenu121(screenName);
-        std::ostringstream skipped;
-        skipped << "{\"ready\":false,\"physical\":false,\"windowId\":" << windowId
-                << ",\"screenWidth\":" << screenWidth
-                << ",\"screenHeight\":" << screenHeight
-                << ",\"slots\":[]}";
-        env->DeleteLocalRef(handlerObj);
-        return skipped.str();
+    std::string screenTitle = GetModernScreenTitle(env, screenObj);
+    std::string titleLower = screenTitle;
+    for (char& ch : titleLower) ch = (char)std::tolower((unsigned char)ch);
+    bool titleIsMenu = false;
+    if (!titleLower.empty()) {
+        if (titleLower.find("shop") != std::string::npos ||
+            titleLower.find("selector") != std::string::npos ||
+            titleLower.find("upgrade") != std::string::npos ||
+            titleLower.find("menu") != std::string::npos ||
+            titleLower.find("game") != std::string::npos ||
+            titleLower.find("cosmetic") != std::string::npos ||
+            titleLower.find("play") != std::string::npos ||
+            titleLower.find("lobby") != std::string::npos ||
+            titleLower.find("teleport") != std::string::npos ||
+            titleLower.find("profile") != std::string::npos ||
+            titleLower.find("quest") != std::string::npos ||
+            titleLower.find("store") != std::string::npos) {
+            titleIsMenu = true;
+        }
     }
 
     jobject slotsObj = env->GetObjectField(handlerObj, g_chestStealerHandlerSlotsField_121);
@@ -6847,6 +6943,7 @@ static std::string BuildModernChestStealerStateJson(JNIEnv* env, jobject screenO
 
     std::ostringstream slotsJson;
     int count = 0;
+    int customItemCount = 0;
     for (int i = 0; i < chestSlotCount; i++) {
         jobject slotObj = env->CallObjectMethod(slotsObj, getMid, i);
         if (env->ExceptionCheck()) { env->ExceptionClear(); slotObj = nullptr; }
@@ -6859,6 +6956,17 @@ static std::string BuildModernChestStealerStateJson(JNIEnv* env, jobject screenO
         bool hasStack = env->CallBooleanMethod(slotObj, g_chestStealerSlotHasStackMethod_121) == JNI_TRUE;
         if (env->ExceptionCheck()) { env->ExceptionClear(); hasStack = false; }
         if (hasStack) {
+            if (g_chestStealerSlotGetStackMethod_121) {
+                jobject stackObj = env->CallObjectMethod(slotObj, g_chestStealerSlotGetStackMethod_121);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); stackObj = nullptr; }
+                if (stackObj) {
+                    if (IsModernItemStackCustomNamed(env, stackObj)) {
+                        customItemCount++;
+                    }
+                    env->DeleteLocalRef(stackObj);
+                }
+            }
+
             int slotNumber = env->GetIntField(slotObj, g_chestStealerSlotIdField_121);
             int slotX = env->GetIntField(slotObj, g_chestStealerSlotXField_121);
             int slotY = env->GetIntField(slotObj, g_chestStealerSlotYField_121);
@@ -6880,9 +6988,25 @@ static std::string BuildModernChestStealerStateJson(JNIEnv* env, jobject screenO
     env->DeleteLocalRef(listAccessCls);
     env->DeleteLocalRef(slotsObj);
 
+    bool itemsAreMenu = (count > 0) && (((float)customItemCount / (float)count) > 0.5f);
+    bool isMenu = titleIsMenu || itemsAreMenu;
+    bool physicalNearby = IsModernChestStealerPhysicalContainer();
+    bool physical = !isMenu && physicalNearby;
+
+    if (menuCheck && (!physical || isMenu)) {
+        std::string label = screenTitle.empty() ? screenName : screenTitle;
+        LogChestStealerSkippedMenu121(label + (isMenu ? (titleIsMenu ? " [menu-title]" : " [custom-items]") : " [no-chest-nearby]"));
+        std::ostringstream skipped;
+        skipped << "{\"ready\":false,\"physical\":false,\"windowId\":" << windowId
+                << ",\"screenWidth\":" << screenWidth
+                << ",\"screenHeight\":" << screenHeight
+                << ",\"slots\":[]}";
+        return skipped.str();
+    }
+
     std::ostringstream out;
     out << "{\"ready\":" << (count > 0 ? "true" : "false")
-        << ",\"physical\":true"
+        << ",\"physical\":" << (physical ? "true" : "false")
         << ",\"windowId\":" << windowId
         << ",\"screenWidth\":" << screenWidth
         << ",\"screenHeight\":" << screenHeight
@@ -11279,6 +11403,8 @@ static void ResetModernJniRuntimeCaches121(JNIEnv* env, const char* reason) {
     g_itemStackGetName_121 = nullptr;
     g_itemStackGetDamage_121 = nullptr;
     g_itemStackGetMaxDamage_121 = nullptr;
+    g_chestStealerSlotGetStackMethod_121 = nullptr;
+    g_itemStackHasCustomName_121 = nullptr;
     g_getGameProfile_121 = nullptr;
     g_gameProfileGetName_121 = nullptr;
     g_gameProfileNameField_121 = nullptr;
@@ -12776,8 +12902,9 @@ static void UpdateJniState() {
     }
 
     bool chestStealerEnabled = false;
-    { LockGuard lk(g_configMutex); chestStealerEnabled = g_config.chestStealer; }
-    std::string chestStealerStateJson = BuildModernChestStealerStateJson(env, scr, screenName, chestStealerEnabled);
+    bool chestStealerMenuCheck = true;
+    { LockGuard lk(g_configMutex); chestStealerEnabled = g_config.chestStealer; chestStealerMenuCheck = g_config.chestStealerMenuCheck; }
+    std::string chestStealerStateJson = BuildModernChestStealerStateJson(env, scr, screenName, chestStealerEnabled, chestStealerMenuCheck);
     if (scr) env->DeleteLocalRef(scr);
 
     // Debug: log screen changes (helps diagnose Click-in-Chests matching).
@@ -13985,6 +14112,9 @@ static jmethodID g_autoToolAttackBlock121 = nullptr;
 static jmethodID g_autoToolCancelBreaking121 = nullptr;
 static jclass    g_autoToolSwordItemClass121 = nullptr;
 static jclass    g_autoToolAxeItemClass121 = nullptr;
+static jclass    g_autoToolChestBlockClass121 = nullptr;
+static jclass    g_autoToolEnderChestBlockClass121 = nullptr;
+static jclass    g_autoToolTrappedChestBlockClass121 = nullptr;
 
 static void ResetAutoToolModernCaches(JNIEnv* env) {
     g_autoToolState121.Reset();
@@ -14002,6 +14132,9 @@ static void ResetAutoToolModernCaches(JNIEnv* env) {
     if (env) {
         if (g_autoToolSwordItemClass121) { env->DeleteGlobalRef(g_autoToolSwordItemClass121); g_autoToolSwordItemClass121 = nullptr; }
         if (g_autoToolAxeItemClass121) { env->DeleteGlobalRef(g_autoToolAxeItemClass121); g_autoToolAxeItemClass121 = nullptr; }
+        if (g_autoToolChestBlockClass121) { env->DeleteGlobalRef(g_autoToolChestBlockClass121); g_autoToolChestBlockClass121 = nullptr; }
+        if (g_autoToolEnderChestBlockClass121) { env->DeleteGlobalRef(g_autoToolEnderChestBlockClass121); g_autoToolEnderChestBlockClass121 = nullptr; }
+        if (g_autoToolTrappedChestBlockClass121) { env->DeleteGlobalRef(g_autoToolTrappedChestBlockClass121); g_autoToolTrappedChestBlockClass121 = nullptr; }
     }
 }
 
@@ -14039,6 +14172,50 @@ static bool EnsureAutoToolModernMappings(JNIEnv* env, jobject player) {
                 env->DeleteLocalRef(worldCls);
             }
             env->DeleteLocalRef(world);
+        }
+    }
+
+    EnsureChestStateDetectionCaches(env, nullptr);
+
+    if (!g_autoToolChestBlockClass121) {
+        const char* chestClasses[] = {
+            "net.minecraft.class_2281",
+            "net.minecraft.world.level.block.ChestBlock",
+            "net.minecraft.block.ChestBlock",
+            nullptr
+        };
+        jclass c = LoadAutoRodClass121(env, chestClasses);
+        if (c) {
+            g_autoToolChestBlockClass121 = (jclass)env->NewGlobalRef(c);
+            env->DeleteLocalRef(c);
+        }
+    }
+
+    if (!g_autoToolEnderChestBlockClass121) {
+        const char* enderChestClasses[] = {
+            "net.minecraft.class_2336",
+            "net.minecraft.world.level.block.EnderChestBlock",
+            "net.minecraft.block.EnderChestBlock",
+            nullptr
+        };
+        jclass c = LoadAutoRodClass121(env, enderChestClasses);
+        if (c) {
+            g_autoToolEnderChestBlockClass121 = (jclass)env->NewGlobalRef(c);
+            env->DeleteLocalRef(c);
+        }
+    }
+
+    if (!g_autoToolTrappedChestBlockClass121) {
+        const char* trappedChestClasses[] = {
+            "net.minecraft.class_2527",
+            "net.minecraft.world.level.block.TrappedChestBlock",
+            "net.minecraft.block.TrappedChestBlock",
+            nullptr
+        };
+        jclass c = LoadAutoRodClass121(env, trappedChestClasses);
+        if (c) {
+            g_autoToolTrappedChestBlockClass121 = (jclass)env->NewGlobalRef(c);
+            env->DeleteLocalRef(c);
         }
     }
 
@@ -14164,6 +14341,27 @@ static bool EnsureAutoToolModernMappings(JNIEnv* env, jobject player) {
     }
 
     return g_autoRodGetInventory121 != nullptr && g_autoRodSelectedSlotField121 != nullptr && g_autoRodInventoryGetItem121 != nullptr;
+}
+
+static bool IsAutoToolChestBlockModern(JNIEnv* env, jobject block) {
+    if (!env || !block) return false;
+    if (g_autoToolChestBlockClass121 && env->IsInstanceOf(block, g_autoToolChestBlockClass121)) return true;
+    if (g_autoToolEnderChestBlockClass121 && env->IsInstanceOf(block, g_autoToolEnderChestBlockClass121)) return true;
+    if (g_autoToolTrappedChestBlockClass121 && env->IsInstanceOf(block, g_autoToolTrappedChestBlockClass121)) return true;
+
+    if (g_blockGetTranslationKey_121) {
+        jstring jKey = (jstring)env->CallObjectMethod(block, g_blockGetTranslationKey_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); jKey = nullptr; }
+        if (jKey) {
+            const char* c = env->GetStringUTFChars(jKey, nullptr);
+            std::string key = c ? c : "";
+            if (c) env->ReleaseStringUTFChars(jKey, c);
+            env->DeleteLocalRef(jKey);
+            std::string norm = lc::BlockEspNormalizeId(key);
+            if (norm.find("chest") != std::string::npos) return true;
+        }
+    }
+    return false;
 }
 
 static void ApplyAutoToolSlotModern(JNIEnv* env, jobject inventory, int targetSlot) {
@@ -14302,6 +14500,17 @@ static void UpdateAutoToolModern(JNIEnv* env, const Config& cfg) {
                     jobject blockState = env->CallObjectMethod(world, g_autoToolWorldGetBlockState121, blockPos);
                     if (env->ExceptionCheck()) { env->ExceptionClear(); blockState = nullptr; }
                     if (blockState) {
+                        if (g_stateGetBlock_121) {
+                            jobject block = env->CallObjectMethod(blockState, g_stateGetBlock_121);
+                            if (env->ExceptionCheck()) { env->ExceptionClear(); block = nullptr; }
+                            if (block) {
+                                if (IsAutoToolChestBlockModern(env, block)) {
+                                    input.isChestHit = true;
+                                }
+                                env->DeleteLocalRef(block);
+                            }
+                        }
+
                         float bestSpeed = 1.0f;
                         int bestSlot = -1;
                         for (int i = 0; i < 9; ++i) {
@@ -14424,6 +14633,7 @@ static void UpdateAutoToolModern(JNIEnv* env, const Config& cfg) {
     coreCfg.swapBackDelayMs = cfg.autoToolSwapBackDelay;
     coreCfg.requireMouseDown = cfg.autoToolRequireMouseDown;
     coreCfg.onlyWhileSneaking = cfg.autoToolOnlySneaking;
+    coreCfg.bedwarsMode = cfg.autoToolBedwarsMode;
 
     autotool::AutoToolAction action = autotool::UpdateAutoToolState(g_autoToolState121, coreCfg, input);
     if (action.switchSlot && action.targetSlot >= 0 && action.targetSlot < 9) {
@@ -14455,7 +14665,7 @@ static DWORD WINAPI FastPollThreadProc(LPVOID) {
                 ReadCameraState(env);
             }
         }
-        Sleep(5); // 200Hz poll
+        Sleep(lc::kFastPollIntervalMs);
     }
     g_jvm->DetachCurrentThread();
     return 0;
@@ -14468,6 +14678,16 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
     DWORD lastAutoRemapRetryMs = 0;
     DWORD lastNickHiderRefreshMs = 0;
     DWORD lastChestEspScanMs = 0;
+    DWORD lastPlayerScanMs = 0;
+    DWORD lastSpeedBridgeMs = 0;
+    DWORD lastKillAuraMs = 0;
+    DWORD lastReachMs = 0;
+    DWORD lastVelocityMs = 0;
+    DWORD lastAutoTotemMs = 0;
+    DWORD lastAntiDebuffMs = 0;
+    DWORD lastPixelPartyMs = 0;
+    DWORD lastClosestPlayerMs = 0;
+    DWORD lastNickHiderFallbackMs = 0;
     bool chestEspScanWasEnabled = false;
     bool entityProducerWasEnabled = false;
     // Teleport detection: track last scanned player position to catch same-world jumps
@@ -14487,6 +14707,8 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
         }
         Config cfg;
         { LockGuard lk(g_configMutex); cfg = g_config; }
+        unsigned int sleepMs = lc::kWorkerIdleIntervalMs;
+        bool inWorldForSleep = false;
         anti_debuff_jvmti::SetEnabled(cfg.antiDebuffEnabled);
 
         bool forcedRemap = (InterlockedExchange(&g_forceGlobalJniRemap_121, 0) != 0);
@@ -14531,6 +14753,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                 inWorldNow = IsInWorldNow(env);
             }
             { LockGuard lk(g_jniStateMtx); g_jniInWorld = inWorldNow; }
+            inWorldForSleep = inWorldNow;
             if (g_stateJniReady && inWorldNow) {
                 // A respawn/reconnect can replace the local player while retaining
                 // the same ClientLevel. Treat that exactly like a world switch so
@@ -14618,43 +14841,87 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                         }
 
                         if (cfg.nickHiderEnabled || g_nickHiderProfileAliasApplied_121) {
-                            ApplyModernNickHiderFallback(env, cfg);
+                            if (lc::IsTelemetryIntervalDue(
+                                    nowMs, lastNickHiderFallbackMs, lc::kStateReadIntervalMs)) {
+                                ApplyModernNickHiderFallback(env, cfg);
+                                lastNickHiderFallbackMs = nowMs;
+                            }
                         }
 
                         static bool s_reachWasEnabled = false;
                     if (cfg.reachEnabled || s_reachWasEnabled) {
-                        UpdateReach(env, cfg);
-                        s_reachWasEnabled = cfg.reachEnabled;
+                        if (!cfg.reachEnabled ||
+                            lc::IsTelemetryIntervalDue(nowMs, lastReachMs, lc::kReachIntervalMs)) {
+                            UpdateReach(env, cfg);
+                            lastReachMs = nowMs;
+                            s_reachWasEnabled = cfg.reachEnabled;
+                        }
                     }
 
                     static bool s_velocityWasEnabled = false;
                     if (cfg.velocityEnabled || s_velocityWasEnabled) {
-                        UpdateVelocity(env, cfg);
-                        s_velocityWasEnabled = cfg.velocityEnabled;
+                        if (!cfg.velocityEnabled ||
+                            lc::IsTelemetryIntervalDue(nowMs, lastVelocityMs, lc::kVelocityIntervalMs)) {
+                            UpdateVelocity(env, cfg);
+                            lastVelocityMs = nowMs;
+                            s_velocityWasEnabled = cfg.velocityEnabled;
+                        }
                     }
 
                     static bool s_autoTotemWasEnabled = false;
                     if (cfg.autoTotemEnabled || s_autoTotemWasEnabled) {
-                        UpdateAutoTotem(env, cfg);
-                        s_autoTotemWasEnabled = cfg.autoTotemEnabled;
+                        if (!cfg.autoTotemEnabled ||
+                            lc::IsTelemetryIntervalDue(nowMs, lastAutoTotemMs, lc::kAutoTotemIntervalMs)) {
+                            UpdateAutoTotem(env, cfg);
+                            lastAutoTotemMs = nowMs;
+                            s_autoTotemWasEnabled = cfg.autoTotemEnabled;
+                        }
                     }
 
-                    UpdateKillAura(env, cfg);
+                    static bool s_killAuraWasEnabled = false;
+                    if (cfg.killAura || s_killAuraWasEnabled) {
+                        if (!cfg.killAura ||
+                            lc::IsTelemetryIntervalDue(
+                                nowMs, lastKillAuraMs, lc::kKillAuraWorkerIntervalMs)) {
+                            UpdateKillAura(env, cfg);
+                            if (cfg.killAura) lastKillAuraMs = nowMs;
+                            s_killAuraWasEnabled = cfg.killAura;
+                        }
+                    }
 
                     if (cfg.antiDebuffEnabled) {
-                        UpdateAntiDebuff(env, cfg);
+                        if (lc::IsTelemetryIntervalDue(
+                                nowMs, lastAntiDebuffMs, lc::kAntiDebuffIntervalMs)) {
+                            UpdateAntiDebuff(env, cfg);
+                            lastAntiDebuffMs = nowMs;
+                        }
                     }
 
                     static bool s_speedBridgeWasEnabled = false;
                     if (cfg.speedBridge || s_speedBridgeWasEnabled || g_speedBridgeManagingSneak_121) {
-                        UpdateSpeedBridge(env, cfg, inWorldNow);
-                        s_speedBridgeWasEnabled = cfg.speedBridge;
+                        if (lc::IsTelemetryIntervalDue(
+                                nowMs, lastSpeedBridgeMs, lc::kSpeedBridgeIntervalMs) ||
+                            (!cfg.speedBridge && s_speedBridgeWasEnabled)) {
+                            UpdateSpeedBridge(env, cfg, inWorldNow);
+                            lastSpeedBridgeMs = nowMs;
+                            s_speedBridgeWasEnabled = cfg.speedBridge;
+                        }
                     }
 
-                    if (cfg.closestPlayer)
-                        UpdateClosestPlayerOverlay(env);
-                    if (cfg.pixelPartyAssist)
-                        UpdatePixelPartyAssist(env, cfg);
+                    if (cfg.closestPlayer) {
+                        if (lc::IsTelemetryIntervalDue(
+                                nowMs, lastClosestPlayerMs, lc::kClosestPlayerIntervalMs)) {
+                            UpdateClosestPlayerOverlay(env);
+                            lastClosestPlayerMs = nowMs;
+                        }
+                    }
+                    if (cfg.pixelPartyAssist) {
+                        if (lc::IsTelemetryIntervalDue(
+                                nowMs, lastPixelPartyMs, lc::kPixelPartyIntervalMs)) {
+                            UpdatePixelPartyAssist(env, cfg);
+                            lastPixelPartyMs = nowMs;
+                        }
+                    }
                     const bool chunkScansEnabled = cfg.chestEsp || cfg.chestStealer || cfg.blockEsp || cfg.bedPlates;
                     const bool chunkScanReady = !chunkScansEnabled ||
                         (!IsWorldTransitionActive() && ProbeModernChunkObject(env));
@@ -14665,9 +14932,14 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                         cfg.nametags || cfg.nickHiderEnabled || cfg.closestPlayer ||
                         cfg.fightStatus || cfg.aimAssist || cfg.triggerbot ||
                         cfg.nametagHideVanilla || g_nametagSuppressionActive_121;
+                    const unsigned int playerInterval = lc::PlayerOverlayIntervalMs(
+                        cfg.aimAssist || cfg.triggerbot);
                     if (entityProducerEnabled) {
-                        NativePerfScope playerScanPerf(lc::PERF_PLAYER_SCAN);
-                        UpdatePlayerListOverlay(env);
+                        if (lc::IsTelemetryIntervalDue(nowMs, lastPlayerScanMs, playerInterval)) {
+                            NativePerfScope playerScanPerf(lc::PERF_PLAYER_SCAN);
+                            UpdatePlayerListOverlay(env);
+                            lastPlayerScanMs = nowMs;
+                        }
                     } else if (entityProducerWasEnabled) {
                         // Do not let full or newly-enabled fast state packets
                         // publish targets from the last enabled producer run.
@@ -14679,7 +14951,6 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                     const bool chestEspScanEnabled = cfg.chestEsp || cfg.chestStealer;
                     const bool chestEspScanDue =
                         !chestEspScanWasEnabled ||
-                        cfg.chestStealer ||
                         lc::IsTelemetryIntervalDue(
                             producerNowMs,
                             lastChestEspScanMs,
@@ -14691,7 +14962,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                     }
                     chestEspScanWasEnabled = chestEspScanEnabled;
 
-                    {
+                    if (cfg.blockEsp || cfg.bedPlates) {
                         NativePerfScope sectionScanPerf(lc::PERF_BLOCK_SCAN);
                         UpdateSectionChunkScans(env);
                     }
@@ -14751,8 +15022,38 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
         }
         RecordNativePerfSince(lc::PERF_SCAN_LOOP, scanLoopPerfStarted);
         MaybeLogNativePerfDiagnostics();
-        // 5ms (~200Hz) for latency-sensitive modules; otherwise 50ms.
-        Sleep((cfg.aimAssist || cfg.triggerbot || cfg.killAura || cfg.speedBridge) ? 5 : 50);
+        if (inWorldForSleep) {
+            const DWORD sleepNow = GetTickCount();
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastSpeedBridgeMs, lc::kSpeedBridgeIntervalMs,
+                cfg.speedBridge || g_speedBridgeManagingSneak_121);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastKillAuraMs, lc::kKillAuraWorkerIntervalMs, cfg.killAura);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastReachMs, lc::kReachIntervalMs, cfg.reachEnabled);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastVelocityMs, lc::kVelocityIntervalMs, cfg.velocityEnabled);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastAutoTotemMs, lc::kAutoTotemIntervalMs, cfg.autoTotemEnabled);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastAntiDebuffMs, lc::kAntiDebuffIntervalMs, cfg.antiDebuffEnabled);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastPixelPartyMs, lc::kPixelPartyIntervalMs, cfg.pixelPartyAssist);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastClosestPlayerMs, lc::kClosestPlayerIntervalMs, cfg.closestPlayer);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastPlayerScanMs,
+                lc::PlayerOverlayIntervalMs(cfg.aimAssist || cfg.triggerbot),
+                cfg.nametags || cfg.nickHiderEnabled || cfg.closestPlayer ||
+                cfg.fightStatus || cfg.aimAssist || cfg.triggerbot || cfg.nametagHideVanilla);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastChestEspScanMs, lc::kChestEspScanIntervalMs,
+                cfg.chestEsp || cfg.chestStealer);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastNickHiderFallbackMs, lc::kStateReadIntervalMs,
+                cfg.nickHiderEnabled);
+        }
+        if (sleepMs > 0) Sleep(sleepMs);
     }
     if (lastObservedPlayer) env->DeleteGlobalRef(lastObservedPlayer);
     ReleaseSpeedBridgeSneak121(env);
