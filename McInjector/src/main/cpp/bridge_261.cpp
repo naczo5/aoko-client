@@ -35,12 +35,17 @@
 #include "json_config_reader.h"
 #include "bounded_newline_buffer.h"
 #include "auto_rod_core.h"
+#include "auto_tool_core.h"
 #include "bridge_capabilities.h"
 #include "nick_hider.h"
 #include "nick_hider_jvmti.h"
 #include "anti_debuff_jvmti.h"
 #include "hud_layout.h"
 #include "block_esp_common.h"
+#include "chest_esp_common.h"
+#include "chunk_scan_common.h"
+#include "bedplates_common.h"
+#include "bedplates_icons.h"
 #include "fight_status_core.h"
 #include "aim_assist_projection.h"
 #include "screen_projection.h"
@@ -225,6 +230,9 @@ struct Config {
     bool  blockEspHud    = true;
     int   blockEspMaxCount = 64;
     int   blockEspRange  = 4;
+    bool  bedPlates = false;
+    bool  bedPlatesShowDistance = true;
+    int   bedPlatesRange = 4; // chunks, clamp 1..8
     bool  showModuleList = true;
     bool  closestPlayer  = false;
     bool  fightStatus    = false;
@@ -234,8 +242,8 @@ struct Config {
     bool  nametagShowHeldItem = true;
     bool  supportsStatePatches = false;
     bool  nametagHideVanilla = false;
-    int   nametagMaxCount = 8;
-    int   chestEspMaxCount = 5;
+    int   nametagRange = 4; // chunks, clamp 1..8
+    int   chestEspRange = 4; // chunks, clamp 1..8
     bool  rightClick     = false;
     int   moduleListStyle = 0;
     bool  showLogo       = true;
@@ -276,6 +284,15 @@ struct Config {
     int   autoRodExtensionTicks = autorod::kUseToRestoreTicks;
     bool  autoRodHoldToExtend = false;
     int   keybindAutoRod = 0;
+    bool  autoToolEnabled = false;
+    bool  autoToolSwapWeapon = true;
+    bool  autoToolInstantSwap = true;
+    int   autoToolSwapToDelay = 50;
+    bool  autoToolSwapBack = false;
+    int   autoToolSwapBackDelay = 350;
+    bool  autoToolRequireMouseDown = true;
+    bool  autoToolOnlySneaking = false;
+    int   keybindAutoTool = 0;
     bool  pixelPartyAssist = false;
     int   pixelPartyScanRadius = 28;
     bool  pixelPartyAutoLook = false;
@@ -478,8 +495,8 @@ static void ParseConfig(const std::string& line) {
     g_config.nametagArmor  = reader.GetBool("nametagShowArmor");
     g_config.nametagShowHeldItem = reader.GetBool("nametagShowHeldItem", true);
     g_config.nametagHideVanilla = reader.GetBool("nametagHideVanilla");
-    g_config.nametagMaxCount = lc::ClampInt(reader.GetInt("nametagMaxCount", g_config.nametagMaxCount), 1, 20);
-    g_config.chestEspMaxCount = lc::ClampInt(reader.GetInt("chestEspMaxCount", g_config.chestEspMaxCount), 1, 20);
+    g_config.nametagRange = lc::ClampInt(reader.GetInt("nametagRange", g_config.nametagRange), 1, 8);
+    g_config.chestEspRange = lc::ClampInt(reader.GetInt("chestEspRange", g_config.chestEspRange), 1, 8);
     g_config.chestStealerDelayMs = lc::ClampInt(reader.GetInt("chestStealerDelayMs", g_config.chestStealerDelayMs), 50, 500);
     g_config.blockEsp        = reader.GetBool("blockEspEnabled");
     g_config.blockEspBoxes   = reader.GetBool("blockEspBoxes", true);
@@ -507,6 +524,9 @@ static void ParseConfig(const std::string& line) {
             InterlockedIncrement(&g_blockEspTargetsVersion);
         }
     }
+    g_config.bedPlates = reader.GetBool("bedPlatesEnabled");
+    g_config.bedPlatesShowDistance = reader.GetBool("bedPlatesShowDistance", true);
+    g_config.bedPlatesRange = lc::ClampInt(reader.GetInt("bedPlatesRange", g_config.bedPlatesRange), 1, 8);
     g_config.rightClick    = reader.GetBool("right");
     g_config.rightMinCPS   = lc::ClampFloat(reader.GetFloat("rightMinCPS", g_config.rightMinCPS), 1.0f, 25.0f);
     g_config.rightMaxCPS   = lc::ClampFloat(reader.GetFloat("rightMaxCPS", g_config.rightMaxCPS), 1.0f, 25.0f);
@@ -553,6 +573,15 @@ static void ParseConfig(const std::string& line) {
         autorod::kMinExtensionTicks, autorod::kMaxExtensionTicks);
     g_config.autoRodHoldToExtend = reader.GetBool("autoRodHoldToExtend", false);
     g_config.keybindAutoRod = lc::ClampInt(reader.GetInt("keybindAutoRod", g_config.keybindAutoRod), 0, 255);
+    g_config.autoToolEnabled = reader.GetBool("autoToolEnabled");
+    g_config.autoToolSwapWeapon = reader.GetBool("autoToolSwapWeapon", true);
+    g_config.autoToolInstantSwap = reader.GetBool("autoToolInstantSwap", true);
+    g_config.autoToolSwapToDelay = lc::ClampInt(reader.GetInt("autoToolSwapToDelay", 50), 0, 500);
+    g_config.autoToolSwapBack = reader.GetBool("autoToolSwapBack", false);
+    g_config.autoToolSwapBackDelay = lc::ClampInt(reader.GetInt("autoToolSwapBackDelay", 350), 0, 1000);
+    g_config.autoToolRequireMouseDown = reader.GetBool("autoToolRequireMouseDown", true);
+    g_config.autoToolOnlySneaking = reader.GetBool("autoToolOnlySneaking", false);
+    g_config.keybindAutoTool = lc::ClampInt(reader.GetInt("keybindAutoTool", g_config.keybindAutoTool), 0, 255);
     g_config.pixelPartyAssist = reader.GetBool("pixelPartyAssist");
     g_config.pixelPartyScanRadius = lc::ClampInt(reader.GetInt("pixelPartyScanRadius", g_config.pixelPartyScanRadius), 8, 48);
     g_config.pixelPartyAutoLook = reader.GetBool("pixelPartyAutoLook");
@@ -1499,12 +1528,28 @@ struct ChestData121 {
 static std::vector<ChestData121> g_chestList;
 static Mutex g_chestListMutex;
 static DWORD g_lastChestScanMs = 0;
+struct ChestChunkCache121 { std::vector<ChestData121> hits; };
+static std::map<long long, ChestChunkCache121> g_chestChunkCache;
+
+static void ClearChestChunkCache121() {
+    g_chestChunkCache.clear();
+}
 
 // ── Block ESP / X-ray shared state ──
 struct BlockEspData121 { double x, y, z; unsigned int color; double dist; };
 static std::vector<BlockEspData121> g_blockEspList;
 static Mutex g_blockEspListMutex;
 static DWORD g_lastBlockEspScanMs = 0;
+
+// ── BedPlates shared state ──
+struct BedPlateRenderData {
+    int x, y, z;
+    double dist;
+    std::vector<std::string> blocks; // visible unique ids already sorted
+};
+static std::vector<BedPlateRenderData> g_bedPlateList;
+static Mutex g_bedPlateListMutex;
+static DWORD g_lastBedPlatesScanMs = 0;
 
 struct PixelPartySnap121 {
     bool active = false;
@@ -2741,6 +2786,12 @@ static bool IsChestBlockEntity(JNIEnv* env, jobject be) {
         if (g_chestBlockEntityClasses[i] && env->IsInstanceOf(be, g_chestBlockEntityClasses[i])) return true;
     }
 
+    int resolvedTyped = 0;
+    for (int i = 0; i < 4; i++) {
+        if (g_chestBlockEntityClasses[i]) resolvedTyped++;
+    }
+    if (!lc::ChestEspNeedNameFallback(resolvedTyped, 4)) return false;
+
     // Fallback: detect chest-like block entities via BlockState -> Block translation key/class name.
     // This keeps Chest ESP resilient when class IDs shift across client remaps.
     EnsureChestStateDetectionCaches(env, be);
@@ -2897,6 +2948,7 @@ static void LogNametagSuppressionMissingMappings121(JNIEnv* env, jobject worldOb
 static void ResetNametagSuppressionCaches121(JNIEnv* env, const char* reason);
 static void ResetAutoTotemCaches(JNIEnv* env);
 static void ResetAutoRodModernCaches(JNIEnv* env);
+static void ResetAutoToolModernCaches(JNIEnv* env);
 static void ExecuteAutoRodModern(JNIEnv* env);
 static void ResetModernJniRuntimeCaches121(JNIEnv* env, const char* reason);
 static bool TrackSuppressionWorldContext121(JNIEnv* env, jobject worldObj);
@@ -5595,6 +5647,7 @@ static void UpdatePlayerListOverlay(JNIEnv* env) {
         }
         double dx = ex - sx, dy = ey - sy, dz = ez - sz;
         double dist = sqrt(dx*dx + dy*dy + dz*dz);
+        if (dist != dist) { env->DeleteLocalRef(entObj); continue; }
 
         lwList.push_back({entObj, dist, ex, ey, ez});
     }
@@ -5824,7 +5877,7 @@ static void UpdatePlayerListOverlay(JNIEnv* env) {
                 }
 
                 int armor = GetEntityArmor(env, lw.obj);
-                std::string held = needHeldItem
+                std::string held = lc::NametagShouldFetchHeldItem(needHeldItem, lw.dist)
                     ? GetHeldItemInfo(env, lw.obj)
                     : std::string();
                 appendPlayer(name, lw, hp, healthAvailable, absorption, armor,
@@ -6886,7 +6939,8 @@ static void UpdateChestList(JNIEnv* env) {
 
     int pcx = (int)std::floor(sx) >> 4;
     int pcz = (int)std::floor(sz) >> 4;
-    const int RANGE = 4; // ±4 = 9×9 = 81 chunks (vs previous 17×17 = 289)
+    int RANGE = 4;
+    { LockGuard lk(g_configMutex); RANGE = lc::ClampChestEspRange(g_config.chestEspRange); }
 
     static DWORD lastLogMs = 0;
     bool shouldLog = (now - lastLogMs > 5000);
@@ -6899,14 +6953,22 @@ static void UpdateChestList(JNIEnv* env) {
     int chunksScanned = 0;
     int chunksWithBEMap = 0;
 
-    for (int dx = -RANGE; dx <= RANGE; dx++) {
-        for (int dz = -RANGE; dz <= RANGE; dz++) {
-            // Re-check transition guard inside the loop too
+    lc::EvictChunksOutsideRange(g_chestChunkCache, pcx, pcz, RANGE);
+    const int chestBudget = lc::ChestEspChunkScanBudget();
+    std::vector<std::pair<int, int> > chestOrder;
+    lc::BuildNearToFarChunkOffsets(RANGE, chestOrder);
+    for (size_t ci = 0; ci < chestOrder.size(); ci++) {
             if (IsWorldTransitionActive()) break;
-            jobject chunkObj = env->CallObjectMethod(worldObj, g_worldGetChunkMethod_121, pcx + dx, pcz + dz);
+            int ccx = pcx + chestOrder[ci].first;
+            int ccz = pcz + chestOrder[ci].second;
+            long long chestKey = lc::ChunkKey(ccx, ccz);
+            if (g_chestChunkCache.find(chestKey) != g_chestChunkCache.end()) continue;
+            if (chunksScanned >= chestBudget) continue;
+            jobject chunkObj = env->CallObjectMethod(worldObj, g_worldGetChunkMethod_121, ccx, ccz);
             if (env->ExceptionCheck()) { env->ExceptionClear(); continue; }
             if (!chunkObj) continue;
             chunksScanned++;
+            std::vector<ChestData121> chunkChests;
 
             if (!g_chunkBlockEntitiesMapField_121)
                 EnsureChunkBEMap(env, chunkObj);
@@ -7004,8 +7066,7 @@ static void UpdateChestList(JNIEnv* env) {
                                                     + " keyField=" + std::to_string(g_javaHMNodeKeyField ? 1 : 0));
                                             }
                                             if (gotPos) {
-                                                double ddx = cx2-sx, ddy = cy2-sy, ddz = cz2-sz;
-                                                localList.push_back({cx2, cy2, cz2, std::sqrt(ddx*ddx+ddy*ddy+ddz*ddz)});
+                                                chunkChests.push_back({cx2, cy2, cz2, 0.0});
                                             }
                                         }
                                         env->DeleteLocalRef(be);
@@ -7084,8 +7145,7 @@ static void UpdateChestList(JNIEnv* env) {
                                                 } else env->ExceptionClear();
                                             }
                                             if (gotPos) {
-                                                double ddx = cx2-sx, ddy = cy2-sy, ddz = cz2-sz;
-                                                localList.push_back({cx2, cy2, cz2, std::sqrt(ddx*ddx+ddy*ddy+ddz*ddz)});
+                                                chunkChests.push_back({cx2, cy2, cz2, 0.0});
                                             }
                                         }
                                         if (keyBp) env->DeleteLocalRef(keyBp);
@@ -7105,6 +7165,15 @@ static void UpdateChestList(JNIEnv* env) {
                 }
             }
             env->DeleteLocalRef(chunkObj);
+            g_chestChunkCache[chestKey].hits = std::move(chunkChests);
+    }
+
+    for (auto& kv : g_chestChunkCache) {
+        for (auto& h : kv.second.hits) {
+            ChestData121 d = h;
+            double ddx = d.x - sx, ddy = d.y - sy, ddz = d.z - sz;
+            d.dist = std::sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
+            localList.push_back(d);
         }
     }
 
@@ -7169,11 +7238,6 @@ static std::vector<BlockIdCacheEntry121> g_blockIdCache_121;
 struct BlockEspChunkCache121 { std::vector<BlockEspData121> hits; };
 static std::map<long long, BlockEspChunkCache121> g_blockEspChunkCache;
 static LONG g_blockEspCacheVersion = -1;
-
-static long long BlockEspChunkKey121(int cx, int cz) {
-    return ((long long)(unsigned int)cx << 32) | (unsigned int)(unsigned int)cz;
-}
-static int BlockEspAbsI(int v) { return v < 0 ? -v : v; }
 
 static void EnsureBlockEspSectionMappings(JNIEnv* env, jobject chunkObj, jobject worldObj) {
     if (!env) return;
@@ -7272,148 +7336,51 @@ static const std::string* BlockEspIdForBlock121(JNIEnv* env, jobject block) {
     return &g_blockIdCache_121.back().id;
 }
 
-static void UpdateBlockEspList(JNIEnv* env) {
-    DWORD now = GetTickCount();
-    if (now - g_lastBlockEspScanMs < 120) return;
-    if (IsWorldTransitionActive()) return;
-    // The fast-poll thread can invalidate this cache when it observes a loading
-    // screen. Keep the complete map operation on one synchronized ownership
-    // window so a transition cannot clear it during iteration or publication.
-    LockGuard blockCacheLock(g_blockEspCacheMutex);
-    if (IsWorldTransitionActive()) return;
-    {
-        std::string sn;
-        { LockGuard lk(g_jniStateMtx); sn = g_jniScreenName; }
-        if (sn.find("ContainerScreen") != std::string::npos ||
-            sn.find("AbstractContainerScreen") != std::string::npos) return;
-    }
-    g_lastBlockEspScanMs = now;
+struct BedPlateCandidate121 { int x, y, z; };
+struct BedPlatesChunkCache121 { std::vector<BedPlateCandidate121> beds; };
+static std::map<long long, BedPlatesChunkCache121> g_bedPlatesChunkCache;
+static Mutex g_bedPlatesCacheMutex;
 
-    std::vector<lc::BlockEspTargetDef> targets;
-    LONG version;
-    { LockGuard tlk(g_blockEspTargetsMutex); targets = g_blockEspTargets; version = g_blockEspTargetsVersion; }
-    int range, maxCount;
-    { LockGuard lk(g_configMutex); range = g_config.blockEspRange; maxCount = g_config.blockEspMaxCount; }
+static jclass g_javaLangClass_121 = nullptr;
+static jmethodID g_classGetName_121 = nullptr;
 
-    if (targets.empty()) {
-        { LockGuard lk(g_blockEspListMutex); g_blockEspList.clear(); }
-        g_blockEspChunkCache.clear();
-        return;
-    }
-    if (version != g_blockEspCacheVersion) {
-        g_blockEspChunkCache.clear();
-        g_blockEspCacheVersion = version;
-    }
-
-    if (!g_mcInstance || !g_worldField_121) return;
-    jobject worldObj = env->GetObjectField(g_mcInstance, g_worldField_121);
-    if (env->ExceptionCheck()) { env->ExceptionClear(); worldObj = nullptr; }
-    if (!worldObj) return;
-
-    double sx = 0, sy = 0, sz = 0;
-    { LockGuard lk(g_bgCamMutex); sx = g_bgCamState.camX; sy = g_bgCamState.camY; sz = g_bgCamState.camZ; }
-
-    if (!EnsureChunkAccess(env, worldObj)) { env->DeleteLocalRef(worldObj); return; }
-    EnsureChestStateDetectionCaches(env, nullptr); // resolves BlockState.getBlock + Block.getTranslationKey
-    EnsureBlockEspSectionMappings(env, nullptr, worldObj);
-
-    int pcx = (int)std::floor(sx) >> 4;
-    int pcz = (int)std::floor(sz) >> 4;
-
-    int bottomY = -64;
-    if (g_worldGetBottomY_121) {
-        int b = env->CallIntMethod(worldObj, g_worldGetBottomY_121);
-        if (env->ExceptionCheck()) env->ExceptionClear();
-        else if (b > -512 && b < 512) bottomY = b;
-    }
-
-    // Evict cache entries outside range.
-    for (auto it = g_blockEspChunkCache.begin(); it != g_blockEspChunkCache.end(); ) {
-        int ccx = (int)(it->first >> 32);
-        int ccz = (int)(it->first & 0xffffffff);
-        if (BlockEspAbsI(ccx - pcx) > range || BlockEspAbsI(ccz - pcz) > range)
-            it = g_blockEspChunkCache.erase(it);
-        else ++it;
-    }
-
-    // Round-robin: scan at most one missing chunk per tick to spread the one-time cost.
-    const int CHUNK_BUDGET = 1;
-    int scanned = 0;
-    for (int dx = -range; dx <= range && scanned < CHUNK_BUDGET; dx++) {
-        for (int dz = -range; dz <= range && scanned < CHUNK_BUDGET; dz++) {
-            if (IsWorldTransitionActive()) break;
-            int cx = pcx + dx, cz = pcz + dz;
-            long long key = BlockEspChunkKey121(cx, cz);
-            if (g_blockEspChunkCache.find(key) != g_blockEspChunkCache.end()) continue;
-
-            BlockEspChunkCache121 cache;
-            jobject chunkObj = env->CallObjectMethod(worldObj, g_worldGetChunkMethod_121, cx, cz);
-            if (env->ExceptionCheck()) { env->ExceptionClear(); chunkObj = nullptr; }
-            if (!chunkObj) continue;
-
-            if (!g_chunkGetSectionArray_121) EnsureBlockEspSectionMappings(env, chunkObj, worldObj);
-            if (!g_chunkGetSectionArray_121 || !g_sectionGetBlockState_121 || !g_stateGetBlock_121) {
-                env->DeleteLocalRef(chunkObj);
-                break; // mappings unavailable; bail this tick (feature degrades safely)
-            }
-
-            jobjectArray sections = (jobjectArray)env->CallObjectMethod(chunkObj, g_chunkGetSectionArray_121);
-            if (env->ExceptionCheck()) { env->ExceptionClear(); sections = nullptr; }
-            if (sections) {
-                jsize nsec = env->GetArrayLength(sections);
-                for (jsize si = 0; si < nsec; si++) {
-                    jobject sec = env->GetObjectArrayElement(sections, si);
-                    if (env->ExceptionCheck()) { env->ExceptionClear(); sec = nullptr; }
-                    if (!sec) continue;
-
-                    bool empty = false;
-                    if (g_sectionIsEmpty_121) {
-                        empty = env->CallBooleanMethod(sec, g_sectionIsEmpty_121) == JNI_TRUE;
-                        if (env->ExceptionCheck()) { env->ExceptionClear(); empty = false; }
-                    }
-                    if (!empty) {
-                        int sectionMinY = bottomY + (int)si * 16;
-                        for (int ly = 0; ly < 16; ly++) {
-                            for (int lz = 0; lz < 16; lz++) {
-                                for (int lx = 0; lx < 16; lx++) {
-                                    jobject state = env->CallObjectMethod(sec, g_sectionGetBlockState_121, lx, ly, lz);
-                                    if (env->ExceptionCheck()) { env->ExceptionClear(); state = nullptr; }
-                                    if (!state) continue;
-                                    jobject block = env->CallObjectMethod(state, g_stateGetBlock_121);
-                                    if (env->ExceptionCheck()) { env->ExceptionClear(); block = nullptr; }
-                                    if (block) {
-                                        const std::string* id = BlockEspIdForBlock121(env, block);
-                                        if (id && !id->empty()) {
-                                            for (const auto& tg : targets) {
-                                                if (tg.id == *id) {
-                                                    double wx = (double)cx * 16 + lx + 0.5;
-                                                    double wy = (double)sectionMinY + ly + 0.5;
-                                                    double wz = (double)cz * 16 + lz + 0.5;
-                                                    cache.hits.push_back({ wx, wy, wz, tg.color, 0.0 });
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                        env->DeleteLocalRef(block);
-                                    }
-                                    env->DeleteLocalRef(state);
-                                }
-                            }
-                        }
-                    }
-                    env->DeleteLocalRef(sec);
-                }
-                env->DeleteLocalRef(sections);
-            }
-            env->DeleteLocalRef(chunkObj);
-            g_blockEspChunkCache[key] = std::move(cache);
-            scanned++;
+static bool IsBedBlock121(JNIEnv* env, jobject block, const std::string* id) {
+    if (id && lc::IsBedBlockId(*id)) return true;
+    if (!block) return false;
+    jclass bcls = env->GetObjectClass(block);
+    if (!bcls) return false;
+    if (!g_javaLangClass_121) {
+        jclass classCls = env->FindClass("java/lang/Class");
+        if (env->ExceptionCheck()) { env->ExceptionClear(); classCls = nullptr; }
+        if (classCls) {
+            g_javaLangClass_121 = (jclass)env->NewGlobalRef(classCls);
+            env->DeleteLocalRef(classCls);
         }
     }
+    if (!g_classGetName_121 && g_javaLangClass_121) {
+        g_classGetName_121 = env->GetMethodID(g_javaLangClass_121, "getName", "()Ljava/lang/String;");
+        if (env->ExceptionCheck()) { env->ExceptionClear(); g_classGetName_121 = nullptr; }
+    }
+    bool isBed = false;
+    if (g_classGetName_121) {
+        jstring jn = (jstring)env->CallObjectMethod(bcls, g_classGetName_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); jn = nullptr; }
+        if (jn) {
+            const char* utf = env->GetStringUTFChars(jn, nullptr);
+            std::string cn = utf ? utf : "";
+            if (utf) env->ReleaseStringUTFChars(jn, utf);
+            env->DeleteLocalRef(jn);
+            if (cn.find("BedBlock") != std::string::npos
+                || (cn.size() >= 3 && cn.compare(cn.size() - 3, 3, "Bed") == 0)) {
+                isBed = true;
+            }
+        }
+    }
+    env->DeleteLocalRef(bcls);
+    return isBed;
+}
 
-    env->DeleteLocalRef(worldObj);
-
-    // Merge cached hits in range, compute distance, sort, cap.
+static void PublishBlockEspFromCache121(double sx, double sy, double sz, int maxCount) {
     std::vector<BlockEspData121> merged;
     for (auto& kv : g_blockEspChunkCache) {
         for (auto& h : kv.second.hits) {
@@ -7427,6 +7394,248 @@ static void UpdateBlockEspList(JNIEnv* env) {
               [](const BlockEspData121& a, const BlockEspData121& b) { return a.dist < b.dist; });
     if ((int)merged.size() > maxCount) merged.resize(maxCount);
     { LockGuard lk(g_blockEspListMutex); g_blockEspList.swap(merged); }
+}
+
+static void PublishBedPlatesFromCache121(JNIEnv* env, double sx, double sy, double sz, DWORD now, int scanned) {
+    std::vector<BedPlateCandidate121> allBeds;
+    for (auto& kv : g_bedPlatesChunkCache)
+        for (auto& b : kv.second.beds) allBeds.push_back(b);
+
+    auto hasBedAt = [&](int x, int y, int z) -> bool {
+        for (auto& b : allBeds) if (b.x == x && b.y == y && b.z == z) return true;
+        return false;
+    };
+
+    struct CanonicalBed121 { int x, y, z; int facing; double dist; };
+    std::vector<CanonicalBed121> canonical;
+    for (auto& b : allBeds) {
+        bool hasNegX = hasBedAt(b.x - 1, b.y, b.z);
+        bool hasNegZ = hasBedAt(b.x, b.y, b.z - 1);
+        if (!lc::BedPlatesIsCanonicalHalf(hasNegX, hasNegZ)) continue;
+        int ox = 0, oz = 0;
+        if (hasBedAt(b.x + 1, b.y, b.z)) ox = 1;
+        else if (hasBedAt(b.x - 1, b.y, b.z)) ox = -1;
+        else if (hasBedAt(b.x, b.y, b.z + 1)) oz = 1;
+        else if (hasBedAt(b.x, b.y, b.z - 1)) oz = -1;
+        int facing = (ox == 0 && oz == 0) ? 0 : lc::BedFacingFromFootOffset(ox, oz);
+        double ddx = ((double)b.x + 0.5) - sx;
+        double ddy = (double)b.y - sy;
+        double ddz = ((double)b.z + 0.5) - sz;
+        CanonicalBed121 cb;
+        cb.x = b.x; cb.y = b.y; cb.z = b.z; cb.facing = facing;
+        cb.dist = std::sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
+        canonical.push_back(cb);
+    }
+    std::sort(canonical.begin(), canonical.end(),
+              [](const CanonicalBed121& a, const CanonicalBed121& b) { return a.dist < b.dist; });
+    const size_t kMaxBedPlates = 32;
+    if (canonical.size() > kMaxBedPlates) canonical.resize(kMaxBedPlates);
+
+    std::vector<BedPlateRenderData> result;
+    result.reserve(canonical.size());
+    std::vector<lc::BedPlateSample> samples;
+    for (auto& bed : canonical) {
+        lc::CollectBedPlateSamples(bed.x, bed.y, bed.z, bed.facing, samples);
+        lc::BedPlateCountState counts;
+        for (auto& s : samples) {
+            std::string descId;
+            if (GetBlockAt121IsNonAir(env, s.x, s.y, s.z, nullptr, &descId)) {
+                std::string id = lc::BlockEspNormalizeId(descId);
+                if (!id.empty()) counts.incrementBlock(s.layer, id);
+            }
+        }
+        counts.sortLayersByFrequency();
+        std::vector<std::string> visible;
+        counts.collectVisibleBlockIds(visible);
+        BedPlateRenderData d;
+        d.x = bed.x; d.y = bed.y; d.z = bed.z;
+        d.dist = bed.dist;
+        d.blocks = visible;
+        result.push_back(std::move(d));
+    }
+
+    static DWORD s_lastBedDiagMs = 0;
+    if (now - s_lastBedDiagMs > 2000) {
+        s_lastBedDiagMs = now;
+        Log("BedPlates: halves=" + std::to_string(allBeds.size())
+            + " plates=" + std::to_string(result.size())
+            + " cachedChunks=" + std::to_string(g_bedPlatesChunkCache.size())
+            + " scannedThisTick=" + std::to_string(scanned)
+            + " translationKey=" + (g_blockGetTranslationKey_121 ? "1" : "0"));
+    }
+
+    { LockGuard lk(g_bedPlateListMutex); g_bedPlateList.swap(result); }
+}
+
+// One section walk fills Block ESP and/or BedPlates for each visited chunk.
+static void UpdateSectionChunkScans(JNIEnv* env) {
+    Config cfg;
+    { LockGuard lk(g_configMutex); cfg = g_config; }
+
+    DWORD now = GetTickCount();
+    if (IsWorldTransitionActive()) return;
+
+    std::vector<lc::BlockEspTargetDef> targets;
+    LONG version;
+    { LockGuard tlk(g_blockEspTargetsMutex); targets = g_blockEspTargets; version = g_blockEspTargetsVersion; }
+    int blockRange = lc::ClampChunkRange(cfg.blockEspRange);
+    int bedRange = lc::ClampChunkRange(cfg.bedPlatesRange);
+    int maxCount = cfg.blockEspMaxCount;
+    if (maxCount < 1) maxCount = 1;
+    if (maxCount > 512) maxCount = 512;
+
+    const bool blockOn = cfg.blockEsp && !targets.empty();
+    const bool bedsOn = cfg.bedPlates;
+
+    if (!cfg.blockEsp || targets.empty()) {
+        { LockGuard lk(g_blockEspListMutex); g_blockEspList.clear(); }
+        { LockGuard lk(g_blockEspCacheMutex); g_blockEspChunkCache.clear(); }
+    }
+    if (!bedsOn) {
+        { LockGuard lk(g_bedPlateListMutex); g_bedPlateList.clear(); }
+        { LockGuard cacheLk(g_bedPlatesCacheMutex); g_bedPlatesChunkCache.clear(); }
+    }
+    if (!blockOn && !bedsOn) return;
+
+    const bool blockDue = blockOn && (now - g_lastBlockEspScanMs >= 120);
+    const bool bedsDue = bedsOn && (now - g_lastBedPlatesScanMs >= lc::kBedPlatesScanIntervalMs);
+    if (!blockDue && !bedsDue) return;
+
+    {
+        std::string sn;
+        { LockGuard lk(g_jniStateMtx); sn = g_jniScreenName; }
+        if (sn.find("ContainerScreen") != std::string::npos ||
+            sn.find("AbstractContainerScreen") != std::string::npos) return;
+    }
+
+    LockGuard blockCacheLock(g_blockEspCacheMutex);
+    LockGuard bedCacheLock(g_bedPlatesCacheMutex);
+    if (IsWorldTransitionActive()) return;
+
+    if (blockOn && version != g_blockEspCacheVersion) {
+        g_blockEspChunkCache.clear();
+        g_blockEspCacheVersion = version;
+    }
+
+    if (!g_mcInstance || !g_worldField_121) return;
+    jobject worldObj = env->GetObjectField(g_mcInstance, g_worldField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); worldObj = nullptr; }
+    if (!worldObj) return;
+
+    double sx = 0, sy = 0, sz = 0;
+    { LockGuard lk(g_bgCamMutex); sx = g_bgCamState.camX; sy = g_bgCamState.camY; sz = g_bgCamState.camZ; }
+
+    if (!EnsureChunkAccess(env, worldObj)) { env->DeleteLocalRef(worldObj); return; }
+    EnsureChestStateDetectionCaches(env, nullptr);
+    EnsureBlockEspSectionMappings(env, nullptr, worldObj);
+
+    int pcx = (int)std::floor(sx) >> 4;
+    int pcz = (int)std::floor(sz) >> 4;
+
+    int bottomY = -64;
+    if (g_worldGetBottomY_121) {
+        int b = env->CallIntMethod(worldObj, g_worldGetBottomY_121);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        else if (b > -512 && b < 512) bottomY = b;
+    }
+
+    if (blockOn) lc::EvictChunksOutsideRange(g_blockEspChunkCache, pcx, pcz, blockRange);
+    if (bedsOn) lc::EvictChunksOutsideRange(g_bedPlatesChunkCache, pcx, pcz, bedRange);
+
+    const int visitRange = lc::MaxEnabledChunkRange(blockOn, blockRange, bedsOn, bedRange);
+    const int budget = lc::CombinedSectionChunkBudget(blockOn, bedsOn);
+    std::vector<std::pair<int, int> > chunkOrder;
+    lc::BuildNearToFarChunkOffsets(visitRange, chunkOrder);
+
+    int scanned = 0;
+    for (size_t ci = 0; ci < chunkOrder.size() && scanned < budget; ci++) {
+        if (IsWorldTransitionActive()) break;
+        int cx = pcx + chunkOrder[ci].first;
+        int cz = pcz + chunkOrder[ci].second;
+        long long key = lc::ChunkKey(cx, cz);
+        const bool needBlock = blockOn && lc::ChunkInChebyshevRange(cx, cz, pcx, pcz, blockRange)
+            && g_blockEspChunkCache.find(key) == g_blockEspChunkCache.end();
+        const bool needBeds = bedsOn && lc::ChunkInChebyshevRange(cx, cz, pcx, pcz, bedRange)
+            && g_bedPlatesChunkCache.find(key) == g_bedPlatesChunkCache.end();
+        if (!needBlock && !needBeds) continue;
+
+        BlockEspChunkCache121 blockCache;
+        BedPlatesChunkCache121 bedCache;
+        jobject chunkObj = env->CallObjectMethod(worldObj, g_worldGetChunkMethod_121, cx, cz);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); chunkObj = nullptr; }
+        if (!chunkObj) continue;
+        if (!g_chunkGetSectionArray_121) EnsureBlockEspSectionMappings(env, chunkObj, worldObj);
+        if (!g_chunkGetSectionArray_121 || !g_sectionGetBlockState_121 || !g_stateGetBlock_121) {
+            env->DeleteLocalRef(chunkObj);
+            break;
+        }
+        {
+                jobjectArray sections = (jobjectArray)env->CallObjectMethod(chunkObj, g_chunkGetSectionArray_121);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); sections = nullptr; }
+                if (sections) {
+                    jsize nsec = env->GetArrayLength(sections);
+                    for (jsize si = 0; si < nsec; si++) {
+                        jobject sec = env->GetObjectArrayElement(sections, si);
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); sec = nullptr; }
+                        if (!sec) continue;
+                        bool empty = false;
+                        if (g_sectionIsEmpty_121) {
+                            empty = env->CallBooleanMethod(sec, g_sectionIsEmpty_121) == JNI_TRUE;
+                            if (env->ExceptionCheck()) { env->ExceptionClear(); empty = false; }
+                        }
+                        if (!empty) {
+                            int sectionMinY = bottomY + (int)si * 16;
+                            for (int ly = 0; ly < 16; ly++) {
+                                for (int lz = 0; lz < 16; lz++) {
+                                    for (int lx = 0; lx < 16; lx++) {
+                                        jobject state = env->CallObjectMethod(sec, g_sectionGetBlockState_121, lx, ly, lz);
+                                        if (env->ExceptionCheck()) { env->ExceptionClear(); state = nullptr; }
+                                        if (!state) continue;
+                                        jobject block = env->CallObjectMethod(state, g_stateGetBlock_121);
+                                        if (env->ExceptionCheck()) { env->ExceptionClear(); block = nullptr; }
+                                        if (block) {
+                                            const std::string* id = BlockEspIdForBlock121(env, block);
+                                            if (needBlock && id && !id->empty()) {
+                                                for (const auto& tg : targets) {
+                                                    if (tg.id == *id) {
+                                                        double wx = (double)cx * 16 + lx + 0.5;
+                                                        double wy = (double)sectionMinY + ly + 0.5;
+                                                        double wz = (double)cz * 16 + lz + 0.5;
+                                                        blockCache.hits.push_back({ wx, wy, wz, tg.color, 0.0 });
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            if (needBeds && IsBedBlock121(env, block, id)) {
+                                                BedPlateCandidate121 c;
+                                                c.x = (cx << 4) + lx;
+                                                c.y = sectionMinY + ly;
+                                                c.z = (cz << 4) + lz;
+                                                bedCache.beds.push_back(c);
+                                            }
+                                            env->DeleteLocalRef(block);
+                                        }
+                                        env->DeleteLocalRef(state);
+                                    }
+                                }
+                            }
+                        }
+                        env->DeleteLocalRef(sec);
+                    }
+                    env->DeleteLocalRef(sections);
+                }
+            env->DeleteLocalRef(chunkObj);
+        }
+        if (needBlock) g_blockEspChunkCache[key] = std::move(blockCache);
+        if (needBeds) g_bedPlatesChunkCache[key] = std::move(bedCache);
+        scanned++;
+    }
+
+    env->DeleteLocalRef(worldObj);
+    if (blockDue) g_lastBlockEspScanMs = now;
+    if (bedsDue) g_lastBedPlatesScanMs = now;
+    if (blockOn) PublishBlockEspFromCache121(sx, sy, sz, maxCount);
+    if (bedsDue) PublishBedPlatesFromCache121(env, sx, sy, sz, now, scanned);
 }
 
 // Require a few complete background polls after the world/player/camera state is
@@ -7467,8 +7676,11 @@ static void ScheduleWorldTransition(JNIEnv* env, const char* reason) {
     { LockGuard lk(g_playerListMutex); g_playerList.clear(); }
     ResetFightStatusState121();
     { LockGuard lk(g_chestListMutex); g_chestList.clear(); }
+    ClearChestChunkCache121();
     { LockGuard lk(g_blockEspListMutex); g_blockEspList.clear(); }
     { LockGuard lk(g_blockEspCacheMutex); g_blockEspChunkCache.clear(); }
+    { LockGuard lk(g_bedPlateListMutex); g_bedPlateList.clear(); }
+    { LockGuard lk(g_bedPlatesCacheMutex); g_bedPlatesChunkCache.clear(); }
     { LockGuard lk(g_bgCamMutex); g_bgCamState = BgCamState(); }
 
     static DWORD s_lastLogMs = 0;
@@ -10913,6 +11125,7 @@ static void ResetModernJniRuntimeCaches121(JNIEnv* env, const char* reason) {
     InterlockedIncrement(&g_mappingGeneration121);
 
     ResetAutoRodModernCaches(env);
+    ResetAutoToolModernCaches(env);
     CleanupJniGlobals(env);
     ResetNametagSuppressionCaches121(env, nullptr);
 
@@ -13758,6 +13971,468 @@ static void ExecuteAutoRodModern(JNIEnv* env) {
     env->PopLocalFrame(nullptr);
 }
 
+static autotool::AutoToolState g_autoToolState121;
+static jmethodID g_autoToolDestroySpeedMethod121 = nullptr;
+static jmethodID g_autoToolWorldGetBlockState121 = nullptr;
+static jmethodID g_autoToolBlockHitGetPosMethod121 = nullptr;
+static jfieldID  g_autoToolBlockHitPosField121 = nullptr;
+static jmethodID g_autoToolBlockHitGetDir121 = nullptr;
+static jfieldID  g_autoToolBlockHitDirField121 = nullptr;
+static jmethodID g_autoToolPlayerIsSneaking121 = nullptr;
+static jmethodID g_autoToolItemStackGetItem121 = nullptr;
+static jmethodID g_autoToolItemStackIsEmpty121 = nullptr;
+static jmethodID g_autoToolAttackBlock121 = nullptr;
+static jmethodID g_autoToolCancelBreaking121 = nullptr;
+static jclass    g_autoToolSwordItemClass121 = nullptr;
+static jclass    g_autoToolAxeItemClass121 = nullptr;
+
+static void ResetAutoToolModernCaches(JNIEnv* env) {
+    g_autoToolState121.Reset();
+    g_autoToolDestroySpeedMethod121 = nullptr;
+    g_autoToolWorldGetBlockState121 = nullptr;
+    g_autoToolBlockHitGetPosMethod121 = nullptr;
+    g_autoToolBlockHitPosField121 = nullptr;
+    g_autoToolBlockHitGetDir121 = nullptr;
+    g_autoToolBlockHitDirField121 = nullptr;
+    g_autoToolPlayerIsSneaking121 = nullptr;
+    g_autoToolItemStackGetItem121 = nullptr;
+    g_autoToolItemStackIsEmpty121 = nullptr;
+    g_autoToolAttackBlock121 = nullptr;
+    g_autoToolCancelBreaking121 = nullptr;
+    if (env) {
+        if (g_autoToolSwordItemClass121) { env->DeleteGlobalRef(g_autoToolSwordItemClass121); g_autoToolSwordItemClass121 = nullptr; }
+        if (g_autoToolAxeItemClass121) { env->DeleteGlobalRef(g_autoToolAxeItemClass121); g_autoToolAxeItemClass121 = nullptr; }
+    }
+}
+
+static bool EnsureAutoToolModernMappings(JNIEnv* env, jobject player) {
+    if (!env || !player || !g_mcInstance) return false;
+
+    if (!EnsureAutoRodModernMappings(env, player, true)) return false;
+
+    if (!g_crosshairTargetField_121) {
+        jclass mcCls = env->GetObjectClass(g_mcInstance);
+        if (mcCls) {
+            EnsureCrosshairTargetField(env, mcCls);
+            env->DeleteLocalRef(mcCls);
+        }
+    }
+
+    if (!g_autoToolWorldGetBlockState121 && g_worldField_121) {
+        jobject world = env->GetObjectField(g_mcInstance, g_worldField_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); world = nullptr; }
+        if (world) {
+            jclass worldCls = env->GetObjectClass(world);
+            if (worldCls) {
+                const char* names[] = { "getBlockState", "method_8320", "m_8055_", nullptr };
+                const char* sigs[] = {
+                    "(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/state/BlockState;",
+                    "(Lnet/minecraft/class_2338;)Lnet/minecraft/class_2680;",
+                    nullptr
+                };
+                for (int ni = 0; names[ni] && !g_autoToolWorldGetBlockState121; ++ni) {
+                    for (int si = 0; sigs[si] && !g_autoToolWorldGetBlockState121; ++si) {
+                        g_autoToolWorldGetBlockState121 = env->GetMethodID(worldCls, names[ni], sigs[si]);
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolWorldGetBlockState121 = nullptr; }
+                    }
+                }
+                env->DeleteLocalRef(worldCls);
+            }
+            env->DeleteLocalRef(world);
+        }
+    }
+
+    if (!g_autoToolDestroySpeedMethod121 || !g_autoToolItemStackGetItem121 || !g_autoToolItemStackIsEmpty121) {
+        const char* stackClasses[] = {
+            "net.minecraft.world.item.ItemStack",
+            "net.minecraft.class_1799",
+            "net.minecraft.item.ItemStack",
+            nullptr
+        };
+        jclass stackCls = LoadAutoRodClass121(env, stackClasses);
+        if (stackCls) {
+            if (!g_autoToolDestroySpeedMethod121) {
+                const char* names[] = { "getDestroySpeed", "method_7924", "getMiningSpeedMultiplier", "m_41671_", nullptr };
+                const char* sigs[] = {
+                    "(Lnet/minecraft/world/level/block/state/BlockState;)F",
+                    "(Lnet/minecraft/class_2680;)F",
+                    nullptr
+                };
+                for (int ni = 0; names[ni] && !g_autoToolDestroySpeedMethod121; ++ni) {
+                    for (int si = 0; sigs[si] && !g_autoToolDestroySpeedMethod121; ++si) {
+                        g_autoToolDestroySpeedMethod121 = env->GetMethodID(stackCls, names[ni], sigs[si]);
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolDestroySpeedMethod121 = nullptr; }
+                    }
+                }
+            }
+            if (!g_autoToolItemStackGetItem121) {
+                const char* names[] = { "getItem", "method_7909", "m_41720_", nullptr };
+                const char* sigs[] = {
+                    "()Lnet/minecraft/world/item/Item;",
+                    "()Lnet/minecraft/class_1792;",
+                    "()Lnet/minecraft/item/Item;",
+                    nullptr
+                };
+                for (int ni = 0; names[ni] && !g_autoToolItemStackGetItem121; ++ni) {
+                    for (int si = 0; sigs[si] && !g_autoToolItemStackGetItem121; ++si) {
+                        g_autoToolItemStackGetItem121 = env->GetMethodID(stackCls, names[ni], sigs[si]);
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolItemStackGetItem121 = nullptr; }
+                    }
+                }
+            }
+            if (!g_autoToolItemStackIsEmpty121) {
+                const char* names[] = { "isEmpty", "method_7960", "m_41619_", nullptr };
+                for (int ni = 0; names[ni] && !g_autoToolItemStackIsEmpty121; ++ni) {
+                    g_autoToolItemStackIsEmpty121 = env->GetMethodID(stackCls, names[ni], "()Z");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolItemStackIsEmpty121 = nullptr; }
+                }
+            }
+            env->DeleteLocalRef(stackCls);
+        }
+    }
+
+    if (!g_autoToolSwordItemClass121) {
+        const char* swordClasses[] = {
+            "net.minecraft.world.item.SwordItem",
+            "net.minecraft.class_1829",
+            "net.minecraft.item.SwordItem",
+            nullptr
+        };
+        jclass swordCls = LoadAutoRodClass121(env, swordClasses);
+        if (swordCls) {
+            g_autoToolSwordItemClass121 = (jclass)env->NewGlobalRef(swordCls);
+            env->DeleteLocalRef(swordCls);
+        }
+    }
+
+    if (!g_autoToolAxeItemClass121) {
+        const char* axeClasses[] = {
+            "net.minecraft.world.item.AxeItem",
+            "net.minecraft.class_1743",
+            "net.minecraft.item.AxeItem",
+            nullptr
+        };
+        jclass axeCls = LoadAutoRodClass121(env, axeClasses);
+        if (axeCls) {
+            g_autoToolAxeItemClass121 = (jclass)env->NewGlobalRef(axeCls);
+            env->DeleteLocalRef(axeCls);
+        }
+    }
+
+    if (!g_autoToolPlayerIsSneaking121) {
+        jclass playerCls = env->GetObjectClass(player);
+        if (playerCls) {
+            const char* names[] = { "isShiftKeyDown", "isSneaking", "isCrouching", "method_5715", "method_18276", "m_6144_", "m_6047_", nullptr };
+            for (int ni = 0; names[ni] && !g_autoToolPlayerIsSneaking121; ++ni) {
+                g_autoToolPlayerIsSneaking121 = env->GetMethodID(playerCls, names[ni], "()Z");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolPlayerIsSneaking121 = nullptr; }
+            }
+            env->DeleteLocalRef(playerCls);
+        }
+    }
+
+    jobject gameMode = g_autoRodGameModeField121 ? env->GetObjectField(g_mcInstance, g_autoRodGameModeField121) : nullptr;
+    if (env->ExceptionCheck()) { env->ExceptionClear(); gameMode = nullptr; }
+    if (gameMode) {
+        jclass modeCls = env->GetObjectClass(gameMode);
+        if (modeCls) {
+            if (!g_autoToolCancelBreaking121) {
+                const char* names[] = { "cancelBlockBreaking", "stopDestroying", "method_2925", nullptr };
+                for (int i = 0; names[i] && !g_autoToolCancelBreaking121; ++i) {
+                    g_autoToolCancelBreaking121 = env->GetMethodID(modeCls, names[i], "()V");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolCancelBreaking121 = nullptr; }
+                }
+            }
+            if (!g_autoToolAttackBlock121) {
+                const char* names[] = { "attackBlock", "startDestroyBlock", "method_2910", nullptr };
+                const char* sigs[] = {
+                    "(Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/Direction;)Z",
+                    "(Lnet/minecraft/class_2338;Lnet/minecraft/class_2350;)Z",
+                    "(Lnet/minecraft/util/math/BlockPos;Lnet/minecraft/util/math/Direction;)Z",
+                    nullptr
+                };
+                for (int ni = 0; names[ni] && !g_autoToolAttackBlock121; ++ni) {
+                    for (int si = 0; sigs[si] && !g_autoToolAttackBlock121; ++si) {
+                        g_autoToolAttackBlock121 = env->GetMethodID(modeCls, names[ni], sigs[si]);
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolAttackBlock121 = nullptr; }
+                    }
+                }
+            }
+            env->DeleteLocalRef(modeCls);
+        }
+        env->DeleteLocalRef(gameMode);
+    }
+
+    return g_autoRodGetInventory121 != nullptr && g_autoRodSelectedSlotField121 != nullptr && g_autoRodInventoryGetItem121 != nullptr;
+}
+
+static void ApplyAutoToolSlotModern(JNIEnv* env, jobject inventory, int targetSlot) {
+    if (!env || !inventory || !g_autoRodSelectedSlotField121) return;
+    env->SetIntField(inventory, g_autoRodSelectedSlotField121, targetSlot);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+}
+
+static bool IsAutoRodTransactionActive121() {
+    LockGuard transactionLock(g_autoRodTransactionMutex121);
+    return g_autoRodTransaction121.phase != AUTO_ROD_TRANSACTION_IDLE_121;
+}
+
+static void UpdateAutoToolModern(JNIEnv* env, const Config& cfg) {
+    if (!cfg.autoToolEnabled) {
+        g_autoToolState121.Reset();
+        return;
+    }
+
+    if (!g_mcInstance || !g_playerField_121) {
+        return;
+    }
+
+    if (IsAutoRodTransactionActive121()) {
+        return;
+    }
+
+    bool inWorld = false;
+    bool guiOpen = false;
+    bool breakingBlock = false;
+    bool lookingAtEntity = false;
+    {
+        LockGuard lk(g_jniStateMtx);
+        inWorld = g_jniInWorld;
+        guiOpen = g_jniGuiOpen;
+        breakingBlock = g_jniBreakingBlock;
+        lookingAtEntity = g_jniLookingAtEntity;
+    }
+
+    if (!inWorld || guiOpen) {
+        return;
+    }
+
+    if (env->PushLocalFrame(32) < 0) return;
+
+    jobject player = env->GetObjectField(g_mcInstance, g_playerField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); player = nullptr; }
+    if (!player || !EnsureAutoToolModernMappings(env, player)) {
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    jobject inventory = env->CallObjectMethod(player, g_autoRodGetInventory121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); inventory = nullptr; }
+    if (!inventory) {
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    int currentSlot = env->GetIntField(inventory, g_autoRodSelectedSlotField121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); currentSlot = 0; }
+
+    bool isSneaking = false;
+    if (g_autoToolPlayerIsSneaking121) {
+        isSneaking = env->CallBooleanMethod(player, g_autoToolPlayerIsSneaking121) != JNI_FALSE;
+        if (env->ExceptionCheck()) { env->ExceptionClear(); isSneaking = false; }
+    }
+
+    autotool::AutoToolInput input;
+    input.nowMs = GetTickCount();
+    input.inWorld = inWorld;
+    input.guiOpen = guiOpen;
+    input.mouseDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 || breakingBlock;
+    input.isSneaking = isSneaking;
+    input.currentSlot = currentSlot;
+    input.pauseExclusive = IsAutoRodTransactionActive121();
+    input.isBlockHit = false;
+    input.isEntityHit = false;
+    input.bestToolSlot = -1;
+    input.bestWeaponSlot = -1;
+
+    jfieldID hitFld = g_crosshairTargetField_121;
+    if (hitFld) {
+        jobject hitObj = env->GetObjectField(g_mcInstance, hitFld);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); hitObj = nullptr; }
+        if (hitObj) {
+            int hitOrd = GetHitResultTypeOrdinal(env, hitObj);
+            if (hitOrd == 1) { // BLOCK
+                input.isBlockHit = true;
+                if (!g_autoToolBlockHitGetPosMethod121 && !g_autoToolBlockHitPosField121) {
+                    jclass hitCls = env->GetObjectClass(hitObj);
+                    if (hitCls) {
+                        const char* mNames[] = { "getBlockPos", "method_17777", "m_82425_", nullptr };
+                        const char* mSigs[] = {
+                            "()Lnet/minecraft/core/BlockPos;",
+                            "()Lnet/minecraft/class_2338;",
+                            nullptr
+                        };
+                        for (int ni = 0; mNames[ni] && !g_autoToolBlockHitGetPosMethod121; ++ni) {
+                            for (int si = 0; mSigs[si] && !g_autoToolBlockHitGetPosMethod121; ++si) {
+                                g_autoToolBlockHitGetPosMethod121 = env->GetMethodID(hitCls, mNames[ni], mSigs[si]);
+                                if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolBlockHitGetPosMethod121 = nullptr; }
+                            }
+                        }
+                        if (!g_autoToolBlockHitGetPosMethod121) {
+                            const char* fNames[] = { "blockPos", "field_17588", "f_82414_", nullptr };
+                            const char* fSigs[] = {
+                                "Lnet/minecraft/core/BlockPos;",
+                                "Lnet/minecraft/class_2338;",
+                                nullptr
+                            };
+                            for (int ni = 0; fNames[ni] && !g_autoToolBlockHitPosField121; ++ni) {
+                                for (int si = 0; fSigs[si] && !g_autoToolBlockHitPosField121; ++si) {
+                                    g_autoToolBlockHitPosField121 = env->GetFieldID(hitCls, fNames[ni], fSigs[si]);
+                                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolBlockHitPosField121 = nullptr; }
+                                }
+                            }
+                        }
+                        env->DeleteLocalRef(hitCls);
+                    }
+                }
+
+                jobject blockPos = nullptr;
+                if (g_autoToolBlockHitGetPosMethod121) {
+                    blockPos = env->CallObjectMethod(hitObj, g_autoToolBlockHitGetPosMethod121);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); blockPos = nullptr; }
+                } else if (g_autoToolBlockHitPosField121) {
+                    blockPos = env->GetObjectField(hitObj, g_autoToolBlockHitPosField121);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); blockPos = nullptr; }
+                }
+
+                jobject world = g_worldField_121 ? env->GetObjectField(g_mcInstance, g_worldField_121) : nullptr;
+                if (env->ExceptionCheck()) { env->ExceptionClear(); world = nullptr; }
+
+                if (blockPos && world && g_autoToolWorldGetBlockState121 && g_autoToolDestroySpeedMethod121) {
+                    jobject blockState = env->CallObjectMethod(world, g_autoToolWorldGetBlockState121, blockPos);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); blockState = nullptr; }
+                    if (blockState) {
+                        float bestSpeed = 1.0f;
+                        int bestSlot = -1;
+                        for (int i = 0; i < 9; ++i) {
+                            jobject stack = env->CallObjectMethod(inventory, g_autoRodInventoryGetItem121, (jint)i);
+                            if (env->ExceptionCheck()) { env->ExceptionClear(); stack = nullptr; }
+                            if (!stack) continue;
+
+                            if (g_autoToolItemStackIsEmpty121 && env->CallBooleanMethod(stack, g_autoToolItemStackIsEmpty121)) {
+                                env->DeleteLocalRef(stack);
+                                continue;
+                            }
+
+                            float speed = env->CallFloatMethod(stack, g_autoToolDestroySpeedMethod121, blockState);
+                            if (env->ExceptionCheck()) { env->ExceptionClear(); speed = 1.0f; }
+
+                            if (g_autoToolItemStackGetItem121 && g_autoToolSwordItemClass121) {
+                                jobject item = env->CallObjectMethod(stack, g_autoToolItemStackGetItem121);
+                                if (env->ExceptionCheck()) { env->ExceptionClear(); item = nullptr; }
+                                if (item) {
+                                    if (env->IsInstanceOf(item, g_autoToolSwordItemClass121) && speed <= 1.5f) {
+                                        speed /= 2.0f;
+                                    }
+                                    env->DeleteLocalRef(item);
+                                }
+                            }
+
+                            if (speed > bestSpeed) {
+                                bestSpeed = speed;
+                                bestSlot = i;
+                            }
+                            env->DeleteLocalRef(stack);
+                        }
+                        input.bestToolSlot = bestSlot;
+                        env->DeleteLocalRef(blockState);
+                    }
+                }
+                if (world) env->DeleteLocalRef(world);
+                if (blockPos) env->DeleteLocalRef(blockPos);
+            } else if (hitOrd == 2) { // ENTITY
+                input.isEntityHit = true;
+                if (cfg.autoToolSwapWeapon) {
+                    float bestScore = 0.0f;
+                    int bestWeapon = -1;
+                    for (int i = 0; i < 9; ++i) {
+                        jobject stack = env->CallObjectMethod(inventory, g_autoRodInventoryGetItem121, (jint)i);
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); stack = nullptr; }
+                        if (!stack) continue;
+
+                        if (g_autoToolItemStackIsEmpty121 && env->CallBooleanMethod(stack, g_autoToolItemStackIsEmpty121)) {
+                            env->DeleteLocalRef(stack);
+                            continue;
+                        }
+
+                        if (g_autoToolItemStackGetItem121) {
+                            jobject item = env->CallObjectMethod(stack, g_autoToolItemStackGetItem121);
+                            if (env->ExceptionCheck()) { env->ExceptionClear(); item = nullptr; }
+                            if (item) {
+                                float score = 0.0f;
+                                if (g_autoToolSwordItemClass121 && env->IsInstanceOf(item, g_autoToolSwordItemClass121)) {
+                                    score = 10.0f;
+                                } else if (g_autoToolAxeItemClass121 && env->IsInstanceOf(item, g_autoToolAxeItemClass121)) {
+                                    score = 8.0f;
+                                }
+                                if (score > bestScore) {
+                                    bestScore = score;
+                                    bestWeapon = i;
+                                }
+                                env->DeleteLocalRef(item);
+                            }
+                        }
+                        env->DeleteLocalRef(stack);
+                    }
+                    input.bestWeaponSlot = bestWeapon;
+                }
+            }
+            env->DeleteLocalRef(hitObj);
+        }
+    }
+
+    if (lookingAtEntity) input.isEntityHit = true;
+    if (input.isEntityHit && cfg.autoToolSwapWeapon && input.bestWeaponSlot < 0) {
+        float bestScore = 0.0f;
+        int bestWeapon = -1;
+        for (int i = 0; i < 9; ++i) {
+            jobject stack = env->CallObjectMethod(inventory, g_autoRodInventoryGetItem121, (jint)i);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); stack = nullptr; }
+            if (!stack) continue;
+            if (g_autoToolItemStackIsEmpty121 && env->CallBooleanMethod(stack, g_autoToolItemStackIsEmpty121)) {
+                env->DeleteLocalRef(stack);
+                continue;
+            }
+            if (g_autoToolItemStackGetItem121) {
+                jobject item = env->CallObjectMethod(stack, g_autoToolItemStackGetItem121);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); item = nullptr; }
+                if (item) {
+                    float score = 0.0f;
+                    if (g_autoToolSwordItemClass121 && env->IsInstanceOf(item, g_autoToolSwordItemClass121)) {
+                        score = 10.0f;
+                    } else if (g_autoToolAxeItemClass121 && env->IsInstanceOf(item, g_autoToolAxeItemClass121)) {
+                        score = 8.0f;
+                    }
+                    if (score > bestScore) {
+                        bestScore = score;
+                        bestWeapon = i;
+                    }
+                    env->DeleteLocalRef(item);
+                }
+            }
+            env->DeleteLocalRef(stack);
+        }
+        input.bestWeaponSlot = bestWeapon;
+    }
+
+    autotool::AutoToolConfig coreCfg;
+    coreCfg.enabled = cfg.autoToolEnabled;
+    coreCfg.swapWeapon = cfg.autoToolSwapWeapon;
+    coreCfg.instantSwap = cfg.autoToolInstantSwap;
+    coreCfg.swapToDelayMs = cfg.autoToolSwapToDelay;
+    coreCfg.swapBack = cfg.autoToolSwapBack;
+    coreCfg.swapBackDelayMs = cfg.autoToolSwapBackDelay;
+    coreCfg.requireMouseDown = cfg.autoToolRequireMouseDown;
+    coreCfg.onlyWhileSneaking = cfg.autoToolOnlySneaking;
+
+    autotool::AutoToolAction action = autotool::UpdateAutoToolState(g_autoToolState121, coreCfg, input);
+    if (action.switchSlot && action.targetSlot >= 0 && action.targetSlot < 9) {
+        ApplyAutoToolSlotModern(env, inventory, action.targetSlot);
+    }
+
+    env->PopLocalFrame(nullptr);
+}
+
 static DWORD WINAPI FastPollThreadProc(LPVOID) {
     JNIEnv* env = nullptr;
     if (!g_jvm || g_jvm->AttachCurrentThread((void**)&env, nullptr) != JNI_OK) return 1;
@@ -13767,6 +14442,13 @@ static DWORD WINAPI FastPollThreadProc(LPVOID) {
             if (g_stateJniReady) {
                 UpdateJniState();
                 ExecuteAutoRodModern(env);
+                {
+                    Config cfg;
+                    { LockGuard lk(g_configMutex); cfg = g_config; }
+                    if (cfg.autoToolEnabled) {
+                        UpdateAutoToolModern(env, cfg);
+                    }
+                }
                 // Camera validity is part of the transition readiness handshake;
                 // continue sampling it while modules remain gated so recovery is
                 // based on the new frame state instead of elapsed time.
@@ -13786,9 +14468,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
     DWORD lastAutoRemapRetryMs = 0;
     DWORD lastNickHiderRefreshMs = 0;
     DWORD lastChestEspScanMs = 0;
-    DWORD lastBlockEspScanMs = 0;
     bool chestEspScanWasEnabled = false;
-    bool blockEspScanWasEnabled = false;
     bool entityProducerWasEnabled = false;
     // Teleport detection: track last scanned player position to catch same-world jumps
     // (arena teleports) that bypass the loading-screen / world-instance guards.
@@ -13919,6 +14599,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                             }
                             ResetAutoRodModernCaches(env);
                             ResetAutoTotemCaches(env);
+                            ResetAutoToolModernCaches(env);
                             if (g_lastAutoTotemWorld_121) env->DeleteGlobalRef(g_lastAutoTotemWorld_121);
                             g_lastAutoTotemWorld_121 = env->NewGlobalRef(worldObj);
                         }
@@ -13974,7 +14655,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                         UpdateClosestPlayerOverlay(env);
                     if (cfg.pixelPartyAssist)
                         UpdatePixelPartyAssist(env, cfg);
-                    const bool chunkScansEnabled = cfg.chestEsp || cfg.chestStealer || cfg.blockEsp;
+                    const bool chunkScansEnabled = cfg.chestEsp || cfg.chestStealer || cfg.blockEsp || cfg.bedPlates;
                     const bool chunkScanReady = !chunkScansEnabled ||
                         (!IsWorldTransitionActive() && ProbeModernChunkObject(env));
                     static bool s_fightStatusWasEnabled = false;
@@ -14010,18 +14691,10 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                     }
                     chestEspScanWasEnabled = chestEspScanEnabled;
 
-                    const bool blockEspScanDue =
-                        !blockEspScanWasEnabled ||
-                        lc::IsTelemetryIntervalDue(
-                            producerNowMs,
-                            lastBlockEspScanMs,
-                            lc::kBlockEspScanIntervalMs);
-                    if (cfg.blockEsp && blockEspScanDue && chunkScanReady) {
-                        NativePerfScope blockScanPerf(lc::PERF_BLOCK_SCAN);
-                        UpdateBlockEspList(env);
-                        lastBlockEspScanMs = producerNowMs;
+                    {
+                        NativePerfScope sectionScanPerf(lc::PERF_BLOCK_SCAN);
+                        UpdateSectionChunkScans(env);
                     }
-                    blockEspScanWasEnabled = cfg.blockEsp;
                 }
             } else if (g_stateJniReady && !inWorldNow) {
                 if (hadLivePlayer)
@@ -14044,6 +14717,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                 { LockGuard lk(g_playerListMutex); g_playerList.clear(); }
                 ResetFightStatusState121();
                 { LockGuard lk2(g_chestListMutex); g_chestList.clear(); }
+                ClearChestChunkCache121();
                 { LockGuard lkb(g_blockEspListMutex); g_blockEspList.clear(); }
                 { LockGuard lkCache(g_blockEspCacheMutex); g_blockEspChunkCache.clear(); }
                 { LockGuard lk3(g_bgCamMutex); g_bgCamState = BgCamState(); }
@@ -14070,6 +14744,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
             { LockGuard lk(g_playerListMutex); g_playerList.clear(); }
             ResetFightStatusState121();
             { LockGuard lk2(g_chestListMutex); g_chestList.clear(); }
+            ClearChestChunkCache121();
             { LockGuard lkb(g_blockEspListMutex); g_blockEspList.clear(); }
             { LockGuard lkCache(g_blockEspCacheMutex); g_blockEspChunkCache.clear(); }
             { LockGuard lk3(g_bgCamMutex); g_bgCamState = BgCamState(); }
@@ -14511,7 +15186,7 @@ static void RenderOverlayPanels(
             Matrix4x4 sharedProj = {}, sharedView = {};
             bool sharedMatsOk = false;
 
-            if (cfg.nametags || cfg.chestEsp || cfg.blockEsp || cfg.fightStatus) {
+            if (cfg.nametags || cfg.chestEsp || cfg.blockEsp || cfg.fightStatus || cfg.bedPlates) {
                 BgCamState cs;
                 { LockGuard lk(g_bgCamMutex); cs = g_bgCamState; }
                 sharedCam      = { cs.camX, cs.camY, cs.camZ };
@@ -14632,7 +15307,7 @@ static void RenderOverlayPanels(
             bool renderNametags = TRACE261_IF("renderNametags", (!g_realGuiOpen && cfg.nametags && sharedCamFound));
             if (renderNametags) {
                 drawnTags = 0;
-                const int nametagRenderCap = (std::max)(1, (std::min)(20, cfg.nametagMaxCount));
+                const int nametagRange = lc::ClampOverlayChunkRange(cfg.nametagRange);
                 const float nametagLayoutScale =
                     hudLayout.Resolve(lc::ELEM_NAMETAGS).scale;
 
@@ -14648,8 +15323,9 @@ static void RenderOverlayPanels(
                     const int   winH = (int)io.DisplaySize.y;
 
                     for (const auto& it : playerSnap) {
-                        if (drawnTags >= nametagRenderCap) break;
                         if (LooksLikeFakePlayerLine(it.name)) continue;
+                        if (!lc::InChunkRange((int)std::floor(it.ex), (int)std::floor(it.ez),
+                                cam.x, cam.z, nametagRange)) continue;
 
                         // Centre of player's head
                         const LegoVec3 headPos = { it.ex, it.ey + 1.9, it.ez };
@@ -14788,6 +15464,7 @@ static void RenderOverlayPanels(
                     LockGuard chestLk(g_chestListMutex);
                     chestSnapshot = g_chestList;
                 }
+
                 // Use shared camera data (same source as nametags – no redundant JNI fetch)
                 const LegoVec3   espCam   = sharedCam;
                 const float      espYaw   = sharedYaw;
@@ -14826,26 +15503,28 @@ static void RenderOverlayPanels(
                     const ImU32 espBg       = IM_COL32(0, 0, 0, 90);
                     const float lineThick   = 1.5f;
 
-                    constexpr double kChestEspMaxRenderDist = 64.0;
-                    const size_t maxChestRenderCount = (size_t)(std::max)(1, (std::min)(20, cfg.chestEspMaxCount));
+                    const int chestEspRange = lc::ClampChestEspRange(cfg.chestEspRange);
                     struct RenderChestCandidate { const ChestData121* chest; double dist; };
                     static thread_local std::vector<RenderChestCandidate> renderChests;
                     renderChests.clear();
                     renderChests.reserve(chestSnapshot.size());
                     for (const auto& ch : chestSnapshot) {
+                        if (!lc::ChestEspInChunkRange((int)std::floor(ch.x), (int)std::floor(ch.z),
+                                espCam.x, espCam.z, chestEspRange)) continue;
                         double dx = ch.x - espCam.x;
                         double dy = ch.y - espCam.y;
                         double dz = ch.z - espCam.z;
                         double distNow = std::sqrt(dx*dx + dy*dy + dz*dz);
-                        if (distNow > kChestEspMaxRenderDist) continue;
+                        if (distNow != distNow) continue;
                         renderChests.push_back({ &ch, distNow });
                     }
                     std::sort(renderChests.begin(), renderChests.end(),
                         [](const RenderChestCandidate& a, const RenderChestCandidate& b) {
+                            const bool aOk = a.dist == a.dist;
+                            const bool bOk = b.dist == b.dist;
+                            if (aOk != bOk) return aOk;
                             return a.dist < b.dist;
                         });
-                    if (renderChests.size() > maxChestRenderCount)
-                        renderChests.resize(maxChestRenderCount);
 
                     for (const auto& candidate : renderChests) {
                         const auto& ch = *candidate.chest;
@@ -15095,6 +15774,68 @@ static void RenderOverlayPanels(
                 }
             } // cfg.blockEsp
 
+            // ── BedPlates: Vape-style distance + block icons above beds ──
+            bool renderBedPlates = TRACE261_IF("renderBedPlates", (!g_realGuiOpen && cfg.bedPlates && sharedCamFound));
+            if (renderBedPlates) {
+                static thread_local std::vector<BedPlateRenderData> plates;
+                { LockGuard lk(g_bedPlateListMutex); plates = g_bedPlateList; }
+
+                const int winWBed = (int)io.DisplaySize.x;
+                const int winHBed = (int)io.DisplaySize.y;
+                const bool showDist = cfg.bedPlatesShowDistance;
+                const ImU32 bedBg = IM_COL32(0, 0, 0, 150);
+                const ImU32 bedBorder = IM_COL32(45, 45, 45, 255);
+
+                for (const auto& plate : plates) {
+                    LegoVec3 target = { (double)plate.x + 0.5, (double)plate.y + 1.2, (double)plate.z + 0.5 };
+                    float psx = 0, psy = 0;
+                    bool ok = sharedMatsOk
+                        ? WorldToScreen(target, sharedCam, sharedView, sharedProj, winWBed, winHBed, &psx, &psy)
+                        : WorldToScreen_Angles(target, sharedCam, sharedYaw, sharedPitch, cpCamState.fov, winWBed, winHBed, &psx, &psy);
+                    if (!ok) continue;
+
+                    std::string distLine;
+                    if (showDist) {
+                        char db[32];
+                        snprintf(db, sizeof(db), "%.0fm", plate.dist);
+                        distLine = db;
+                    }
+                    ImVec2 distSz = distLine.empty() ? ImVec2(0, 0) : ImGui::CalcTextSize(distLine.c_str());
+
+                    int iconCount = (int)plate.blocks.size();
+                    float panelW = 0, panelH = 0, iconsY = 0;
+                    lc::BedPlateComputePanelSize(iconCount, showDist, distSz.x, &panelW, &panelH, &iconsY);
+
+                    float bx0 = std::floor(psx - panelW * 0.5f);
+                    float by0 = std::floor(psy - panelH);
+                    ImVec2 pMin(bx0, by0);
+                    ImVec2 pMax(bx0 + panelW, by0 + panelH);
+                    fg->AddRectFilled(pMin, pMax, bedBg, 6.0f);
+                    fg->AddRect(pMin, pMax, bedBorder, 6.0f, 0, 1.0f);
+
+                    if (!distLine.empty()) {
+                        float dtx = std::floor(bx0 + (panelW - distSz.x) * 0.5f);
+                        fg->AddText(ImVec2(dtx + 1, by0 + 2 + 1), IM_COL32(0, 0, 0, 200), distLine.c_str());
+                        fg->AddText(ImVec2(dtx, by0 + 2), IM_COL32(255, 255, 255, 255), distLine.c_str());
+                    }
+
+                    if (iconCount == 0) {
+                        float ix = bx0 + (panelW - lc::kBedPlateIconW) * 0.5f;
+                        float iy = by0 + iconsY;
+                        lc::BedPlateDrawIcon(fg, ix, iy, "red_bed");
+                    } else {
+                        float iconsW = (float)iconCount * lc::kBedPlateIconW
+                            + (float)(iconCount - 1) * lc::kBedPlateIconPad;
+                        float ix = bx0 + (panelW - iconsW) * 0.5f;
+                        float iy = by0 + iconsY;
+                        for (int i = 0; i < iconCount; i++) {
+                            lc::BedPlateDrawIcon(fg, ix, iy, plate.blocks[i]);
+                            ix += lc::kBedPlateIconW + lc::kBedPlateIconPad;
+                        }
+                    }
+                }
+            } // cfg.bedPlates
+
             bool renderGtbHelper = TRACE261_IF("renderGtbHelper", cfg.gtbHelper);
             if (renderGtbHelper) {
                 std::string hint = cfg.gtbHint;
@@ -15182,7 +15923,7 @@ static void RenderOverlayPanels(
             if (renderModuleList) {
                 // Module list (top-right) - original-like (right aligned colored bars)
                 struct ModLine { const char* text; ImU32 accent; float width; };
-                ModLine mods[24];
+                ModLine mods[32];
                 int modCount = 0;
 
                 auto pushMod = [&](const char* text, ImU32 accent) {
@@ -15209,6 +15950,7 @@ static void RenderOverlayPanels(
                 if (cfg.killAura)      pushMod("Kill Aura", overlayTheme.accentSecondary);
                 if (cfg.speedBridge)   pushMod("SpeedBridge", overlayTheme.accentPrimary);
                 if (cfg.autoRodEnabled) pushMod("Auto Rod", overlayTheme.accentPrimary);
+                if (cfg.autoToolEnabled) pushMod("AutoTool", overlayTheme.accentPrimary);
                 if (cfg.chestStealer)  pushMod("Chest Stealer", overlayTheme.accentTertiary);
                 if (cfg.chestEsp)      pushMod("Chest ESP", overlayTheme.accentSecondary);
                 if (cfg.blockEsp)      pushMod("Block ESP", overlayTheme.accentSecondary);
@@ -15222,6 +15964,7 @@ static void RenderOverlayPanels(
                 if (cfg.velocityEnabled) pushMod("Velocity", overlayTheme.accentTertiary);
                 if (cfg.autoTotemEnabled) pushMod("AutoTotem", overlayTheme.accentPrimary);
                 if (cfg.antiDebuffEnabled) pushMod("AntiDebuff", overlayTheme.accentPrimary);
+                if (cfg.bedPlates)     pushMod("BedPlates", overlayTheme.accentSecondary);
                 if (cfg.hitDelayFixEnabled) pushMod("Hit Delay Fix", overlayTheme.accentPrimary);
 
                 // Sort by width descending (staggered original look)

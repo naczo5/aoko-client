@@ -1,0 +1,1 @@
+refer to AGENTS.md and .agents/skills/

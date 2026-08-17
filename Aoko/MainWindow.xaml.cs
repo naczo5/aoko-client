@@ -79,12 +79,14 @@ public partial class MainWindow : Window
         ["chestesp"] = "Chest ESP",
         ["cheststealer"] = "Chest Stealer",
         ["blockesp"] = "Block ESP",
+        ["bedplates"] = "BedPlates",
         ["closestplayer"] = "Closest Player",
         ["fightstatus"] = "Fight Status",
         ["reach"] = "Reach",
         ["velocity"] = "Velocity",
         ["autototem"] = "AutoTotem",
         ["autorod"] = "Auto Rod",
+        ["autotool"] = "AutoTool",
         ["antidebuff"] = "AntiDebuff",
         ["hitdelayfix"] = "Hit Delay Fix",
         ["panic"] = "Panic"
@@ -315,6 +317,7 @@ public partial class MainWindow : Window
         bool velocitySupported = IsModuleSupported("velocity");
         bool autoTotemSupported = IsModuleSupported("autototem");
         bool autoRodSupported = IsModuleSupported("autorod");
+        bool autoToolSupported = IsModuleSupported("autotool");
         bool antiDebuffSupported = IsModuleSupported("antidebuff");
         bool hitDelayFixSupported = IsModuleSupported("hitdelayfix");
         bool reloadMappingsSupported = GameStateClient.Instance.SupportsSetting("reloadMappingsNonce");
@@ -330,6 +333,7 @@ public partial class MainWindow : Window
         VelocityCard.IsEnabled = velocitySupported;
         AutoTotemCard.IsEnabled = autoTotemSupported;
         AutoRodCard.IsEnabled = autoRodSupported;
+        AutoToolCard.IsEnabled = autoToolSupported;
         AntiDebuffCard.IsEnabled = antiDebuffSupported;
         HitDelayFixCard.IsEnabled = hitDelayFixSupported;
 
@@ -344,6 +348,7 @@ public partial class MainWindow : Window
         if (!velocitySupported && clicker.VelocityEnabled) clicker.VelocityEnabled = false;
         if (!autoTotemSupported && clicker.AutoTotemEnabled) clicker.AutoTotemEnabled = false;
         if (!autoRodSupported && clicker.AutoRodEnabled) clicker.AutoRodEnabled = false;
+        if (!autoToolSupported && clicker.AutoToolEnabled) clicker.AutoToolEnabled = false;
         if (!antiDebuffSupported && clicker.AntiDebuffEnabled) clicker.AntiDebuffEnabled = false;
         if (!hitDelayFixSupported && clicker.HitDelayFixEnabled) clicker.HitDelayFixEnabled = false;
 
@@ -359,6 +364,7 @@ public partial class MainWindow : Window
         VelocityAvailabilityText.Text = velocitySupported ? "Available" : "Unavailable on current bridge";
         AutoTotemAvailabilityText.Text = autoTotemSupported ? "Available" : "Unavailable on current bridge";
         AutoRodAvailabilityText.Text = autoRodSupported ? "Available" : "Unavailable on current bridge";
+        AutoToolAvailabilityText.Text = autoToolSupported ? "Available" : "Unavailable on current bridge";
         AntiDebuffAvailabilityText.Text = antiDebuffSupported ? "Available" : "Unavailable on current bridge";
         HitDelayFixAvailabilityText.Text = hitDelayFixSupported ? "Available" : "Unavailable on current bridge";
         ChestStealerAvailabilityText.Text = chestStealerSupported ? "Available" : "Unavailable on current bridge";
@@ -381,6 +387,7 @@ public partial class MainWindow : Window
         KeybindAutoTotemButton.IsEnabled = autoTotemSupported;
         KeybindAutoRodButton.IsEnabled = autoRodSupported;
         AutoRodActionBindButton.IsEnabled = autoRodSupported;
+        KeybindAutoToolButton.IsEnabled = autoToolSupported;
         KeybindAntiDebuffButton.IsEnabled = antiDebuffSupported;
         KeybindHitDelayFixButton.IsEnabled = hitDelayFixSupported;
         KeybindPanicButton.IsEnabled = true;
@@ -1425,12 +1432,14 @@ public partial class MainWindow : Window
         SetKeybindButtonContent(KeybindChestEspButton, "chestesp");
         SetKeybindButtonContent(KeybindChestStealerButton, "cheststealer");
         SetKeybindButtonContent(KeybindBlockEspButton, "blockesp");
+        SetKeybindButtonContent(KeybindBedPlatesButton, "bedplates");
         SetKeybindButtonContent(KeybindClosestPlayerButton, "closestplayer");
         SetKeybindButtonContent(KeybindFightStatusButton, "fightstatus");
         SetKeybindButtonContent(KeybindReachButton, "reach");
         SetKeybindButtonContent(KeybindVelocityButton, "velocity");
         SetKeybindButtonContent(KeybindAutoTotemButton, "autototem");
         SetKeybindButtonContent(KeybindAutoRodButton, "autorod");
+        SetKeybindButtonContent(KeybindAutoToolButton, "autotool");
         SetKeybindButtonContent(KeybindAntiDebuffButton, "antidebuff");
         SetKeybindButtonContent(KeybindHitDelayFixButton, "hitdelayfix");
         SetKeybindButtonContent(KeybindPanicButton, "panic");

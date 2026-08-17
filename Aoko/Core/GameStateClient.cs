@@ -1146,9 +1146,9 @@ public class GameStateClient : INotifyPropertyChanged
                     nametagShowHeldItem = clicker.NametagShowHeldItem,
                     nametagHideVanilla = clicker.NametagHideVanilla,
                     reloadMappingsNonce = Volatile.Read(ref _reloadMappingsNonce),
-                    nametagMaxCount = clicker.NametagMaxCount,
+                    nametagRange = clicker.NametagRange,
                     chestEsp = clicker.ChestEspEnabled,
-                    chestEspMaxCount = clicker.ChestEspMaxCount,
+                    chestEspRange = clicker.ChestEspRange,
                     chestStealerEnabled = clicker.ChestStealerEnabled,
                     chestStealerDelayMs = clicker.ChestStealerDelayMs,
                     blockEspEnabled = clicker.BlockEspEnabled,
@@ -1158,6 +1158,9 @@ public class GameStateClient : INotifyPropertyChanged
                     blockEspMaxCount = clicker.BlockEspMaxCount,
                     blockEspRange = clicker.BlockEspRange,
                     blockEspBlocks = clicker.BlockEspBlocksSerialized,
+                    bedPlatesEnabled = clicker.BedPlatesEnabled,
+                    bedPlatesShowDistance = clicker.BedPlatesShowDistance,
+                    bedPlatesRange = clicker.BedPlatesRange,
                     reachEnabled = clicker.ReachEnabled,
                     reachMin = clicker.ReachMin,
                     reachMax = clicker.ReachMax,
@@ -1177,6 +1180,14 @@ public class GameStateClient : INotifyPropertyChanged
                     autoRodVerifyForcedSlot = clicker.AutoRodVerifyForcedSlot,
                     autoRodExtensionTicks = clicker.AutoRodExtensionTicks,
                     autoRodHoldToExtend = clicker.AutoRodHoldToExtend,
+                    autoToolEnabled = clicker.AutoToolEnabled,
+                    autoToolSwapWeapon = clicker.AutoToolSwapWeapon,
+                    autoToolInstantSwap = clicker.AutoToolInstantSwap,
+                    autoToolSwapToDelay = clicker.AutoToolSwapToDelay,
+                    autoToolSwapBack = clicker.AutoToolSwapBack,
+                    autoToolSwapBackDelay = clicker.AutoToolSwapBackDelay,
+                    autoToolRequireMouseDown = clicker.AutoToolRequireMouseDown,
+                    autoToolOnlySneaking = clicker.AutoToolOnlySneaking,
                     antiDebuffEnabled = clicker.AntiDebuffEnabled,
                     hitDelayFixEnabled = clicker.HitDelayFixEnabled,
                     // Per-module keybinds
@@ -1193,8 +1204,10 @@ public class GameStateClient : INotifyPropertyChanged
                     keybindChestEsp      = InputHooks.GetModuleKey("chestesp"),
                     keybindChestStealer  = InputHooks.GetModuleKey("cheststealer"),
                     keybindBlockEsp      = InputHooks.GetModuleKey("blockesp"),
+                    keybindBedPlates     = InputHooks.GetModuleKey("bedplates"),
                     keybindPixelPartyAssist = InputHooks.GetModuleKey("pixelpartyassist"),
                     keybindAutoRod = InputHooks.GetModuleKey("autorod"),
+                    keybindAutoTool = InputHooks.GetModuleKey("autotool"),
                     hudEditor = clicker.HudEditorActive,
                     hudLayout = clicker.HudLayout.ToJson()
                     };
@@ -1403,6 +1416,12 @@ public class GameStateClient : INotifyPropertyChanged
                     break;
                 case "toggleBlockEspHud":
                     clicker.BlockEspHud = !clicker.BlockEspHud;
+                    break;
+                case "toggleBedPlates":
+                    clicker.BedPlatesEnabled = !clicker.BedPlatesEnabled;
+                    break;
+                case "toggleBedPlatesShowDistance":
+                    clicker.BedPlatesShowDistance = !clicker.BedPlatesShowDistance;
                     break;
                 case "setChestStealerDelayMs":
                     clicker.ChestStealerDelayMs = (int)(node?["value"]?.GetValue<float>() ?? 120f);

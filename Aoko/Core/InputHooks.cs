@@ -91,10 +91,12 @@ public static class InputHooks
         ["chestesp"]         = 0,
         ["cheststealer"]     = 0,
         ["blockesp"]         = 0,
+        ["bedplates"]        = 0,
         ["reach"]            = 0,
         ["velocity"]         = 0,
         ["autototem"]        = 0,
         ["autorod"]          = 0,
+        ["autotool"]         = 0,
         ["antidebuff"]       = 0,
         ["hitdelayfix"]     = 0,
         ["panic"]            = 0,
@@ -240,10 +242,12 @@ public static class InputHooks
             case "chestesp":         c.ChestEspEnabled = !c.ChestEspEnabled; break;
             case "cheststealer":     c.ChestStealerEnabled = !c.ChestStealerEnabled; break;
             case "blockesp":         c.BlockEspEnabled = !c.BlockEspEnabled; break;
+            case "bedplates":        c.BedPlatesEnabled = !c.BedPlatesEnabled; break;
             case "reach":            c.ReachEnabled = !c.ReachEnabled; break;
             case "velocity":         c.VelocityEnabled = !c.VelocityEnabled; break;
             case "autototem":        c.AutoTotemEnabled = !c.AutoTotemEnabled; break;
             case "autorod":          c.AutoRodEnabled = !c.AutoRodEnabled; break;
+            case "autotool":         c.AutoToolEnabled = !c.AutoToolEnabled; break;
             case "antidebuff":       c.AntiDebuffEnabled = !c.AntiDebuffEnabled; break;
             case "hitdelayfix":     c.HitDelayFixEnabled = !c.HitDelayFixEnabled; break;
             case "hudeditor":        c.HudEditorActive = !c.HudEditorActive; break;

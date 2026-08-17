@@ -6,6 +6,7 @@ static const unsigned int kModernStateFastIntervalMs = 5;
 static const unsigned int kModernStateNormalIntervalMs = 25;
 static const unsigned int kChestEspScanIntervalMs = 100;
 static const unsigned int kBlockEspScanIntervalMs = 150;
+static const unsigned int kBedPlatesScanIntervalMs = 350;
 
 inline bool IsTelemetryIntervalDue(
     unsigned int nowMs,

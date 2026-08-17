@@ -487,10 +487,12 @@ public class Clicker : INotifyPropertyChanged
             ChestEspEnabled = false;
             ChestStealerEnabled = false;
             BlockEspEnabled = false;
+            BedPlatesEnabled = false;
             ReachEnabled = false;
             VelocityEnabled = false;
             AutoTotemEnabled = false;
             AutoRodEnabled = false;
+            AutoToolEnabled = false;
             AntiDebuffEnabled = false;
             HitDelayFixEnabled = false;
 
@@ -936,17 +938,17 @@ public class Clicker : INotifyPropertyChanged
         }
     }
 
-    private int _nametagMaxCount = 8;
-    public int NametagMaxCount
+    private int _nametagRange = 4;
+    public int NametagRange
     {
-        get => _nametagMaxCount;
+        get => _nametagRange;
         set
         {
-            int clamped = Math.Clamp(value, 1, 20);
-            if (_nametagMaxCount != clamped)
+            int clamped = Math.Clamp(value, 1, 8);
+            if (_nametagRange != clamped)
             {
-                _nametagMaxCount = clamped;
-                OnPropertyChanged(nameof(NametagMaxCount));
+                _nametagRange = clamped;
+                OnPropertyChanged(nameof(NametagRange));
                 StateChanged?.Invoke();
             }
         }
@@ -964,17 +966,17 @@ public class Clicker : INotifyPropertyChanged
         }
     }
 
-    private int _chestEspMaxCount = 5;
-    public int ChestEspMaxCount
+    private int _chestEspRange = 4;
+    public int ChestEspRange
     {
-        get => _chestEspMaxCount;
+        get => _chestEspRange;
         set
         {
-            int clamped = Math.Clamp(value, 1, 20);
-            if (_chestEspMaxCount != clamped)
+            int clamped = Math.Clamp(value, 1, 8);
+            if (_chestEspRange != clamped)
             {
-                _chestEspMaxCount = clamped;
-                OnPropertyChanged(nameof(ChestEspMaxCount));
+                _chestEspRange = clamped;
+                OnPropertyChanged(nameof(ChestEspRange));
                 StateChanged?.Invoke();
             }
         }
@@ -1151,6 +1153,48 @@ public class Clicker : INotifyPropertyChanged
 
     /// <summary>Encodes the enabled targets as the delimited wire string sent to the bridge.</summary>
     public string BlockEspBlocksSerialized => BlockEspConfig.Serialize(_blockEspTargets);
+
+    // === BedPlates (block types around beds) ===
+
+    private bool _bedPlatesEnabled;
+    public bool BedPlatesEnabled
+    {
+        get => _bedPlatesEnabled;
+        set
+        {
+            if (_bedPlatesEnabled == value) return;
+            _bedPlatesEnabled = value;
+            OnPropertyChanged(nameof(BedPlatesEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _bedPlatesShowDistance = true;
+    public bool BedPlatesShowDistance
+    {
+        get => _bedPlatesShowDistance;
+        set
+        {
+            if (_bedPlatesShowDistance == value) return;
+            _bedPlatesShowDistance = value;
+            OnPropertyChanged(nameof(BedPlatesShowDistance));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private int _bedPlatesRange = 4;
+    public int BedPlatesRange
+    {
+        get => _bedPlatesRange;
+        set
+        {
+            int clamped = Math.Clamp(value, 1, 8);
+            if (_bedPlatesRange == clamped) return;
+            _bedPlatesRange = clamped;
+            OnPropertyChanged(nameof(BedPlatesRange));
+            StateChanged?.Invoke();
+        }
+    }
 
     private bool _showModuleList = true;
     public bool ShowModuleList
@@ -1452,6 +1496,112 @@ public class Clicker : INotifyPropertyChanged
         {
             if (InputHooks.SetAutoRodActionKey(value))
                 OnPropertyChanged(nameof(AutoRodActionKey));
+        }
+    }
+
+    private bool _autoToolEnabled = false;
+    public bool AutoToolEnabled
+    {
+        get => _autoToolEnabled;
+        set
+        {
+            if (_autoToolEnabled == value) return;
+            _autoToolEnabled = value;
+            OnPropertyChanged(nameof(AutoToolEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _autoToolSwapWeapon = true;
+    public bool AutoToolSwapWeapon
+    {
+        get => _autoToolSwapWeapon;
+        set
+        {
+            if (_autoToolSwapWeapon == value) return;
+            _autoToolSwapWeapon = value;
+            OnPropertyChanged(nameof(AutoToolSwapWeapon));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _autoToolInstantSwap = true;
+    public bool AutoToolInstantSwap
+    {
+        get => _autoToolInstantSwap;
+        set
+        {
+            if (_autoToolInstantSwap == value) return;
+            _autoToolInstantSwap = value;
+            OnPropertyChanged(nameof(AutoToolInstantSwap));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private int _autoToolSwapToDelay = 50;
+    public int AutoToolSwapToDelay
+    {
+        get => _autoToolSwapToDelay;
+        set
+        {
+            int clamped = Math.Clamp(value, 0, 500);
+            if (_autoToolSwapToDelay == clamped) return;
+            _autoToolSwapToDelay = clamped;
+            OnPropertyChanged(nameof(AutoToolSwapToDelay));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _autoToolSwapBack = false;
+    public bool AutoToolSwapBack
+    {
+        get => _autoToolSwapBack;
+        set
+        {
+            if (_autoToolSwapBack == value) return;
+            _autoToolSwapBack = value;
+            OnPropertyChanged(nameof(AutoToolSwapBack));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private int _autoToolSwapBackDelay = 350;
+    public int AutoToolSwapBackDelay
+    {
+        get => _autoToolSwapBackDelay;
+        set
+        {
+            int clamped = Math.Clamp(value, 0, 1000);
+            if (_autoToolSwapBackDelay == clamped) return;
+            _autoToolSwapBackDelay = clamped;
+            OnPropertyChanged(nameof(AutoToolSwapBackDelay));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _autoToolRequireMouseDown = true;
+    public bool AutoToolRequireMouseDown
+    {
+        get => _autoToolRequireMouseDown;
+        set
+        {
+            if (_autoToolRequireMouseDown == value) return;
+            _autoToolRequireMouseDown = value;
+            OnPropertyChanged(nameof(AutoToolRequireMouseDown));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _autoToolOnlySneaking = false;
+    public bool AutoToolOnlySneaking
+    {
+        get => _autoToolOnlySneaking;
+        set
+        {
+            if (_autoToolOnlySneaking == value) return;
+            _autoToolOnlySneaking = value;
+            OnPropertyChanged(nameof(AutoToolOnlySneaking));
+            StateChanged?.Invoke();
         }
     }
 

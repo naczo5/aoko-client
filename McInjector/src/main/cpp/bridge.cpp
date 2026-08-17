@@ -23,18 +23,24 @@
 #include "json_config_reader.h"
 #include "bounded_newline_buffer.h"
 #include "auto_rod_core.h"
+#include "auto_tool_core.h"
 #include "bridge_capabilities.h"
 #include "nick_hider.h"
 #include "nick_hider_jvmti.h"
 #include "anti_debuff_jvmti.h"
 #include "hud_layout.h"
 #include "block_esp_common.h"
+#include "chest_esp_common.h"
+#include "chunk_scan_common.h"
+#include "bedplates_common.h"
+#include "bedplates_icons.h"
 #include "fight_status_core.h"
 #include "aim_assist_projection.h"
 #include "silent_aura_aim.h"
 #include "kill_aura_core.h"
 #include "kill_aura_premotion.h"
 #include "native_perf_diagnostics.h"
+#include "telemetry_schedule.h"
 #include "jni_core/scoped_env.h"
 #include "jni_core/local_frame.h"
 #include "jni_core/matrix_reader.h"
@@ -112,11 +118,29 @@ static bool IsBridgeRunning() {
     return InterlockedCompareExchange(&g_running, 0, 0) != 0;
 }
 // Per-subsystem JNI locks (finer-grained than the old single JNI lock).
-// Render thread (SwapBuffers) holds g_renderJniMutex; LegoBridge thread holds
+// Overlay scan / camera poll hold g_renderJniMutex; LegoBridge thread holds
 // g_stateJniMutex.  Reach state is shared by the LegoBridge thread and WndProc,
-// so both reach paths serialize on g_stateJniMutex.
-static Mutex g_renderJniMutex;  // nametags / chest ESP / closest-player (render thread)
+// so both reach paths serialize on g_stateJniMutex. The render thread is
+// draw-only and does not take either JNI mutex.
+static Mutex g_renderJniMutex;  // nametags / chest ESP / closest-player (overlay scan)
 static Mutex g_stateJniMutex;   // ReadGameState / reach / velocity (LegoBridge thread)
+static DWORD g_legacyMinecraftClientThreadId = 0;
+
+static bool IsLegacyMinecraftClientThread() {
+    return g_legacyMinecraftClientThreadId != 0
+        && GetCurrentThreadId() == g_legacyMinecraftClientThreadId;
+}
+
+static JNIEnv* TryGetLegacyClientJniEnv() {
+    if (!g_jvm || !IsLegacyMinecraftClientThread()) return nullptr;
+    JNIEnv* env = nullptr;
+    if (g_jvm->GetEnv((void**)&env, JNI_VERSION_1_8) == JNI_OK && env) return env;
+    env = nullptr;
+    if (g_jvm->GetEnv((void**)&env, JNI_VERSION_1_6) == JNI_OK && env) return env;
+    return nullptr;
+}
+static HANDLE g_legacyScanThreadHandle = nullptr;
+static HANDLE g_legacyFastPollThreadHandle = nullptr;
 static volatile SOCKET g_serverSocket = INVALID_SOCKET;
 static volatile SOCKET g_clientSocket = INVALID_SOCKET;
 static SOCKET AtomicSocketLoad(const volatile SOCKET* slot) {
@@ -144,6 +168,8 @@ static Mutex g_legacyDetachCleanupMutex;
 static volatile LONG g_legacyRenderCleanupRequested = 0;
 static volatile LONG g_legacyRenderCallbacksInFlight = 0;
 static void ResetAutoRodLegacyJniCaches(JNIEnv* env);
+static void ResetAutoToolLegacyJniCaches(JNIEnv* env);
+static bool EnsureAutoRodLegacyMappings(JNIEnv* env, jobject player, bool needRodClass);
 
 class LegacyRenderCallbackLease {
     bool active_;
@@ -208,9 +234,9 @@ struct Config {
     bool nametagShowArmor = true;
     bool nametagShowHeldItem = true;
     bool nametagHideVanilla = false;
-    int nametagMaxCount = 8;
+    int nametagRange = 4; // chunks, clamp 1..8
     bool chestEsp = false;
-    int chestEspMaxCount = 5;
+    int chestEspRange = 4; // chunks, clamp 1..8
     bool chestStealer = false;
     int chestStealerDelayMs = 120;
     bool blockEsp = false;
@@ -219,6 +245,9 @@ struct Config {
     bool blockEspHud = true;
     int blockEspMaxCount = 64;
     int blockEspRange = 4;
+    bool bedPlates = false;
+    bool bedPlatesShowDistance = true;
+    int bedPlatesRange = 4; // chunks, clamp 1..8
     std::string gtbHint;
     int gtbCount = 0;
     std::string gtbPreview;
@@ -237,6 +266,14 @@ struct Config {
     bool autoRodVerifyForcedSlot = true;
     int autoRodExtensionTicks = autorod::kUseToRestoreTicks;
     bool autoRodHoldToExtend = false;
+    bool autoToolEnabled = false;
+    bool autoToolSwapWeapon = true;
+    bool autoToolInstantSwap = true;
+    int  autoToolSwapToDelay = 50;
+    bool autoToolSwapBack = false;
+    int  autoToolSwapBackDelay = 350;
+    bool autoToolRequireMouseDown = true;
+    bool autoToolOnlySneaking = false;
     bool showModuleList = true;
     int moduleListStyle = 0;
     bool showLogo = true;
@@ -254,7 +291,9 @@ struct Config {
     int keybindChestEsp = 0;
     int keybindChestStealer = 0;
     int keybindBlockEsp = 0;
+    int keybindBedPlates = 0;
     int keybindAutoRod = 0;
+    int keybindAutoTool = 0;
     bool pixelPartyAssist = false;
     int pixelPartyScanRadius = 28;
     bool pixelPartyAutoLook = false;
@@ -417,6 +456,16 @@ static Mutex g_blockEspTargetsMutex;
 static volatile LONG g_blockEspTargetsVersion = 0;
 static DWORD g_lastBlockEspScanMs = 0;
 
+// ── BedPlates shared state (legacy 1.8.9) ──
+struct BedPlateRenderData {
+    int x, y, z;
+    double dist;
+    std::vector<std::string> blocks; // visible unique ids already sorted
+};
+static std::vector<BedPlateRenderData> g_bedPlateList;
+static Mutex g_bedPlateListMutex;
+static DWORD g_lastBedPlatesScanMs = 0;
+
 // Game State
 struct GameState {
     bool mapped = false;
@@ -445,7 +494,7 @@ static GameState g_gameState;
 static Mutex g_stateMutex;
 static Mutex g_socketMutex; // Protects socket writes
 static Mutex g_jsonMutex;   // Protects shared JSON buffer
-static std::string g_pendingJson; // Data from Render Thread
+static std::string g_pendingJson; // Entity telemetry projected on the render thread
 static unsigned long long g_lastEntitySeenMs = 0;
 
 struct PixelPartySnap {
@@ -817,6 +866,16 @@ static jfieldID g_viewerPosXField = nullptr;
 static jfieldID g_viewerPosYField = nullptr;
 static jfieldID g_viewerPosZField = nullptr;
 
+struct BgCamState18 {
+    double camX = 0, camY = 0, camZ = 0;
+    float yaw = 0, pitch = 0, fov = 70.0f;
+    bool camFound = false;
+    Matrix4x4 proj = {}, view = {};
+    bool matsOk = false;
+};
+static BgCamState18 g_bgCamState18 = {};
+static Mutex g_bgCamMutex18;
+
 struct TagSmoothingState {
     float x = 0.0f;
     float y = 0.0f;
@@ -863,9 +922,8 @@ struct FightStatusDrawSnapshot18 {
     std::uint64_t stableId = 0;
     std::string targetName;
     float distance = 0.0f;
-    float feetX = 0.0f, feetY = 0.0f;
-    float headX = 0.0f, headY = 0.0f;
-    bool hasProjectedAnchors = false;
+    double worldX = 0.0, worldY = 0.0, worldZ = 0.0;
+    bool hasWorldPos = false;
     fightstatus::FightStatusResult result;
     float normalizedAdvantage = 0.0f;
 };
@@ -881,6 +939,23 @@ struct ClosestPlayerDrawSnapshot18 {
     double relativeZ = 0.0;
     float localYaw = 0.0f;
 };
+
+struct OverlayPlayer18 {
+    std::string displayName;
+    std::string heldText;
+    double iX = 0, iY = 0, iZ = 0;
+    double dist = 0;
+    float health = 20.0f;
+    int armorPoints = -1;
+    int hashKey = 0;
+    bool inNametagRange = false;
+};
+static std::vector<OverlayPlayer18> g_overlayPlayers18;
+static Mutex g_overlayPlayersMutex18;
+static ClosestPlayerDrawSnapshot18 g_closestPlayerDraw18;
+static Mutex g_closestPlayerMutex18;
+static std::vector<lc::ChestEspCandidate> g_overlayChests18;
+static Mutex g_overlayChestsMutex18;
 
 static fightstatus::FightStatusTracker g_fightStatusTracker18;
 static std::unordered_map<std::uint64_t, FightStatusTargetObservation18> g_fightStatusObservations18;
@@ -1002,11 +1077,10 @@ static void UpdateFightStatusState18(DWORD now, bool enabled, bool menuOpen,
     snapshot.stableId = selected->stableId;
     snapshot.targetName = selected->displayName;
     snapshot.distance = selected->distance;
-    snapshot.feetX = selected->feetX;
-    snapshot.feetY = selected->feetY;
-    snapshot.headX = selected->headX;
-    snapshot.headY = selected->headY;
-    snapshot.hasProjectedAnchors = selected->hasProjectedAnchors;
+    snapshot.worldX = selected->x;
+    snapshot.worldY = selected->y;
+    snapshot.worldZ = selected->z;
+    snapshot.hasWorldPos = true;
     snapshot.result = result;
     snapshot.normalizedAdvantage = fightstatus::NormalizedLead(
         result.selfSurvivability, result.targetSurvivability);
@@ -2004,10 +2078,10 @@ bool DiscoverMappings(JNIEnv* env) {
     if (env->ExceptionCheck()) env->ExceptionClear();
 
     if (mopClass && !g_movingObjectTypeClass) {
-        jclass mopTypeLocal = env->FindClass("net/minecraft/util/MovingObjectPosition$MovingObjectType");
+        jclass mopTypeLocal = LoadClassWithLoader(env, gcl, "net.minecraft.util.MovingObjectPosition$MovingObjectType");
         if (!mopTypeLocal) {
-            env->ExceptionClear();
-            mopTypeLocal = LoadClassWithLoader(env, gcl, "net.minecraft.util.MovingObjectPosition$MovingObjectType");
+            mopTypeLocal = env->FindClass("net/minecraft/util/MovingObjectPosition$MovingObjectType");
+            if (env->ExceptionCheck()) env->ExceptionClear();
         }
         if (mopTypeLocal && !env->ExceptionCheck()) {
             g_movingObjectTypeClass = (jclass)env->NewGlobalRef(mopTypeLocal);
@@ -2316,10 +2390,16 @@ bool DiscoverMappings(JNIEnv* env) {
     }
 
     // ActiveRenderInfo Discovery (Dynamic)
-    g_activeRenderInfoClass = env->FindClass("net/minecraft/client/renderer/ActiveRenderInfo");
-    TRACE_BRANCH("activeRenderInfoCanonicalFindClassHit", g_activeRenderInfoClass != nullptr);
-    if (!g_activeRenderInfoClass) {
-        env->ExceptionClear();
+    jclass ariClass = LoadClassWithLoader(env, gcl, "net.minecraft.client.renderer.ActiveRenderInfo");
+    if (!ariClass) {
+        ariClass = env->FindClass("net/minecraft/client/renderer/ActiveRenderInfo");
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+    if (ariClass) {
+        g_activeRenderInfoClass = (jclass)env->NewGlobalRef(ariClass);
+        TRACE_BRANCH("activeRenderInfoCanonicalFindClassHit", true);
+        Log("Found ActiveRenderInfo class: net.minecraft.client.renderer.ActiveRenderInfo");
+    } else {
         Log("ActiveRenderInfo not found by name, scanning classes...");
         TRACE_PATH("scan-for-active-render-info");
         for (int i = 0; i < classCount; i++) {
@@ -2355,16 +2435,22 @@ bool DiscoverMappings(JNIEnv* env) {
                  break;
             }
         }
-    } else {
-        g_activeRenderInfoClass = (jclass)env->NewGlobalRef(g_activeRenderInfoClass);
     }
 
     if (g_activeRenderInfoClass) {
         g_modelViewField = env->GetStaticFieldID(g_activeRenderInfoClass, "MODELVIEW", "Ljava/nio/FloatBuffer;");
+        if (!g_modelViewField) {
+            env->ExceptionClear();
+            g_modelViewField = env->GetStaticFieldID(g_activeRenderInfoClass, "field_178812_b", "Ljava/nio/FloatBuffer;");
+        }
         TRACE_BRANCH("modelViewCanonicalHit", g_modelViewField != nullptr);
         if (!g_modelViewField) env->ExceptionClear();
         
         g_projectionField = env->GetStaticFieldID(g_activeRenderInfoClass, "PROJECTION", "Ljava/nio/FloatBuffer;");
+        if (!g_projectionField) {
+            env->ExceptionClear();
+            g_projectionField = env->GetStaticFieldID(g_activeRenderInfoClass, "field_178813_c", "Ljava/nio/FloatBuffer;");
+        }
         TRACE_BRANCH("projectionCanonicalHit", g_projectionField != nullptr);
         if (!g_projectionField) env->ExceptionClear();
         
@@ -2916,6 +3002,7 @@ static bool RunHeavyDiscovery(JNIEnv* env, const char* reason) {
     DWORD startedAt = GetTickCount();
     InterlockedExchange(&g_heavyDiscoveryInProgress, 1);
     ResetAutoRodLegacyJniCaches(env);
+    ResetAutoToolLegacyJniCaches(env);
     Log(std::string("Heavy mapping discovery start: ") + (reason ? reason : "unspecified"));
     bool ok = DiscoverMappings(env);
     DWORD elapsedMs = GetTickCount() - startedAt;
@@ -6291,6 +6378,72 @@ static bool LegacyGetBlockAtIsNonAir(JNIEnv* env, int bx, int by, int bz, jobjec
     return true;
 }
 
+// Like LegacyGetBlockAtIsNonAir, but does not require Material.isSolid() —
+// BedPlates needs non-solid blocks (e.g. beds themselves) too. Returns the
+// normalized block id via outId; false/empty for air or unresolved blocks.
+static bool LegacyGetBlockIdAtAny(JNIEnv* env, int bx, int by, int bz, std::string* outId) {
+    if (outId) outId->clear();
+    if (!env || !g_mcInstance || !g_theWorldField || !g_blockPosClass || !g_blockPosIntCtor) return false;
+    jobject world = env->GetObjectField(g_mcInstance, g_theWorldField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return false; }
+    if (!world) return false;
+
+    if (!g_worldGetBlockStateMethod) {
+        jclass worldCls = env->GetObjectClass(world);
+        if (worldCls) {
+            g_worldGetBlockStateMethod = env->GetMethodID(worldCls, "getBlockState", "(Lnet/minecraft/util/BlockPos;)Lnet/minecraft/block/state/IBlockState;");
+            if (!g_worldGetBlockStateMethod) {
+                env->ExceptionClear();
+                g_worldGetBlockStateMethod = env->GetMethodID(worldCls, "func_180495_p", "(Lnet/minecraft/util/BlockPos;)Lnet/minecraft/block/state/IBlockState;");
+            }
+            if (!g_worldGetBlockStateMethod) env->ExceptionClear();
+            env->DeleteLocalRef(worldCls);
+        }
+    }
+    if (!g_worldGetBlockStateMethod) { env->DeleteLocalRef(world); return false; }
+
+    jobject pos = env->NewObject(g_blockPosClass, g_blockPosIntCtor, (jint)bx, (jint)by, (jint)bz);
+    if (env->ExceptionCheck() || !pos) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        env->DeleteLocalRef(world);
+        return false;
+    }
+    jobject state = env->CallObjectMethod(world, g_worldGetBlockStateMethod, pos);
+    env->DeleteLocalRef(pos);
+    env->DeleteLocalRef(world);
+    if (env->ExceptionCheck() || !state) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return false;
+    }
+
+    if (!g_blockStateGetBlockMethod) {
+        jclass stateCls = env->GetObjectClass(state);
+        if (stateCls) {
+            g_blockStateGetBlockMethod = env->GetMethodID(stateCls, "getBlock", "()Lnet/minecraft/block/Block;");
+            if (!g_blockStateGetBlockMethod) {
+                env->ExceptionClear();
+                g_blockStateGetBlockMethod = env->GetMethodID(stateCls, "func_177230_c", "()Lnet/minecraft/block/Block;");
+            }
+            if (!g_blockStateGetBlockMethod) env->ExceptionClear();
+            env->DeleteLocalRef(stateCls);
+        }
+    }
+    if (!g_blockStateGetBlockMethod) { env->DeleteLocalRef(state); return false; }
+
+    jobject block = env->CallObjectMethod(state, g_blockStateGetBlockMethod);
+    env->DeleteLocalRef(state);
+    if (env->ExceptionCheck() || !block) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return false;
+    }
+    std::string unloc = LegacyGetBlockUnlocalizedName(env, block);
+    env->DeleteLocalRef(block);
+    std::string id = lc::BlockEspNormalizeId(unloc);
+    if (id.empty() || lc::IsIgnorableBedPlateBlockId(id)) return false;
+    if (outId) *outId = id;
+    return true;
+}
+
 static bool LegacyResolveHeldClayBlock(JNIEnv* env, jobject player,
     jobject* outBlock, std::string* outUnloc, std::string* outLabel) {
     if (outBlock) *outBlock = nullptr;
@@ -6620,6 +6773,472 @@ static void UpdateHitDelayFixLegacy(JNIEnv* env, const Config& cfg, const GameSt
         env->SetIntField(g_mcInstance, g_leftClickCounterField, 0);
         if (env->ExceptionCheck()) env->ExceptionClear();
     }
+}
+
+static autotool::AutoToolState g_autoToolState18;
+static jmethodID g_autoToolGetStrVsBlock18 = nullptr;
+static jmethodID g_autoToolGetItem18 = nullptr;
+static jmethodID g_autoToolGetIdFromItem18 = nullptr;
+static jmethodID g_autoToolGetEnchantmentLevel18 = nullptr;
+static jmethodID g_autoToolMopGetBlockPos18 = nullptr;
+static jfieldID  g_autoToolMopBlockPosField18 = nullptr;
+static jfieldID  g_autoToolMopSideHitField18 = nullptr;
+static jmethodID g_autoToolPlayerIsSneaking18 = nullptr;
+static jmethodID g_autoToolClickBlock18 = nullptr;
+static jmethodID g_autoToolResetBlockRemoving18 = nullptr;
+static jfieldID  g_autoToolCurrentPlayerItem18 = nullptr;
+static jclass    g_autoToolItemClass18 = nullptr;
+static jclass    g_autoToolSwordClass18 = nullptr;
+static jclass    g_autoToolAxeClass18 = nullptr;
+static jclass    g_autoToolEnchantHelperClass18 = nullptr;
+
+static void ResetAutoToolLegacyJniCaches(JNIEnv* env) {
+    g_autoToolState18.Reset();
+    g_autoToolGetStrVsBlock18 = nullptr;
+    g_autoToolGetItem18 = nullptr;
+    g_autoToolGetIdFromItem18 = nullptr;
+    g_autoToolGetEnchantmentLevel18 = nullptr;
+    g_autoToolMopGetBlockPos18 = nullptr;
+    g_autoToolMopBlockPosField18 = nullptr;
+    g_autoToolMopSideHitField18 = nullptr;
+    g_autoToolPlayerIsSneaking18 = nullptr;
+    g_autoToolClickBlock18 = nullptr;
+    g_autoToolResetBlockRemoving18 = nullptr;
+    g_autoToolCurrentPlayerItem18 = nullptr;
+    if (env) {
+        if (g_autoToolItemClass18) { env->DeleteGlobalRef(g_autoToolItemClass18); g_autoToolItemClass18 = nullptr; }
+        if (g_autoToolSwordClass18) { env->DeleteGlobalRef(g_autoToolSwordClass18); g_autoToolSwordClass18 = nullptr; }
+        if (g_autoToolAxeClass18) { env->DeleteGlobalRef(g_autoToolAxeClass18); g_autoToolAxeClass18 = nullptr; }
+        if (g_autoToolEnchantHelperClass18) { env->DeleteGlobalRef(g_autoToolEnchantHelperClass18); g_autoToolEnchantHelperClass18 = nullptr; }
+    }
+}
+
+static bool EnsureAutoToolLegacyJni(JNIEnv* env, jobject player) {
+    if (!env || !player || !g_mcInstance) return false;
+    jobject gcl = EnsureGameClassLoader(env);
+    if (!gcl) return false;
+
+    if (!EnsureAutoRodLegacyMappings(env, player, false)) return false;
+
+    if (!g_autoToolGetStrVsBlock18 || !g_autoToolGetItem18) {
+        jclass stackCls = LoadClassWithLoader(env, gcl, "net.minecraft.item.ItemStack");
+        if (stackCls) {
+            if (!g_autoToolGetStrVsBlock18) {
+                const char* names[] = { "getStrVsBlock", "func_150997_a", nullptr };
+                for (int i = 0; names[i] && !g_autoToolGetStrVsBlock18; ++i) {
+                    g_autoToolGetStrVsBlock18 = env->GetMethodID(stackCls, names[i], "(Lnet/minecraft/block/Block;)F");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolGetStrVsBlock18 = nullptr; }
+                }
+            }
+            if (!g_autoToolGetItem18) {
+                const char* names[] = { "getItem", "func_77973_b", nullptr };
+                for (int i = 0; names[i] && !g_autoToolGetItem18; ++i) {
+                    g_autoToolGetItem18 = env->GetMethodID(stackCls, names[i], "()Lnet/minecraft/item/Item;");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolGetItem18 = nullptr; }
+                }
+            }
+            env->DeleteLocalRef(stackCls);
+        }
+    }
+
+    if (!g_autoToolItemClass18 || !g_autoToolGetIdFromItem18) {
+        jclass itemCls = LoadClassWithLoader(env, gcl, "net.minecraft.item.Item");
+        if (itemCls) {
+            if (!g_autoToolGetIdFromItem18) {
+                const char* names[] = { "getIdFromItem", "func_150891_a", nullptr };
+                for (int i = 0; names[i] && !g_autoToolGetIdFromItem18; ++i) {
+                    g_autoToolGetIdFromItem18 = env->GetStaticMethodID(itemCls, names[i], "(Lnet/minecraft/item/Item;)I");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolGetIdFromItem18 = nullptr; }
+                }
+            }
+            if (!g_autoToolItemClass18) {
+                g_autoToolItemClass18 = (jclass)env->NewGlobalRef(itemCls);
+            }
+            env->DeleteLocalRef(itemCls);
+        }
+    }
+
+    if (!g_autoToolSwordClass18) {
+        jclass swordCls = LoadClassWithLoader(env, gcl, "net.minecraft.item.ItemSword");
+        if (swordCls) {
+            g_autoToolSwordClass18 = (jclass)env->NewGlobalRef(swordCls);
+            env->DeleteLocalRef(swordCls);
+        }
+    }
+
+    if (!g_autoToolAxeClass18) {
+        jclass axeCls = LoadClassWithLoader(env, gcl, "net.minecraft.item.ItemAxe");
+        if (axeCls) {
+            g_autoToolAxeClass18 = (jclass)env->NewGlobalRef(axeCls);
+            env->DeleteLocalRef(axeCls);
+        }
+    }
+
+    if (!g_autoToolEnchantHelperClass18 || !g_autoToolGetEnchantmentLevel18) {
+        jclass enchCls = LoadClassWithLoader(env, gcl, "net.minecraft.enchantment.EnchantmentHelper");
+        if (enchCls) {
+            if (!g_autoToolGetEnchantmentLevel18) {
+                const char* names[] = { "getEnchantmentLevel", "func_77506_a", nullptr };
+                for (int i = 0; names[i] && !g_autoToolGetEnchantmentLevel18; ++i) {
+                    g_autoToolGetEnchantmentLevel18 = env->GetStaticMethodID(enchCls, names[i], "(ILnet/minecraft/item/ItemStack;)I");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolGetEnchantmentLevel18 = nullptr; }
+                }
+            }
+            if (!g_autoToolEnchantHelperClass18) {
+                g_autoToolEnchantHelperClass18 = (jclass)env->NewGlobalRef(enchCls);
+            }
+            env->DeleteLocalRef(enchCls);
+        }
+    }
+
+    if (!g_autoToolPlayerIsSneaking18) {
+        jclass playerCls = env->GetObjectClass(player);
+        if (playerCls) {
+            const char* names[] = { "isSneaking", "func_70093_af", nullptr };
+            for (int i = 0; names[i] && !g_autoToolPlayerIsSneaking18; ++i) {
+                g_autoToolPlayerIsSneaking18 = env->GetMethodID(playerCls, names[i], "()Z");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolPlayerIsSneaking18 = nullptr; }
+            }
+            env->DeleteLocalRef(playerCls);
+        }
+    }
+
+    jobject controller = nullptr;
+    if (g_autoRodControllerField18) {
+        controller = env->GetObjectField(g_mcInstance, g_autoRodControllerField18);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); controller = nullptr; }
+    }
+    if (controller) {
+        jclass controllerCls = env->GetObjectClass(controller);
+        if (controllerCls) {
+            if (!g_autoToolClickBlock18) {
+                const char* names[] = { "clickBlock", "func_180511_b", nullptr };
+                const char* sig = "(Lnet/minecraft/util/BlockPos;Lnet/minecraft/util/EnumFacing;)Z";
+                for (int i = 0; names[i] && !g_autoToolClickBlock18; ++i) {
+                    g_autoToolClickBlock18 = env->GetMethodID(controllerCls, names[i], sig);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolClickBlock18 = nullptr; }
+                }
+            }
+            if (!g_autoToolResetBlockRemoving18) {
+                const char* names[] = { "resetBlockRemoving", "func_78767_c", nullptr };
+                for (int i = 0; names[i] && !g_autoToolResetBlockRemoving18; ++i) {
+                    g_autoToolResetBlockRemoving18 = env->GetMethodID(controllerCls, names[i], "()V");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolResetBlockRemoving18 = nullptr; }
+                }
+            }
+            if (!g_autoToolCurrentPlayerItem18) {
+                const char* names[] = { "currentPlayerItem", "field_78777_l", nullptr };
+                for (int i = 0; names[i] && !g_autoToolCurrentPlayerItem18; ++i) {
+                    g_autoToolCurrentPlayerItem18 = env->GetFieldID(controllerCls, names[i], "I");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolCurrentPlayerItem18 = nullptr; }
+                }
+            }
+            env->DeleteLocalRef(controllerCls);
+        }
+        env->DeleteLocalRef(controller);
+    }
+
+    if (!g_worldGetBlockStateMethod && g_theWorldField) {
+        jobject world = env->GetObjectField(g_mcInstance, g_theWorldField);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); world = nullptr; }
+        if (world) {
+            jclass worldCls = env->GetObjectClass(world);
+            if (worldCls) {
+                const char* names[] = { "getBlockState", "func_180495_p", nullptr };
+                for (int i = 0; names[i] && !g_worldGetBlockStateMethod; ++i) {
+                    g_worldGetBlockStateMethod = env->GetMethodID(worldCls, names[i], "(Lnet/minecraft/util/BlockPos;)Lnet/minecraft/block/state/IBlockState;");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_worldGetBlockStateMethod = nullptr; }
+                }
+                env->DeleteLocalRef(worldCls);
+            }
+            env->DeleteLocalRef(world);
+        }
+    }
+
+    if (!g_blockStateGetBlockMethod) {
+        jclass stateCls = LoadClassWithLoader(env, gcl, "net.minecraft.block.state.IBlockState");
+        if (stateCls) {
+            const char* names[] = { "getBlock", "func_177230_c", nullptr };
+            for (int i = 0; names[i] && !g_blockStateGetBlockMethod; ++i) {
+                g_blockStateGetBlockMethod = env->GetMethodID(stateCls, names[i], "()Lnet/minecraft/block/Block;");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_blockStateGetBlockMethod = nullptr; }
+            }
+            env->DeleteLocalRef(stateCls);
+        }
+    }
+
+    return g_autoToolGetStrVsBlock18 != nullptr && g_autoRodInventoryField18 != nullptr && g_autoRodCurrentItemField18 != nullptr;
+}
+
+static int FindBestAutoToolWeaponSlotLegacy(JNIEnv* env, jobject inventory) {
+    if (!env || !inventory || !g_autoRodGetStackInSlot18) return -1;
+    float bestDmg = 0.0f;
+    int bestWeapon = -1;
+    for (int i = 0; i < 9; ++i) {
+        jobject stack = env->CallObjectMethod(inventory, g_autoRodGetStackInSlot18, (jint)i);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); stack = nullptr; }
+        if (!stack) continue;
+
+        jobject item = g_autoToolGetItem18 ? env->CallObjectMethod(stack, g_autoToolGetItem18) : nullptr;
+        if (env->ExceptionCheck()) { env->ExceptionClear(); item = nullptr; }
+        if (item) {
+            float score = 0.0f;
+            const bool isSword = g_autoToolSwordClass18 && env->IsInstanceOf(item, g_autoToolSwordClass18);
+            const bool isAxe = g_autoToolAxeClass18 && env->IsInstanceOf(item, g_autoToolAxeClass18);
+            if (isSword) {
+                score = 10.0f;
+            } else if (isAxe) {
+                score = 8.0f;
+            } else if (g_autoToolItemClass18 && g_autoToolGetIdFromItem18) {
+                int itemId = env->CallStaticIntMethod(g_autoToolItemClass18, g_autoToolGetIdFromItem18, item);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); itemId = 0; }
+                switch (itemId) {
+                    case 276: score = 7.0f; break;
+                    case 267: score = 6.0f; break;
+                    case 272: score = 5.0f; break;
+                    case 268: score = 4.0f; break;
+                    case 283: score = 4.0f; break;
+                    case 279: score = 6.0f; break;
+                    case 258: score = 5.0f; break;
+                    case 275: score = 4.0f; break;
+                    case 271: score = 3.0f; break;
+                    case 286: score = 3.0f; break;
+                    default:  score = 0.0f; break;
+                }
+            }
+            if (score > 0.0f && g_autoToolEnchantHelperClass18 && g_autoToolGetEnchantmentLevel18) {
+                jint sharp = env->CallStaticIntMethod(g_autoToolEnchantHelperClass18, g_autoToolGetEnchantmentLevel18, 16, stack);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); sharp = 0; }
+                if (sharp > 0) score += (float)sharp * 1.25f;
+            }
+            if (isSword) score += 0.01f;
+            if (score > bestDmg) {
+                bestDmg = score;
+                bestWeapon = i;
+            }
+            env->DeleteLocalRef(item);
+        }
+        env->DeleteLocalRef(stack);
+    }
+    return bestWeapon;
+}
+
+static void ApplyAutoToolSlotLegacy(JNIEnv* env, jobject inventory, int targetSlot) {
+    if (!env || !inventory || !g_autoRodCurrentItemField18) return;
+    env->SetIntField(inventory, g_autoRodCurrentItemField18, targetSlot);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return; }
+
+    // Invalidate the controller's cached slot so the next client tick emits C09
+    // in vanilla packet order. Do not call syncCurrentPlayItem or clickBlock from
+    // this worker — off-thread START_DESTROY / held-item packets crash and flag.
+    jobject controller = nullptr;
+    if (g_autoRodControllerField18 && g_mcInstance) {
+        controller = env->GetObjectField(g_mcInstance, g_autoRodControllerField18);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); controller = nullptr; }
+    }
+    if (controller && g_autoToolCurrentPlayerItem18) {
+        env->SetIntField(controller, g_autoToolCurrentPlayerItem18, -1);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+    if (controller) env->DeleteLocalRef(controller);
+}
+
+static void UpdateAutoToolLegacy(JNIEnv* env, const Config& cfg, const GameState& state) {
+    if (!cfg.autoToolEnabled) {
+        g_autoToolState18.Reset();
+        return;
+    }
+
+    if (!state.inWorld || state.guiOpen || !g_mcInstance || !g_thePlayerField) {
+        return;
+    }
+
+    // Auto Rod writes the rod slot then waits two ticks to use. A held LMB
+    // autoclick makes Auto Tool snap back to the weapon in that window, which
+    // cancels the cast and can flag Grim for use/attack on the wrong item.
+    if (HasPendingAutoRodLegacyTransaction()) {
+        return;
+    }
+
+    if (env->PushLocalFrame(32) < 0) return;
+
+    jobject player = env->GetObjectField(g_mcInstance, g_thePlayerField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); player = nullptr; }
+    if (!player || !EnsureAutoToolLegacyJni(env, player)) {
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    jobject inventory = env->GetObjectField(player, g_autoRodInventoryField18);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); inventory = nullptr; }
+    if (!inventory) {
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    int currentSlot = env->GetIntField(inventory, g_autoRodCurrentItemField18);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); currentSlot = 0; }
+
+    bool isSneaking = false;
+    if (g_autoToolPlayerIsSneaking18) {
+        isSneaking = env->CallBooleanMethod(player, g_autoToolPlayerIsSneaking18) != JNI_FALSE;
+        if (env->ExceptionCheck()) { env->ExceptionClear(); isSneaking = false; }
+    }
+
+    autotool::AutoToolInput input;
+    input.nowMs = GetTickCount();
+    input.inWorld = state.inWorld;
+    input.guiOpen = state.guiOpen;
+    input.mouseDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 || state.breakingBlock;
+    input.isSneaking = isSneaking;
+    input.currentSlot = currentSlot;
+    input.pauseExclusive = HasPendingAutoRodLegacyTransaction();
+    input.isBlockHit = false;
+    input.isEntityHit = false;
+    input.bestToolSlot = -1;
+    input.bestWeaponSlot = -1;
+
+    if (g_objectMouseOverField && g_typeOfHitField && g_enumNameMethod) {
+        jobject mop = env->GetObjectField(g_mcInstance, g_objectMouseOverField);
+        if (mop) {
+            jobject typeOfHit = env->GetObjectField(mop, g_typeOfHitField);
+            if (typeOfHit) {
+                jstring nameStr = (jstring)env->CallObjectMethod(typeOfHit, g_enumNameMethod);
+                if (nameStr && !env->ExceptionCheck()) {
+                    const char* nameChars = env->GetStringUTFChars(nameStr, nullptr);
+                    if (nameChars) {
+                        if (strcmp(nameChars, "BLOCK") == 0) {
+                            input.isBlockHit = true;
+                            // Resolve block at hit pos
+                            if (!g_autoToolMopGetBlockPos18 && !g_autoToolMopBlockPosField18) {
+                                jclass mopCls = env->GetObjectClass(mop);
+                                if (mopCls) {
+                                    const char* mNames[] = { "getBlockPos", "func_178782_a", nullptr };
+                                    for (int m = 0; mNames[m] && !g_autoToolMopGetBlockPos18; ++m) {
+                                        g_autoToolMopGetBlockPos18 = env->GetMethodID(mopCls, mNames[m], "()Lnet/minecraft/util/BlockPos;");
+                                        if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolMopGetBlockPos18 = nullptr; }
+                                    }
+                                    if (!g_autoToolMopGetBlockPos18) {
+                                        const char* fNames[] = { "blockPos", "field_178783_e", nullptr };
+                                        for (int f = 0; fNames[f] && !g_autoToolMopBlockPosField18; ++f) {
+                                            g_autoToolMopBlockPosField18 = env->GetFieldID(mopCls, fNames[f], "Lnet/minecraft/util/BlockPos;");
+                                            if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolMopBlockPosField18 = nullptr; }
+                                        }
+                                    }
+                                    env->DeleteLocalRef(mopCls);
+                                }
+                            }
+
+                            jobject blockPos = nullptr;
+                            if (g_autoToolMopGetBlockPos18) {
+                                blockPos = env->CallObjectMethod(mop, g_autoToolMopGetBlockPos18);
+                                if (env->ExceptionCheck()) { env->ExceptionClear(); blockPos = nullptr; }
+                            } else if (g_autoToolMopBlockPosField18) {
+                                blockPos = env->GetObjectField(mop, g_autoToolMopBlockPosField18);
+                                if (env->ExceptionCheck()) { env->ExceptionClear(); blockPos = nullptr; }
+                            }
+
+                            jobject world = g_theWorldField ? env->GetObjectField(g_mcInstance, g_theWorldField) : nullptr;
+                            if (env->ExceptionCheck()) { env->ExceptionClear(); world = nullptr; }
+
+                            if (blockPos && world && g_worldGetBlockStateMethod && g_blockStateGetBlockMethod) {
+                                jobject blockState = env->CallObjectMethod(world, g_worldGetBlockStateMethod, blockPos);
+                                if (env->ExceptionCheck()) { env->ExceptionClear(); blockState = nullptr; }
+                                if (blockState) {
+                                    jobject block = env->CallObjectMethod(blockState, g_blockStateGetBlockMethod);
+                                    if (env->ExceptionCheck()) { env->ExceptionClear(); block = nullptr; }
+                                    if (block) {
+                                        float bestSpeed = 1.0f;
+                                        int bestSlot = -1;
+                                        for (int i = 0; i < 9; ++i) {
+                                            jobject stack = env->CallObjectMethod(inventory, g_autoRodGetStackInSlot18, (jint)i);
+                                            if (env->ExceptionCheck()) { env->ExceptionClear(); stack = nullptr; }
+                                            if (!stack) continue;
+
+                                            float speed = env->CallFloatMethod(stack, g_autoToolGetStrVsBlock18, block);
+                                            if (env->ExceptionCheck()) { env->ExceptionClear(); speed = 1.0f; }
+
+                                            if (speed > 1.0f && g_autoToolEnchantHelperClass18 && g_autoToolGetEnchantmentLevel18) {
+                                                jint eff = env->CallStaticIntMethod(g_autoToolEnchantHelperClass18, g_autoToolGetEnchantmentLevel18, 32, stack);
+                                                if (env->ExceptionCheck()) { env->ExceptionClear(); eff = 0; }
+                                                if (eff > 0) speed += (float)(eff * eff + 1);
+                                            }
+
+                                            if (g_autoToolGetItem18 && g_autoToolSwordClass18) {
+                                                jobject item = env->CallObjectMethod(stack, g_autoToolGetItem18);
+                                                if (env->ExceptionCheck()) { env->ExceptionClear(); item = nullptr; }
+                                                if (item) {
+                                                    if (env->IsInstanceOf(item, g_autoToolSwordClass18) && speed <= 1.5f) {
+                                                        speed /= 2.0f;
+                                                    }
+                                                    env->DeleteLocalRef(item);
+                                                }
+                                            }
+
+                                            if (speed > bestSpeed) {
+                                                bestSpeed = speed;
+                                                bestSlot = i;
+                                            }
+                                            env->DeleteLocalRef(stack);
+                                        }
+                                        input.bestToolSlot = bestSlot;
+                                        env->DeleteLocalRef(block);
+                                    }
+                                    env->DeleteLocalRef(blockState);
+                                }
+                            }
+                            if (world) env->DeleteLocalRef(world);
+                            if (blockPos) env->DeleteLocalRef(blockPos);
+                        } else if (strcmp(nameChars, "ENTITY") == 0) {
+                            input.isEntityHit = true;
+                        }
+                        env->ReleaseStringUTFChars(nameStr, nameChars);
+                    }
+                    env->DeleteLocalRef(nameStr);
+                }
+                if (env->ExceptionCheck()) env->ExceptionClear();
+                env->DeleteLocalRef(typeOfHit);
+            }
+            if (!input.isEntityHit && g_entityHitField) {
+                jobject entityHit = env->GetObjectField(mop, g_entityHitField);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); entityHit = nullptr; }
+                if (entityHit) {
+                    input.isEntityHit = true;
+                    env->DeleteLocalRef(entityHit);
+                }
+            }
+            env->DeleteLocalRef(mop);
+        }
+    }
+
+    if (!input.isEntityHit && g_pointedEntityField && g_mcInstance) {
+        jobject pointed = env->GetObjectField(g_mcInstance, g_pointedEntityField);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); pointed = nullptr; }
+        if (pointed) {
+            input.isEntityHit = true;
+            env->DeleteLocalRef(pointed);
+        }
+    }
+    if (input.isEntityHit && cfg.autoToolSwapWeapon) {
+        input.bestWeaponSlot = FindBestAutoToolWeaponSlotLegacy(env, inventory);
+    }
+
+    autotool::AutoToolConfig coreCfg;
+    coreCfg.enabled = cfg.autoToolEnabled;
+    coreCfg.swapWeapon = cfg.autoToolSwapWeapon;
+    coreCfg.instantSwap = cfg.autoToolInstantSwap;
+    coreCfg.swapToDelayMs = cfg.autoToolSwapToDelay;
+    coreCfg.swapBack = cfg.autoToolSwapBack;
+    coreCfg.swapBackDelayMs = cfg.autoToolSwapBackDelay;
+    coreCfg.requireMouseDown = cfg.autoToolRequireMouseDown;
+    coreCfg.onlyWhileSneaking = cfg.autoToolOnlySneaking;
+
+    autotool::AutoToolAction action = autotool::UpdateAutoToolState(g_autoToolState18, coreCfg, input);
+    if (action.switchSlot && action.targetSlot >= 0 && action.targetSlot < 9) {
+        ApplyAutoToolSlotLegacy(env, inventory, action.targetSlot);
+    }
+
+    env->PopLocalFrame(nullptr);
 }
 
 static void LogChestStealerSkippedMenu(const std::string& title) {
@@ -8036,6 +8655,19 @@ static void ResetImGuiBackendsForReinit(const char* reason) {
     g_glInitialized = false;
 }
 
+static bool WaitForOwnedThreadExit(HANDLE& handle, const char* name, DWORD timeoutMs) {
+    if (!handle) return true;
+    const DWORD result = WaitForSingleObject(handle, timeoutMs);
+    if (result != WAIT_OBJECT_0) {
+        Log(std::string("Detach: timed out waiting for ") + (name ? name : "worker") +
+            "; keeping bridge loaded for safety.");
+        return false;
+    }
+    CloseHandle(handle);
+    handle = nullptr;
+    return true;
+}
+
 static bool WaitForLegacyMainThreadExit(DWORD timeoutMs) {
     if (!g_legacyMainThreadHandle) return true;
     const DWORD result = WaitForSingleObject(g_legacyMainThreadHandle, timeoutMs);
@@ -8072,7 +8704,9 @@ extern "C" __declspec(dllexport) void Detach() {
     // previous path cleaned those resources immediately and unloaded 100 ms
     // later, which could race ServerLoop or a SwapBuffers callback.
     CreateThread(nullptr, 0, [](LPVOID) -> DWORD {
-        if (!WaitForLegacyMainThreadExit(5000)) {
+        if (!WaitForOwnedThreadExit(g_legacyScanThreadHandle, "overlay scan thread", 5000) ||
+            !WaitForOwnedThreadExit(g_legacyFastPollThreadHandle, "fast poll thread", 5000) ||
+            !WaitForLegacyMainThreadExit(5000)) {
             // Permit a later Detach call to retry after a transient server/JNI
     // stall rather than permanently latching a failed teardown.
             InterlockedExchange(&g_legacyDetachRequested, 0);
@@ -8696,14 +9330,16 @@ static jobject GetLegacyNickHiderTabProfile(JNIEnv* env, const std::string& orig
 
 static void ApplyLegacyNickHiderProfileFallback(JNIEnv* env, const Config& cfg) {
     if (!env || !g_mcInstance || !g_thePlayerField) return;
+    if (!IsLegacyMinecraftClientThread()) return;
+    const bool applyAlias = cfg.nickHiderEnabled && !cfg.nickHiderAlias.empty();
+    if (!applyAlias) return;
     jobject player = env->GetObjectField(g_mcInstance, g_thePlayerField);
     if (env->ExceptionCheck()) { env->ExceptionClear(); player = nullptr; }
     if (!player) return;
 
     // Always seed the original account name from getName() so chat rewrite can
     // proceed even when GameProfile mutation mappings are still resolving.
-    const bool applyAlias = cfg.nickHiderEnabled && !cfg.nickHiderAlias.empty();
-    if (applyAlias && g_nickHiderOriginalProfileName.empty()) {
+    if (g_nickHiderOriginalProfileName.empty()) {
         const std::string fromGetName = GetStablePlayerName(env, player);
         if (!fromGetName.empty() && fromGetName != cfg.nickHiderAlias)
             g_nickHiderOriginalProfileName = fromGetName;
@@ -8884,6 +9520,14 @@ static void ApplyLegacyNickHiderFallback(JNIEnv* env, const Config& cfg) {
     // denying can_access_local_variables, which leaves the text-rewrite interceptor idle.
     // Only skip the JNI profile/chat fallback when local-variable rewrite is actually usable.
     if (lc::HasJvmtiLocalVariables()) return;
+    // Patcher's tab overlay sorts NetworkPlayerInfo every HUD frame. Mutating
+    // GameProfile / playerInfoMap / tab display names from a worker thread makes
+    // that comparator unstable (TimSort "violates its general contract").
+    if (!IsLegacyMinecraftClientThread()) return;
+    if (!cfg.nickHiderEnabled) {
+        RestoreLegacyNickHiderTextMutations(env);
+        return;
+    }
     ApplyLegacyNickHiderProfileFallback(env, cfg);
     ApplyLegacyNickHiderChatFallback(env, cfg);
     if (!g_loggedLegacyNickHiderFallback) {
@@ -9574,6 +10218,7 @@ void RenderHUD(
     if (cfg.killAura)          pushMod("Kill Aura", ToImU32(theme.accentSecondary));
     if (cfg.speedBridge)       pushMod("SpeedBridge", ToImU32(theme.accentPrimary));
     if (cfg.autoRodEnabled)    pushMod("Auto Rod", ToImU32(theme.accentPrimary));
+    if (cfg.autoToolEnabled)   pushMod("AutoTool", ToImU32(theme.accentPrimary));
     if (cfg.chestEsp)          pushMod("Chest ESP", ToImU32(theme.accentSecondary));
     if (cfg.blockEsp)          pushMod("Block ESP", ToImU32(theme.accentSecondary));
     if (cfg.chestStealer)      pushMod("Chest Stealer", ToImU32(theme.accentTertiary));
@@ -9586,6 +10231,7 @@ void RenderHUD(
     if (cfg.reachEnabled)      pushMod("Reach", ToImU32(theme.accentPrimary));
     if (cfg.velocityEnabled)   pushMod("Velocity", ToImU32(theme.accentTertiary));
     if (cfg.antiDebuffEnabled) pushMod("AntiDebuff", ToImU32(theme.accentPrimary));
+    if (cfg.bedPlates)         pushMod("BedPlates", ToImU32(theme.accentSecondary));
     if (cfg.hitDelayFixEnabled) pushMod("Hit Delay Fix", ToImU32(theme.accentPrimary));
 
     std::sort(mods.begin(), mods.end(), [](const ModLine& a, const ModLine& b) {
@@ -9908,6 +10554,98 @@ Matrix4x4 GetMatrix(JNIEnv* env, jfieldID field) {
     return m;
 }
 
+static BgCamState18 SnapshotBgCam18() {
+    LockGuard lk(g_bgCamMutex18);
+    return g_bgCamState18;
+}
+
+static BgCamState18 SnapshotOverlayCamera18() {
+    BgCamState18 cam = SnapshotBgCam18();
+    Matrix4x4 view = {}, proj = {};
+    if (TryUseCapturedRenderMatrices(view, proj) && !IsLikelyUiOrthoMatrix(view, proj)) {
+        cam.view = view;
+        cam.proj = proj;
+        cam.matsOk = true;
+    }
+    return cam;
+}
+
+static void ReadCameraState18(JNIEnv* env) {
+    if (!env || !g_mcInstance) return;
+    BgCamState18 cs = {};
+    cs.fov = 70.0f;
+
+    TryResolvePlayerCoreMappings(env);
+    TryResolveRenderMappings(env, false);
+
+    if (g_renderManagerField && g_viewerPosXField && g_viewerPosYField && g_viewerPosZField) {
+        jobject rm = env->GetObjectField(g_mcInstance, g_renderManagerField);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); rm = nullptr; }
+        if (rm) {
+            cs.camX = env->GetDoubleField(rm, g_viewerPosXField);
+            cs.camY = env->GetDoubleField(rm, g_viewerPosYField);
+            cs.camZ = env->GetDoubleField(rm, g_viewerPosZField);
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+            } else {
+                cs.camFound = std::isfinite(cs.camX) && std::isfinite(cs.camY) && std::isfinite(cs.camZ);
+            }
+            env->DeleteLocalRef(rm);
+        }
+    }
+    if (!cs.camFound && g_thePlayerField && g_posXField && g_posYField && g_posZField) {
+        jobject player = env->GetObjectField(g_mcInstance, g_thePlayerField);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); player = nullptr; }
+        if (player) {
+            cs.camX = env->GetDoubleField(player, g_posXField);
+            cs.camY = env->GetDoubleField(player, g_posYField) + 1.62;
+            cs.camZ = env->GetDoubleField(player, g_posZField);
+            if (!env->ExceptionCheck() && std::isfinite(cs.camX) && std::isfinite(cs.camY) && std::isfinite(cs.camZ))
+                cs.camFound = true;
+            else if (env->ExceptionCheck()) env->ExceptionClear();
+            env->DeleteLocalRef(player);
+        }
+    }
+
+    if (g_thePlayerField) {
+        jobject player = env->GetObjectField(g_mcInstance, g_thePlayerField);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); player = nullptr; }
+        if (player) {
+            if (g_rotationYawField) {
+                cs.yaw = env->GetFloatField(player, g_rotationYawField);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); cs.yaw = 0.0f; }
+            }
+            if (g_rotationPitchField) {
+                cs.pitch = env->GetFloatField(player, g_rotationPitchField);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); cs.pitch = 0.0f; }
+            }
+            env->DeleteLocalRef(player);
+        }
+    }
+    if (g_gameSettingsField && g_fovSettingField) {
+        jobject gs = env->GetObjectField(g_mcInstance, g_gameSettingsField);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); gs = nullptr; }
+        if (gs) {
+            float fov = env->GetFloatField(gs, g_fovSettingField);
+            if (!env->ExceptionCheck() && fov >= 10.0f && fov <= 170.0f) cs.fov = fov;
+            else if (env->ExceptionCheck()) env->ExceptionClear();
+            env->DeleteLocalRef(gs);
+        }
+    }
+
+    if (g_activeRenderInfoClass && g_modelViewField && g_projectionField) {
+        Matrix4x4 view = GetMatrix(env, g_modelViewField);
+        Matrix4x4 proj = GetMatrix(env, g_projectionField);
+        if (MatrixProjectionUsable(view, proj) && !IsLikelyUiOrthoMatrix(view, proj)) {
+            cs.view = view;
+            cs.proj = proj;
+            cs.matsOk = true;
+        }
+    }
+
+    { LockGuard lk(g_bgCamMutex18); g_bgCamState18 = cs; }
+}
+
 bool WorldToScreen(const double x, const double y, const double z, const Matrix4x4& view, const Matrix4x4& proj, int w, int h, float& outX, float& outY) {
     // 1. View Transformation
     float vX = x * view.m[0] + y * view.m[4] + z * view.m[8] + view.m[12];
@@ -9933,55 +10671,44 @@ bool WorldToScreen(const double x, const double y, const double z, const Matrix4
 
     return true;
 }
-void RenderNametags(
-    int w,
-    int h,
-    const Config& config,
-    ClosestPlayerDrawSnapshot18* closestSnapshot) {
+static void ClearLegacyOverlayPlayers() {
+    { LockGuard lk(g_overlayPlayersMutex18); g_overlayPlayers18.clear(); }
+    { LockGuard lk(g_closestPlayerMutex18); g_closestPlayerDraw18 = ClosestPlayerDrawSnapshot18(); }
+}
+
+static void UpdatePlayerListOverlayLegacy(JNIEnv* env, const Config& config) {
     TRACE_PATH("enter");
-    if (closestSnapshot)
-        *closestSnapshot = ClosestPlayerDrawSnapshot18();
     static bool warnedMissingMappings = false;
-    bool showHealth = true;
-    bool showArmor = true;
-    bool showHeldItem = true;
-    bool hideVanillaTags = false;
-    bool nametagsEnabled = false;
-    bool nickHiderEnabled = false;
-    bool fightStatusEnabled = false;
-    bool entityTelemetryNeeded = false;
-    int nametagMaxCount = 8;
-    std::string guiTheme = "Default";
-    std::string nickHiderAlias;
-    nametagsEnabled = config.nametags;
-    nickHiderEnabled = config.nickHiderEnabled;
-    fightStatusEnabled = config.fightStatus;
-    nickHiderAlias = config.nickHiderAlias;
-    entityTelemetryNeeded = config.nametags || config.nickHiderEnabled ||
+    bool showHeldItem = config.nametagShowHeldItem;
+    bool hideVanillaTags = config.nametagHideVanilla;
+    bool nametagsEnabled = config.nametags;
+    bool nickHiderEnabled = config.nickHiderEnabled;
+    bool fightStatusEnabled = config.fightStatus;
+    std::string nickHiderAlias = config.nickHiderAlias;
+    bool entityTelemetryNeeded = config.nametags || config.nickHiderEnabled ||
         config.closestPlayerInfo || config.aimAssist || config.fightStatus ||
         config.nametagHideVanilla || g_legacyNametagSuppressionActive;
     TRACE_BRANCH("entityTelemetryNeeded", entityTelemetryNeeded);
-    if (!entityTelemetryNeeded) { ResetFightStatusState18(); return; }
-    showHealth = config.nametagShowHealth;
-    showArmor = config.nametagShowArmor;
-    showHeldItem = config.nametagShowHeldItem;
-    hideVanillaTags = config.nametagHideVanilla;
-    nametagMaxCount = (std::max)(1, (std::min)(20, config.nametagMaxCount));
-    guiTheme = config.guiTheme;
-    OverlayTheme nametagTheme = ResolveOverlayTheme(guiTheme);
-
-    // Default to empty telemetry each run so stale entities are not reused.
-    {
-        LockGuard lk(g_jsonMutex);
-        g_pendingJson = "[]";
+    if (!entityTelemetryNeeded) {
+        ResetFightStatusState18();
+        ClearLegacyOverlayPlayers();
+        return;
     }
-   bool mappedReady = (g_mapped && g_mcInstance);
-   TRACE_BRANCH("mappedReady", mappedReady);
-   if (!mappedReady) { if (fightStatusEnabled) ResetFightStatusState18(); return; }
+    const int nametagRange = lc::ClampOverlayChunkRange(config.nametagRange);
+    const bool showArmor = config.nametagShowArmor;
 
-    ScopedJNIEnv env(g_jvm);
-    TRACE_BRANCH("jniEnvAvailable", env != nullptr);
-    if (!env) { if (fightStatusEnabled) ResetFightStatusState18(); return; }
+    bool mappedReady = (g_mapped && g_mcInstance);
+    TRACE_BRANCH("mappedReady", mappedReady);
+    if (!mappedReady) {
+        if (fightStatusEnabled) ResetFightStatusState18();
+        ClearLegacyOverlayPlayers();
+        return;
+    }
+    if (!env) {
+        if (fightStatusEnabled) ResetFightStatusState18();
+        ClearLegacyOverlayPlayers();
+        return;
+    }
 
     TryResolveScreenFieldDirect(env);
     TryResolvePlayerCoreMappings(env);
@@ -9996,6 +10723,7 @@ void RenderNametags(
             Log("Nametags missing core/player mappings.");
         }
         if (fightStatusEnabled) ResetFightStatusState18();
+        ClearLegacyOverlayPlayers();
         return;
     }
 
@@ -10006,117 +10734,42 @@ void RenderNametags(
             Log("Nametags waiting for JNI world mappings.");
         }
         if (fightStatusEnabled) ResetFightStatusState18();
+        ClearLegacyOverlayPlayers();
         return;
     }
 
-    if ((!g_activeRenderInfoClass || !g_modelViewField || !g_projectionField) && !fightStatusEnabled) {
-        TRACE_PATH("missing-render-mappings");
-        if (!warnedMissingMappings) {
-            warnedMissingMappings = true;
-            Log("Nametags waiting for render mappings.");
-        }
-        return;
-    }
-
-   warnedMissingMappings = false;
-   g_tagFrameCounter++;
-
-    // Safety check: Don't render if we have pending exceptions
+    warnedMissingMappings = false;
     if (env->ExceptionCheck()) { env->ExceptionClear(); return; }
-    
-    // Ensure we can create local references (limit to 256 for this frame)
     if (env->PushLocalFrame(256) < 0) {
         env->ExceptionClear();
         return;
     }
-    
-    // Ensure C locale for dot decimals
-    setlocale(LC_NUMERIC, "C");
 
-    // 1. Get Matrices
-    Matrix4x4 view = GetMatrix(env, g_modelViewField);
-    Matrix4x4 proj = GetMatrix(env, g_projectionField);
-    bool matrixProjectionUsable = MatrixProjectionUsable(view, proj);
-    TRACE_BRANCH("matrixProjectionUsableInitial", matrixProjectionUsable);
-    bool usedCapturedMatrices = false;
-    if (!matrixProjectionUsable) {
-        TRACE_PATH("matrix-fallback-captured");
-        usedCapturedMatrices = TryUseCapturedRenderMatrices(view, proj);
-        matrixProjectionUsable = usedCapturedMatrices;
-    }
-    TRACE_BRANCH("matrixProjectionUsableAfterFallback", matrixProjectionUsable);
-
-    static int logctr = 0;
-    static bool loggedCapturedMatrixFallback = false;
-    static bool loggedUiMatrixReject = false;
-    if (logctr++ % 600 == 0) {
-         if (!matrixProjectionUsable) Log("WARNING: Matrix projection unavailable.");
-         if (usedCapturedMatrices && !loggedCapturedMatrixFallback) {
-             loggedCapturedMatrixFallback = true;
-             Log("Nametags using captured GL matrix fallback.");
-         }
-    }
-
-    if (matrixProjectionUsable && IsLikelyUiOrthoMatrix(view, proj)) {
-        TRACE_PATH("matrix-ui-ortho-rebind-attempt");
-        TryResolveRenderMappings(env, false);
-        view = GetMatrix(env, g_modelViewField);
-        proj = GetMatrix(env, g_projectionField);
-        matrixProjectionUsable = MatrixProjectionUsable(view, proj);
-        usedCapturedMatrices = false;
-        if (!matrixProjectionUsable) {
-            TRACE_PATH("matrix-ui-ortho-second-fallback");
-            usedCapturedMatrices = TryUseCapturedRenderMatrices(view, proj);
-            matrixProjectionUsable = usedCapturedMatrices;
-        }
-        if (matrixProjectionUsable && IsLikelyUiOrthoMatrix(view, proj)) {
-            matrixProjectionUsable = false;
-            if (!loggedUiMatrixReject) {
-                loggedUiMatrixReject = true;
-                Log("Nametags rejected UI-space matrix projection after rebind attempt.");
-            }
-        }
-    }
-
-    // 2. Get Partial Ticks
     float pt = 1.0f;
     if (g_timerField && g_renderPartialTicksField) {
         jobject timer = env->GetObjectField(g_mcInstance, g_timerField);
         if (timer) {
-             pt = env->GetFloatField(timer, g_renderPartialTicksField);
-             env->DeleteLocalRef(timer);
+            pt = env->GetFloatField(timer, g_renderPartialTicksField);
+            env->DeleteLocalRef(timer);
         }
     }
 
-    // 3. Get RenderManager Viewer Position (the matrix path expects camera-relative coords)
-    double vX = 0.0, vY = 0.0, vZ = 0.0;
-    if (g_renderManagerField && g_viewerPosXField && g_viewerPosYField && g_viewerPosZField) {
-        jobject rm = env->GetObjectField(g_mcInstance, g_renderManagerField);
-        if (rm) {
-            vX = env->GetDoubleField(rm, g_viewerPosXField);
-            vY = env->GetDoubleField(rm, g_viewerPosYField);
-            vZ = env->GetDoubleField(rm, g_viewerPosZField);
-            env->DeleteLocalRef(rm);
-        }
-    }
-
-    // 4. Iterate Entities
     jobject world = env->GetObjectField(g_mcInstance, g_theWorldField);
     if (!world) {
         if (fightStatusEnabled) ResetFightStatusState18();
         if (g_legacyNametagSuppressionActive || !g_hiddenNametagOriginalTeamByPlayerLegacy.empty() || g_lastLegacyNametagSuppressionWorld) {
             ResetLegacyNametagSuppressionState(env, "world-null");
         }
-        if (logctr % 600 == 0) Log("WARNING: World is null");
+        ClearLegacyOverlayPlayers();
         env->PopLocalFrame(nullptr);
         return;
     }
     TrackLegacySuppressionWorldContext(env, world);
-    
+
     jobject startList = env->GetObjectField(world, g_playerEntitiesField);
     if (!startList) {
         if (fightStatusEnabled) ResetFightStatusState18();
-        if (logctr % 600 == 0) Log("WARNING: playerEntities list is null");
+        ClearLegacyOverlayPlayers();
         env->PopLocalFrame(nullptr);
         return;
     }
@@ -10125,95 +10778,33 @@ void RenderNametags(
     if (env->ExceptionCheck()) {
         env->ExceptionClear();
         if (fightStatusEnabled) ResetFightStatusState18();
+        ClearLegacyOverlayPlayers();
         env->PopLocalFrame(nullptr);
         return;
     }
-    int count = 0;
 
-    bool guiOpen = false; // Internal ClickGUI was removed; only Minecraft screens suppress tags.
-    std::string screenName = "none";
+    bool guiOpen = false;
     if (g_currentScreenField) {
         jobject currentScreen = env->GetObjectField(g_mcInstance, g_currentScreenField);
         if (currentScreen) {
             guiOpen = true;
-            jclass cls = env->GetObjectClass(currentScreen);
-            if (cls) {
-                jclass cc = env->GetObjectClass(cls);
-                jmethodID mGetName = cc ? env->GetMethodID(cc, "getName", "()Ljava/lang/String;") : nullptr;
-                if (mGetName) {
-                    jstring jn = (jstring)env->CallObjectMethod(cls, mGetName);
-                    if (env->ExceptionCheck()) {
-                        env->ExceptionClear();
-                    } else if (jn) {
-                        const char* cn = env->GetStringUTFChars(jn, nullptr);
-                        if (cn) {
-                            screenName = cn;
-                            env->ReleaseStringUTFChars(jn, cn);
-                        } else if (env->ExceptionCheck()) {
-                            env->ExceptionClear();
-                        }
-                        env->DeleteLocalRef(jn);
-                    }
-                }
-                if (cc) env->DeleteLocalRef(cc);
-                env->DeleteLocalRef(cls);
-            }
             env->DeleteLocalRef(currentScreen);
         }
     }
 
-    std::stringstream ss;
-    ss << "[";
     constexpr int kEntityJsonCap = 20;
-    const int entityProcessCap = (fightStatusEnabled || config.closestPlayerInfo)
+    const int entityProcessCap = (fightStatusEnabled || config.closestPlayerInfo ||
+        hideVanillaTags || g_legacyNametagSuppressionActive || nametagsEnabled)
         ? (std::max)(1, size)
-        : (hideVanillaTags || g_legacyNametagSuppressionActive)
-        ? (std::max)(1, size)
-        : nametagsEnabled
-            ? (std::max)(1, (std::min)(20, nametagMaxCount))
-            : kEntityJsonCap;
-    bool suppressionAppliedThisPass = false;
-    bool suppressionAttemptedThisPass = false;
-    
-    // Get Local Player for distance & health debug
+        : kEntityJsonCap;
+
     jobject player = env->GetObjectField(g_mcInstance, g_thePlayerField);
     if (fightStatusEnabled && player) EnsureVelocityMappings(env, player);
     const std::string localAccountName = !g_nickHiderOriginalProfileName.empty()
         ? g_nickHiderOriginalProfileName
         : (player ? GetStablePlayerName(env, player) : "");
-    jobject hideScoreboardObj = nullptr;
-    jobject hideTeamObj = nullptr;
-    if ((hideVanillaTags || g_legacyNametagSuppressionActive) && !EnsureLegacyNametagTeamMappings(env, world) && !g_loggedLegacyNametagSuppressionUnavailable) {
-        g_loggedLegacyNametagSuppressionUnavailable = true;
-        Log("NametagHideVanilla: legacy team-visibility mappings unresolved; fail-open (vanilla nametags remain visible).");
-    }
-    if (!hideVanillaTags && g_legacyNametagSuppressionActive) {
-        jobject restoreScoreboard = GetLegacyScoreboard(env, world);
-        if (restoreScoreboard) {
-            RestoreLegacyVanillaNametagSuppression(env, restoreScoreboard);
-            env->DeleteLocalRef(restoreScoreboard);
-        } else {
-            g_hiddenNametagOriginalTeamByPlayerLegacy.clear();
-        }
-        g_legacyNametagSuppressionActive = false;
-    }
-    if (hideVanillaTags) {
-        hideScoreboardObj = GetLegacyScoreboard(env, world);
-        if (hideScoreboardObj) {
-            hideTeamObj = EnsureLegacyHideTeam(env, hideScoreboardObj);
-            if (!hideTeamObj && !g_loggedLegacyNametagSuppressionUnavailable) {
-                g_loggedLegacyNametagSuppressionUnavailable = true;
-                Log("NametagHideVanilla: legacy hide team unavailable; fail-open (vanilla nametags remain visible).");
-            }
-        } else if (!g_loggedLegacyNametagSuppressionUnavailable) {
-            g_loggedLegacyNametagSuppressionUnavailable = true;
-            Log("NametagHideVanilla: legacy scoreboard unavailable; fail-open (vanilla nametags remain visible).");
-        }
-    }
+
     float fallbackYaw = 0.0f;
-    float fallbackPitch = 0.0f;
-    float fallbackFov = 70.0f;
-    
     double localPX = 0.0, localPY = 0.0, localPZ = 0.0;
     bool haveLocalPos = false;
     FightStatusLocalSample18 fightSelf;
@@ -10223,8 +10814,12 @@ void RenderNametags(
         fightCandidates.capacity() < static_cast<size_t>((std::max)(0, size))) {
         fightCandidates.reserve(static_cast<size_t>((std::max)(0, size)));
     }
-    int closestPlayerIndex = -1;
+    ClosestPlayerDrawSnapshot18 closestSnap;
     double closestPlayerDistance = 99999.0;
+    std::vector<OverlayPlayer18> localPlayers;
+    localPlayers.reserve((size_t)(std::max)(0, size));
+    int count = 0;
+
     if (player) {
         localPX = env->GetDoubleField(player, g_posXField);
         localPY = env->GetDoubleField(player, g_posYField);
@@ -10258,35 +10853,16 @@ void RenderNametags(
             if (env->ExceptionCheck()) env->ExceptionClear();
             else fightSelf.hurtTimeAvailable = true;
         }
-    }
-    if (!haveLocalPos) {
-        if (fightStatusEnabled) ResetFightStatusState18();
-        env->DeleteLocalRef(startList);
-        env->DeleteLocalRef(world);
-        goto exit_frame;
-    }
-
-    if (player) {
         if (g_rotationYawField) {
             fallbackYaw = env->GetFloatField(player, g_rotationYawField);
             if (env->ExceptionCheck()) { env->ExceptionClear(); fallbackYaw = 0.0f; }
         }
-        if (g_rotationPitchField) {
-            fallbackPitch = env->GetFloatField(player, g_rotationPitchField);
-            if (env->ExceptionCheck()) { env->ExceptionClear(); fallbackPitch = 0.0f; }
-        }
     }
-    if (g_gameSettingsField && g_fovSettingField) {
-        jobject gs = env->GetObjectField(g_mcInstance, g_gameSettingsField);
-        if (gs) {
-            float fov = env->GetFloatField(gs, g_fovSettingField);
-            if (!env->ExceptionCheck() && fov >= 10.0f && fov <= 170.0f) {
-                fallbackFov = fov;
-            } else if (env->ExceptionCheck()) {
-                env->ExceptionClear();
-            }
-            env->DeleteLocalRef(gs);
-        }
+    if (!haveLocalPos) {
+        if (fightStatusEnabled) ResetFightStatusState18();
+        ClearLegacyOverlayPlayers();
+        env->PopLocalFrame(nullptr);
+        return;
     }
 
     for (int i = 0; i < size && count < entityProcessCap; i++) {
@@ -10296,44 +10872,41 @@ void RenderNametags(
             break;
         }
         if (!entity) continue;
-
         if (env->IsSameObject(entity, player)) {
             env->DeleteLocalRef(entity);
             continue;
         }
 
-        // Positions
         double ex = env->GetDoubleField(entity, g_posXField);
         double ey = env->GetDoubleField(entity, g_posYField);
         double ez = env->GetDoubleField(entity, g_posZField);
-        
         double lx = g_lastTickPosXField ? env->GetDoubleField(entity, g_lastTickPosXField) : ex;
         double ly = g_lastTickPosYField ? env->GetDoubleField(entity, g_lastTickPosYField) : ey;
         double lz = g_lastTickPosZField ? env->GetDoubleField(entity, g_lastTickPosZField) : ez;
-
-        // Interpolate
         double iX = lx + (ex - lx) * pt;
         double iY = ly + (ey - ly) * pt;
         double iZ = lz + (ez - lz) * pt;
-        double rX = iX - vX;
-        double rY = iY - vY;
-        double rZ = iZ - vZ;
+        double dx = iX - localPX;
+        double dy = iY - localPY;
+        double dz = iZ - localPZ;
+        double dist = sqrt(dx * dx + dy * dy + dz * dz);
+        const bool inNametagRange = lc::InChunkRange(
+            (int)std::floor(iX), (int)std::floor(iZ), localPX, localPZ, nametagRange);
+        if (!lc::OverlayEntityNeedsFullScan(
+                nametagsEnabled, inNametagRange, fightStatusEnabled,
+                hideVanillaTags || g_legacyNametagSuppressionActive,
+                config.closestPlayerInfo, dist, count < kEntityJsonCap)) {
+            env->DeleteLocalRef(entity);
+            continue;
+        }
 
-        // Name with fake/bot line filtering parity
         std::string stableName = GetStablePlayerName(env, entity);
         std::string displayName = lc::ReplaceNickHiderText(stableName, nickHiderEnabled, localAccountName, nickHiderAlias);
         if (stableName.empty() || displayName.empty() || LooksLikeFakePlayerLine(stableName) || LooksLikeFakePlayerLine(displayName)) {
             env->DeleteLocalRef(entity);
             continue;
         }
-        if (hideVanillaTags && hideScoreboardObj && hideTeamObj) {
-            suppressionAttemptedThisPass = true;
-            if (ApplyLegacyVanillaNametagSuppression(env, hideScoreboardObj, hideTeamObj, displayName)) {
-                suppressionAppliedThisPass = true;
-            }
-        }
-        
-        // Health
+
         float health = 20.0f;
         bool healthAvailable = false;
         if (g_getHealthMethod) {
@@ -10362,31 +10935,25 @@ void RenderNametags(
             if (env->ExceptionCheck()) env->ExceptionClear();
             else hurtTimeAvailable = true;
         }
-        double dx = iX - localPX;
-        double dy = iY - localPY;
-        double dz = iZ - localPZ;
-        double dist = sqrt(dx*dx + dy*dy + dz*dz);
 
-        if (closestSnapshot && config.closestPlayerInfo &&
-            dist < closestPlayerDistance && dist <= 96.0) {
-            closestPlayerDistance = dist;
-            closestPlayerIndex = i;
-            closestSnapshot->valid = true;
-            closestSnapshot->name = displayName;
-            closestSnapshot->health = health;
-            closestSnapshot->armorPoints = armorPoints;
-            closestSnapshot->distance = static_cast<float>(dist);
-            closestSnapshot->relativeX = dx;
-            closestSnapshot->relativeZ = dz;
-            closestSnapshot->localYaw = fallbackYaw;
+        std::string heldText;
+        if ((nametagsEnabled && inNametagRange && lc::NametagShouldFetchHeldItem(showHeldItem, dist)) ||
+            (config.closestPlayerInfo && showHeldItem && dist <= lc::kClosestPlayerMaxDist)) {
+            heldText = GetEntityHeldItemInfo(env, entity, nullptr);
         }
 
-        // Project (prefer matrix when stable, otherwise fallback to angle/FOV)
-        float sX = 0, sY = 0;
-        bool matrixProjected = false;
-        float matrixSX = 0, matrixSY = 0;
-        if (matrixProjectionUsable) {
-            matrixProjected = WorldToScreen(rX, rY + 2.3, rZ, view, proj, w, h, matrixSX, matrixSY);
+        if (config.closestPlayerInfo &&
+            dist < closestPlayerDistance && dist <= lc::kClosestPlayerMaxDist) {
+            closestPlayerDistance = dist;
+            closestSnap.valid = true;
+            closestSnap.name = displayName;
+            closestSnap.health = health;
+            closestSnap.armorPoints = armorPoints;
+            closestSnap.distance = static_cast<float>(dist);
+            closestSnap.relativeX = dx;
+            closestSnap.relativeZ = dz;
+            closestSnap.localYaw = fallbackYaw;
+            closestSnap.heldText = showHeldItem ? heldText : std::string();
         }
 
         if (fightStatusEnabled) {
@@ -10403,300 +10970,277 @@ void RenderNametags(
             candidate.currentX = ex; candidate.currentY = ey; candidate.currentZ = ez;
             candidate.x = iX; candidate.y = iY; candidate.z = iZ;
             candidate.distance = (float)dist;
-            if (matrixProjectionUsable) {
-                candidate.hasProjectedAnchors =
-                    WorldToScreen(rX, rY, rZ, view, proj, w, h,
-                                  candidate.feetX, candidate.feetY) &&
-                    WorldToScreen(rX, rY + 1.8, rZ, view, proj, w, h,
-                                  candidate.headX, candidate.headY);
-            }
             fightCandidates.push_back(candidate);
         }
 
-        LegoVec3 camPos = { localPX, localPY + 1.62, localPZ };
-
-        bool projected = false;
-        if (matrixProjected) {
-            sX = matrixSX;
-            sY = matrixSY;
-            projected = true;
+        OverlayPlayer18 rec;
+        rec.displayName = displayName;
+        rec.heldText = heldText;
+        rec.iX = iX; rec.iY = iY; rec.iZ = iZ;
+        rec.dist = dist;
+        rec.health = health;
+        rec.armorPoints = armorPoints;
+        rec.inNametagRange = inNametagRange;
+        if (g_objectHashCodeMethod) {
+            rec.hashKey = env->CallIntMethod(entity, g_objectHashCodeMethod);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); rec.hashKey = 0; }
         }
-        // Do not use angle/FOV fallback here. On 1.8.9 this path can be misaligned and causes ghost tracking.
+        if (rec.hashKey == 0)
+            rec.hashKey = (int)(iX * 17.0 + iZ * 31.0) ^ i;
+        localPlayers.push_back(rec);
+        count++;
+        env->DeleteLocalRef(entity);
+    }
 
-        // Aim-assist target point: closest projected point on a player body box
-        // to the current crosshair center. Keep nametag anchor separate.
-        float aimSX = sX;
-        float aimSY = sY;
+    UpdateFightStatusState18(GetTickCount(), fightStatusEnabled, guiOpen, fightSelf, fightCandidates);
+    {
+        LockGuard lk(g_overlayPlayersMutex18);
+        g_overlayPlayers18.swap(localPlayers);
+    }
+    {
+        LockGuard lk(g_closestPlayerMutex18);
+        g_closestPlayerDraw18 = closestSnap;
+    }
+    env->PopLocalFrame(nullptr);
+}
+
+void RenderNametags(
+    int w,
+    int h,
+    const Config& config,
+    ClosestPlayerDrawSnapshot18* closestSnapshot) {
+    TRACE_PATH("enter");
+    if (closestSnapshot) {
+        LockGuard lk(g_closestPlayerMutex18);
+        *closestSnapshot = g_closestPlayerDraw18;
+    }
+
+    bool nametagsEnabled = config.nametags;
+    bool fightStatusEnabled = config.fightStatus;
+    bool entityTelemetryNeeded = config.nametags || config.nickHiderEnabled ||
+        config.closestPlayerInfo || config.aimAssist || config.fightStatus ||
+        config.nametagHideVanilla || g_legacyNametagSuppressionActive;
+    if (!entityTelemetryNeeded) return;
+
+    const bool showHealth = config.nametagShowHealth;
+    const bool showArmor = config.nametagShowArmor;
+    OverlayTheme nametagTheme = ResolveOverlayTheme(config.guiTheme);
+    BgCamState18 cam = SnapshotOverlayCamera18();
+    g_tagFrameCounter++;
+
+    static thread_local std::vector<OverlayPlayer18> players;
+    { LockGuard lk(g_overlayPlayersMutex18); players = g_overlayPlayers18; }
+
+    std::stringstream ss;
+    ss << "[";
+    constexpr int kEntityJsonCap = 20;
+    int count = 0;
+    const double vX = cam.camX, vY = cam.camY, vZ = cam.camZ;
+    const bool matsOk = cam.camFound && cam.matsOk;
+
+    for (const auto& rec : players) {
+        const bool wantNametagDraw = nametagsEnabled && rec.inNametagRange;
+        const bool wantJsonSlot = count < kEntityJsonCap;
+        const bool wantProject = wantNametagDraw || fightStatusEnabled || wantJsonSlot;
+        if (!wantProject) continue;
+
+        float sX = 0, sY = 0;
+        bool projected = false;
+        if (matsOk) {
+            projected = WorldToScreen(rec.iX - vX, rec.iY + 2.3 - vY, rec.iZ - vZ,
+                cam.view, cam.proj, w, h, sX, sY);
+        }
+
+        float aimSX = sX, aimSY = sY;
         bool aimProjected = projected;
         auto projectAimBodyPoint = [&](double worldX, double worldY, double worldZ,
                                        float* outX, float* outY) -> bool {
-            if (!matrixProjectionUsable) return false;
-            return WorldToScreen(
-                worldX - vX,
-                worldY - vY,
-                worldZ - vZ,
-                view,
-                proj,
-                w,
-                h,
-                *outX,
-                *outY);
+            if (!matsOk) return false;
+            return WorldToScreen(worldX - vX, worldY - vY, worldZ - vZ,
+                cam.view, cam.proj, w, h, *outX, *outY);
         };
-        float selectedAimX = aimSX;
-        float selectedAimY = aimSY;
-        if (lc::aimassist::SelectClosestBodyPoint(
-                iX, iY, iZ, w, h, projectAimBodyPoint,
+        float selectedAimX = aimSX, selectedAimY = aimSY;
+        if (wantProject && lc::aimassist::SelectClosestBodyPoint(
+                rec.iX, rec.iY, rec.iZ, w, h, projectAimBodyPoint,
                 &selectedAimX, &selectedAimY)) {
             aimSX = selectedAimX;
             aimSY = selectedAimY;
             aimProjected = true;
         }
 
-        if (projected) {
-             if (dist > 48.0) {
-                 env->DeleteLocalRef(entity);
-                 continue;
-             }
-             if (sX < -64.0f || sX > (float)w + 64.0f || sY < -64.0f || sY > (float)h + 64.0f) {
-                 env->DeleteLocalRef(entity);
-                 continue;
-             }
-              if (!displayName.empty()) {
-                  float hpClampedSimple = health < 0 ? 0 : (health > 40 ? 40 : health);
+        if (!projected) continue;
+        if (sX < -64.0f || sX > (float)w + 64.0f || sY < -64.0f || sY > (float)h + 64.0f)
+            continue;
 
-                   if (!nametagsEnabled) {
-                       if (count < kEntityJsonCap) {
-                           if (count > 0) ss << ",";
-                           ss << "{";
-                           ss << "\"sx\":" << (aimProjected ? aimSX : sX) << ",";
-                           ss << "\"sy\":" << (aimProjected ? aimSY : sY) << ",";
-                           ss << "\"dist\":" << dist << ",";
-                           ss << "\"name\":\"" << JsonEscape(displayName) << "\",";
-                           ss << "\"hp\":" << hpClampedSimple;
-                           ss << "}";
-                      }
-                      count++;
-                      if (count >= entityProcessCap) {
-                          env->DeleteLocalRef(entity);
-                          break;
-                      }
-                      continue;
-                  }
-
-                 float hpClamped = health < 0 ? 0 : (health > 40 ? 40 : health);
-                 float hpBarValue = health < 0 ? 0 : (health > 20 ? 20 : health);
-                 float hpPct = hpBarValue / 20.0f;
-                 if (hpPct < 0.0f) hpPct = 0.0f;
-                 if (hpPct > 1.0f) hpPct = 1.0f;
-
-                 std::string statsText;
-                 if (showHealth) {
-                     char hpBuf[32];
-                     snprintf(hpBuf, sizeof(hpBuf), "%.0f HP", hpClamped);
-                     statsText += hpBuf;
-                 }
-                 if (showArmor && armorPoints >= 0) {
-                     if (!statsText.empty()) statsText += " | ";
-                     char armorBuf[32];
-                     snprintf(armorBuf, sizeof(armorBuf), "%d ARM", armorPoints);
-                     statsText += armorBuf;
-                 }
-
-                 std::string heldText = showHeldItem
-                     ? GetEntityHeldItemInfo(env, entity, nullptr)
-                     : std::string();
-
-                 int key = 0;
-                 if (g_objectHashCodeMethod) {
-                     key = env->CallIntMethod(entity, g_objectHashCodeMethod);
-                     if (env->ExceptionCheck()) { env->ExceptionClear(); key = 0; }
-                 }
-                 if (key == 0) {
-                     key = (int)(iX * 17.0 + iZ * 31.0) ^ i;
-                 }
-
-                 auto calcTextScaled = [](const char* text, float fontSize) -> ImVec2 {
-                     ImVec2 sz = ImGui::CalcTextSize(text ? text : "");
-                     float base = ImGui::GetFontSize();
-                     if (base <= 0.0f) base = 16.0f;
-                     float scale = fontSize / base;
-                     sz.x *= scale;
-                     sz.y *= scale;
-                     return sz;
-                 };
-
-                 float nameScale = 1.0f - (float)(dist / 64.0);
-                 if (nameScale < 0.65f) nameScale = 0.65f;
-                 if (nameScale > 1.0f) nameScale = 1.0f;
-                 const float nameFontSize = std::floor(ImGui::GetFontSize() * nameScale);
-                 const float infoFontSize = std::floor(nameFontSize * 0.85f);
-
-                 ImVec2 nameSz = calcTextScaled(displayName.c_str(), nameFontSize);
-                 ImVec2 statsSz = statsText.empty() ? ImVec2(0, 0) : calcTextScaled(statsText.c_str(), infoFontSize);
-                 ImVec2 itemSz = heldText.empty() ? ImVec2(0, 0) : calcTextScaled(heldText.c_str(), infoFontSize);
-
-                 float maxW = (std::max)(nameSz.x, (std::max)(statsSz.x, itemSz.x));
-                 float totalH = nameSz.y;
-                 if (statsSz.y > 0.0f) totalH += statsSz.y + 2.0f;
-                 if (itemSz.y > 0.0f) totalH += itemSz.y + 2.0f;
-
-                 float pad = std::floor(4.0f * nameScale);
-                 float px = std::floor(sX - maxW * 0.5f) - pad;
-                 float py = std::floor(sY - totalH - pad * 2.0f);
-                 auto& smooth = g_tagSmoothing[key];
-                 if (!smooth.init) {
-                     smooth.x = px;
-                     smooth.y = py;
-                     smooth.vx = 0.0f;
-                     smooth.vy = 0.0f;
-                     smooth.init = true;
-                 }
-                 else {
-                     float dxs = px - smooth.x;
-                     float dys = py - smooth.y;
-                     float deltaSq = dxs * dxs + dys * dys;
-
-                     if (deltaSq > 24000.0f) {
-                         smooth.x = px;
-                         smooth.y = py;
-                         smooth.vx = 0.0f;
-                         smooth.vy = 0.0f;
-                     }
-                     else {
-                         float blend = 0.12f;
-                         if (dist < 12.0) blend = 0.14f;
-                         if (deltaSq < 6.0f) blend = 0.22f;
-                         smooth.x += dxs * blend;
-                         smooth.y += dys * blend;
-                     }
-                 }
-                 smooth.lastFrame = g_tagFrameCounter;
-                 px = smooth.x;
-                 py = smooth.y;
-
-                 ImDrawList* fg = ImGui::GetForegroundDrawList();
-                 ImVec2 pMin(px, py);
-                 ImVec2 pMax(px + maxW + pad * 2.0f, py + totalH + pad * 2.0f + 2.0f);
-                 fg->AddRectFilled(pMin, pMax, IM_COL32(0, 0, 0, 160), 3.0f);
-
-                 float curY = py + pad;
-                 float centerX = px + (maxW + pad * 2.0f) * 0.5f;
-                 float nameX = std::floor(centerX - nameSz.x * 0.5f);
-                 fg->AddText(ImGui::GetFont(), nameFontSize, ImVec2(nameX + 1, curY + 1), IM_COL32(0, 0, 0, 255), displayName.c_str());
-                 fg->AddText(ImGui::GetFont(), nameFontSize, ImVec2(nameX, curY), ToImU32(nametagTheme.moduleText), displayName.c_str());
-                 curY += nameSz.y + 2.0f;
-
-                 if (!statsText.empty()) {
-                     float statsX = std::floor(centerX - statsSz.x * 0.5f);
-                     ImU32 statCol = hpClamped <= 8.0f ? IM_COL32(255, 100, 100, 250) : IM_COL32(200, 220, 255, 250);
-                     fg->AddText(ImGui::GetFont(), infoFontSize, ImVec2(statsX + 1, curY + 1), IM_COL32(0, 0, 0, 255), statsText.c_str());
-                     fg->AddText(ImGui::GetFont(), infoFontSize, ImVec2(statsX, curY), statCol, statsText.c_str());
-                     curY += statsSz.y + 2.0f;
-                 }
-
-                 if (!heldText.empty()) {
-                     float heldX = std::floor(centerX - itemSz.x * 0.5f);
-                     fg->AddText(ImGui::GetFont(), infoFontSize, ImVec2(heldX + 1, curY + 1), IM_COL32(0, 0, 0, 255), heldText.c_str());
-                     fg->AddText(ImGui::GetFont(), infoFontSize, ImVec2(heldX, curY), IM_COL32(255, 200, 80, 250), heldText.c_str());
-                 }
-
-                 if (showHealth) {
-                     float barW = (pMax.x - pMin.x) * hpPct;
-                     ImU32 hpCol = IM_COL32((int)(255 * (1.0f - hpPct)), (int)(220 * hpPct + 35), 60, 255);
-                     fg->AddRectFilled(ImVec2(pMin.x, pMax.y),
-                                       ImVec2(pMin.x + barW, pMax.y + std::floor(3.0f * nameScale)), hpCol);
-                 }
-                 if (count < kEntityJsonCap) {
-                     if (count > 0) ss << ",";
-                     ss << "{";
-                     ss << "\"sx\":" << (aimProjected ? aimSX : sX) << ",";
-                     ss << "\"sy\":" << (aimProjected ? aimSY : sY) << ",";
-                     ss << "\"dist\":" << dist << ",";
-                     ss << "\"name\":\"" << JsonEscape(displayName) << "\",";
-                     ss << "\"hp\":" << hpClamped;
-                     ss << "}";
-                 }
-
-                  count++;
-                  if (count >= entityProcessCap) {
-                      env->DeleteLocalRef(entity);
-                      break;
-                  }
-             }
+        float hpClamped = rec.health < 0 ? 0 : (rec.health > 40 ? 40 : rec.health);
+        if (!wantNametagDraw) {
+            if (count < kEntityJsonCap) {
+                if (count > 0) ss << ",";
+                ss << "{";
+                ss << "\"sx\":" << (aimProjected ? aimSX : sX) << ",";
+                ss << "\"sy\":" << (aimProjected ? aimSY : sY) << ",";
+                ss << "\"dist\":" << rec.dist << ",";
+                ss << "\"name\":\"" << JsonEscape(rec.displayName) << "\",";
+                ss << "\"hp\":" << hpClamped;
+                ss << "}";
+            }
+            count++;
+            continue;
         }
 
-        env->DeleteLocalRef(entity);
-    }
-    if (closestSnapshot && closestSnapshot->valid && closestPlayerIndex >= 0) {
-        jobject closestEntity =
-            env->CallObjectMethod(startList, g_listGetMethod, closestPlayerIndex);
-        if (env->ExceptionCheck()) {
-            env->ExceptionClear();
-            closestSnapshot->heldText.clear();
-        } else if (closestEntity) {
-            closestSnapshot->heldText = showHeldItem
-                ? GetEntityHeldItemInfo(env, closestEntity, nullptr)
-                : std::string();
-            env->DeleteLocalRef(closestEntity);
-        }
-    }
+        float hpBarValue = rec.health < 0 ? 0 : (rec.health > 20 ? 20 : rec.health);
+        float hpPct = hpBarValue / 20.0f;
+        if (hpPct < 0.0f) hpPct = 0.0f;
+        if (hpPct > 1.0f) hpPct = 1.0f;
 
-    UpdateFightStatusState18(GetTickCount(), fightStatusEnabled, guiOpen, fightSelf, fightCandidates);
-    if (hideTeamObj) env->DeleteLocalRef(hideTeamObj);
-    if (hideScoreboardObj) env->DeleteLocalRef(hideScoreboardObj);
-    if (hideVanillaTags && suppressionAppliedThisPass) {
-        g_legacyNametagSuppressionActive = true;
-    } else if (hideVanillaTags && suppressionAttemptedThisPass && !suppressionAppliedThisPass && !g_loggedLegacyNametagSuppressionUnavailable) {
-        g_loggedLegacyNametagSuppressionUnavailable = true;
-        Log("NametagHideVanilla: legacy player->hide-team assignment failed; fail-open on this runtime.");
-    }
-    
-    // Cleanup stale smoothing state
-    for (auto it = g_tagSmoothing.begin(); it != g_tagSmoothing.end(); ) {
-        if (g_tagFrameCounter - it->second.lastFrame > 45) {
-            it = g_tagSmoothing.erase(it);
+        std::string statsText;
+        if (showHealth) {
+            char hpBuf[32];
+            snprintf(hpBuf, sizeof(hpBuf), "%.0f HP", hpClamped);
+            statsText += hpBuf;
+        }
+        if (showArmor && rec.armorPoints >= 0) {
+            if (!statsText.empty()) statsText += " | ";
+            char armorBuf[32];
+            snprintf(armorBuf, sizeof(armorBuf), "%d ARM", rec.armorPoints);
+            statsText += armorBuf;
+        }
+
+        auto calcTextScaled = [](const char* text, float fontSize) -> ImVec2 {
+            ImVec2 sz = ImGui::CalcTextSize(text ? text : "");
+            float base = ImGui::GetFontSize();
+            if (base <= 0.0f) base = 16.0f;
+            float scale = fontSize / base;
+            sz.x *= scale;
+            sz.y *= scale;
+            return sz;
+        };
+
+        float nameScale = 1.0f - (float)(rec.dist / 64.0);
+        if (nameScale < 0.65f) nameScale = 0.65f;
+        if (nameScale > 1.0f) nameScale = 1.0f;
+        const float nameFontSize = std::floor(ImGui::GetFontSize() * nameScale);
+        const float infoFontSize = std::floor(nameFontSize * 0.85f);
+        ImVec2 nameSz = calcTextScaled(rec.displayName.c_str(), nameFontSize);
+        ImVec2 statsSz = statsText.empty() ? ImVec2(0, 0) : calcTextScaled(statsText.c_str(), infoFontSize);
+        ImVec2 itemSz = rec.heldText.empty() ? ImVec2(0, 0) : calcTextScaled(rec.heldText.c_str(), infoFontSize);
+        float maxW = (std::max)(nameSz.x, (std::max)(statsSz.x, itemSz.x));
+        float totalH = nameSz.y;
+        if (statsSz.y > 0.0f) totalH += statsSz.y + 2.0f;
+        if (itemSz.y > 0.0f) totalH += itemSz.y + 2.0f;
+        float pad = std::floor(4.0f * nameScale);
+        float px = std::floor(sX - maxW * 0.5f) - pad;
+        float py = std::floor(sY - totalH - pad * 2.0f);
+        auto& smooth = g_tagSmoothing[rec.hashKey];
+        if (!smooth.init) {
+            smooth.x = px;
+            smooth.y = py;
+            smooth.vx = 0.0f;
+            smooth.vy = 0.0f;
+            smooth.init = true;
         } else {
+            float dxs = px - smooth.x;
+            float dys = py - smooth.y;
+            float deltaSq = dxs * dxs + dys * dys;
+            if (deltaSq > 24000.0f) {
+                smooth.x = px;
+                smooth.y = py;
+                smooth.vx = 0.0f;
+                smooth.vy = 0.0f;
+            } else {
+                float blend = 0.12f;
+                if (rec.dist < 12.0) blend = 0.14f;
+                if (deltaSq < 6.0f) blend = 0.22f;
+                smooth.x += dxs * blend;
+                smooth.y += dys * blend;
+            }
+        }
+        smooth.lastFrame = g_tagFrameCounter;
+        px = smooth.x;
+        py = smooth.y;
+
+        ImDrawList* fg = ImGui::GetForegroundDrawList();
+        ImVec2 pMin(px, py);
+        ImVec2 pMax(px + maxW + pad * 2.0f, py + totalH + pad * 2.0f + 2.0f);
+        fg->AddRectFilled(pMin, pMax, IM_COL32(0, 0, 0, 160), 3.0f);
+        float curY = py + pad;
+        float centerX = px + (maxW + pad * 2.0f) * 0.5f;
+        float nameX = std::floor(centerX - nameSz.x * 0.5f);
+        fg->AddText(ImGui::GetFont(), nameFontSize, ImVec2(nameX + 1, curY + 1), IM_COL32(0, 0, 0, 255), rec.displayName.c_str());
+        fg->AddText(ImGui::GetFont(), nameFontSize, ImVec2(nameX, curY), ToImU32(nametagTheme.moduleText), rec.displayName.c_str());
+        curY += nameSz.y + 2.0f;
+        if (!statsText.empty()) {
+            float statsX = std::floor(centerX - statsSz.x * 0.5f);
+            ImU32 statCol = hpClamped <= 8.0f ? IM_COL32(255, 100, 100, 250) : IM_COL32(200, 220, 255, 250);
+            fg->AddText(ImGui::GetFont(), infoFontSize, ImVec2(statsX + 1, curY + 1), IM_COL32(0, 0, 0, 255), statsText.c_str());
+            fg->AddText(ImGui::GetFont(), infoFontSize, ImVec2(statsX, curY), statCol, statsText.c_str());
+            curY += statsSz.y + 2.0f;
+        }
+        if (!rec.heldText.empty()) {
+            float heldX = std::floor(centerX - itemSz.x * 0.5f);
+            fg->AddText(ImGui::GetFont(), infoFontSize, ImVec2(heldX + 1, curY + 1), IM_COL32(0, 0, 0, 255), rec.heldText.c_str());
+            fg->AddText(ImGui::GetFont(), infoFontSize, ImVec2(heldX, curY), IM_COL32(255, 200, 80, 250), rec.heldText.c_str());
+        }
+        if (showHealth) {
+            float barW = (pMax.x - pMin.x) * hpPct;
+            ImU32 hpCol = IM_COL32((int)(255 * (1.0f - hpPct)), (int)(220 * hpPct + 35), 60, 255);
+            fg->AddRectFilled(ImVec2(pMin.x, pMax.y),
+                              ImVec2(pMin.x + barW, pMax.y + std::floor(3.0f * nameScale)), hpCol);
+        }
+        if (count < kEntityJsonCap) {
+            if (count > 0) ss << ",";
+            ss << "{";
+            ss << "\"sx\":" << (aimProjected ? aimSX : sX) << ",";
+            ss << "\"sy\":" << (aimProjected ? aimSY : sY) << ",";
+            ss << "\"dist\":" << rec.dist << ",";
+            ss << "\"name\":\"" << JsonEscape(rec.displayName) << "\",";
+            ss << "\"hp\":" << hpClamped;
+            ss << "}";
+        }
+        count++;
+    }
+
+    for (auto it = g_tagSmoothing.begin(); it != g_tagSmoothing.end(); ) {
+        if (g_tagFrameCounter - it->second.lastFrame > 45)
+            it = g_tagSmoothing.erase(it);
+        else
             ++it;
-        }
     }
-
-    // Close entities array
     ss << "]";
-
-    env->DeleteLocalRef(startList);
-    env->DeleteLocalRef(world);
-
-    // Store entities JSON for ServerLoop injection
     {
-        std::string json = ss.str();
-        {
-            LockGuard lk(g_jsonMutex);
-            g_pendingJson = json;
-        }
+        LockGuard lk(g_jsonMutex);
+        g_pendingJson = ss.str();
     }
-    
-exit_frame:
-    env->PopLocalFrame(nullptr);
 }
 
 static void RenderFightStatus(int w, int h) {
     FightStatusDrawSnapshot18 snapshot;
     { LockGuard lk(g_fightStatusMutex18); snapshot = g_fightStatusDrawSnapshot18; }
-    if (!snapshot.valid || snapshot.distance > 16.0f || !snapshot.hasProjectedAnchors) return;
+    if (!snapshot.valid || snapshot.distance > 16.0f || !snapshot.hasWorldPos) return;
 
-    const bool onScreen = snapshot.feetX >= 0.0f && snapshot.feetX <= w &&
-        snapshot.headX >= 0.0f && snapshot.headX <= w &&
-        snapshot.feetY >= 0.0f && snapshot.feetY <= h &&
-        snapshot.headY >= 0.0f && snapshot.headY <= h;
+    BgCamState18 cam = SnapshotOverlayCamera18();
+    if (!cam.camFound || !cam.matsOk) return;
+    float feetX = 0, feetY = 0, headX = 0, headY = 0;
+    const bool projected =
+        WorldToScreen(snapshot.worldX - cam.camX, snapshot.worldY - cam.camY, snapshot.worldZ - cam.camZ,
+            cam.view, cam.proj, w, h, feetX, feetY) &&
+        WorldToScreen(snapshot.worldX - cam.camX, snapshot.worldY + 1.8 - cam.camY, snapshot.worldZ - cam.camZ,
+            cam.view, cam.proj, w, h, headX, headY);
+    if (!projected) return;
+
+    const bool onScreen = feetX >= 0.0f && feetX <= w &&
+        headX >= 0.0f && headX <= w &&
+        feetY >= 0.0f && feetY <= h &&
+        headY >= 0.0f && headY <= h;
     if (!onScreen) return;
 
     ImDrawList* fg = ImGui::GetForegroundDrawList();
-    const float rawHeight = std::fabs(snapshot.feetY - snapshot.headY);
+    const float rawHeight = std::fabs(feetY - headY);
     const float barHeight = (std::max)(48.0f, (std::min)(110.0f, rawHeight));
-    const float centerY = (snapshot.feetY + snapshot.headY) * 0.5f;
+    const float centerY = (feetY + headY) * 0.5f;
     const float topY = centerY - barHeight * 0.5f;
     const float bottomY = centerY + barHeight * 0.5f;
-    const float bodyX = (snapshot.feetX + snapshot.headX) * 0.5f;
+    const float bodyX = (feetX + headX) * 0.5f;
     const float bodyHalfWidth = (std::max)(10.0f, rawHeight * (0.6f / 1.8f) * 0.5f);
     const float barWidth = 8.0f;
     const float gap = 7.0f;
@@ -10751,7 +11295,6 @@ static void RenderFightStatus(int w, int h) {
         stateColor, ImGui::GetFontSize());
     drawText(prediction, midY + 3.0f, IM_COL32(235, 238, 245, 240), smallFont);
 }
-
 void RenderPixelPartyAssist(
     int w,
     int h,
@@ -10934,26 +11477,24 @@ void RenderClosestPlayerInfo(
     }
 }
 
-void RenderChestESP(int w, int h, const Config& config) {
+static void UpdateChestListLegacy(JNIEnv* env, const Config& config) {
     TRACE_PATH("enter");
     static bool warnedChestMappings = false;
     TRACE_BRANCH("chestEspEnabled", config.chestEsp);
-    if (!config.chestEsp) return;
-    const int chestEspMaxCount =
-        (std::max)(1, (std::min)(20, config.chestEspMaxCount));
+    if (!config.chestEsp) {
+        LockGuard lk(g_overlayChestsMutex18);
+        g_overlayChests18.clear();
+        return;
+    }
+    const int chestEspRange = lc::ClampChestEspRange(config.chestEspRange);
     bool mappedReady = (g_mapped && g_mcInstance);
     TRACE_BRANCH("mappedReady", mappedReady);
-    if (!mappedReady) return;
-
-    ScopedJNIEnv env(g_jvm);
-    TRACE_BRANCH("jniEnvAvailable", env != nullptr);
-    if (!env) return;
+    if (!mappedReady || !env) return;
 
     TryResolveScreenFieldDirect(env);
     TryResolvePlayerCoreMappings(env);
     TryResolveChestEspMappings(env);
     TryResolveWorldMappings(env);
-    TryResolveRenderMappings(env, false);
 
     if (!g_theWorldField || !g_listSizeMethod || !g_listGetMethod ||
         !g_thePlayerField || !g_posXField || !g_posYField || !g_posZField ||
@@ -10974,77 +11515,10 @@ void RenderChestESP(int w, int h, const Config& config) {
         }
         return;
     }
-    if (!g_activeRenderInfoClass || !g_modelViewField || !g_projectionField) {
-        TRACE_PATH("missing-render-mappings");
-        if (!warnedChestMappings) {
-            warnedChestMappings = true;
-            Log("ChestESP waiting for render mappings.");
-        }
-        return;
-    }
 
     warnedChestMappings = false;
-
     if (env->ExceptionCheck()) { env->ExceptionClear(); return; }
     if (env->PushLocalFrame(256) < 0) { env->ExceptionClear(); return; }
-
-    Matrix4x4 view = GetMatrix(env, g_modelViewField);
-    Matrix4x4 proj = GetMatrix(env, g_projectionField);
-    bool matrixProjectionUsable = MatrixProjectionUsable(view, proj);
-    TRACE_BRANCH("matrixProjectionUsableInitial", matrixProjectionUsable);
-    bool usedCapturedMatrices = false;
-    if (!matrixProjectionUsable) {
-        TRACE_PATH("matrix-fallback-captured");
-        usedCapturedMatrices = TryUseCapturedRenderMatrices(view, proj);
-        matrixProjectionUsable = usedCapturedMatrices;
-    }
-    TRACE_BRANCH("matrixProjectionUsableAfterFallback", matrixProjectionUsable);
-    static bool loggedChestCapturedMatrixFallback = false;
-    static bool loggedChestUiMatrixReject = false;
-    if (usedCapturedMatrices && !loggedChestCapturedMatrixFallback) {
-        loggedChestCapturedMatrixFallback = true;
-        Log("ChestESP using captured GL matrix fallback.");
-    }
-    if (matrixProjectionUsable && IsLikelyUiOrthoMatrix(view, proj)) {
-        TRACE_PATH("matrix-ui-ortho-rebind-attempt");
-        TryResolveRenderMappings(env, false);
-        view = GetMatrix(env, g_modelViewField);
-        proj = GetMatrix(env, g_projectionField);
-        matrixProjectionUsable = MatrixProjectionUsable(view, proj);
-        usedCapturedMatrices = false;
-        if (!matrixProjectionUsable) {
-            TRACE_PATH("matrix-ui-ortho-second-fallback");
-            usedCapturedMatrices = TryUseCapturedRenderMatrices(view, proj);
-            matrixProjectionUsable = usedCapturedMatrices;
-        }
-        if (matrixProjectionUsable && IsLikelyUiOrthoMatrix(view, proj)) {
-            matrixProjectionUsable = false;
-            if (!loggedChestUiMatrixReject) {
-                loggedChestUiMatrixReject = true;
-                Log("ChestESP rejected UI-space matrix projection after rebind attempt.");
-            }
-        }
-    }
-    if (!matrixProjectionUsable) {
-        static bool warnedChestMatrixUnavailable = false;
-        if (!warnedChestMatrixUnavailable) {
-            warnedChestMatrixUnavailable = true;
-            Log("ChestESP waiting for usable projection matrices.");
-        }
-        env->PopLocalFrame(nullptr);
-        return;
-    }
-
-    double vX = 0.0, vY = 0.0, vZ = 0.0;
-    if (g_renderManagerField && g_viewerPosXField && g_viewerPosYField && g_viewerPosZField) {
-        jobject rm = env->GetObjectField(g_mcInstance, g_renderManagerField);
-        if (rm) {
-            vX = env->GetDoubleField(rm, g_viewerPosXField);
-            vY = env->GetDoubleField(rm, g_viewerPosYField);
-            vZ = env->GetDoubleField(rm, g_viewerPosZField);
-            env->DeleteLocalRef(rm);
-        }
-    }
 
     jobject world = env->GetObjectField(g_mcInstance, g_theWorldField);
     if (!world) { env->PopLocalFrame(nullptr); return; }
@@ -11071,8 +11545,9 @@ void RenderChestESP(int w, int h, const Config& config) {
         return;
     }
 
-    int drawn = 0;
-    for (int i = 0; i < size && drawn < chestEspMaxCount; i++) {
+    std::vector<lc::ChestEspCandidate> chests;
+    chests.reserve((size_t)(std::max)(0, size));
+    for (int i = 0; i < size; i++) {
         jobject te = env->CallObjectMethod(tileList, g_listGetMethod, i);
         if (env->ExceptionCheck()) { env->ExceptionClear(); break; }
         if (!te) continue;
@@ -11080,7 +11555,8 @@ void RenderChestESP(int w, int h, const Config& config) {
         bool isChest = false;
         if (g_tileEntityChestClass && env->IsInstanceOf(te, g_tileEntityChestClass)) isChest = true;
         if (!isChest && g_tileEntityEnderChestClass && env->IsInstanceOf(te, g_tileEntityEnderChestClass)) isChest = true;
-        if (!isChest) {
+        if (!isChest && lc::ChestEspNeedClassNameFallback(
+                g_tileEntityChestClass != nullptr, g_tileEntityEnderChestClass != nullptr)) {
             jclass teClass = env->GetObjectClass(te);
             if (teClass) {
                 std::string clsName = GetClassNameFromClass(env, teClass);
@@ -11094,10 +11570,8 @@ void RenderChestESP(int w, int h, const Config& config) {
         }
 
         jobject posObj = env->GetObjectField(te, g_tileEntityPosField);
-        if (!posObj) {
-            env->DeleteLocalRef(te);
-            continue;
-        }
+        env->DeleteLocalRef(te);
+        if (!posObj) continue;
 
         int bx = env->CallIntMethod(posObj, g_blockPosGetX);
         int by = env->CallIntMethod(posObj, g_blockPosGetY);
@@ -11105,25 +11579,40 @@ void RenderChestESP(int w, int h, const Config& config) {
         env->DeleteLocalRef(posObj);
         if (env->ExceptionCheck()) {
             env->ExceptionClear();
-            env->DeleteLocalRef(te);
             continue;
         }
+        if (!lc::ChestEspInChunkRange(bx, bz, localPX, localPZ, chestEspRange)) continue;
 
-        double cx = (double)bx + 0.5;
-        double cy = (double)by + 0.5;
-        double cz = (double)bz + 0.5;
-        double dx = cx - localPX;
-        double dy = cy - localPY;
-        double dz = cz - localPZ;
-        double dist = sqrt(dx*dx + dy*dy + dz*dz);
-        if (dist > 64.0) {
-            env->DeleteLocalRef(te);
-            continue;
-        }
+        double dx = ((double)bx + 0.5) - localPX;
+        double dy = ((double)by + 0.5) - localPY;
+        double dz = ((double)bz + 0.5) - localPZ;
+        const double distSq = dx * dx + dy * dy + dz * dz;
+        if (distSq != distSq) continue;
+        chests.push_back({ bx, by, bz, distSq });
+    }
+    lc::ChestEspSortNearestFirst(chests);
+    { LockGuard lk(g_overlayChestsMutex18); g_overlayChests18.swap(chests); }
+    env->PopLocalFrame(nullptr);
+}
 
-        const double minX = (double)bx;
-        const double minY = (double)by;
-        const double minZ = (double)bz;
+void RenderChestESP(int w, int h, const Config& config) {
+    TRACE_PATH("enter");
+    TRACE_BRANCH("chestEspEnabled", config.chestEsp);
+    if (!config.chestEsp) return;
+
+    static thread_local std::vector<lc::ChestEspCandidate> chests;
+    { LockGuard lk(g_overlayChestsMutex18); chests = g_overlayChests18; }
+    if (chests.empty()) return;
+
+    BgCamState18 cam = SnapshotOverlayCamera18();
+    if (!cam.camFound || !cam.matsOk) return;
+    const double vX = cam.camX, vY = cam.camY, vZ = cam.camZ;
+
+    ImDrawList* fg = ImGui::GetForegroundDrawList();
+    for (const auto& chest : chests) {
+        const double minX = (double)chest.bx;
+        const double minY = (double)chest.by;
+        const double minZ = (double)chest.bz;
         const double maxX = minX + 1.0;
         const double maxY = minY + 1.0;
         const double maxZ = minZ + 1.0;
@@ -11137,7 +11626,8 @@ void RenderChestESP(int w, int h, const Config& config) {
         bool projected = true;
         for (int c = 0; c < 8; c++) {
             float sx = 0.0f, sy = 0.0f;
-            if (!WorldToScreen(corners[c][0] - vX, corners[c][1] - vY, corners[c][2] - vZ, view, proj, w, h, sx, sy)) {
+            if (!WorldToScreen(corners[c][0] - vX, corners[c][1] - vY, corners[c][2] - vZ,
+                    cam.view, cam.proj, w, h, sx, sy)) {
                 projected = false;
                 break;
             }
@@ -11147,28 +11637,19 @@ void RenderChestESP(int w, int h, const Config& config) {
             if (sy > bottom) bottom = sy;
         }
 
-        if (projected && right > left && bottom > top) {
-            left = (std::max)(left, 0.0f);
-            top = (std::max)(top, 0.0f);
-            right = (std::min)(right, (float)w);
-            bottom = (std::min)(bottom, (float)h);
-            if (right <= left || bottom <= top) {
-                env->DeleteLocalRef(te);
-                continue;
-            }
+        if (!projected || right <= left || bottom <= top) continue;
+        left = (std::max)(left, 0.0f);
+        top = (std::max)(top, 0.0f);
+        right = (std::min)(right, (float)w);
+        bottom = (std::min)(bottom, (float)h);
+        if (right <= left || bottom <= top) continue;
 
-            float t = (std::min)((float)(dist / 40.0), 1.0f);
-            ImU32 boxColor = IM_COL32(255, 165 + (int)(90 * t), 0 + (int)(80 * t), (int)(220 - 40 * t));
-            ImDrawList* fg = ImGui::GetForegroundDrawList();
-            fg->AddRectFilled(ImVec2(left, top), ImVec2(right, bottom), IM_COL32(0, 0, 0, 90));
-            fg->AddRect(ImVec2(left, top), ImVec2(right, bottom), boxColor, 0.0f, 0, 1.5f);
-            drawn++;
-        }
-
-        env->DeleteLocalRef(te);
+        const double dist = std::sqrt(chest.distSq);
+        float t = (std::min)((float)(dist / 40.0), 1.0f);
+        ImU32 boxColor = IM_COL32(255, 165 + (int)(90 * t), 0 + (int)(80 * t), (int)(220 - 40 * t));
+        fg->AddRectFilled(ImVec2(left, top), ImVec2(right, bottom), IM_COL32(0, 0, 0, 90));
+        fg->AddRect(ImVec2(left, top), ImVec2(right, bottom), boxColor, 0.0f, 0, 1.5f);
     }
-
-    env->PopLocalFrame(nullptr);
 }
 
 // ===================== BLOCK ESP / X-RAY (legacy 1.8.9) =====================
@@ -11185,11 +11666,6 @@ static LONG g_blockEspTargetBlocksVersion18 = -1;
 
 struct BlockEspChunkCache18 { std::vector<BlockEspData18> hits; };
 static std::map<long long, BlockEspChunkCache18> g_blockEspChunkCache18;
-
-static long long BlockEspChunkKey18(int cx, int cz) {
-    return ((long long)(unsigned int)cx << 32) | (unsigned int)cz;
-}
-static int BlockEspAbsI18(int v) { return v < 0 ? -v : v; }
 
 static void EnsureBlockClass18(JNIEnv* env) {
     if (g_blockClass18) return;
@@ -11241,161 +11717,44 @@ static void EnsureBlockEspTargetBlocks18(JNIEnv* env) {
     g_blockEspTargetBlocksVersion18 = ver;
 }
 
-static void UpdateBlockEspListLegacy(JNIEnv* env, const Config& cfg) {
-    DWORD now = GetTickCount();
-    if (now - g_lastBlockEspScanMs < 120) return;
-    g_lastBlockEspScanMs = now;
+// ===================== BED PLATES (legacy 1.8.9) =====================
+// Round-robin chunk scan (reusing the Block ESP chunk-section machinery) that
+// detects bed blocks, dedupes head/foot pairs, and samples nearby block ids
+// Resolve the 1.8.9 Block.bed singleton once for fast IsSameObject matching.
+static jobject g_bedBlock18 = nullptr;
+static bool g_bedBlock18Resolved = false;
 
-    if (!g_mcInstance || !g_theWorldField || !g_thePlayerField || !g_posXField || !g_posYField || !g_posZField) return;
-
-    EnsureBlockEspTargetBlocks18(env);
-    if (g_blockEspTargetBlocks18.empty()) {
-        { LockGuard lk(g_blockEspListMutex); g_blockEspList.clear(); }
-        g_blockEspChunkCache18.clear();
-        return;
+static jobject EnsureBedBlock18(JNIEnv* env) {
+    if (g_bedBlock18Resolved) return g_bedBlock18;
+    g_bedBlock18Resolved = true;
+    EnsureBlockClass18(env);
+    if (!g_blockClass18 || !g_blockGetFromName18) {
+        Log("BedPlates: Block.getBlockFromName unavailable");
+        return nullptr;
     }
-
-    int range = (std::max)(1, (std::min)(8, cfg.blockEspRange));
-    int maxCount = (std::max)(1, (std::min)(512, cfg.blockEspMaxCount));
-
-    jobject world = env->GetObjectField(g_mcInstance, g_theWorldField);
-    if (env->ExceptionCheck()) { env->ExceptionClear(); world = nullptr; }
-    if (!world) return;
-    jobject player = env->GetObjectField(g_mcInstance, g_thePlayerField);
-    if (env->ExceptionCheck()) { env->ExceptionClear(); player = nullptr; }
-    if (!player) { env->DeleteLocalRef(world); return; }
-
-    double px = env->GetDoubleField(player, g_posXField);
-    double py = env->GetDoubleField(player, g_posYField);
-    double pz = env->GetDoubleField(player, g_posZField);
-    env->DeleteLocalRef(player);
-
-    // Resolve chunk/storage methods lazily.
-    if (!g_worldGetChunk18) {
-        jclass wcls = env->GetObjectClass(world);
-        if (wcls) {
-            const char* names[] = { "getChunkFromChunkCoords", "func_72964_e", "getChunk", nullptr };
-            for (int i = 0; names[i] && !g_worldGetChunk18; i++) {
-                g_worldGetChunk18 = env->GetMethodID(wcls, names[i], "(II)Lnet/minecraft/world/chunk/Chunk;");
-                if (env->ExceptionCheck()) { env->ExceptionClear(); g_worldGetChunk18 = nullptr; }
-            }
-            env->DeleteLocalRef(wcls);
+    const char* names[] = { "bed", "minecraft:bed", nullptr };
+    for (int i = 0; names[i] && !g_bedBlock18; i++) {
+        jstring jn = env->NewStringUTF(names[i]);
+        if (!jn) continue;
+        jobject blk = env->CallStaticObjectMethod(g_blockClass18, g_blockGetFromName18, jn);
+        env->DeleteLocalRef(jn);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); blk = nullptr; }
+        if (blk) {
+            g_bedBlock18 = env->NewGlobalRef(blk);
+            env->DeleteLocalRef(blk);
+            Log(std::string("BedPlates: resolved bed block via getBlockFromName(\"") + names[i] + "\")");
         }
     }
-    if (!g_worldGetChunk18) { env->DeleteLocalRef(world); return; }
+    if (!g_bedBlock18) Log("BedPlates: failed to resolve bed block singleton");
+    return g_bedBlock18;
+}
 
-    int pcx = (int)std::floor(px) >> 4;
-    int pcz = (int)std::floor(pz) >> 4;
+// (via lc::CollectBedPlateSamples) for the on-screen callout.
+struct BedPlateCandidate18 { int x, y, z; };
+struct BedPlatesChunkCache18 { std::vector<BedPlateCandidate18> beds; };
+static std::map<long long, BedPlatesChunkCache18> g_bedPlatesChunkCache18;
 
-    // Evict out-of-range cache entries.
-    for (auto it = g_blockEspChunkCache18.begin(); it != g_blockEspChunkCache18.end(); ) {
-        int ccx = (int)(it->first >> 32);
-        int ccz = (int)(it->first & 0xffffffff);
-        if (BlockEspAbsI18(ccx - pcx) > range || BlockEspAbsI18(ccz - pcz) > range)
-            it = g_blockEspChunkCache18.erase(it);
-        else ++it;
-    }
-
-    // Round-robin: scan at most one missing chunk per tick.
-    const int CHUNK_BUDGET = 1;
-    int scanned = 0;
-    for (int dx = -range; dx <= range && scanned < CHUNK_BUDGET; dx++) {
-        for (int dz = -range; dz <= range && scanned < CHUNK_BUDGET; dz++) {
-            int cx = pcx + dx, cz = pcz + dz;
-            long long key = BlockEspChunkKey18(cx, cz);
-            if (g_blockEspChunkCache18.find(key) != g_blockEspChunkCache18.end()) continue;
-
-            BlockEspChunkCache18 cache;
-            jobject chunk = env->CallObjectMethod(world, g_worldGetChunk18, cx, cz);
-            if (env->ExceptionCheck()) { env->ExceptionClear(); chunk = nullptr; }
-            if (!chunk) continue;
-
-            if (!g_chunkGetStorageArray18) {
-                jclass ccls = env->GetObjectClass(chunk);
-                if (ccls) {
-                    const char* names[] = { "getBlockStorageArray", "func_76587_i", nullptr };
-                    for (int i = 0; names[i] && !g_chunkGetStorageArray18; i++) {
-                        g_chunkGetStorageArray18 = env->GetMethodID(ccls, names[i], "()[Lnet/minecraft/world/chunk/storage/ExtendedBlockStorage;");
-                        if (env->ExceptionCheck()) { env->ExceptionClear(); g_chunkGetStorageArray18 = nullptr; }
-                    }
-                    env->DeleteLocalRef(ccls);
-                }
-            }
-            if (!g_chunkGetStorageArray18) { env->DeleteLocalRef(chunk); break; }
-
-            jobjectArray storages = (jobjectArray)env->CallObjectMethod(chunk, g_chunkGetStorageArray18);
-            if (env->ExceptionCheck()) { env->ExceptionClear(); storages = nullptr; }
-            if (storages) {
-                jsize nsec = env->GetArrayLength(storages);
-                for (jsize si = 0; si < nsec; si++) {
-                    jobject sec = env->GetObjectArrayElement(storages, si);
-                    if (env->ExceptionCheck()) { env->ExceptionClear(); sec = nullptr; }
-                    if (!sec) continue; // null = empty section in 1.8.9
-
-                    if (!g_storageGet18) {
-                        jclass scls = env->GetObjectClass(sec);
-                        if (scls) {
-                            if (!g_storageClass18) g_storageClass18 = (jclass)env->NewGlobalRef(scls);
-                            const char* names[] = { "get", "func_177485_a", nullptr };
-                            for (int i = 0; names[i] && !g_storageGet18; i++) {
-                                g_storageGet18 = env->GetMethodID(scls, names[i], "(III)Lnet/minecraft/block/state/IBlockState;");
-                                if (env->ExceptionCheck()) { env->ExceptionClear(); g_storageGet18 = nullptr; }
-                            }
-                            env->DeleteLocalRef(scls);
-                        }
-                    }
-                    if (g_storageGet18) {
-                        int sectionMinY = (int)si * 16;
-                        for (int ly = 0; ly < 16; ly++) {
-                            for (int lz = 0; lz < 16; lz++) {
-                                for (int lx = 0; lx < 16; lx++) {
-                                    jobject state = env->CallObjectMethod(sec, g_storageGet18, lx, ly, lz);
-                                    if (env->ExceptionCheck()) { env->ExceptionClear(); state = nullptr; }
-                                    if (!state) continue;
-                                    if (!g_blockStateGetBlockMethod) {
-                                        jclass stcls = env->GetObjectClass(state);
-                                        if (stcls) {
-                                            const char* names[] = { "getBlock", "func_177230_c", nullptr };
-                                            for (int i = 0; names[i] && !g_blockStateGetBlockMethod; i++) {
-                                                g_blockStateGetBlockMethod = env->GetMethodID(stcls, names[i], "()Lnet/minecraft/block/Block;");
-                                                if (env->ExceptionCheck()) { env->ExceptionClear(); g_blockStateGetBlockMethod = nullptr; }
-                                            }
-                                            env->DeleteLocalRef(stcls);
-                                        }
-                                    }
-                                    if (g_blockStateGetBlockMethod) {
-                                        jobject block = env->CallObjectMethod(state, g_blockStateGetBlockMethod);
-                                        if (env->ExceptionCheck()) { env->ExceptionClear(); block = nullptr; }
-                                        if (block) {
-                                            for (const auto& tb : g_blockEspTargetBlocks18) {
-                                                if (env->IsSameObject(tb.block, block)) {
-                                                    double wx = (double)cx * 16 + lx + 0.5;
-                                                    double wy = (double)sectionMinY + ly + 0.5;
-                                                    double wz = (double)cz * 16 + lz + 0.5;
-                                                    cache.hits.push_back({ wx, wy, wz, tb.color, 0.0 });
-                                                    break;
-                                                }
-                                            }
-                                            env->DeleteLocalRef(block);
-                                        }
-                                    }
-                                    env->DeleteLocalRef(state);
-                                }
-                            }
-                        }
-                    }
-                    env->DeleteLocalRef(sec);
-                }
-                env->DeleteLocalRef(storages);
-            }
-            env->DeleteLocalRef(chunk);
-            g_blockEspChunkCache18[key] = std::move(cache);
-            scanned++;
-        }
-    }
-
-    env->DeleteLocalRef(world);
-
+static void PublishBlockEspFromCache18(double px, double py, double pz, int maxCount) {
     static thread_local std::vector<BlockEspData18> merged;
     merged.clear();
     for (auto& kv : g_blockEspChunkCache18) {
@@ -11412,25 +11771,359 @@ static void UpdateBlockEspListLegacy(JNIEnv* env, const Config& cfg) {
     { LockGuard lk(g_blockEspListMutex); g_blockEspList.swap(merged); }
 }
 
+static void PublishBedPlatesFromCache18(JNIEnv* env, double px, double py, double pz, DWORD now, int scanned) {
+    static thread_local std::vector<BedPlateCandidate18> allBeds;
+    allBeds.clear();
+    for (auto& kv : g_bedPlatesChunkCache18)
+        for (auto& b : kv.second.beds) allBeds.push_back(b);
+
+    auto hasBedAt = [&](int x, int y, int z) -> bool {
+        for (auto& b : allBeds) if (b.x == x && b.y == y && b.z == z) return true;
+        return false;
+    };
+
+    struct CanonicalBed18 { int x, y, z; int facing; double dist; };
+    static thread_local std::vector<CanonicalBed18> canonical;
+    canonical.clear();
+    for (auto& b : allBeds) {
+        bool hasNegX = hasBedAt(b.x - 1, b.y, b.z);
+        bool hasNegZ = hasBedAt(b.x, b.y, b.z - 1);
+        if (!lc::BedPlatesIsCanonicalHalf(hasNegX, hasNegZ)) continue;
+        int ox = 0, oz = 0;
+        if (hasBedAt(b.x + 1, b.y, b.z)) ox = 1;
+        else if (hasBedAt(b.x - 1, b.y, b.z)) ox = -1;
+        else if (hasBedAt(b.x, b.y, b.z + 1)) oz = 1;
+        else if (hasBedAt(b.x, b.y, b.z - 1)) oz = -1;
+        int facing = (ox == 0 && oz == 0) ? 0 : lc::BedFacingFromFootOffset(ox, oz);
+        double ddx = ((double)b.x + 0.5) - px;
+        double ddy = (double)b.y - py;
+        double ddz = ((double)b.z + 0.5) - pz;
+        CanonicalBed18 cb;
+        cb.x = b.x; cb.y = b.y; cb.z = b.z; cb.facing = facing;
+        cb.dist = std::sqrt(ddx * ddx + ddy * ddy + ddz * ddz);
+        canonical.push_back(cb);
+    }
+    std::sort(canonical.begin(), canonical.end(),
+              [](const CanonicalBed18& a, const CanonicalBed18& b) { return a.dist < b.dist; });
+    const size_t kMaxBedPlates = 32;
+    if (canonical.size() > kMaxBedPlates) canonical.resize(kMaxBedPlates);
+
+    std::vector<BedPlateRenderData> result;
+    result.reserve(canonical.size());
+    static thread_local std::vector<lc::BedPlateSample> samples;
+    for (auto& bed : canonical) {
+        lc::CollectBedPlateSamples(bed.x, bed.y, bed.z, bed.facing, samples);
+        lc::BedPlateCountState counts;
+        for (auto& s : samples) {
+            std::string id;
+            if (LegacyGetBlockIdAtAny(env, s.x, s.y, s.z, &id)) {
+                counts.incrementBlock(s.layer, id);
+            }
+        }
+        counts.sortLayersByFrequency();
+        std::vector<std::string> visible;
+        counts.collectVisibleBlockIds(visible);
+        BedPlateRenderData d;
+        d.x = bed.x; d.y = bed.y; d.z = bed.z;
+        d.dist = bed.dist;
+        d.blocks = visible;
+        result.push_back(std::move(d));
+    }
+
+    static DWORD s_lastBedDiagMs = 0;
+    if (now - s_lastBedDiagMs > 2000) {
+        s_lastBedDiagMs = now;
+        Log("BedPlates: halves=" + std::to_string(allBeds.size())
+            + " plates=" + std::to_string(result.size())
+            + " cachedChunks=" + std::to_string(g_bedPlatesChunkCache18.size())
+            + " scannedThisTick=" + std::to_string(scanned));
+    }
+
+    { LockGuard lk(g_bedPlateListMutex); g_bedPlateList.swap(result); }
+}
+
+static void UpdateSectionChunkScansLegacy(JNIEnv* env, const Config& cfg) {
+    DWORD now = GetTickCount();
+    if (!g_mcInstance || !g_theWorldField || !g_thePlayerField || !g_posXField || !g_posYField || !g_posZField) return;
+
+    EnsureBlockEspTargetBlocks18(env);
+    const bool blockOn = cfg.blockEsp && !g_blockEspTargetBlocks18.empty();
+    jobject bedBlock = cfg.bedPlates ? EnsureBedBlock18(env) : nullptr;
+    const bool bedsOn = cfg.bedPlates && bedBlock != nullptr;
+
+    if (!cfg.blockEsp || g_blockEspTargetBlocks18.empty()) {
+        { LockGuard lk(g_blockEspListMutex); g_blockEspList.clear(); }
+        g_blockEspChunkCache18.clear();
+    }
+    if (!cfg.bedPlates) {
+        { LockGuard lk(g_bedPlateListMutex); g_bedPlateList.clear(); }
+        g_bedPlatesChunkCache18.clear();
+    }
+    if (!blockOn && !bedsOn) return;
+
+    const bool blockDue = blockOn && (now - g_lastBlockEspScanMs >= 120);
+    const bool bedsDue = bedsOn && (now - g_lastBedPlatesScanMs >= 200);
+    if (!blockDue && !bedsDue) return;
+
+    int blockRange = lc::ClampChunkRange(cfg.blockEspRange);
+    int bedRange = lc::ClampChunkRange(cfg.bedPlatesRange);
+    int maxCount = (std::max)(1, (std::min)(512, cfg.blockEspMaxCount));
+
+    jobject world = env->GetObjectField(g_mcInstance, g_theWorldField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); world = nullptr; }
+    if (!world) return;
+    jobject player = env->GetObjectField(g_mcInstance, g_thePlayerField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); player = nullptr; }
+    if (!player) { env->DeleteLocalRef(world); return; }
+
+    double px = env->GetDoubleField(player, g_posXField);
+    double py = env->GetDoubleField(player, g_posYField);
+    double pz = env->GetDoubleField(player, g_posZField);
+    env->DeleteLocalRef(player);
+
+    if (!g_worldGetChunk18) {
+        jclass wcls = env->GetObjectClass(world);
+        if (wcls) {
+            const char* names[] = { "getChunkFromChunkCoords", "func_72964_e", "getChunk", nullptr };
+            for (int i = 0; names[i] && !g_worldGetChunk18; i++) {
+                g_worldGetChunk18 = env->GetMethodID(wcls, names[i], "(II)Lnet/minecraft/world/chunk/Chunk;");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_worldGetChunk18 = nullptr; }
+            }
+            env->DeleteLocalRef(wcls);
+        }
+    }
+    if (!g_worldGetChunk18) { env->DeleteLocalRef(world); return; }
+
+    int pcx = (int)std::floor(px) >> 4;
+    int pcz = (int)std::floor(pz) >> 4;
+    if (blockOn) lc::EvictChunksOutsideRange(g_blockEspChunkCache18, pcx, pcz, blockRange);
+    if (bedsOn) lc::EvictChunksOutsideRange(g_bedPlatesChunkCache18, pcx, pcz, bedRange);
+
+    const int visitRange = lc::MaxEnabledChunkRange(blockOn, blockRange, bedsOn, bedRange);
+    const int budget = lc::CombinedSectionChunkBudget(blockOn, bedsOn);
+    std::vector<std::pair<int, int> > chunkOrder;
+    lc::BuildNearToFarChunkOffsets(visitRange, chunkOrder);
+
+    int scanned = 0;
+    for (size_t ci = 0; ci < chunkOrder.size() && scanned < budget; ci++) {
+        int cx = pcx + chunkOrder[ci].first;
+        int cz = pcz + chunkOrder[ci].second;
+        long long key = lc::ChunkKey(cx, cz);
+        const bool needBlock = blockOn && lc::ChunkInChebyshevRange(cx, cz, pcx, pcz, blockRange)
+            && g_blockEspChunkCache18.find(key) == g_blockEspChunkCache18.end();
+        const bool needBeds = bedsOn && lc::ChunkInChebyshevRange(cx, cz, pcx, pcz, bedRange)
+            && g_bedPlatesChunkCache18.find(key) == g_bedPlatesChunkCache18.end();
+        if (!needBlock && !needBeds) continue;
+
+        BlockEspChunkCache18 blockCache;
+        BedPlatesChunkCache18 bedCache;
+        jobject chunk = env->CallObjectMethod(world, g_worldGetChunk18, cx, cz);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); chunk = nullptr; }
+        if (!chunk) continue;
+        {
+            if (!g_chunkGetStorageArray18) {
+                jclass ccls = env->GetObjectClass(chunk);
+                if (ccls) {
+                    const char* names[] = { "getBlockStorageArray", "func_76587_i", nullptr };
+                    for (int i = 0; names[i] && !g_chunkGetStorageArray18; i++) {
+                        g_chunkGetStorageArray18 = env->GetMethodID(ccls, names[i], "()[Lnet/minecraft/world/chunk/storage/ExtendedBlockStorage;");
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); g_chunkGetStorageArray18 = nullptr; }
+                    }
+                    env->DeleteLocalRef(ccls);
+                }
+            }
+            if (g_chunkGetStorageArray18) {
+                jobjectArray storages = (jobjectArray)env->CallObjectMethod(chunk, g_chunkGetStorageArray18);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); storages = nullptr; }
+                if (storages) {
+                    jsize nsec = env->GetArrayLength(storages);
+                    for (jsize si = 0; si < nsec; si++) {
+                        jobject sec = env->GetObjectArrayElement(storages, si);
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); sec = nullptr; }
+                        if (!sec) continue;
+                        if (!g_storageGet18) {
+                            jclass scls = env->GetObjectClass(sec);
+                            if (scls) {
+                                if (!g_storageClass18) g_storageClass18 = (jclass)env->NewGlobalRef(scls);
+                                const char* names[] = { "get", "func_177485_a", nullptr };
+                                for (int i = 0; names[i] && !g_storageGet18; i++) {
+                                    g_storageGet18 = env->GetMethodID(scls, names[i], "(III)Lnet/minecraft/block/state/IBlockState;");
+                                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_storageGet18 = nullptr; }
+                                }
+                                env->DeleteLocalRef(scls);
+                            }
+                        }
+                        if (g_storageGet18) {
+                            int sectionMinY = (int)si * 16;
+                            for (int ly = 0; ly < 16; ly++) {
+                                for (int lz = 0; lz < 16; lz++) {
+                                    for (int lx = 0; lx < 16; lx++) {
+                                        jobject state = env->CallObjectMethod(sec, g_storageGet18, lx, ly, lz);
+                                        if (env->ExceptionCheck()) { env->ExceptionClear(); state = nullptr; }
+                                        if (!state) continue;
+                                        if (!g_blockStateGetBlockMethod) {
+                                            jclass stcls = env->GetObjectClass(state);
+                                            if (stcls) {
+                                                const char* names[] = { "getBlock", "func_177230_c", nullptr };
+                                                for (int i = 0; names[i] && !g_blockStateGetBlockMethod; i++) {
+                                                    g_blockStateGetBlockMethod = env->GetMethodID(stcls, names[i], "()Lnet/minecraft/block/Block;");
+                                                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_blockStateGetBlockMethod = nullptr; }
+                                                }
+                                                env->DeleteLocalRef(stcls);
+                                            }
+                                        }
+                                        if (g_blockStateGetBlockMethod) {
+                                            jobject block = env->CallObjectMethod(state, g_blockStateGetBlockMethod);
+                                            if (env->ExceptionCheck()) { env->ExceptionClear(); block = nullptr; }
+                                            if (block) {
+                                                if (needBlock) {
+                                                    for (const auto& tb : g_blockEspTargetBlocks18) {
+                                                        if (env->IsSameObject(tb.block, block)) {
+                                                            double wx = (double)cx * 16 + lx + 0.5;
+                                                            double wy = (double)sectionMinY + ly + 0.5;
+                                                            double wz = (double)cz * 16 + lz + 0.5;
+                                                            blockCache.hits.push_back({ wx, wy, wz, tb.color, 0.0 });
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                                if (needBeds && env->IsSameObject(block, bedBlock)) {
+                                                    BedPlateCandidate18 c;
+                                                    c.x = (cx << 4) + lx;
+                                                    c.y = sectionMinY + ly;
+                                                    c.z = (cz << 4) + lz;
+                                                    bedCache.beds.push_back(c);
+                                                }
+                                                env->DeleteLocalRef(block);
+                                            }
+                                        }
+                                        env->DeleteLocalRef(state);
+                                    }
+                                }
+                            }
+                        }
+                        env->DeleteLocalRef(sec);
+                    }
+                    env->DeleteLocalRef(storages);
+                }
+            }
+            env->DeleteLocalRef(chunk);
+        }
+        if (needBlock) g_blockEspChunkCache18[key] = std::move(blockCache);
+        if (needBeds) g_bedPlatesChunkCache18[key] = std::move(bedCache);
+        scanned++;
+    }
+
+    env->DeleteLocalRef(world);
+    if (blockDue) g_lastBlockEspScanMs = now;
+    if (bedsDue) g_lastBedPlatesScanMs = now;
+    if (blockOn) PublishBlockEspFromCache18(px, py, pz, maxCount);
+    if (bedsDue) PublishBedPlatesFromCache18(env, px, py, pz, now, scanned);
+}
+
+static DWORD WINAPI FastPollThreadProc18(LPVOID) {
+    JNIEnv* env = JniEnv::Get(g_jvm);
+    if (!env) return 1;
+    while (IsBridgeRunning()) {
+        if (g_mapped && g_mcInstance) {
+            TryLockGuard jniTry(g_renderJniMutex);
+            if (jniTry.owns_lock())
+                ReadCameraState18(env);
+        }
+        Sleep(5);
+    }
+    JniEnv::DetachThisThread(g_jvm);
+    return 0;
+}
+
+static DWORD WINAPI OverlayScanThreadProc18(LPVOID) {
+    JNIEnv* env = JniEnv::Get(g_jvm);
+    if (!env) return 1;
+    DWORD lastChestEspScanMs = 0;
+    bool chestEspScanWasEnabled = false;
+    bool entityProducerWasEnabled = false;
+    while (IsBridgeRunning()) {
+        const unsigned long long scanLoopPerfStarted =
+            GetNativePerfDiagnostics().Enabled() ? NativePerfTimestamp() : 0;
+        Config cfg;
+        { LockGuard lk(g_configMutex); cfg = g_config; }
+        GameState stateSnap;
+        { LockGuard lk(g_stateMutex); stateSnap = g_gameState; }
+
+        const bool inWorld = stateSnap.inWorld && g_mapped && g_mcInstance;
+        {
+            LockGuard overlayJni(g_renderJniMutex);
+            if (inWorld && !ShouldHideWorldRenderModules(stateSnap)) {
+                ReadCameraState18(env);
+                const bool entityProducerEnabled =
+                    cfg.nametags || cfg.nickHiderEnabled || cfg.closestPlayerInfo ||
+                    cfg.aimAssist || cfg.fightStatus || cfg.nametagHideVanilla ||
+                    g_legacyNametagSuppressionActive;
+                if (entityProducerEnabled) {
+                    NativePerfScope playerScanPerf(lc::PERF_PLAYER_SCAN);
+                    UpdatePlayerListOverlayLegacy(env, cfg);
+                } else if (entityProducerWasEnabled) {
+                    ClearLegacyOverlayPlayers();
+                    ResetFightStatusState18();
+                }
+                entityProducerWasEnabled = entityProducerEnabled;
+
+                const DWORD nowMs = GetTickCount();
+                const bool chestEspScanEnabled = cfg.chestEsp;
+                const bool chestEspScanDue =
+                    !chestEspScanWasEnabled ||
+                    lc::IsTelemetryIntervalDue(nowMs, lastChestEspScanMs, lc::kChestEspScanIntervalMs);
+                if (chestEspScanEnabled && chestEspScanDue) {
+                    NativePerfScope chestScanPerf(lc::PERF_CHEST_SCAN);
+                    UpdateChestListLegacy(env, cfg);
+                    lastChestEspScanMs = nowMs;
+                } else if (!chestEspScanEnabled && chestEspScanWasEnabled) {
+                    UpdateChestListLegacy(env, cfg);
+                }
+                chestEspScanWasEnabled = chestEspScanEnabled;
+
+                {
+                    NativePerfScope sectionScanPerf(lc::PERF_BLOCK_SCAN);
+                    UpdateSectionChunkScansLegacy(env, cfg);
+                }
+            } else {
+                if (entityProducerWasEnabled) {
+                    ClearLegacyOverlayPlayers();
+                    ResetFightStatusState18();
+                }
+                entityProducerWasEnabled = false;
+                chestEspScanWasEnabled = false;
+                { LockGuard lk(g_overlayChestsMutex18); g_overlayChests18.clear(); }
+                { LockGuard lk(g_blockEspListMutex); g_blockEspList.clear(); }
+                { LockGuard lk(g_bedPlateListMutex); g_bedPlateList.clear(); }
+                { LockGuard lk(g_bgCamMutex18); g_bgCamState18 = BgCamState18(); }
+            }
+        }
+        RecordNativePerfSince(lc::PERF_SCAN_LOOP, scanLoopPerfStarted);
+        Sleep((cfg.aimAssist || cfg.killAura || cfg.speedBridge) ? 5 : 50);
+    }
+    JniEnv::DetachThisThread(g_jvm);
+    return 0;
+}
+
+static void StartBackgroundThreadsIfNeeded() {
+    static volatile LONG s_started = 0;
+    if (!g_jvm || InterlockedCompareExchange(&s_started, 1, 0) != 0) return;
+    g_legacyScanThreadHandle = CreateThread(nullptr, 0, OverlayScanThreadProc18, nullptr, 0, nullptr);
+    g_legacyFastPollThreadHandle = CreateThread(nullptr, 0, FastPollThreadProc18, nullptr, 0, nullptr);
+    Log("Background JNI threads started (camera poll + overlay scan).");
+}
+
 void RenderBlockESP(
     int w,
     int h,
     const Config& config,
     const lc::HudLayout& hudLayout) {
     if (!config.blockEsp) return;
-    if (!g_mapped || !g_mcInstance) return;
-    ScopedJNIEnv env(g_jvm);
-    if (!env) return;
-
-    TryResolvePlayerCoreMappings(env);
-    TryResolveRenderMappings(env, false);
-    if (!g_thePlayerField || !g_posXField || !g_posYField || !g_posZField) return;
-    if (!g_activeRenderInfoClass || !g_modelViewField || !g_projectionField) return;
 
     const bool boxes = config.blockEspBoxes;
     const bool tracers = config.blockEspTracers;
     const bool hud = config.blockEspHud;
-    const int maxCount = config.blockEspMaxCount;
 
     static thread_local std::vector<BlockEspData18> blocks;
     { LockGuard lk(g_blockEspListMutex); blocks = g_blockEspList; }
@@ -11438,25 +12131,11 @@ void RenderBlockESP(
     static thread_local std::vector<lc::BlockEspTargetDef> targets;
     { LockGuard tlk(g_blockEspTargetsMutex); targets = g_blockEspTargets; }
 
-    if (env->ExceptionCheck()) { env->ExceptionClear(); return; }
-    if (env->PushLocalFrame(64) < 0) { env->ExceptionClear(); return; }
-
-    Matrix4x4 view = GetMatrix(env, g_modelViewField);
-    Matrix4x4 proj = GetMatrix(env, g_projectionField);
-    bool usable = MatrixProjectionUsable(view, proj);
-    if (!usable) usable = TryUseCapturedRenderMatrices(view, proj);
-    if (!usable || IsLikelyUiOrthoMatrix(view, proj)) { env->PopLocalFrame(nullptr); return; }
-
-    double vX = 0, vY = 0, vZ = 0;
-    if (g_renderManagerField && g_viewerPosXField && g_viewerPosYField && g_viewerPosZField) {
-        jobject rm = env->GetObjectField(g_mcInstance, g_renderManagerField);
-        if (rm) {
-            vX = env->GetDoubleField(rm, g_viewerPosXField);
-            vY = env->GetDoubleField(rm, g_viewerPosYField);
-            vZ = env->GetDoubleField(rm, g_viewerPosZField);
-            env->DeleteLocalRef(rm);
-        }
-    }
+    BgCamState18 cam = SnapshotOverlayCamera18();
+    if (!cam.camFound || !cam.matsOk) return;
+    const Matrix4x4& view = cam.view;
+    const Matrix4x4& proj = cam.proj;
+    const double vX = cam.camX, vY = cam.camY, vZ = cam.camZ;
 
     ImDrawList* fg = ImGui::GetForegroundDrawList();
 
@@ -11558,8 +12237,74 @@ void RenderBlockESP(
             curY += rowH;
         }
     }
+}
 
-    env->PopLocalFrame(nullptr);
+// Vape-style world-space BedPlates callout: distance + block icons.
+void RenderBedPlates(int w, int h, const Config& config) {
+    if (!config.bedPlates) return;
+
+    static thread_local std::vector<BedPlateRenderData> plates;
+    { LockGuard lk(g_bedPlateListMutex); plates = g_bedPlateList; }
+    if (plates.empty()) return;
+
+    BgCamState18 cam = SnapshotOverlayCamera18();
+    if (!cam.camFound || !cam.matsOk) return;
+    const Matrix4x4& view = cam.view;
+    const Matrix4x4& proj = cam.proj;
+    const double vX = cam.camX, vY = cam.camY, vZ = cam.camZ;
+
+    ImDrawList* fg = ImGui::GetForegroundDrawList();
+    const bool showDist = config.bedPlatesShowDistance;
+    const ImU32 bg = IM_COL32(0, 0, 0, 150);
+    const ImU32 border = IM_COL32(45, 45, 45, 255);
+
+    for (const auto& plate : plates) {
+        float sx = 0, sy = 0;
+        double wx = (double)plate.x + 0.5 - vX;
+        double wy = (double)plate.y + 1.2 - vY;
+        double wz = (double)plate.z + 0.5 - vZ;
+        if (!WorldToScreen(wx, wy, wz, view, proj, w, h, sx, sy)) continue;
+
+        std::string distLine;
+        if (showDist) {
+            char db[32];
+            snprintf(db, sizeof(db), "%.0fm", plate.dist);
+            distLine = db;
+        }
+        ImVec2 distSz = distLine.empty() ? ImVec2(0, 0) : ImGui::CalcTextSize(distLine.c_str());
+
+        int iconCount = (int)plate.blocks.size();
+        float panelW = 0, panelH = 0, iconsY = 0;
+        lc::BedPlateComputePanelSize(iconCount, showDist, distSz.x, &panelW, &panelH, &iconsY);
+
+        float px = std::floor(sx - panelW * 0.5f);
+        float py = std::floor(sy - panelH);
+        ImVec2 pMin(px, py);
+        ImVec2 pMax(px + panelW, py + panelH);
+        fg->AddRectFilled(pMin, pMax, bg, 6.0f);
+        fg->AddRect(pMin, pMax, border, 6.0f, 0, 1.0f);
+
+        if (!distLine.empty()) {
+            float dtx = std::floor(px + (panelW - distSz.x) * 0.5f);
+            fg->AddText(ImVec2(dtx + 1, py + 2 + 1), IM_COL32(0, 0, 0, 200), distLine.c_str());
+            fg->AddText(ImVec2(dtx, py + 2), IM_COL32(255, 255, 255, 255), distLine.c_str());
+        }
+
+        if (iconCount == 0) {
+            float ix = px + (panelW - lc::kBedPlateIconW) * 0.5f;
+            float iy = py + iconsY;
+            lc::BedPlateDrawIcon(fg, ix, iy, "red_bed");
+        } else {
+            float iconsW = (float)iconCount * lc::kBedPlateIconW
+                + (float)(iconCount - 1) * lc::kBedPlateIconPad;
+            float ix = px + (panelW - iconsW) * 0.5f;
+            float iy = py + iconsY;
+            for (int i = 0; i < iconCount; i++) {
+                lc::BedPlateDrawIcon(fg, ix, iy, plate.blocks[i]);
+                ix += lc::kBedPlateIconW + lc::kBedPlateIconPad;
+            }
+        }
+    }
 }
 
 // ===================== INPUT HOOK =====================
@@ -11706,11 +12451,64 @@ static void ConfigureImGuiFontAndStyle(HWND hwnd) {
     st.ScaleAllSizes(dpiScale);
 }
 
+static void ApplyLegacyNametagSuppressionOnClientThread(JNIEnv* env, const Config& cfg) {
+    if (!env || !IsLegacyMinecraftClientThread() || !g_mcInstance || !g_theWorldField) return;
+    jobject world = env->GetObjectField(g_mcInstance, g_theWorldField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); world = nullptr; }
+    if (!world) return;
+
+    if (!cfg.nametagHideVanilla) {
+        if (g_legacyNametagSuppressionActive) {
+            jobject restoreScoreboard = GetLegacyScoreboard(env, world);
+            if (restoreScoreboard) {
+                RestoreLegacyVanillaNametagSuppression(env, restoreScoreboard);
+                env->DeleteLocalRef(restoreScoreboard);
+            } else {
+                g_hiddenNametagOriginalTeamByPlayerLegacy.clear();
+            }
+            g_legacyNametagSuppressionActive = false;
+        }
+        env->DeleteLocalRef(world);
+        return;
+    }
+
+    if (!EnsureLegacyNametagTeamMappings(env, world)) {
+        env->DeleteLocalRef(world);
+        return;
+    }
+    jobject scoreboard = GetLegacyScoreboard(env, world);
+    jobject hideTeam = scoreboard ? EnsureLegacyHideTeam(env, scoreboard) : nullptr;
+    std::vector<OverlayPlayer18> players;
+    {
+        LockGuard lk(g_overlayPlayersMutex18);
+        players = g_overlayPlayers18;
+    }
+    bool applied = false;
+    if (scoreboard && hideTeam) {
+        for (size_t i = 0; i < players.size(); ++i) {
+            if (ApplyLegacyVanillaNametagSuppression(env, scoreboard, hideTeam, players[i].displayName))
+                applied = true;
+        }
+    }
+    if (applied) g_legacyNametagSuppressionActive = true;
+    if (hideTeam) env->DeleteLocalRef(hideTeam);
+    if (scoreboard) env->DeleteLocalRef(scoreboard);
+    env->DeleteLocalRef(world);
+}
+
+static void ApplyLegacyClientThreadOnlyJni(JNIEnv* env, const Config& cfg) {
+    if (!env) return;
+    ApplyLegacyNickHiderFallback(env, cfg);
+    ApplyLegacyNametagSuppressionOnClientThread(env, cfg);
+}
+
 // ===================== SWAPBUFFERS HOOK =====================
 BOOL WINAPI HookedSwapBuffers(HDC hdc) {
     LegacyRenderCallbackLease renderLease;
     if (!renderLease.Active()) return CallOriginalSwapBuffers(hdc);
     if (!hdc) return CallOriginalSwapBuffers(hdc);
+
+    g_legacyMinecraftClientThreadId = GetCurrentThreadId();
 
     HGLRC currentRc = wglGetCurrentContext();
     if (!currentRc) return CallOriginalSwapBuffers(hdc);
@@ -11859,42 +12657,29 @@ BOOL WINAPI HookedSwapBuffers(HDC hdc) {
             renderHudLayout = g_hudLayout;
         }
 
+        if (JNIEnv* clientEnv = TryGetLegacyClientJniEnv()) {
+            ApplyLegacyClientThreadOnlyJni(clientEnv, renderConfig);
+        }
+
         RenderHUD(w, h, renderConfig, state, renderHudLayout);
         if (!ShouldHideWorldRenderModules(state)) {
-            TryLockGuard jniTry(g_renderJniMutex);
-            if (jniTry.owns_lock()) {
-                ClosestPlayerDrawSnapshot18 closestPlayerSnapshot;
-                {
-                    NativePerfScope playerPerf(lc::PERF_PLAYER_SCAN);
-                    RenderNametags(
-                        w,
-                        h,
-                        renderConfig,
-                        &closestPlayerSnapshot);
-                }
-                RenderFightStatus(w, h);
-                RenderClosestPlayerInfo(
-                    w,
-                    h,
-                    renderConfig,
-                    renderHudLayout,
-                    closestPlayerSnapshot);
-                RenderPixelPartyAssist(w, h, renderConfig, state);
-                {
-                    NativePerfScope chestPerf(lc::PERF_CHEST_SCAN);
-                    RenderChestESP(w, h, renderConfig);
-                }
-                RenderBlockESP(w, h, renderConfig, renderHudLayout);
-            } else {
-                static DWORD nextJniBusyLogAt = 0;
-                DWORD now = GetTickCount();
-                if (now >= nextJniBusyLogAt) {
-                    nextJniBusyLogAt = now + 15000;
-                    bool heavy = (InterlockedCompareExchange(&g_heavyDiscoveryInProgress, 0, 0) != 0);
-                    Log(std::string("Skipped world overlay frame: JNI busy")
-                        + (heavy ? " (heavy discovery active)" : ""));
-                }
-            }
+            ClosestPlayerDrawSnapshot18 closestPlayerSnapshot;
+            RenderNametags(
+                w,
+                h,
+                renderConfig,
+                &closestPlayerSnapshot);
+            RenderFightStatus(w, h);
+            RenderClosestPlayerInfo(
+                w,
+                h,
+                renderConfig,
+                renderHudLayout,
+                closestPlayerSnapshot);
+            RenderPixelPartyAssist(w, h, renderConfig, state);
+            RenderChestESP(w, h, renderConfig);
+            RenderBlockESP(w, h, renderConfig, renderHudLayout);
+            RenderBedPlates(w, h, renderConfig);
         }
 
         ImGui::Render();
@@ -12251,6 +13036,12 @@ void ParseConfig(const std::string& line) {
                 InterlockedIncrement(&g_blockEspTargetsVersion);
             }
         }
+        g_config.bedPlates = reader.GetBool("bedPlatesEnabled");
+        g_config.bedPlatesShowDistance = reader.GetBool("bedPlatesShowDistance", true);
+        {
+            int br = reader.GetInt("bedPlatesRange", -1);
+            if (br >= 1) g_config.bedPlatesRange = (br > 8) ? 8 : br;
+        }
         g_config.reachEnabled = reader.GetBool("reachEnabled");
         g_config.velocityEnabled = reader.GetBool("velocityEnabled");
         g_config.hitDelayFixEnabled = reader.GetBool("hitDelayFixEnabled");
@@ -12262,6 +13053,14 @@ void ParseConfig(const std::string& line) {
             reader.GetInt("autoRodExtensionTicks", g_config.autoRodExtensionTicks),
             autorod::kMinExtensionTicks, autorod::kMaxExtensionTicks);
         g_config.autoRodHoldToExtend = reader.GetBool("autoRodHoldToExtend", false);
+        g_config.autoToolEnabled = reader.GetBool("autoToolEnabled");
+        g_config.autoToolSwapWeapon = reader.GetBool("autoToolSwapWeapon", true);
+        g_config.autoToolInstantSwap = reader.GetBool("autoToolInstantSwap", true);
+        g_config.autoToolSwapToDelay = lc::ClampInt(reader.GetInt("autoToolSwapToDelay", 50), 0, 500);
+        g_config.autoToolSwapBack = reader.GetBool("autoToolSwapBack", false);
+        g_config.autoToolSwapBackDelay = lc::ClampInt(reader.GetInt("autoToolSwapBackDelay", 350), 0, 1000);
+        g_config.autoToolRequireMouseDown = reader.GetBool("autoToolRequireMouseDown", true);
+        g_config.autoToolOnlySneaking = reader.GetBool("autoToolOnlySneaking", false);
 
         std::string showModuleListRaw = reader.GetString("showModuleList");
         g_config.showModuleList = showModuleListRaw.empty() ? true : (showModuleListRaw == "true");
@@ -12280,15 +13079,15 @@ void ParseConfig(const std::string& line) {
         g_config.nametagShowHeldItem = reader.GetBool("nametagShowHeldItem", true);
         g_config.nametagHideVanilla = reader.GetBool("nametagHideVanilla");
 
-        int nametagMaxCount = reader.GetInt("nametagMaxCount", -1);
-        if (nametagMaxCount < 1) nametagMaxCount = g_config.nametagMaxCount;
-        if (nametagMaxCount > 20) nametagMaxCount = 20;
-        g_config.nametagMaxCount = nametagMaxCount;
+        int nametagRange = reader.GetInt("nametagRange", -1);
+        if (nametagRange < 1) nametagRange = g_config.nametagRange;
+        if (nametagRange > 8) nametagRange = 8;
+        g_config.nametagRange = nametagRange;
 
-        int chestEspMaxCount = reader.GetInt("chestEspMaxCount", -1);
-        if (chestEspMaxCount < 1) chestEspMaxCount = g_config.chestEspMaxCount;
-        if (chestEspMaxCount > 20) chestEspMaxCount = 20;
-        g_config.chestEspMaxCount = chestEspMaxCount;
+        int chestEspRange = reader.GetInt("chestEspRange", -1);
+        if (chestEspRange < 1) chestEspRange = g_config.chestEspRange;
+        if (chestEspRange > 8) chestEspRange = 8;
+        g_config.chestEspRange = chestEspRange;
 
         int reachChance = reader.GetInt("reachChance", -1);
         if (reachChance < 1) reachChance = g_config.reachChance;
@@ -12358,7 +13157,9 @@ void ParseConfig(const std::string& line) {
         { int v = reader.GetInt("keybindChestEsp", -1);      if (v >= 0) g_config.keybindChestEsp      = v; }
         { int v = reader.GetInt("keybindChestStealer", -1);  if (v >= 0) g_config.keybindChestStealer  = v; }
         { int v = reader.GetInt("keybindBlockEsp", -1);      if (v >= 0) g_config.keybindBlockEsp      = v; }
+        { int v = reader.GetInt("keybindBedPlates", -1);     if (v >= 0) g_config.keybindBedPlates     = v; }
         { int v = reader.GetInt("keybindAutoRod", -1);       if (v >= 0) g_config.keybindAutoRod = lc::ClampInt(v, 0, 255); }
+        { int v = reader.GetInt("keybindAutoTool", -1);      if (v >= 0) g_config.keybindAutoTool = lc::ClampInt(v, 0, 255); }
 
         g_config.pixelPartyAssist = reader.GetBool("pixelPartyAssist");
         int ppRadius = reader.GetInt("pixelPartyScanRadius", g_config.pixelPartyScanRadius);
@@ -12537,7 +13338,6 @@ void ServerLoop() {
                         env->DeleteLocalRef(localPlayer);
                     }
                 }
-                ApplyLegacyNickHiderFallback(env, cfgSnapshot);
                 state = ReadGameState(env);
                 TrackAutoRodLegacyWorld(env);
                 ExecuteAutoRodLegacy(env, cfgSnapshot, state);
@@ -12559,10 +13359,7 @@ void ServerLoop() {
                     s_antiDebuffWasEnabled = cfgSnapshot.antiDebuffEnabled;
                 }
                 UpdateHitDelayFixLegacy(env, cfgSnapshot, state);
-                if (cfgSnapshot.blockEsp) {
-                    NativePerfScope blockScanPerf(lc::PERF_BLOCK_SCAN);
-                    UpdateBlockEspListLegacy(env, cfgSnapshot);
-                }
+                UpdateAutoToolLegacy(env, cfgSnapshot, state);
             }
             RecordNativePerfSince(lc::PERF_SCAN_LOOP, stateScanPerfStarted);
             if (!cfgSnapshot.reachEnabled) {
@@ -12710,6 +13507,7 @@ void ServerLoop() {
         ReleaseSpeedBridgeSneak(env);
         ResetSpeedBridgeMovementTracking();
         ResetAutoRodLegacyJniCaches(env);
+        ResetAutoToolLegacyJniCaches(env);
         ResetFightStatusState18();
         HelperBridge::Unload(env);
         const bool antiDebuffSafeToUnload = anti_debuff_jvmti::Shutdown(env);
@@ -12746,8 +13544,8 @@ DWORD WINAPI MainThread(LPVOID lpParam) {
     if (res != JNI_OK || cnt == 0) { Log("ERROR: No JVM"); return 0; }
     Log("JVM found");
 
-    // Install rendering hook
     InstallSwapBuffersHook();
+    StartBackgroundThreadsIfNeeded();
 
     // Start TCP server
     Log("Starting server...");

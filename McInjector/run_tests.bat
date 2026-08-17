@@ -18,6 +18,14 @@ echo [NativeTests] Running auto_rod_core_tests.exe...
 tests\auto_rod_core_tests.exe
 if %errorlevel% neq 0 exit /b %errorlevel%
 
+echo [NativeTests] Building auto_tool_core_tests.exe...
+"%GPP%" -m64 -std=c++11 -O2 -static-libgcc -static-libstdc++ -o tests\auto_tool_core_tests.exe tests\auto_tool_core_tests.cpp
+if %errorlevel% neq 0 exit /b %errorlevel%
+
+echo [NativeTests] Running auto_tool_core_tests.exe...
+tests\auto_tool_core_tests.exe
+if %errorlevel% neq 0 exit /b %errorlevel%
+
 echo [NativeTests] Building json_config_reader_tests.exe...
 "%GPP%" -m64 -std=c++11 -O2 -static-libgcc -static-libstdc++ -o tests\json_config_reader_tests.exe tests\json_config_reader_tests.cpp
 if %errorlevel% neq 0 exit /b %errorlevel%
@@ -58,12 +66,36 @@ echo [NativeTests] Running mapping_probe_gate_tests.exe...
 tests\mapping_probe_gate_tests.exe
 if %errorlevel% neq 0 exit /b %errorlevel%
 
+echo [NativeTests] Building chunk_scan_tests.exe...
+"%GPP%" -m64 -std=c++11 -O2 -static-libgcc -static-libstdc++ -o tests\chunk_scan_tests.exe tests\chunk_scan_tests.cpp
+if %errorlevel% neq 0 exit /b %errorlevel%
+
+echo [NativeTests] Running chunk_scan_tests.exe...
+tests\chunk_scan_tests.exe
+if %errorlevel% neq 0 exit /b %errorlevel%
+
 echo [NativeTests] Building block_esp_tests.exe...
 "%GPP%" -m64 -std=c++11 -O2 -static-libgcc -static-libstdc++ -o tests\block_esp_tests.exe tests\block_esp_tests.cpp
 if %errorlevel% neq 0 exit /b %errorlevel%
 
 echo [NativeTests] Running block_esp_tests.exe...
 tests\block_esp_tests.exe
+if %errorlevel% neq 0 exit /b %errorlevel%
+
+echo [NativeTests] Building chest_esp_tests.exe...
+"%GPP%" -m64 -std=c++11 -O2 -static-libgcc -static-libstdc++ -o tests\chest_esp_tests.exe tests\chest_esp_tests.cpp
+if %errorlevel% neq 0 exit /b %errorlevel%
+
+echo [NativeTests] Running chest_esp_tests.exe...
+tests\chest_esp_tests.exe
+if %errorlevel% neq 0 exit /b %errorlevel%
+
+echo [NativeTests] Building bedplates_tests.exe...
+"%GPP%" -m64 -std=c++11 -O2 -static-libgcc -static-libstdc++ -o tests\bedplates_tests.exe tests\bedplates_tests.cpp
+if %errorlevel% neq 0 exit /b %errorlevel%
+
+echo [NativeTests] Running bedplates_tests.exe...
+tests\bedplates_tests.exe
 if %errorlevel% neq 0 exit /b %errorlevel%
 
 echo [NativeTests] Building nick_hider_tests.exe...
@@ -132,3 +164,4 @@ if %errorlevel% neq 0 exit /b %errorlevel%
 
 echo [NativeTests] All native harness tests passed.
 exit /b 0
+

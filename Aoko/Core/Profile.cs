@@ -75,10 +75,10 @@ public class Profile
     public bool NametagShowArmor { get; set; } = true;
     public bool NametagShowHeldItem { get; set; } = true;
     public bool NametagHideVanilla { get; set; } = false;
-    public int NametagMaxCount { get; set; } = 8;
+    public int NametagRange { get; set; } = 4;
 
     public bool ChestEspEnabled { get; set; } = false;
-    public int ChestEspMaxCount { get; set; } = 5;
+    public int ChestEspRange { get; set; } = 4;
     public bool ChestStealerEnabled { get; set; } = false;
     public int ChestStealerDelayMs { get; set; } = 120;
 
@@ -89,6 +89,10 @@ public class Profile
     public int BlockEspMaxCount { get; set; } = 64;
     public int BlockEspRange { get; set; } = 4;
     public List<BlockEspTargetData> BlockEspTargets { get; set; } = BlockEspTargetData.BuildDefaults();
+
+    public bool BedPlatesEnabled { get; set; } = false;
+    public bool BedPlatesShowDistance { get; set; } = true;
+    public int BedPlatesRange { get; set; } = 4;
 
     public bool ReachEnabled { get; set; } = false;
     public float ReachMin { get; set; } = 3.0f;
@@ -116,6 +120,15 @@ public class Profile
     public bool AutoRodHoldToExtend { get; set; } = false;
     public int AutoRodActionKey { get; set; } = 0;
 
+    public bool AutoToolEnabled { get; set; } = false;
+    public bool AutoToolSwapWeapon { get; set; } = true;
+    public bool AutoToolInstantSwap { get; set; } = true;
+    public int AutoToolSwapToDelay { get; set; } = 50;
+    public bool AutoToolSwapBack { get; set; } = false;
+    public int AutoToolSwapBackDelay { get; set; } = 350;
+    public bool AutoToolRequireMouseDown { get; set; } = true;
+    public bool AutoToolOnlySneaking { get; set; } = false;
+
     public bool AntiDebuffEnabled { get; set; } = false;
     public bool HitDelayFixEnabled { get; set; } = false;
 
@@ -140,10 +153,12 @@ public class Profile
         ["chestesp"]         = 0,
         ["cheststealer"]     = 0,
         ["blockesp"]         = 0,
+        ["bedplates"]        = 0,
         ["reach"]            = 0,
         ["velocity"]         = 0,
         ["autototem"]        = 0,
         ["autorod"]          = 0,
+        ["autotool"]         = 0,
         ["antidebuff"]       = 0,
         ["hitdelayfix"]     = 0,
         ["panic"]            = 0,
@@ -507,9 +522,9 @@ public static class ProfileManager
             NametagShowArmor = clicker.NametagShowArmor,
             NametagShowHeldItem = clicker.NametagShowHeldItem,
             NametagHideVanilla = clicker.NametagHideVanilla,
-            NametagMaxCount = clicker.NametagMaxCount,
+            NametagRange = clicker.NametagRange,
             ChestEspEnabled = clicker.ChestEspEnabled,
-            ChestEspMaxCount = clicker.ChestEspMaxCount,
+            ChestEspRange = clicker.ChestEspRange,
             ChestStealerEnabled = clicker.ChestStealerEnabled,
             ChestStealerDelayMs = clicker.ChestStealerDelayMs,
 
@@ -520,6 +535,10 @@ public static class ProfileManager
             BlockEspMaxCount = clicker.BlockEspMaxCount,
             BlockEspRange = clicker.BlockEspRange,
             BlockEspTargets = BuildBlockEspTargetData(clicker.BlockEspTargets),
+
+            BedPlatesEnabled = clicker.BedPlatesEnabled,
+            BedPlatesShowDistance = clicker.BedPlatesShowDistance,
+            BedPlatesRange = clicker.BedPlatesRange,
 
             ReachEnabled = clicker.ReachEnabled,
             ReachMin = clicker.ReachMin,
@@ -544,6 +563,15 @@ public static class ProfileManager
             AutoRodExtensionTicks = clicker.AutoRodExtensionTicks,
             AutoRodHoldToExtend = clicker.AutoRodHoldToExtend,
             AutoRodActionKey = InputHooks.AutoRodActionKey,
+
+            AutoToolEnabled = clicker.AutoToolEnabled,
+            AutoToolSwapWeapon = clicker.AutoToolSwapWeapon,
+            AutoToolInstantSwap = clicker.AutoToolInstantSwap,
+            AutoToolSwapToDelay = clicker.AutoToolSwapToDelay,
+            AutoToolSwapBack = clicker.AutoToolSwapBack,
+            AutoToolSwapBackDelay = clicker.AutoToolSwapBackDelay,
+            AutoToolRequireMouseDown = clicker.AutoToolRequireMouseDown,
+            AutoToolOnlySneaking = clicker.AutoToolOnlySneaking,
 
             AntiDebuffEnabled = clicker.AntiDebuffEnabled,
             HitDelayFixEnabled = clicker.HitDelayFixEnabled,
@@ -631,9 +659,9 @@ public static class ProfileManager
         clicker.NametagShowArmor = profile.NametagShowArmor;
         clicker.NametagShowHeldItem = profile.NametagShowHeldItem;
         clicker.NametagHideVanilla = profile.NametagHideVanilla;
-        clicker.NametagMaxCount = profile.NametagMaxCount;
+        clicker.NametagRange = profile.NametagRange;
         clicker.ChestEspEnabled = profile.ChestEspEnabled;
-        clicker.ChestEspMaxCount = profile.ChestEspMaxCount;
+        clicker.ChestEspRange = profile.ChestEspRange;
         clicker.ChestStealerEnabled = profile.ChestStealerEnabled;
         clicker.ChestStealerDelayMs = profile.ChestStealerDelayMs;
 
@@ -644,6 +672,10 @@ public static class ProfileManager
         clicker.BlockEspMaxCount = profile.BlockEspMaxCount;
         clicker.BlockEspRange = profile.BlockEspRange;
         clicker.BlockEspTargets = BuildBlockEspTargets(profile.BlockEspTargets);
+
+        clicker.BedPlatesEnabled = profile.BedPlatesEnabled;
+        clicker.BedPlatesShowDistance = profile.BedPlatesShowDistance;
+        clicker.BedPlatesRange = profile.BedPlatesRange;
 
         clicker.ReachEnabled = profile.ReachEnabled;
         clicker.ReachMin = profile.ReachMin;
@@ -667,6 +699,15 @@ public static class ProfileManager
         clicker.AutoRodVerifyForcedSlot = profile.AutoRodVerifyForcedSlot;
         clicker.AutoRodExtensionTicks = profile.AutoRodExtensionTicks;
         clicker.AutoRodHoldToExtend = profile.AutoRodHoldToExtend;
+
+        clicker.AutoToolEnabled = profile.AutoToolEnabled;
+        clicker.AutoToolSwapWeapon = profile.AutoToolSwapWeapon;
+        clicker.AutoToolInstantSwap = profile.AutoToolInstantSwap;
+        clicker.AutoToolSwapToDelay = profile.AutoToolSwapToDelay;
+        clicker.AutoToolSwapBack = profile.AutoToolSwapBack;
+        clicker.AutoToolSwapBackDelay = profile.AutoToolSwapBackDelay;
+        clicker.AutoToolRequireMouseDown = profile.AutoToolRequireMouseDown;
+        clicker.AutoToolOnlySneaking = profile.AutoToolOnlySneaking;
 
         clicker.AntiDebuffEnabled = profile.AntiDebuffEnabled;
         clicker.HitDelayFixEnabled = profile.HitDelayFixEnabled;

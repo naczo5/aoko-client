@@ -24,9 +24,9 @@ public sealed class LegacyRenderOptimizationTests
         string renderer = Slice(
             source,
             "void RenderClosestPlayerInfo(",
-            "void RenderChestESP(");
+            "static void UpdateChestListLegacy(");
 
-        Assert.Contains("ClosestPlayerDrawSnapshot18& snapshot", renderer);
+        Assert.Contains("const ClosestPlayerDrawSnapshot18& snapshot", renderer);
         Assert.DoesNotContain("ScopedJNIEnv", renderer);
         Assert.DoesNotContain("CallObjectMethod", renderer);
     }
@@ -45,6 +45,49 @@ public sealed class LegacyRenderOptimizationTests
         Assert.Contains(
             "RenderBlockESP(w, h, renderConfig, renderHudLayout);",
             renderEntry);
+    }
+
+    [Fact]
+    public void ChestEsp_SortsByDistanceAndUsesChunkRange()
+    {
+        string source = LegacyBridgeSource();
+        string chestLogic = Slice(
+            source,
+            "static void UpdateChestListLegacy(",
+            "// ===================== BLOCK ESP");
+
+        Assert.Contains("ChestEspSortNearestFirst", chestLogic, StringComparison.Ordinal);
+        Assert.Contains("ChestEspInChunkRange", chestLogic, StringComparison.Ordinal);
+        Assert.Contains("chestEspRange", chestLogic, StringComparison.Ordinal);
+        Assert.DoesNotContain("chestEspMaxCount", chestLogic, StringComparison.Ordinal);
+        Assert.DoesNotContain("drawn < chestEspMaxCount", chestLogic, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Nametags_UseChunkRangeInsteadOfCountCap()
+    {
+        string source = LegacyBridgeSource();
+        string nametagLogic = Slice(
+            source,
+            "static void UpdatePlayerListOverlayLegacy(",
+            "void RenderClosestPlayerInfo(");
+
+        Assert.Contains("nametagRange", nametagLogic, StringComparison.Ordinal);
+        Assert.Contains("InChunkRange", nametagLogic, StringComparison.Ordinal);
+        Assert.DoesNotContain("nametagMaxCount", nametagLogic, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SectionScans_ShareOneChunkVisitor()
+    {
+        string source = LegacyBridgeSource();
+        Assert.Contains("UpdateSectionChunkScansLegacy", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("UpdateBlockEspListLegacy", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("UpdateBedPlatesListLegacy", source, StringComparison.Ordinal);
+        Assert.Contains("CombinedSectionChunkBudget", source, StringComparison.Ordinal);
+        Assert.Contains("CombinedSectionChunkBudget(blockOn, bedsOn)", source, StringComparison.Ordinal);
+        Assert.Contains("if (!chunk) continue", source, StringComparison.Ordinal);
+        Assert.Contains("if (bedsDue) PublishBedPlatesFromCache18", source, StringComparison.Ordinal);
     }
 
     [Fact]
