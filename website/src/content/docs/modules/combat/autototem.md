@@ -7,7 +7,7 @@ description: Keeps a Totem of Undying equipped, with inventory-only and anarchy 
 
 ## Version support
 
-1.21.x · 26.1 — **not available on 1.8.9**.
+1.21.x · 26.1 · 26.2 — **not available on 1.8.9**.
 
 ## Settings
 

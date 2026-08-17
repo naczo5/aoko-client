@@ -81,6 +81,7 @@ public class Profile
     public int ChestEspRange { get; set; } = 4;
     public bool ChestStealerEnabled { get; set; } = false;
     public int ChestStealerDelayMs { get; set; } = 120;
+    public bool ChestStealerMenuCheck { get; set; } = true;
 
     public bool BlockEspEnabled { get; set; } = false;
     public bool BlockEspBoxes { get; set; } = true;
@@ -128,6 +129,7 @@ public class Profile
     public int AutoToolSwapBackDelay { get; set; } = 350;
     public bool AutoToolRequireMouseDown { get; set; } = true;
     public bool AutoToolOnlySneaking { get; set; } = false;
+    public bool AutoToolBedwarsMode { get; set; } = true;
 
     public bool AntiDebuffEnabled { get; set; } = false;
     public bool HitDelayFixEnabled { get; set; } = false;
@@ -527,6 +529,7 @@ public static class ProfileManager
             ChestEspRange = clicker.ChestEspRange,
             ChestStealerEnabled = clicker.ChestStealerEnabled,
             ChestStealerDelayMs = clicker.ChestStealerDelayMs,
+            ChestStealerMenuCheck = clicker.ChestStealerMenuCheck,
 
             BlockEspEnabled = clicker.BlockEspEnabled,
             BlockEspBoxes = clicker.BlockEspBoxes,
@@ -572,6 +575,7 @@ public static class ProfileManager
             AutoToolSwapBackDelay = clicker.AutoToolSwapBackDelay,
             AutoToolRequireMouseDown = clicker.AutoToolRequireMouseDown,
             AutoToolOnlySneaking = clicker.AutoToolOnlySneaking,
+            AutoToolBedwarsMode = clicker.AutoToolBedwarsMode,
 
             AntiDebuffEnabled = clicker.AntiDebuffEnabled,
             HitDelayFixEnabled = clicker.HitDelayFixEnabled,
@@ -664,6 +668,7 @@ public static class ProfileManager
         clicker.ChestEspRange = profile.ChestEspRange;
         clicker.ChestStealerEnabled = profile.ChestStealerEnabled;
         clicker.ChestStealerDelayMs = profile.ChestStealerDelayMs;
+        clicker.ChestStealerMenuCheck = profile.ChestStealerMenuCheck;
 
         clicker.BlockEspEnabled = profile.BlockEspEnabled;
         clicker.BlockEspBoxes = profile.BlockEspBoxes;
@@ -708,6 +713,7 @@ public static class ProfileManager
         clicker.AutoToolSwapBackDelay = profile.AutoToolSwapBackDelay;
         clicker.AutoToolRequireMouseDown = profile.AutoToolRequireMouseDown;
         clicker.AutoToolOnlySneaking = profile.AutoToolOnlySneaking;
+        clicker.AutoToolBedwarsMode = profile.AutoToolBedwarsMode;
 
         clicker.AntiDebuffEnabled = profile.AntiDebuffEnabled;
         clicker.HitDelayFixEnabled = profile.HitDelayFixEnabled;

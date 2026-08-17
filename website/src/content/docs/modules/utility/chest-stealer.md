@@ -7,17 +7,19 @@ description: Quickly transfers items out of an open chest using the external cur
 
 ## Version support
 
-1.8.9 · 1.21.x · 26.1
+1.8.9 · 1.21.x · 26.1 · 26.2
 
 ## Settings
 
 | Setting | Description | Range / Default |
 | ------- | ----------- | --------------- |
 | Delay | Delay between slot interactions (milliseconds). | `50`–`500` / `120` |
+| Menu check | Prevents stealing from menus that use the chest interface (such as compass selectors or shop villagers). Disable this if it fails to steal from chests on custom servers. | Toggle / `On` |
 
 ## Usage notes
 
 - The bridge reports the open container's slot layout and screen geometry; the loader drives the physical cursor over those slots.
+- **Menu check** verifies that the opened container corresponds to an actual physical chest near the player, preventing accidental interactions with server HUDs or NPC shops.
 - A higher **Delay** is slower but looks more human and is more reliable on laggy servers; a lower delay is faster but more obvious.
 - Because it uses the real cursor, keep the Minecraft window focused and the chest GUI open while it runs.
 

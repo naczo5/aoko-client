@@ -100,6 +100,7 @@ Hotbar, use-item, attack, or inventory modules must follow `packet-and-call-hygi
 ## High-Signal Gotchas
 
 - `JNIEnv*` is thread-local. Never use across threads. Always call `AttachCurrentThread` from non-render worker threads.
+- Module JNI cadences are independent wall-clock intervals in `telemetry_schedule.h`. Never `Sleep(moduleA || moduleB ? 5 : 50)` and never tick modules from `wglSwapBuffers` / present. Enabling SpeedBridge must not accelerate overlay scans or `ReadGameState`.
 - `bridge_261.cpp` fallback-array parsing: Yarn names MUST be checked first, then Mojmap.
 - `build_release.bat` already runs `build_dll.bat` and copies DLLs from `McInjector\`. Everyday PRs do not need it. Publishing a GitHub release uses `scripts\New-GitHubRelease.ps1`, which calls `build_release.bat` itself.
 

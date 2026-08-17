@@ -7,7 +7,7 @@ The *Autoclicker* fires the left and/or right mouse button at a randomized rate 
 
 ## Version support
 
-1.8.9 · 1.21.x · 26.1
+1.8.9 · 1.21.x · 26.1 · 26.2
 
 ## Settings
 

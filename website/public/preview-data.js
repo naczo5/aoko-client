@@ -84,6 +84,18 @@ window.AOKO_PREVIEW_DATA = {
           ],
         },
         {
+          title: 'Auto Rod',
+          keybind: true,
+          status: 'Available',
+          controls: [
+            { type: 'switch', label: 'Enable Auto Rod', on: false, main: true },
+            { type: 'select', label: 'Slot mode', options: ['Auto', 'Slot 1', 'Slot 2', 'Slot 3', 'Slot 4', 'Slot 5', 'Slot 6', 'Slot 7', 'Slot 8', 'Slot 9'], index: 0 },
+            { type: 'check', label: 'Verify forced slot contains fishing rod', checked: true },
+            { type: 'slider', label: 'Extension ticks', min: 1, max: 40, value: 4, step: 1, decimals: 0 },
+            { type: 'check', label: 'Hold action bind to extend cast', checked: false },
+          ],
+        },
+        {
           title: 'Kill Aura',
           toggle: { on: false, main: true },
           keybind: true,
@@ -137,6 +149,15 @@ window.AOKO_PREVIEW_DATA = {
             { type: 'slider', label: 'Max Blocks', min: 1, max: 512, value: 256, step: 1, decimals: 0, gate: true },
             { type: 'slider', label: 'Scan Range (chunks)', min: 1, max: 8, value: 4, step: 1, decimals: 0, gate: true },
             { type: 'note', text: 'Tracked blocks (e.g. minecraft:diamond_ore) are managed in a scrollable list in the app.' },
+          ],
+        },
+        {
+          title: 'BedPlates',
+          toggle: { on: false, main: true },
+          keybind: true,
+          controls: [
+            { type: 'check', label: 'Show distance', checked: true },
+            { type: 'slider', label: 'Scan range (chunks)', min: 1, max: 8, value: 4, step: 1, decimals: 0 },
           ],
         },
         {
@@ -233,6 +254,8 @@ window.AOKO_PREVIEW_DATA = {
           controls: [
             { type: 'switch', label: 'Enable Chest Stealer', on: false, main: true },
             { type: 'slider', label: 'Delay (ms)', min: 50, max: 500, value: 120, step: 10, decimals: 0 },
+            { type: 'check', label: 'Menu check', checked: true },
+            { type: 'note', text: 'Prevents stealing from menus (compass selectors, NPC shops) using chest GUI. Disable if it fails to steal from chests on custom servers.' },
           ],
         },
         {
@@ -251,6 +274,23 @@ window.AOKO_PREVIEW_DATA = {
           controls: [
             { type: 'switch', label: 'Enable Hit Delay Fix', on: false, main: true },
             { type: 'note', text: 'Removes the 1.8.9 attack cooldown delay for faster hit registration.' },
+          ],
+        },
+        {
+          title: 'AutoTool',
+          toggle: { on: false, main: true },
+          keybind: true,
+          controls: [
+            { type: 'checks', gate: true, items: [
+              { label: 'Swap weapon on entity hover', checked: true },
+              { label: 'Instant weapon swap', checked: true },
+              { label: 'Require mouse down', checked: true },
+              { label: 'Only while sneaking', checked: false },
+              { label: 'Bedwars mode', checked: true },
+              { label: 'Swap back to original slot', checked: false },
+            ] },
+            { type: 'slider', label: 'Swap-to Delay (ms)', min: 0, max: 200, value: 50, step: 10, decimals: 0, gate: true },
+            { type: 'slider', label: 'Swap-back Delay (ms)', min: 0, max: 1000, value: 350, step: 25, decimals: 0, gate: true },
           ],
         },
         {

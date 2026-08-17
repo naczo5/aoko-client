@@ -44,6 +44,7 @@ export default defineConfig({
                 { label: 'Autoclicker', slug: 'modules/combat/autoclicker' },
                 { label: 'Aim Assist', slug: 'modules/combat/aim-assist' },
                 { label: 'Triggerbot', slug: 'modules/combat/triggerbot' },
+                { label: 'Auto Rod', slug: 'modules/combat/auto-rod' },
                 { label: 'Reach', slug: 'modules/combat/reach' },
                 { label: 'Velocity', slug: 'modules/combat/velocity' },
                 { label: 'AutoTotem', slug: 'modules/combat/autototem' },
@@ -64,6 +65,7 @@ export default defineConfig({
                 { label: 'Fight Status', slug: 'modules/visual/fight-status' },
                 { label: 'Chest ESP', slug: 'modules/visual/chest-esp' },
                 { label: 'Block ESP', slug: 'modules/visual/block-esp' },
+                { label: 'BedPlates', slug: 'modules/visual/bedplates' },
                 { label: 'Module List & Logo', slug: 'modules/visual/module-list' },
                 { label: 'HUD Editor', slug: 'modules/visual/hud-editor' },
               ],
@@ -71,6 +73,7 @@ export default defineConfig({
             {
               label: 'Utility',
               items: [
+                { label: 'AutoTool', slug: 'modules/utility/auto-tool' },
                 { label: 'Nick Hider', slug: 'modules/utility/nick-hider' },
                 { label: 'Hit Delay Fix', slug: 'modules/utility/hit-delay-fix' },
                 { label: 'Chest Stealer', slug: 'modules/utility/chest-stealer' },

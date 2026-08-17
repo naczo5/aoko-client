@@ -5,6 +5,10 @@ description: Client-side local username spoofing via native JVMTI string filteri
 
 Nick Hider replaces your in-game username with a custom alias locally across rendered text, nametags, scoreboards, and chat messages.
 
+## Version support
+
+1.8.9 · 1.21.x · 26.1 · 26.2
+
 ## How It Works
 
 Nick Hider operates via a native JVMTI agent injected alongside the bridge DLL. It inspects string allocations and replaces occurrences of your actual player name with your configured alias before text is rendered on screen.

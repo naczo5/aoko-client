@@ -7,7 +7,7 @@ The *HUD Editor* lets you reposition and scale aoko's on-screen overlay elements
 
 ## Version support
 
-1.8.9 · 1.21.x · 26.1
+1.8.9 · 1.21.x · 26.1 · 26.2
 
 ## Settings
 

@@ -239,6 +239,7 @@ struct Config {
     int chestEspRange = 4; // chunks, clamp 1..8
     bool chestStealer = false;
     int chestStealerDelayMs = 120;
+    bool chestStealerMenuCheck = true;
     bool blockEsp = false;
     bool blockEspBoxes = true;
     bool blockEspTracers = false;
@@ -274,6 +275,7 @@ struct Config {
     int  autoToolSwapBackDelay = 350;
     bool autoToolRequireMouseDown = true;
     bool autoToolOnlySneaking = false;
+    bool autoToolBedwarsMode = true;
     bool showModuleList = true;
     int moduleListStyle = 0;
     bool showLogo = true;
@@ -666,6 +668,8 @@ static jmethodID g_slotGetHasStackMethod = nullptr;
 static jfieldID g_slotSlotNumberField = nullptr;
 static jfieldID g_slotXDisplayPositionField = nullptr;
 static jfieldID g_slotYDisplayPositionField = nullptr;
+static jmethodID g_slotGetStackMethod = nullptr;
+static jmethodID g_itemStackHasDisplayNameMethod = nullptr;
 static jfieldID g_guiLeftField = nullptr;
 static jfieldID g_guiTopField = nullptr;
 static jfieldID g_guiWidthField = nullptr;
@@ -6564,7 +6568,40 @@ static bool IsSpeedBridgeEdgeUnsupported(JNIEnv* env, const Config& cfg, const G
     return !IsSolidBlockAt(env, sx, sy, sz);
 }
 
-static void UpdateSpeedBridge(JNIEnv* env, const Config& cfg, const GameState& state) {
+static void RefreshSpeedBridgeLiveState(JNIEnv* env, GameState& state) {
+    if (!env || !g_mcInstance) return;
+    if (g_currentScreenField) {
+        jobject scr = env->GetObjectField(g_mcInstance, g_currentScreenField);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); scr = nullptr; }
+        state.guiOpen = (scr != nullptr);
+        if (scr) env->DeleteLocalRef(scr);
+    }
+    if (!g_thePlayerField) return;
+    jobject player = env->GetObjectField(g_mcInstance, g_thePlayerField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); player = nullptr; }
+    if (!player) return;
+    if (g_posXField) {
+        state.posX = env->GetDoubleField(player, g_posXField);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+    if (g_posYField) {
+        state.posY = env->GetDoubleField(player, g_posYField);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+    if (g_posZField) {
+        state.posZ = env->GetDoubleField(player, g_posZField);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+    if (g_rotationPitchField) {
+        state.pitch = env->GetFloatField(player, g_rotationPitchField);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+    env->DeleteLocalRef(player);
+}
+
+static void UpdateSpeedBridge(JNIEnv* env, const Config& cfg, const GameState& stateIn) {
+    GameState state = stateIn;
+    RefreshSpeedBridgeLiveState(env, state);
     bool shouldRun =
         cfg.speedBridge &&
         state.mapped &&
@@ -6702,6 +6739,10 @@ static jclass    g_autoToolItemClass18 = nullptr;
 static jclass    g_autoToolSwordClass18 = nullptr;
 static jclass    g_autoToolAxeClass18 = nullptr;
 static jclass    g_autoToolEnchantHelperClass18 = nullptr;
+static jclass    g_autoToolBlockChestClass18 = nullptr;
+static jclass    g_autoToolBlockEnderChestClass18 = nullptr;
+static jclass    g_autoToolBlockClass18 = nullptr;
+static jmethodID g_autoToolGetIdFromBlock18 = nullptr;
 
 static void ResetAutoToolLegacyJniCaches(JNIEnv* env) {
     g_autoToolState18.Reset();
@@ -6716,11 +6757,15 @@ static void ResetAutoToolLegacyJniCaches(JNIEnv* env) {
     g_autoToolClickBlock18 = nullptr;
     g_autoToolResetBlockRemoving18 = nullptr;
     g_autoToolCurrentPlayerItem18 = nullptr;
+    g_autoToolGetIdFromBlock18 = nullptr;
     if (env) {
         if (g_autoToolItemClass18) { env->DeleteGlobalRef(g_autoToolItemClass18); g_autoToolItemClass18 = nullptr; }
         if (g_autoToolSwordClass18) { env->DeleteGlobalRef(g_autoToolSwordClass18); g_autoToolSwordClass18 = nullptr; }
         if (g_autoToolAxeClass18) { env->DeleteGlobalRef(g_autoToolAxeClass18); g_autoToolAxeClass18 = nullptr; }
         if (g_autoToolEnchantHelperClass18) { env->DeleteGlobalRef(g_autoToolEnchantHelperClass18); g_autoToolEnchantHelperClass18 = nullptr; }
+        if (g_autoToolBlockChestClass18) { env->DeleteGlobalRef(g_autoToolBlockChestClass18); g_autoToolBlockChestClass18 = nullptr; }
+        if (g_autoToolBlockEnderChestClass18) { env->DeleteGlobalRef(g_autoToolBlockEnderChestClass18); g_autoToolBlockEnderChestClass18 = nullptr; }
+        if (g_autoToolBlockClass18) { env->DeleteGlobalRef(g_autoToolBlockClass18); g_autoToolBlockClass18 = nullptr; }
     }
 }
 
@@ -6782,6 +6827,39 @@ static bool EnsureAutoToolLegacyJni(JNIEnv* env, jobject player) {
         if (axeCls) {
             g_autoToolAxeClass18 = (jclass)env->NewGlobalRef(axeCls);
             env->DeleteLocalRef(axeCls);
+        }
+    }
+
+    if (!g_autoToolBlockChestClass18) {
+        jclass chestCls = LoadClassWithLoader(env, gcl, "net.minecraft.block.BlockChest");
+        if (chestCls) {
+            g_autoToolBlockChestClass18 = (jclass)env->NewGlobalRef(chestCls);
+            env->DeleteLocalRef(chestCls);
+        }
+    }
+
+    if (!g_autoToolBlockEnderChestClass18) {
+        jclass enderChestCls = LoadClassWithLoader(env, gcl, "net.minecraft.block.BlockEnderChest");
+        if (enderChestCls) {
+            g_autoToolBlockEnderChestClass18 = (jclass)env->NewGlobalRef(enderChestCls);
+            env->DeleteLocalRef(enderChestCls);
+        }
+    }
+
+    if (!g_autoToolBlockClass18 || !g_autoToolGetIdFromBlock18) {
+        jclass blkCls = LoadClassWithLoader(env, gcl, "net.minecraft.block.Block");
+        if (blkCls) {
+            if (!g_autoToolGetIdFromBlock18) {
+                const char* names[] = { "getIdFromBlock", "func_149682_b", nullptr };
+                for (int i = 0; names[i] && !g_autoToolGetIdFromBlock18; ++i) {
+                    g_autoToolGetIdFromBlock18 = env->GetStaticMethodID(blkCls, names[i], "(Lnet/minecraft/block/Block;)I");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolGetIdFromBlock18 = nullptr; }
+                }
+            }
+            if (!g_autoToolBlockClass18) {
+                g_autoToolBlockClass18 = (jclass)env->NewGlobalRef(blkCls);
+            }
+            env->DeleteLocalRef(blkCls);
         }
     }
 
@@ -7059,6 +7137,17 @@ static void UpdateAutoToolLegacy(JNIEnv* env, const Config& cfg, const GameState
                                     jobject block = env->CallObjectMethod(blockState, g_blockStateGetBlockMethod);
                                     if (env->ExceptionCheck()) { env->ExceptionClear(); block = nullptr; }
                                     if (block) {
+                                        if ((g_autoToolBlockChestClass18 && env->IsInstanceOf(block, g_autoToolBlockChestClass18)) ||
+                                            (g_autoToolBlockEnderChestClass18 && env->IsInstanceOf(block, g_autoToolBlockEnderChestClass18))) {
+                                            input.isChestHit = true;
+                                        } else if (g_autoToolBlockClass18 && g_autoToolGetIdFromBlock18) {
+                                            int blockId = env->CallStaticIntMethod(g_autoToolBlockClass18, g_autoToolGetIdFromBlock18, block);
+                                            if (env->ExceptionCheck()) { env->ExceptionClear(); blockId = 0; }
+                                            if (blockId == 54 || blockId == 130 || blockId == 146) {
+                                                input.isChestHit = true;
+                                            }
+                                        }
+
                                         float bestSpeed = 1.0f;
                                         int bestSlot = -1;
                                         for (int i = 0; i < 9; ++i) {
@@ -7143,6 +7232,7 @@ static void UpdateAutoToolLegacy(JNIEnv* env, const Config& cfg, const GameState
     coreCfg.swapBackDelayMs = cfg.autoToolSwapBackDelay;
     coreCfg.requireMouseDown = cfg.autoToolRequireMouseDown;
     coreCfg.onlyWhileSneaking = cfg.autoToolOnlySneaking;
+    coreCfg.bedwarsMode = cfg.autoToolBedwarsMode;
 
     autotool::AutoToolAction action = autotool::UpdateAutoToolState(g_autoToolState18, coreCfg, input);
     if (action.switchSlot && action.targetSlot >= 0 && action.targetSlot < 9) {
@@ -7312,12 +7402,32 @@ static bool ResolveChestStealerMappings(JNIEnv* env, jobject currentScreen) {
                                         if (env->ExceptionCheck()) { env->ExceptionClear(); g_slotYDisplayPositionField = nullptr; }
                                     }
                                 }
+                                if (!g_slotGetStackMethod) {
+                                    const char* names[] = { "getStack", "func_75211_c", nullptr };
+                                    for (int i = 0; names[i] && !g_slotGetStackMethod; ++i) {
+                                        g_slotGetStackMethod = env->GetMethodID(slotClass, names[i], "()Lnet/minecraft/item/ItemStack;");
+                                        if (env->ExceptionCheck()) { env->ExceptionClear(); g_slotGetStackMethod = nullptr; }
+                                    }
+                                }
                                 env->DeleteLocalRef(slotClass);
                             }
                             env->DeleteLocalRef(slot);
                         }
                     }
                     env->DeleteLocalRef(slotsList);
+                }
+            }
+            if (!g_itemStackHasDisplayNameMethod) {
+                jobject gcl = EnsureGameClassLoader(env);
+                jclass stackClass = gcl ? LoadClassWithLoader(env, gcl, "net.minecraft.item.ItemStack") : env->FindClass("net/minecraft/item/ItemStack");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); stackClass = nullptr; }
+                if (stackClass) {
+                    const char* names[] = { "hasDisplayName", "func_82837_s", nullptr };
+                    for (int i = 0; names[i] && !g_itemStackHasDisplayNameMethod; ++i) {
+                        g_itemStackHasDisplayNameMethod = env->GetMethodID(stackClass, names[i], "()Z");
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); g_itemStackHasDisplayNameMethod = nullptr; }
+                    }
+                    env->DeleteLocalRef(stackClass);
                 }
             }
             env->DeleteLocalRef(container);
@@ -7521,7 +7631,7 @@ static bool HasPhysicalChestNearPlayer(JNIEnv* env, jobject player) {
     return found;
 }
 
-static std::string BuildChestStealerStateJson(JNIEnv* env, bool enabled) {
+static std::string BuildChestStealerStateJson(JNIEnv* env, bool enabled, bool menuCheck) {
     if (!enabled || !env || !g_mcInstance || !g_currentScreenField || !g_thePlayerField) return "null";
 
     if (env->PushLocalFrame(128) < 0) {
@@ -7561,18 +7671,24 @@ static std::string BuildChestStealerStateJson(JNIEnv* env, bool enabled) {
         return "null";
     }
 
-    bool physical = HasPhysicalChestNearPlayer(env, player);
-    if (!physical) {
-        std::string title = GetLegacyChestScreenTitle(env, currentScreen);
-        if (title.empty()) title = "unknown";
-        LogChestStealerSkippedMenu(title);
-        std::ostringstream skipped;
-        skipped << "{\"ready\":false,\"physical\":false,\"windowId\":" << windowId
-                << ",\"screenWidth\":" << screenWidth
-                << ",\"screenHeight\":" << screenHeight
-                << ",\"slots\":[]}";
-        env->PopLocalFrame(nullptr);
-        return skipped.str();
+    std::string title = GetLegacyChestScreenTitle(env, currentScreen);
+    std::string titleLower = ChestStealerLower(title);
+    bool titleIsMenu = false;
+    if (!titleLower.empty()) {
+        if (titleLower.find("shop") != std::string::npos ||
+            titleLower.find("selector") != std::string::npos ||
+            titleLower.find("upgrade") != std::string::npos ||
+            titleLower.find("menu") != std::string::npos ||
+            titleLower.find("game") != std::string::npos ||
+            titleLower.find("cosmetic") != std::string::npos ||
+            titleLower.find("play") != std::string::npos ||
+            titleLower.find("lobby") != std::string::npos ||
+            titleLower.find("teleport") != std::string::npos ||
+            titleLower.find("profile") != std::string::npos ||
+            titleLower.find("quest") != std::string::npos ||
+            titleLower.find("store") != std::string::npos) {
+            titleIsMenu = true;
+        }
     }
 
     jobject slotsList = env->GetObjectField(container, g_containerInventorySlotsField);
@@ -7595,6 +7711,7 @@ static std::string BuildChestStealerStateJson(JNIEnv* env, bool enabled) {
 
     std::ostringstream slotsJson;
     int count = 0;
+    int customItemCount = 0;
     for (int i = 0; i < chestSlotCount; ++i) {
         jobject slot = env->CallObjectMethod(slotsList, g_listGetMethod, i);
         if (env->ExceptionCheck()) { env->ExceptionClear(); slot = nullptr; }
@@ -7603,6 +7720,19 @@ static std::string BuildChestStealerStateJson(JNIEnv* env, bool enabled) {
         bool hasStack = env->CallBooleanMethod(slot, g_slotGetHasStackMethod) != JNI_FALSE;
         if (env->ExceptionCheck()) { env->ExceptionClear(); hasStack = false; }
         if (hasStack) {
+            if (g_slotGetStackMethod) {
+                jobject stack = env->CallObjectMethod(slot, g_slotGetStackMethod);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); stack = nullptr; }
+                if (stack) {
+                    if (g_itemStackHasDisplayNameMethod) {
+                        bool isCustom = env->CallBooleanMethod(stack, g_itemStackHasDisplayNameMethod) != JNI_FALSE;
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); isCustom = false; }
+                        if (isCustom) customItemCount++;
+                    }
+                    env->DeleteLocalRef(stack);
+                }
+            }
+
             int slotNumber = env->GetIntField(slot, g_slotSlotNumberField);
             int slotX = env->GetIntField(slot, g_slotXDisplayPositionField);
             int slotY = env->GetIntField(slot, g_slotYDisplayPositionField);
@@ -7621,9 +7751,26 @@ static std::string BuildChestStealerStateJson(JNIEnv* env, bool enabled) {
         env->DeleteLocalRef(slot);
     }
 
+    bool itemsAreMenu = (count > 0) && (((float)customItemCount / (float)count) > 0.5f);
+    bool isMenu = titleIsMenu || itemsAreMenu;
+    bool physicalNearby = HasPhysicalChestNearPlayer(env, player);
+    bool physical = !isMenu && physicalNearby;
+
+    if (menuCheck && (!physical || isMenu)) {
+        if (title.empty()) title = "unknown";
+        LogChestStealerSkippedMenu(title + (isMenu ? (titleIsMenu ? " [menu-title]" : " [custom-items]") : " [no-chest-nearby]"));
+        std::ostringstream skipped;
+        skipped << "{\"ready\":false,\"physical\":false,\"windowId\":" << windowId
+                << ",\"screenWidth\":" << screenWidth
+                << ",\"screenHeight\":" << screenHeight
+                << ",\"slots\":[]}";
+        env->PopLocalFrame(nullptr);
+        return skipped.str();
+    }
+
     std::ostringstream out;
     out << "{\"ready\":" << (count > 0 ? "true" : "false")
-        << ",\"physical\":true"
+        << ",\"physical\":" << (physical ? "true" : "false")
         << ",\"windowId\":" << windowId
         << ",\"screenWidth\":" << screenWidth
         << ",\"screenHeight\":" << screenHeight
@@ -7675,10 +7822,29 @@ static void UpdateChestStealer(JNIEnv* env, const Config& cfg) {
     int windowId = env->GetIntField(container, g_containerWindowIdField);
     if (env->ExceptionCheck()) { env->ExceptionClear(); ResetChestStealerRuntime(); env->PopLocalFrame(nullptr); return; }
 
-    if (!HasPhysicalChestNearPlayer(env, player)) {
-        std::string title = GetLegacyChestScreenTitle(env, currentScreen);
+    std::string title = GetLegacyChestScreenTitle(env, currentScreen);
+    std::string titleLower = ChestStealerLower(title);
+    bool titleIsMenu = false;
+    if (!titleLower.empty()) {
+        if (titleLower.find("shop") != std::string::npos ||
+            titleLower.find("selector") != std::string::npos ||
+            titleLower.find("upgrade") != std::string::npos ||
+            titleLower.find("menu") != std::string::npos ||
+            titleLower.find("game") != std::string::npos ||
+            titleLower.find("cosmetic") != std::string::npos ||
+            titleLower.find("play") != std::string::npos ||
+            titleLower.find("lobby") != std::string::npos ||
+            titleLower.find("teleport") != std::string::npos ||
+            titleLower.find("profile") != std::string::npos ||
+            titleLower.find("quest") != std::string::npos ||
+            titleLower.find("store") != std::string::npos) {
+            titleIsMenu = true;
+        }
+    }
+
+    if (cfg.chestStealerMenuCheck && (titleIsMenu || !HasPhysicalChestNearPlayer(env, player))) {
         if (title.empty()) title = "unknown";
-        LogChestStealerSkippedMenu(title);
+        LogChestStealerSkippedMenu(title + (titleIsMenu ? " [menu-title]" : " [no-chest-nearby]"));
         g_chestStealerWindowId = windowId;
         g_chestStealerWindowCompleted = true;
         g_chestStealerNextClickMs = now + 1000;
@@ -7728,6 +7894,8 @@ static void UpdateChestStealer(JNIEnv* env, const Config& cfg) {
 
     if (g_chestStealerSlots.empty()) {
         g_chestStealerSlots.clear();
+        int customItemCount = 0;
+        int totalItemCount = 0;
         for (int i = 0; i < chestSlotCount; ++i) {
             jobject slot = env->CallObjectMethod(slotsList, g_listGetMethod, i);
             if (env->ExceptionCheck()) { env->ExceptionClear(); slot = nullptr; }
@@ -7736,12 +7904,36 @@ static void UpdateChestStealer(JNIEnv* env, const Config& cfg) {
             bool hasStack = env->CallBooleanMethod(slot, g_slotGetHasStackMethod) != JNI_FALSE;
             if (env->ExceptionCheck()) { env->ExceptionClear(); hasStack = false; }
             if (hasStack) {
+                totalItemCount++;
+                if (g_slotGetStackMethod) {
+                    jobject stack = env->CallObjectMethod(slot, g_slotGetStackMethod);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); stack = nullptr; }
+                    if (stack) {
+                        if (g_itemStackHasDisplayNameMethod) {
+                            bool isCustom = env->CallBooleanMethod(stack, g_itemStackHasDisplayNameMethod) != JNI_FALSE;
+                            if (env->ExceptionCheck()) { env->ExceptionClear(); isCustom = false; }
+                            if (isCustom) customItemCount++;
+                        }
+                        env->DeleteLocalRef(stack);
+                    }
+                }
                 int slotNumber = g_slotSlotNumberField ? env->GetIntField(slot, g_slotSlotNumberField) : i;
                 if (env->ExceptionCheck()) { env->ExceptionClear(); slotNumber = i; }
                 g_chestStealerSlots.push_back(slotNumber);
             }
             env->DeleteLocalRef(slot);
         }
+
+        if (cfg.chestStealerMenuCheck && totalItemCount > 0 && (((float)customItemCount / (float)totalItemCount) > 0.5f)) {
+            if (title.empty()) title = "unknown";
+            LogChestStealerSkippedMenu(title + " [custom-items]");
+            g_chestStealerWindowCompleted = true;
+            g_chestStealerNextClickMs = now + 1000;
+            g_chestStealerSlots.clear();
+            env->PopLocalFrame(nullptr);
+            return;
+        }
+
         ShuffleChestStealerSlots(g_chestStealerSlots);
     }
 
@@ -8215,10 +8407,12 @@ GameState ReadGameState(JNIEnv* env) {
     bool gtbHelperEnabled = false;
     bool shouldCheckHoldingBlock = false;
     bool chestStealerEnabled = false;
+    bool chestStealerMenuCheck = true;
     {
         LockGuard lk(g_configMutex);
         gtbHelperEnabled = g_config.gtbHelper;
         chestStealerEnabled = g_config.chestStealer;
+        chestStealerMenuCheck = g_config.chestStealerMenuCheck;
         shouldCheckHoldingBlock =
             (g_config.rightClick && g_config.rightBlockOnly) ||
             (g_config.speedBridge && g_config.speedBridgeBlockOnly);
@@ -8346,7 +8540,7 @@ GameState ReadGameState(JNIEnv* env) {
     s.attackCooldown = 1.0f;
     s.attackCooldownPerTick = 0.08f;
     s.stateMs = (unsigned long long)GetTickCount64();
-    s.chestStealerStateJson = BuildChestStealerStateJson(env, chestStealerEnabled);
+    s.chestStealerStateJson = BuildChestStealerStateJson(env, chestStealerEnabled, chestStealerMenuCheck);
     { LockGuard lk(g_killAuraUnavailableMutex);
         s.killAuraUnavailableReason = g_killAuraUnavailableReason;
         s.killAuraHasTarget = g_killAuraHasTarget;
@@ -11941,7 +12135,7 @@ static DWORD WINAPI FastPollThreadProc18(LPVOID) {
             if (jniTry.owns_lock())
                 ReadCameraState18(env);
         }
-        Sleep(5);
+        Sleep(lc::kFastPollIntervalMs);
     }
     JniEnv::DetachThisThread(g_jvm);
     return 0;
@@ -11951,6 +12145,8 @@ static DWORD WINAPI OverlayScanThreadProc18(LPVOID) {
     JNIEnv* env = JniEnv::Get(g_jvm);
     if (!env) return 1;
     DWORD lastChestEspScanMs = 0;
+    DWORD lastPlayerScanMs = 0;
+    DWORD lastCameraMs = 0;
     bool chestEspScanWasEnabled = false;
     bool entityProducerWasEnabled = false;
     while (IsBridgeRunning()) {
@@ -11962,40 +12158,53 @@ static DWORD WINAPI OverlayScanThreadProc18(LPVOID) {
         { LockGuard lk(g_stateMutex); stateSnap = g_gameState; }
 
         const bool inWorld = stateSnap.inWorld && g_mapped && g_mcInstance;
+        const DWORD nowMs = GetTickCount();
+        const bool entityProducerEnabled =
+            cfg.nametags || cfg.nickHiderEnabled || cfg.closestPlayerInfo ||
+            cfg.aimAssist || cfg.fightStatus || cfg.nametagHideVanilla ||
+            g_legacyNametagSuppressionActive;
+        const bool chestEspScanEnabled = cfg.chestEsp;
+        const bool chunkScanEnabled = cfg.blockEsp || cfg.bedPlates;
+        const bool overlayWork =
+            entityProducerEnabled || chestEspScanEnabled || chunkScanEnabled ||
+            entityProducerWasEnabled || chestEspScanWasEnabled;
+        const unsigned int playerInterval = lc::PlayerOverlayIntervalMs(cfg.aimAssist);
         {
             LockGuard overlayJni(g_renderJniMutex);
             if (inWorld && !ShouldHideWorldRenderModules(stateSnap)) {
-                ReadCameraState18(env);
-                const bool entityProducerEnabled =
-                    cfg.nametags || cfg.nickHiderEnabled || cfg.closestPlayerInfo ||
-                    cfg.aimAssist || cfg.fightStatus || cfg.nametagHideVanilla ||
-                    g_legacyNametagSuppressionActive;
-                if (entityProducerEnabled) {
-                    NativePerfScope playerScanPerf(lc::PERF_PLAYER_SCAN);
-                    UpdatePlayerListOverlayLegacy(env, cfg);
-                } else if (entityProducerWasEnabled) {
-                    ClearLegacyOverlayPlayers();
-                    ResetFightStatusState18();
-                }
-                entityProducerWasEnabled = entityProducerEnabled;
+                if (overlayWork) {
+                    if (lc::IsTelemetryIntervalDue(nowMs, lastCameraMs, lc::kOverlayCameraIntervalMs)) {
+                        ReadCameraState18(env);
+                        lastCameraMs = nowMs;
+                    }
+                    if (entityProducerEnabled) {
+                        if (lc::IsTelemetryIntervalDue(nowMs, lastPlayerScanMs, playerInterval)) {
+                            NativePerfScope playerScanPerf(lc::PERF_PLAYER_SCAN);
+                            UpdatePlayerListOverlayLegacy(env, cfg);
+                            lastPlayerScanMs = nowMs;
+                        }
+                    } else if (entityProducerWasEnabled) {
+                        ClearLegacyOverlayPlayers();
+                        ResetFightStatusState18();
+                    }
+                    entityProducerWasEnabled = entityProducerEnabled;
 
-                const DWORD nowMs = GetTickCount();
-                const bool chestEspScanEnabled = cfg.chestEsp;
-                const bool chestEspScanDue =
-                    !chestEspScanWasEnabled ||
-                    lc::IsTelemetryIntervalDue(nowMs, lastChestEspScanMs, lc::kChestEspScanIntervalMs);
-                if (chestEspScanEnabled && chestEspScanDue) {
-                    NativePerfScope chestScanPerf(lc::PERF_CHEST_SCAN);
-                    UpdateChestListLegacy(env, cfg);
-                    lastChestEspScanMs = nowMs;
-                } else if (!chestEspScanEnabled && chestEspScanWasEnabled) {
-                    UpdateChestListLegacy(env, cfg);
-                }
-                chestEspScanWasEnabled = chestEspScanEnabled;
+                    const bool chestEspScanDue =
+                        !chestEspScanWasEnabled ||
+                        lc::IsTelemetryIntervalDue(nowMs, lastChestEspScanMs, lc::kChestEspScanIntervalMs);
+                    if (chestEspScanEnabled && chestEspScanDue) {
+                        NativePerfScope chestScanPerf(lc::PERF_CHEST_SCAN);
+                        UpdateChestListLegacy(env, cfg);
+                        lastChestEspScanMs = nowMs;
+                    } else if (!chestEspScanEnabled && chestEspScanWasEnabled) {
+                        UpdateChestListLegacy(env, cfg);
+                    }
+                    chestEspScanWasEnabled = chestEspScanEnabled;
 
-                {
-                    NativePerfScope sectionScanPerf(lc::PERF_BLOCK_SCAN);
-                    UpdateSectionChunkScansLegacy(env, cfg);
+                    if (chunkScanEnabled) {
+                        NativePerfScope sectionScanPerf(lc::PERF_BLOCK_SCAN);
+                        UpdateSectionChunkScansLegacy(env, cfg);
+                    }
                 }
             } else {
                 if (entityProducerWasEnabled) {
@@ -12011,7 +12220,21 @@ static DWORD WINAPI OverlayScanThreadProc18(LPVOID) {
             }
         }
         RecordNativePerfSince(lc::PERF_SCAN_LOOP, scanLoopPerfStarted);
-        Sleep((cfg.aimAssist || cfg.killAura || cfg.speedBridge) ? 5 : 50);
+        unsigned int sleepMs = lc::kWorkerIdleIntervalMs;
+        if (inWorld && !ShouldHideWorldRenderModules(stateSnap)) {
+            const DWORD sleepNow = GetTickCount();
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastCameraMs, lc::kOverlayCameraIntervalMs, overlayWork);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastPlayerScanMs, playerInterval, entityProducerEnabled);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastChestEspScanMs, lc::kChestEspScanIntervalMs, chestEspScanEnabled);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, g_lastBlockEspScanMs, lc::kBlockEspScanIntervalMs, cfg.blockEsp);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, g_lastBedPlatesScanMs, lc::kBedPlatesScanIntervalMs, cfg.bedPlates);
+        }
+        if (sleepMs > 0) Sleep(sleepMs);
     }
     JniEnv::DetachThisThread(g_jvm);
     return 0;
@@ -12972,6 +13195,7 @@ void ParseConfig(const std::string& line) {
         g_config.autoToolSwapBackDelay = lc::ClampInt(reader.GetInt("autoToolSwapBackDelay", 350), 0, 1000);
         g_config.autoToolRequireMouseDown = reader.GetBool("autoToolRequireMouseDown", true);
         g_config.autoToolOnlySneaking = reader.GetBool("autoToolOnlySneaking", false);
+        g_config.autoToolBedwarsMode = reader.GetBool("autoToolBedwarsMode", true);
 
         std::string showModuleListRaw = reader.GetString("showModuleList");
         g_config.showModuleList = showModuleListRaw.empty() ? true : (showModuleListRaw == "true");
@@ -13031,6 +13255,7 @@ void ParseConfig(const std::string& line) {
         if (chestStealerDelayMs < 50) chestStealerDelayMs = g_config.chestStealerDelayMs;
         if (chestStealerDelayMs > 500) chestStealerDelayMs = 500;
         g_config.chestStealerDelayMs = chestStealerDelayMs;
+        g_config.chestStealerMenuCheck = reader.GetBool("chestStealerMenuCheck", true);
 
         std::string gtbHint = reader.GetString("gtbHint");
         int gtbCount = reader.GetInt("gtbCount", g_config.gtbCount);
@@ -13202,6 +13427,18 @@ void ServerLoop() {
         std::vector<std::string> receivedConfigLines;
         bool capabilitiesSent = false;
         bool capabilitiesAttempted = false;
+        DWORD lastStateReadMs = 0;
+        DWORD lastStatePublishMs = 0;
+        DWORD lastSpeedBridgeMs = 0;
+        DWORD lastKillAuraMs = 0;
+        DWORD lastAutoRodMs = 0;
+        DWORD lastAutoToolMs = 0;
+        DWORD lastHitDelayMs = 0;
+        DWORD lastReachMs = 0;
+        DWORD lastVelocityMs = 0;
+        DWORD lastAntiDebuffMs = 0;
+        DWORD lastPixelPartyMs = 0;
+        bool killAuraWasEnabled = false;
         while (IsBridgeRunning()) {
             if (!capabilitiesSent) {
                 const int capabilitiesResult = TrySendCapabilities(clientSocket, !capabilitiesAttempted);
@@ -13232,45 +13469,111 @@ void ServerLoop() {
             }
             anti_debuff_jvmti::SetEnabled(cfgSnapshot.antiDebuffEnabled);
 
-            // ALWAYS Read Game State to update global state (for block detection etc.)
+            const DWORD nowMs = GetTickCount();
+            const bool stateDue = lc::IsTelemetryIntervalDue(
+                nowMs, lastStateReadMs, lc::kStateReadIntervalMs);
+            const unsigned int publishInterval = needEntityTelemetry
+                ? lc::kEntityPublishIntervalMs
+                : lc::kStateReadIntervalMs;
+            const bool publishDue = lc::IsTelemetryIntervalDue(
+                nowMs, lastStatePublishMs, publishInterval);
+            const bool speedBridgeEnabled =
+                cfgSnapshot.speedBridge || g_speedBridgeManagingSneak;
+            const bool speedBridgeDue = speedBridgeEnabled &&
+                lc::IsTelemetryIntervalDue(nowMs, lastSpeedBridgeMs, lc::kSpeedBridgeIntervalMs);
+            const bool autoRodEnabled =
+                cfgSnapshot.autoRodEnabled || HasPendingAutoRodLegacyTransaction();
+            const bool autoRodDue = autoRodEnabled &&
+                lc::IsTelemetryIntervalDue(nowMs, lastAutoRodMs, lc::kAutoRodIntervalMs);
+            const bool autoToolDue = cfgSnapshot.autoToolEnabled &&
+                lc::IsTelemetryIntervalDue(nowMs, lastAutoToolMs, lc::kAutoToolIntervalMs);
+            const bool hitDelayDue = cfgSnapshot.hitDelayFixEnabled &&
+                lc::IsTelemetryIntervalDue(nowMs, lastHitDelayMs, lc::kHitDelayFixIntervalMs);
+            const bool reachEnabled =
+                cfgSnapshot.reachEnabled || g_reachAllowCurrentClick || g_reachClickPrevDown;
+            const bool reachDue = reachEnabled &&
+                lc::IsTelemetryIntervalDue(nowMs, lastReachMs, lc::kReachIntervalMs);
+            const bool velocityEnabled = cfgSnapshot.velocityEnabled || g_lastHurtTime > 0;
+            const bool velocityDue = velocityEnabled &&
+                lc::IsTelemetryIntervalDue(nowMs, lastVelocityMs, lc::kVelocityIntervalMs);
+            const bool killAuraDue = (cfgSnapshot.killAura || killAuraWasEnabled) &&
+                (!cfgSnapshot.killAura ||
+                 lc::IsTelemetryIntervalDue(nowMs, lastKillAuraMs, lc::kKillAuraWorkerIntervalMs));
+            const bool pixelPartyDue = cfgSnapshot.pixelPartyAssist &&
+                lc::IsTelemetryIntervalDue(nowMs, lastPixelPartyMs, lc::kPixelPartyIntervalMs);
+            static bool s_antiDebuffWasEnabled = false;
+            const bool antiDebuffDue = (cfgSnapshot.antiDebuffEnabled || s_antiDebuffWasEnabled) &&
+                lc::IsTelemetryIntervalDue(nowMs, lastAntiDebuffMs, lc::kAntiDebuffIntervalMs);
+
             const unsigned long long stateScanPerfStarted =
                 GetNativePerfDiagnostics().Enabled() ? NativePerfTimestamp() : 0;
             GameState state;
-            {
+            const bool jniDue =
+                stateDue || speedBridgeDue || autoRodDue || autoToolDue || hitDelayDue ||
+                reachDue || velocityDue || killAuraDue || pixelPartyDue || antiDebuffDue;
+            if (jniDue) {
                 LockGuard jniLk(g_stateJniMutex);
-                if (g_mcInstance && g_thePlayerField) {
-                    jobject localPlayer = env->GetObjectField(g_mcInstance, g_thePlayerField);
-                    if (env->ExceptionCheck()) { env->ExceptionClear(); localPlayer = nullptr; }
-                    if (localPlayer) {
-                        // Prefer the pre-alias account name once the JNI fallback has mutated GameProfile.
-                        const std::string stableName = GetStablePlayerName(env, localPlayer);
-                        lc::SetNickHiderJvmtiLocalName(
-                            !g_nickHiderOriginalProfileName.empty() ? g_nickHiderOriginalProfileName : stableName);
-                        env->DeleteLocalRef(localPlayer);
+                if (stateDue) {
+                    if (g_mcInstance && g_thePlayerField) {
+                        jobject localPlayer = env->GetObjectField(g_mcInstance, g_thePlayerField);
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); localPlayer = nullptr; }
+                        if (localPlayer) {
+                            const std::string stableName = GetStablePlayerName(env, localPlayer);
+                            lc::SetNickHiderJvmtiLocalName(
+                                !g_nickHiderOriginalProfileName.empty() ? g_nickHiderOriginalProfileName : stableName);
+                            env->DeleteLocalRef(localPlayer);
+                        }
                     }
+                    state = ReadGameState(env);
+                    TrackAutoRodLegacyWorld(env);
+                    lastStateReadMs = nowMs;
+                    { LockGuard lk(g_stateMutex); g_gameState = state; }
+                } else {
+                    LockGuard lk(g_stateMutex);
+                    state = g_gameState;
                 }
-                state = ReadGameState(env);
-                TrackAutoRodLegacyWorld(env);
-                ExecuteAutoRodLegacy(env, cfgSnapshot, state);
-                if (cfgSnapshot.pixelPartyAssist)
+                if (autoRodDue) {
+                    TrackAutoRodLegacyWorld(env);
+                    ExecuteAutoRodLegacy(env, cfgSnapshot, state);
+                    lastAutoRodMs = nowMs;
+                }
+                if (pixelPartyDue) {
                     UpdatePixelPartyAssistLegacy(env, cfgSnapshot, state);
-                UpdateSpeedBridge(env, cfgSnapshot, state);
-                if (cfgSnapshot.reachEnabled || g_reachAllowCurrentClick || g_reachClickPrevDown) {
+                    lastPixelPartyMs = nowMs;
+                }
+                if (speedBridgeDue) {
+                    UpdateSpeedBridge(env, cfgSnapshot, state);
+                    lastSpeedBridgeMs = nowMs;
+                }
+                if (reachDue) {
                     UpdateReach(env, cfgSnapshot, state);
+                    lastReachMs = nowMs;
                 }
-                if (cfgSnapshot.velocityEnabled || g_lastHurtTime > 0) {
+                if (velocityDue) {
                     UpdateVelocity(env, cfgSnapshot);
+                    lastVelocityMs = nowMs;
                 }
-                if (cfgSnapshot.killAura) {
+                if (killAuraDue) {
                     UpdateKillAuraLegacy(env, cfgSnapshot);
+                    if (cfgSnapshot.killAura) lastKillAuraMs = nowMs;
+                    killAuraWasEnabled = cfgSnapshot.killAura;
                 }
-                static bool s_antiDebuffWasEnabled = false;
-                if (cfgSnapshot.antiDebuffEnabled || s_antiDebuffWasEnabled) {
+                if (antiDebuffDue) {
                     UpdateAntiDebuffLegacy(env, cfgSnapshot);
+                    lastAntiDebuffMs = nowMs;
                     s_antiDebuffWasEnabled = cfgSnapshot.antiDebuffEnabled;
                 }
-                UpdateHitDelayFixLegacy(env, cfgSnapshot, state);
-                UpdateAutoToolLegacy(env, cfgSnapshot, state);
+                if (hitDelayDue) {
+                    UpdateHitDelayFixLegacy(env, cfgSnapshot, state);
+                    lastHitDelayMs = nowMs;
+                }
+                if (autoToolDue) {
+                    UpdateAutoToolLegacy(env, cfgSnapshot, state);
+                    lastAutoToolMs = nowMs;
+                }
+            } else {
+                LockGuard lk(g_stateMutex);
+                state = g_gameState;
             }
             RecordNativePerfSince(lc::PERF_SCAN_LOOP, stateScanPerfStarted);
             if (!cfgSnapshot.reachEnabled) {
@@ -13285,91 +13588,88 @@ void ServerLoop() {
             if (!cfgSnapshot.velocityEnabled) {
                 g_lastHurtTime = 0;
             }
-            { LockGuard lk(g_stateMutex); g_gameState = state; }
 
-            // Standard Logic: Build JSON from state
-            const unsigned long long statePublishPerfStarted =
-                GetNativePerfDiagnostics().Enabled() ? NativePerfTimestamp() : 0;
-            std::string jsonToSend = "{";
-            jsonToSend += "\"mapped\":" + std::string(state.mapped ? "true" : "false") + ",";
-            jsonToSend += "\"inWorld\":" + std::string(state.inWorld ? "true" : "false") + ",";
-            jsonToSend += "\"guiOpen\":" + std::string(state.guiOpen ? "true" : "false") + ",";
-            jsonToSend += "\"screenName\":\"" + JsonEscape(state.screenName) + "\",";
-            jsonToSend += "\"actionBar\":\"" + JsonEscape(state.actionBar) + "\",";
-            jsonToSend += "\"health\":" + std::to_string(state.health) + ",";
-            jsonToSend += "\"posX\":" + std::to_string(state.posX) + ",";
-            jsonToSend += "\"posY\":" + std::to_string(state.posY) + ",";
-            jsonToSend += "\"posZ\":" + std::to_string(state.posZ) + ",";
-            jsonToSend += "\"pitch\":" + std::to_string(state.pitch) + ",";
-            jsonToSend += "\"holdingBlock\":" + std::string(state.holdingBlock ? "true" : "false") + ",";
-            jsonToSend += "\"lookingAtBlock\":" + std::string(state.lookingAtBlock ? "true" : "false") + ",";
-            jsonToSend += "\"lookingAtEntity\":" + std::string(state.lookingAtEntity ? "true" : "false") + ",";
-            jsonToSend += "\"lookingAtEntityLatched\":" + std::string(state.lookingAtEntityLatched ? "true" : "false") + ",";
-            jsonToSend += "\"breakingBlock\":" + std::string(state.breakingBlock ? "true" : "false") + ",";
-            jsonToSend += "\"attackCooldown\":" + std::to_string(state.attackCooldown) + ",";
-            jsonToSend += "\"attackCooldownPerTick\":" + std::to_string(state.attackCooldownPerTick) + ",";
-            jsonToSend += "\"killAuraUnavailableReason\":\"" + JsonEscape(state.killAuraUnavailableReason) + "\",";
-            jsonToSend += "\"killAuraHasTarget\":" + std::string(state.killAuraHasTarget ? "true" : "false") + ",";
-            jsonToSend += "\"killAuraBlocking\":" + std::string(state.killAuraBlocking ? "true" : "false") + ",";
-            jsonToSend += "\"stateMs\":" + std::to_string(state.stateMs) + ",";
-            jsonToSend += "\"chestStealerState\":";
-            jsonToSend += state.chestStealerStateJson.empty() ? "null" : state.chestStealerStateJson;
+            bool publishFailed = false;
+            if (publishDue) {
+                const unsigned long long statePublishPerfStarted =
+                    GetNativePerfDiagnostics().Enabled() ? NativePerfTimestamp() : 0;
+                std::string jsonToSend = "{";
+                jsonToSend += "\"mapped\":" + std::string(state.mapped ? "true" : "false") + ",";
+                jsonToSend += "\"inWorld\":" + std::string(state.inWorld ? "true" : "false") + ",";
+                jsonToSend += "\"guiOpen\":" + std::string(state.guiOpen ? "true" : "false") + ",";
+                jsonToSend += "\"screenName\":\"" + JsonEscape(state.screenName) + "\",";
+                jsonToSend += "\"actionBar\":\"" + JsonEscape(state.actionBar) + "\",";
+                jsonToSend += "\"health\":" + std::to_string(state.health) + ",";
+                jsonToSend += "\"posX\":" + std::to_string(state.posX) + ",";
+                jsonToSend += "\"posY\":" + std::to_string(state.posY) + ",";
+                jsonToSend += "\"posZ\":" + std::to_string(state.posZ) + ",";
+                jsonToSend += "\"pitch\":" + std::to_string(state.pitch) + ",";
+                jsonToSend += "\"holdingBlock\":" + std::string(state.holdingBlock ? "true" : "false") + ",";
+                jsonToSend += "\"lookingAtBlock\":" + std::string(state.lookingAtBlock ? "true" : "false") + ",";
+                jsonToSend += "\"lookingAtEntity\":" + std::string(state.lookingAtEntity ? "true" : "false") + ",";
+                jsonToSend += "\"lookingAtEntityLatched\":" + std::string(state.lookingAtEntityLatched ? "true" : "false") + ",";
+                jsonToSend += "\"breakingBlock\":" + std::string(state.breakingBlock ? "true" : "false") + ",";
+                jsonToSend += "\"attackCooldown\":" + std::to_string(state.attackCooldown) + ",";
+                jsonToSend += "\"attackCooldownPerTick\":" + std::to_string(state.attackCooldownPerTick) + ",";
+                jsonToSend += "\"killAuraUnavailableReason\":\"" + JsonEscape(state.killAuraUnavailableReason) + "\",";
+                jsonToSend += "\"killAuraHasTarget\":" + std::string(state.killAuraHasTarget ? "true" : "false") + ",";
+                jsonToSend += "\"killAuraBlocking\":" + std::string(state.killAuraBlocking ? "true" : "false") + ",";
+                jsonToSend += "\"stateMs\":" + std::to_string(state.stateMs) + ",";
+                jsonToSend += "\"chestStealerState\":";
+                jsonToSend += state.chestStealerStateJson.empty() ? "null" : state.chestStealerStateJson;
 
-            PixelPartySnap ppSnap;
-            { LockGuard lk(g_pixelPartyMutex); ppSnap = g_pixelPartySnap; }
-            float ppYawDelta = 0.0f;
-            if (ppSnap.targetFound) {
-                ppYawDelta = ppSnap.targetYaw - state.rotationYaw;
-                while (ppYawDelta > 180.0f) ppYawDelta -= 360.0f;
-                while (ppYawDelta < -180.0f) ppYawDelta += 360.0f;
-            }
-            jsonToSend += ",\"pixelPartyTargetFound\":";
-            jsonToSend += ppSnap.targetFound ? "true" : "false";
-            jsonToSend += ",\"pixelPartyTargetYaw\":";
-            jsonToSend += std::to_string(ppSnap.targetYaw);
-            jsonToSend += ",\"pixelPartyTargetDist\":";
-            jsonToSend += std::to_string((float)ppSnap.dist);
-            jsonToSend += ",\"pixelPartyYawDelta\":";
-            jsonToSend += std::to_string(ppYawDelta);
-
-            jsonToSend += ",\"entities\":";
-
-            std::string entitiesJson = "[]";
-
-            if (needEntityTelemetry) {
-                LockGuard lk(g_jsonMutex);
-                if (!g_pendingJson.empty()) {
-                    entitiesJson = g_pendingJson;
-                    g_pendingJson.clear();
+                PixelPartySnap ppSnap;
+                { LockGuard lk(g_pixelPartyMutex); ppSnap = g_pixelPartySnap; }
+                float ppYawDelta = 0.0f;
+                if (ppSnap.targetFound) {
+                    ppYawDelta = ppSnap.targetYaw - state.rotationYaw;
+                    while (ppYawDelta > 180.0f) ppYawDelta -= 360.0f;
+                    while (ppYawDelta < -180.0f) ppYawDelta += 360.0f;
                 }
-            }
-            jsonToSend += entitiesJson;
-            {
-                LockGuard hudLock(g_hudEditorMutex);
-                LockGuard lk(g_configMutex);
-                if (g_hudEditor.layoutDirty) {
-                    jsonToSend += ",\"hudLayout\":";
-                    jsonToSend += lc::SerializeHudLayout(g_hudLayout);
-                    g_hudEditor.layoutDirty = false;
-                }
-            }
-            jsonToSend += "}\n";
+                jsonToSend += ",\"pixelPartyTargetFound\":";
+                jsonToSend += ppSnap.targetFound ? "true" : "false";
+                jsonToSend += ",\"pixelPartyTargetYaw\":";
+                jsonToSend += std::to_string(ppSnap.targetYaw);
+                jsonToSend += ",\"pixelPartyTargetDist\":";
+                jsonToSend += std::to_string((float)ppSnap.dist);
+                jsonToSend += ",\"pixelPartyYawDelta\":";
+                jsonToSend += std::to_string(ppYawDelta);
 
-            // Send if we have data
-            if (!jsonToSend.empty()) {
-                LockGuard lk(g_socketMutex);
-                if (SendJsonLine(clientSocket, jsonToSend) < 0) break;
+                jsonToSend += ",\"entities\":";
+
+                std::string entitiesJson = "[]";
+
+                if (needEntityTelemetry) {
+                    LockGuard lk(g_jsonMutex);
+                    if (!g_pendingJson.empty()) {
+                        entitiesJson = g_pendingJson;
+                        g_pendingJson.clear();
+                    }
+                }
+                jsonToSend += entitiesJson;
+                {
+                    LockGuard hudLock(g_hudEditorMutex);
+                    LockGuard lk(g_configMutex);
+                    if (g_hudEditor.layoutDirty) {
+                        jsonToSend += ",\"hudLayout\":";
+                        jsonToSend += lc::SerializeHudLayout(g_hudLayout);
+                        g_hudEditor.layoutDirty = false;
+                    }
+                }
+                jsonToSend += "}\n";
+
+                {
+                    LockGuard lk(g_socketMutex);
+                    if (SendJsonLine(clientSocket, jsonToSend) < 0) publishFailed = true;
+                }
+                RecordNativePerfSince(
+                    lc::PERF_STATE_PUBLISH,
+                    statePublishPerfStarted,
+                    static_cast<unsigned long long>(jsonToSend.size()));
+                lastStatePublishMs = nowMs;
             }
-            RecordNativePerfSince(
-                lc::PERF_STATE_PUBLISH,
-                statePublishPerfStarted,
-                static_cast<unsigned long long>(jsonToSend.size()));
-            
-            // Keep telemetry responsive without pegging CPU.
-            // SpeedBridge needs ≥100Hz edge checks; combat/entity paths stay faster too.
-            const bool needFastPoll =
-                cfgSnapshot.speedBridge || cfgSnapshot.killAura || needEntityTelemetry;
-            Sleep(needFastPoll ? 5 : 14);
+            if (publishFailed) break;
+
             static DWORD lastNickHiderRefreshMs = 0;
             const DWORD nickHiderNow = GetTickCount();
             if (nickHiderNow - lastNickHiderRefreshMs >= 2000) {
@@ -13401,7 +13701,31 @@ void ServerLoop() {
             }
 
             MaybeLogNativePerfDiagnostics();
-            Sleep(needFastPoll ? 5 : 25);
+            unsigned int sleepMs = lc::kStateReadIntervalMs;
+            const DWORD sleepNow = GetTickCount();
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastStateReadMs, lc::kStateReadIntervalMs, true);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastStatePublishMs, publishInterval, true);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastSpeedBridgeMs, lc::kSpeedBridgeIntervalMs, speedBridgeEnabled);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastAutoRodMs, lc::kAutoRodIntervalMs, autoRodEnabled);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastAutoToolMs, lc::kAutoToolIntervalMs, cfgSnapshot.autoToolEnabled);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastHitDelayMs, lc::kHitDelayFixIntervalMs, cfgSnapshot.hitDelayFixEnabled);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastReachMs, lc::kReachIntervalMs, reachEnabled);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastVelocityMs, lc::kVelocityIntervalMs, velocityEnabled);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastKillAuraMs, lc::kKillAuraWorkerIntervalMs, cfgSnapshot.killAura);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastPixelPartyMs, lc::kPixelPartyIntervalMs, cfgSnapshot.pixelPartyAssist);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastAntiDebuffMs, lc::kAntiDebuffIntervalMs, cfgSnapshot.antiDebuffEnabled || s_antiDebuffWasEnabled);
+            if (sleepMs > 0) Sleep(sleepMs);
         }
         {
             LockGuard jniLk(g_stateJniMutex);

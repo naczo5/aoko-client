@@ -7,7 +7,7 @@ description: Highlights nearby chests through walls.
 
 ## Version support
 
-1.8.9 · 1.21.x · 26.1
+1.8.9 · 1.21.x · 26.1 · 26.2
 
 ## Settings
 

@@ -22,7 +22,8 @@ public class AutoToolManagedTests
             AutoToolSwapBack = true,
             AutoToolSwapBackDelay = 500,
             AutoToolRequireMouseDown = false,
-            AutoToolOnlySneaking = true
+            AutoToolOnlySneaking = true,
+            AutoToolBedwarsMode = false
         };
 
         Assert.False(defaults.AutoToolEnabled);
@@ -33,6 +34,7 @@ public class AutoToolManagedTests
         Assert.Equal(350, defaults.AutoToolSwapBackDelay);
         Assert.True(defaults.AutoToolRequireMouseDown);
         Assert.False(defaults.AutoToolOnlySneaking);
+        Assert.True(defaults.AutoToolBedwarsMode);
         Assert.Equal(0, defaults.ModuleKeys["autotool"]);
 
         Assert.True(profile.AutoToolEnabled);
@@ -43,6 +45,7 @@ public class AutoToolManagedTests
         Assert.Equal(500, profile.AutoToolSwapBackDelay);
         Assert.False(profile.AutoToolRequireMouseDown);
         Assert.True(profile.AutoToolOnlySneaking);
+        Assert.False(profile.AutoToolBedwarsMode);
 
         Clicker clicker = Clicker.Instance;
         bool savedEnabled = clicker.AutoToolEnabled;
@@ -53,6 +56,7 @@ public class AutoToolManagedTests
         int savedSwapBackDelay = clicker.AutoToolSwapBackDelay;
         bool savedMouseDown = clicker.AutoToolRequireMouseDown;
         bool savedSneaking = clicker.AutoToolOnlySneaking;
+        bool savedBedwarsMode = clicker.AutoToolBedwarsMode;
 
         try
         {
@@ -64,6 +68,7 @@ public class AutoToolManagedTests
             clicker.AutoToolSwapBackDelay = 5000;
             clicker.AutoToolRequireMouseDown = false;
             clicker.AutoToolOnlySneaking = true;
+            clicker.AutoToolBedwarsMode = false;
 
             Assert.True(clicker.AutoToolEnabled);
             Assert.False(clicker.AutoToolSwapWeapon);
@@ -73,6 +78,7 @@ public class AutoToolManagedTests
             Assert.Equal(1000, clicker.AutoToolSwapBackDelay);
             Assert.False(clicker.AutoToolRequireMouseDown);
             Assert.True(clicker.AutoToolOnlySneaking);
+            Assert.False(clicker.AutoToolBedwarsMode);
         }
         finally
         {
@@ -84,6 +90,7 @@ public class AutoToolManagedTests
             clicker.AutoToolSwapBackDelay = savedSwapBackDelay;
             clicker.AutoToolRequireMouseDown = savedMouseDown;
             clicker.AutoToolOnlySneaking = savedSneaking;
+            clicker.AutoToolBedwarsMode = savedBedwarsMode;
         }
     }
 
@@ -99,6 +106,7 @@ public class AutoToolManagedTests
         int savedSwapBackDelay = clicker.AutoToolSwapBackDelay;
         bool savedMouseDown = clicker.AutoToolRequireMouseDown;
         bool savedSneaking = clicker.AutoToolOnlySneaking;
+        bool savedBedwarsMode = clicker.AutoToolBedwarsMode;
 
         try
         {
@@ -110,6 +118,7 @@ public class AutoToolManagedTests
             clicker.AutoToolSwapBackDelay = 400;
             clicker.AutoToolRequireMouseDown = true;
             clicker.AutoToolOnlySneaking = false;
+            clicker.AutoToolBedwarsMode = false;
 
             Profile profile = ProfileManager.CreateFromClicker();
             Assert.True(profile.AutoToolEnabled);
@@ -120,15 +129,18 @@ public class AutoToolManagedTests
             Assert.Equal(400, profile.AutoToolSwapBackDelay);
             Assert.True(profile.AutoToolRequireMouseDown);
             Assert.False(profile.AutoToolOnlySneaking);
+            Assert.False(profile.AutoToolBedwarsMode);
 
             // Change clicker values
             clicker.AutoToolEnabled = false;
             clicker.AutoToolSwapToDelay = 0;
+            clicker.AutoToolBedwarsMode = true;
 
             // Apply back
             ProfileManager.ApplyToClicker(profile);
             Assert.True(clicker.AutoToolEnabled);
             Assert.Equal(120, clicker.AutoToolSwapToDelay);
+            Assert.False(clicker.AutoToolBedwarsMode);
         }
         finally
         {
@@ -140,6 +152,7 @@ public class AutoToolManagedTests
             clicker.AutoToolSwapBackDelay = savedSwapBackDelay;
             clicker.AutoToolRequireMouseDown = savedMouseDown;
             clicker.AutoToolOnlySneaking = savedSneaking;
+            clicker.AutoToolBedwarsMode = savedBedwarsMode;
         }
     }
 
@@ -159,6 +172,7 @@ public class AutoToolManagedTests
         Assert.True(caps.SupportsSetting("autotoolswapbackdelay"));
         Assert.True(caps.SupportsSetting("autotoolrequiremousedown"));
         Assert.True(caps.SupportsSetting("autotoolonlysneaking"));
+        Assert.True(caps.SupportsSetting("autotoolbedwarsmode"));
     }
 
     [Fact]
@@ -169,6 +183,7 @@ public class AutoToolManagedTests
 
         Assert.Contains("autoToolEnabled", legacy, StringComparison.Ordinal);
         Assert.Contains("autoToolSwapWeapon", legacy, StringComparison.Ordinal);
+        Assert.Contains("autoToolBedwarsMode", legacy, StringComparison.Ordinal);
         Assert.Contains("UpdateAutoToolLegacy", legacy, StringComparison.Ordinal);
         Assert.Contains("ResetAutoToolLegacyJniCaches", legacy, StringComparison.Ordinal);
         Assert.Contains("ApplyAutoToolSlotLegacy", legacy, StringComparison.Ordinal);
@@ -176,6 +191,7 @@ public class AutoToolManagedTests
 
         Assert.Contains("autoToolEnabled", modern, StringComparison.Ordinal);
         Assert.Contains("autoToolSwapWeapon", modern, StringComparison.Ordinal);
+        Assert.Contains("autoToolBedwarsMode", modern, StringComparison.Ordinal);
         Assert.Contains("UpdateAutoToolModern", modern, StringComparison.Ordinal);
         Assert.Contains("ResetAutoToolModernCaches", modern, StringComparison.Ordinal);
         Assert.Contains("ApplyAutoToolSlotModern", modern, StringComparison.Ordinal);
@@ -197,6 +213,7 @@ public class AutoToolManagedTests
         Assert.Contains("AutoToolSwapBackDelay", xaml, StringComparison.Ordinal);
         Assert.Contains("AutoToolRequireMouseDown", xaml, StringComparison.Ordinal);
         Assert.Contains("AutoToolOnlySneaking", xaml, StringComparison.Ordinal);
+        Assert.Contains("AutoToolBedwarsMode", xaml, StringComparison.Ordinal);
         Assert.Contains("x:Name=\"KeybindAutoToolButton\" Tag=\"autotool\"", xaml, StringComparison.Ordinal);
     }
 

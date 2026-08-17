@@ -1015,6 +1015,19 @@ public class Clicker : INotifyPropertyChanged
         }
     }
 
+    private bool _chestStealerMenuCheck = true;
+    public bool ChestStealerMenuCheck
+    {
+        get => _chestStealerMenuCheck;
+        set
+        {
+            if (_chestStealerMenuCheck == value) return;
+            _chestStealerMenuCheck = value;
+            OnPropertyChanged(nameof(ChestStealerMenuCheck));
+            StateChanged?.Invoke();
+        }
+    }
+
     // === Block ESP / X-ray ===
 
     private bool _blockEspEnabled = false;
@@ -1601,6 +1614,19 @@ public class Clicker : INotifyPropertyChanged
             if (_autoToolOnlySneaking == value) return;
             _autoToolOnlySneaking = value;
             OnPropertyChanged(nameof(AutoToolOnlySneaking));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _autoToolBedwarsMode = true;
+    public bool AutoToolBedwarsMode
+    {
+        get => _autoToolBedwarsMode;
+        set
+        {
+            if (_autoToolBedwarsMode == value) return;
+            _autoToolBedwarsMode = value;
+            OnPropertyChanged(nameof(AutoToolBedwarsMode));
             StateChanged?.Invoke();
         }
     }

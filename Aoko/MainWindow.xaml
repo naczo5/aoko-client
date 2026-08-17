@@ -776,6 +776,13 @@
                                 <Slider Minimum="50" Maximum="500" TickFrequency="10" IsSnapToTickEnabled="True"
                                         Value="{Binding ChestStealerDelayMs, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                         Style="{StaticResource DarkSlider}"/>
+
+                                <CheckBox Content="Menu check" IsChecked="{Binding ChestStealerMenuCheck, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,10,0,0"/>
+                                <TextBlock Text="Prevents stealing from menus that use the chest interface (such as compass selectors or shop villagers). Disable this if it fails to steal from chests on custom servers."
+                                           Foreground="{DynamicResource DimTextBrush}"
+                                           FontSize="11"
+                                           TextWrapping="Wrap"
+                                           Margin="0,4,0,0"/>
                             </StackPanel>
                         </Border>
 
@@ -816,6 +823,7 @@
                                     <CheckBox Content="Instant weapon swap" IsChecked="{Binding AutoToolInstantSwap, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,0,14,6"/>
                                     <CheckBox Content="Require mouse down" IsChecked="{Binding AutoToolRequireMouseDown, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,0,14,6"/>
                                     <CheckBox Content="Only while sneaking" IsChecked="{Binding AutoToolOnlySneaking, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,0,14,6"/>
+                                    <CheckBox Content="Bedwars mode" IsChecked="{Binding AutoToolBedwarsMode, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,0,14,6" ToolTip="Prevents swapping tools when punching chests so you can deposit resources via left click."/>
                                 </WrapPanel>
                             </StackPanel>
                         </Border>
