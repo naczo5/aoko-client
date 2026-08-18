@@ -9672,94 +9672,222 @@ struct OverlayTheme {
     Color4 accentSecondary;
     Color4 accentTertiary;
     Color4 logoColor;
+    Color4 logoSecondary;
     Color4 logoShadow;
     Color4 moduleBg;
     Color4 moduleBorder;
     Color4 moduleText;
     Color4 moduleTextShadow;
+    Color4 moduleTagText;
     Color4 moduleMinimalBg;
     Color4 moduleOutlinedBg;
     Color4 moduleGlassBorder;
     Color4 moduleBoldText;
+    bool isGradient;
+    bool isTriColor;
 };
+
+static Color4 LerpColor4(const Color4& a, const Color4& b, float t) {
+    t = (std::max)(0.0f, (std::min)(1.0f, t));
+    Color4 c;
+    c.r = a.r + (b.r - a.r) * t;
+    c.g = a.g + (b.g - a.g) * t;
+    c.b = a.b + (b.b - a.b) * t;
+    c.a = a.a + (b.a - a.a) * t;
+    return c;
+}
+
+static Color4 LerpColor4Tri(const Color4& a, const Color4& b, const Color4& c, float t) {
+    t = (std::max)(0.0f, (std::min)(1.0f, t));
+    if (t <= 0.5f) {
+        return LerpColor4(a, b, t * 2.0f);
+    } else {
+        return LerpColor4(b, c, (t - 0.5f) * 2.0f);
+    }
+}
 
 static OverlayTheme ResolveOverlayTheme(const std::string& guiTheme) {
     std::string key = ToLowerAscii(guiTheme);
 
-    // Each theme uses a SINGLE accent (matches the external GUI's AccentBrush).
-    // moduleBg / moduleBorder mirror PanelColor / SliderBgColor from App.xaml so
-    // the in-game module list reads as the same surface the WPF window uses.
-
     if (key == "ink") {
-        // Ink: pure mono, white-grey accent
         return {
-            MakeColor4(176, 182, 192, 255), // accentPrimary
-            MakeColor4(176, 182, 192, 255), // accentSecondary (same)
-            MakeColor4(176, 182, 192, 255), // accentTertiary (same)
-            MakeColor4(232, 234, 238, 255), // logoColor (text)
-            MakeColor4(0, 0, 0, 200),       // logoShadow
-            MakeColor4(16, 17, 21, 200),    // moduleBg (#101115 panel)
-            MakeColor4(22, 24, 28, 200),    // moduleBorder (#16181C)
-            MakeColor4(232, 234, 238, 240), // moduleText
-            MakeColor4(0, 0, 0, 200),       // moduleTextShadow
-            MakeColor4(22, 24, 28, 130),    // moduleMinimalBg
-            MakeColor4(16, 17, 21, 200),    // moduleOutlinedBg
-            MakeColor4(176, 182, 192, 90),  // moduleGlassBorder
-            MakeColor4(232, 234, 238, 245)  // moduleBoldText
+            MakeColor4(176, 182, 192, 255), MakeColor4(176, 182, 192, 255), MakeColor4(176, 182, 192, 255),
+            MakeColor4(176, 182, 192, 255), MakeColor4(232, 234, 238, 255), MakeColor4(0, 0, 0, 200),
+            MakeColor4(16, 17, 21, 200), MakeColor4(22, 24, 28, 200), MakeColor4(232, 234, 238, 240),
+            MakeColor4(0, 0, 0, 200), MakeColor4(122, 130, 143, 220), MakeColor4(22, 24, 28, 130),
+            MakeColor4(16, 17, 21, 200), MakeColor4(176, 182, 192, 90), MakeColor4(232, 234, 238, 245),
+            false, false
         };
     }
     if (key == "graphite") {
-        // Graphite: warm mono, beige accent
         return {
-            MakeColor4(184, 155, 130, 255),
-            MakeColor4(184, 155, 130, 255),
-            MakeColor4(184, 155, 130, 255),
-            MakeColor4(232, 232, 234, 255),
-            MakeColor4(0, 0, 0, 200),
-            MakeColor4(19, 19, 22, 200),    // #131316
-            MakeColor4(25, 25, 28, 200),    // #19191C
-            MakeColor4(232, 232, 234, 240),
-            MakeColor4(0, 0, 0, 200),
-            MakeColor4(25, 25, 28, 130),
-            MakeColor4(19, 19, 22, 200),
-            MakeColor4(184, 155, 130, 90),
-            MakeColor4(232, 232, 234, 245)
+            MakeColor4(184, 155, 130, 255), MakeColor4(184, 155, 130, 255), MakeColor4(184, 155, 130, 255),
+            MakeColor4(184, 155, 130, 255), MakeColor4(232, 232, 234, 255), MakeColor4(0, 0, 0, 200),
+            MakeColor4(19, 19, 22, 200), MakeColor4(25, 25, 28, 200), MakeColor4(232, 232, 234, 240),
+            MakeColor4(0, 0, 0, 200), MakeColor4(130, 130, 126, 220), MakeColor4(25, 25, 28, 130),
+            MakeColor4(19, 19, 22, 200), MakeColor4(184, 155, 130, 90), MakeColor4(232, 232, 234, 245),
+            false, false
         };
     }
     if (key == "steel") {
-        // Steel: cool blue-grey, steel-blue accent
         return {
-            MakeColor4(107, 141, 171, 255),
-            MakeColor4(107, 141, 171, 255),
-            MakeColor4(107, 141, 171, 255),
-            MakeColor4(229, 232, 238, 255),
-            MakeColor4(0, 0, 0, 200),
-            MakeColor4(15, 18, 24, 200),    // #0F1218
-            MakeColor4(22, 26, 33, 200),    // #161A21
-            MakeColor4(229, 232, 238, 240),
-            MakeColor4(0, 0, 0, 200),
-            MakeColor4(22, 26, 33, 130),
-            MakeColor4(15, 18, 24, 200),
-            MakeColor4(107, 141, 171, 90),
-            MakeColor4(229, 232, 238, 245)
+            MakeColor4(107, 141, 171, 255), MakeColor4(107, 141, 171, 255), MakeColor4(107, 141, 171, 255),
+            MakeColor4(107, 141, 171, 255), MakeColor4(229, 232, 238, 255), MakeColor4(0, 0, 0, 200),
+            MakeColor4(15, 18, 24, 200), MakeColor4(22, 26, 33, 200), MakeColor4(229, 232, 238, 240),
+            MakeColor4(0, 0, 0, 200), MakeColor4(114, 134, 160, 220), MakeColor4(22, 26, 33, 130),
+            MakeColor4(15, 18, 24, 200), MakeColor4(107, 141, 171, 90), MakeColor4(229, 232, 238, 245),
+            false, false
+        };
+    }
+    if (key == "blend") {
+        return {
+            MakeColor4(71, 148, 253, 255), MakeColor4(71, 253, 160, 255), MakeColor4(71, 253, 160, 255),
+            MakeColor4(71, 148, 253, 255), MakeColor4(71, 253, 160, 255), MakeColor4(0, 0, 0, 200),
+            MakeColor4(13, 20, 36, 200), MakeColor4(19, 30, 51, 200), MakeColor4(237, 243, 247, 240),
+            MakeColor4(0, 0, 0, 200), MakeColor4(123, 148, 181, 220), MakeColor4(19, 30, 51, 130),
+            MakeColor4(13, 20, 36, 200), MakeColor4(71, 148, 253, 90), MakeColor4(5, 11, 23, 245),
+            true, false
+        };
+    }
+    if (key == "lush") {
+        return {
+            MakeColor4(168, 224, 99, 255), MakeColor4(86, 171, 47, 255), MakeColor4(86, 171, 47, 255),
+            MakeColor4(168, 224, 99, 255), MakeColor4(86, 171, 47, 255), MakeColor4(0, 0, 0, 200),
+            MakeColor4(15, 23, 16, 200), MakeColor4(23, 36, 26, 200), MakeColor4(238, 245, 238, 240),
+            MakeColor4(0, 0, 0, 200), MakeColor4(122, 156, 125, 220), MakeColor4(23, 36, 26, 130),
+            MakeColor4(15, 23, 16, 200), MakeColor4(168, 224, 99, 90), MakeColor4(6, 13, 8, 245),
+            true, false
+        };
+    }
+    if (key == "water" || key == "ocean") {
+        return {
+            MakeColor4(12, 232, 199, 255), MakeColor4(12, 163, 232, 255), MakeColor4(12, 163, 232, 255),
+            MakeColor4(12, 232, 199, 255), MakeColor4(12, 163, 232, 255), MakeColor4(0, 0, 0, 200),
+            MakeColor4(11, 22, 36, 200), MakeColor4(16, 33, 54, 200), MakeColor4(234, 247, 248, 240),
+            MakeColor4(0, 0, 0, 200), MakeColor4(112, 156, 184, 220), MakeColor4(16, 33, 54, 130),
+            MakeColor4(11, 22, 36, 200), MakeColor4(12, 232, 199, 90), MakeColor4(5, 11, 18, 245),
+            true, false
+        };
+    }
+    if (key == "lime water" || key == "limewater") {
+        return {
+            MakeColor4(18, 255, 247, 255), MakeColor4(179, 255, 171, 255), MakeColor4(179, 255, 171, 255),
+            MakeColor4(18, 255, 247, 255), MakeColor4(179, 255, 171, 255), MakeColor4(0, 0, 0, 200),
+            MakeColor4(11, 27, 27, 200), MakeColor4(17, 40, 40, 200), MakeColor4(240, 250, 249, 240),
+            MakeColor4(0, 0, 0, 200), MakeColor4(112, 165, 160, 220), MakeColor4(17, 40, 40, 130),
+            MakeColor4(11, 27, 27, 200), MakeColor4(18, 255, 247, 90), MakeColor4(4, 12, 11, 245),
+            true, false
+        };
+    }
+    if (key == "digital horizon" || key == "digitalhorizon") {
+        return {
+            MakeColor4(95, 195, 228, 255), MakeColor4(229, 93, 135, 255), MakeColor4(229, 93, 135, 255),
+            MakeColor4(95, 195, 228, 255), MakeColor4(229, 93, 135, 255), MakeColor4(0, 0, 0, 200),
+            MakeColor4(18, 19, 36, 200), MakeColor4(27, 29, 51, 200), MakeColor4(243, 237, 245, 240),
+            MakeColor4(0, 0, 0, 200), MakeColor4(142, 127, 168, 220), MakeColor4(27, 29, 51, 130),
+            MakeColor4(18, 19, 36, 200), MakeColor4(95, 195, 228, 90), MakeColor4(9, 10, 20, 245),
+            true, false
+        };
+    }
+    if (key == "coral") {
+        return {
+            MakeColor4(244, 168, 150, 255), MakeColor4(52, 133, 151, 255), MakeColor4(52, 133, 151, 255),
+            MakeColor4(244, 168, 150, 255), MakeColor4(52, 133, 151, 255), MakeColor4(0, 0, 0, 200),
+            MakeColor4(20, 21, 28, 200), MakeColor4(30, 32, 43, 200), MakeColor4(247, 237, 235, 240),
+            MakeColor4(0, 0, 0, 200), MakeColor4(160, 135, 133, 220), MakeColor4(30, 32, 43, 130),
+            MakeColor4(20, 21, 28, 200), MakeColor4(244, 168, 150, 90), MakeColor4(10, 11, 15, 245),
+            true, false
+        };
+    }
+    if (key == "magic") {
+        return {
+            MakeColor4(127, 158, 255, 255), MakeColor4(142, 45, 226, 255), MakeColor4(74, 0, 224, 255),
+            MakeColor4(127, 158, 255, 255), MakeColor4(142, 45, 226, 255), MakeColor4(0, 0, 0, 200),
+            MakeColor4(13, 15, 36, 200), MakeColor4(21, 24, 56, 200), MakeColor4(237, 241, 255, 240),
+            MakeColor4(0, 0, 0, 200), MakeColor4(128, 142, 199, 220), MakeColor4(21, 24, 56, 130),
+            MakeColor4(13, 15, 36, 200), MakeColor4(127, 158, 255, 90), MakeColor4(6, 7, 20, 245),
+            true, true
+        };
+    }
+    if (key == "blossom") {
+        return {
+            MakeColor4(226, 208, 249, 255), MakeColor4(49, 119, 115, 255), MakeColor4(49, 119, 115, 255),
+            MakeColor4(226, 208, 249, 255), MakeColor4(49, 119, 115, 255), MakeColor4(0, 0, 0, 200),
+            MakeColor4(22, 17, 33, 200), MakeColor4(34, 27, 48, 200), MakeColor4(247, 242, 253, 240),
+            MakeColor4(0, 0, 0, 200), MakeColor4(158, 140, 174, 220), MakeColor4(34, 27, 48, 130),
+            MakeColor4(22, 17, 33, 200), MakeColor4(226, 208, 249, 90), MakeColor4(11, 8, 18, 245),
+            true, false
+        };
+    }
+    if (key == "pastel") {
+        return {
+            MakeColor4(243, 155, 178, 255), MakeColor4(207, 196, 243, 255), MakeColor4(207, 196, 243, 255),
+            MakeColor4(243, 155, 178, 255), MakeColor4(207, 196, 243, 255), MakeColor4(0, 0, 0, 200),
+            MakeColor4(24, 19, 30, 200), MakeColor4(36, 29, 43, 200), MakeColor4(251, 243, 246, 240),
+            MakeColor4(0, 0, 0, 200), MakeColor4(168, 144, 157, 220), MakeColor4(36, 29, 43, 130),
+            MakeColor4(24, 19, 30, 200), MakeColor4(243, 155, 178, 90), MakeColor4(13, 10, 16, 245),
+            true, false
+        };
+    }
+    if (key == "sunkist") {
+        return {
+            MakeColor4(242, 201, 76, 255), MakeColor4(242, 153, 74, 255), MakeColor4(242, 153, 74, 255),
+            MakeColor4(242, 201, 76, 255), MakeColor4(242, 153, 74, 255), MakeColor4(0, 0, 0, 200),
+            MakeColor4(26, 21, 13, 200), MakeColor4(38, 32, 20, 200), MakeColor4(255, 249, 237, 240),
+            MakeColor4(0, 0, 0, 200), MakeColor4(168, 150, 117, 220), MakeColor4(38, 32, 20, 130),
+            MakeColor4(26, 21, 13, 200), MakeColor4(242, 201, 76, 90), MakeColor4(14, 11, 7, 245),
+            true, false
+        };
+    }
+    if (key == "nord") {
+        return {
+            MakeColor4(143, 188, 187, 255), MakeColor4(163, 190, 140, 255), MakeColor4(236, 239, 244, 255),
+            MakeColor4(143, 188, 187, 255), MakeColor4(163, 190, 140, 255), MakeColor4(0, 0, 0, 200),
+            MakeColor4(18, 24, 31, 200), MakeColor4(27, 36, 46, 200), MakeColor4(236, 239, 244, 240),
+            MakeColor4(0, 0, 0, 200), MakeColor4(123, 136, 155, 220), MakeColor4(27, 36, 46, 130),
+            MakeColor4(18, 24, 31, 200), MakeColor4(143, 188, 187, 90), MakeColor4(11, 14, 18, 245),
+            true, true
+        };
+    }
+    if (key == "cherry") {
+        return {
+            MakeColor4(187, 55, 125, 255), MakeColor4(251, 211, 233, 255), MakeColor4(251, 211, 233, 255),
+            MakeColor4(187, 55, 125, 255), MakeColor4(251, 211, 233, 255), MakeColor4(0, 0, 0, 200),
+            MakeColor4(28, 16, 24, 200), MakeColor4(43, 25, 37, 200), MakeColor4(252, 242, 247, 240),
+            MakeColor4(0, 0, 0, 200), MakeColor4(168, 124, 147, 220), MakeColor4(43, 25, 37, 130),
+            MakeColor4(28, 16, 24, 200), MakeColor4(187, 55, 125, 90), MakeColor4(15, 8, 12, 245),
+            true, false
+        };
+    }
+    if (key == "aubergine") {
+        return {
+            MakeColor4(170, 7, 107, 255), MakeColor4(97, 4, 95, 255), MakeColor4(97, 4, 95, 255),
+            MakeColor4(170, 7, 107, 255), MakeColor4(97, 4, 95, 255), MakeColor4(0, 0, 0, 200),
+            MakeColor4(26, 12, 24, 200), MakeColor4(40, 19, 37, 200), MakeColor4(250, 235, 247, 240),
+            MakeColor4(0, 0, 0, 200), MakeColor4(158, 110, 149, 220), MakeColor4(40, 19, 37, 130),
+            MakeColor4(26, 12, 24, 200), MakeColor4(170, 7, 107, 90), MakeColor4(14, 6, 13, 245),
+            true, false
+        };
+    }
+    if (key == "snowy sky" || key == "snowysky" || key == "frost") {
+        return {
+            MakeColor4(1, 171, 179, 255), MakeColor4(18, 232, 232, 255), MakeColor4(234, 234, 234, 255),
+            MakeColor4(1, 171, 179, 255), MakeColor4(18, 232, 232, 255), MakeColor4(0, 0, 0, 200),
+            MakeColor4(12, 24, 32, 200), MakeColor4(19, 36, 48, 200), MakeColor4(234, 248, 250, 240),
+            MakeColor4(0, 0, 0, 200), MakeColor4(117, 162, 172, 220), MakeColor4(19, 36, 48, 130),
+            MakeColor4(12, 24, 32, 200), MakeColor4(1, 171, 179, 90), MakeColor4(6, 12, 16, 245),
+            true, true
         };
     }
 
     // Default = Slate (monochrome navy + coral accent)
     return {
-        MakeColor4(199, 98, 90, 255),   // coral #C7625A
-        MakeColor4(199, 98, 90, 255),
-        MakeColor4(199, 98, 90, 255),
-        MakeColor4(232, 234, 238, 255), // logoColor (text)
-        MakeColor4(0, 0, 0, 200),
-        MakeColor4(18, 20, 26, 200),    // moduleBg (#12141A panel)
-        MakeColor4(24, 27, 34, 200),    // moduleBorder (#181B22 slider-bg)
-        MakeColor4(232, 234, 238, 240),
-        MakeColor4(0, 0, 0, 200),
-        MakeColor4(24, 27, 34, 130),    // moduleMinimalBg
-        MakeColor4(18, 20, 26, 200),    // moduleOutlinedBg
-        MakeColor4(199, 98, 90, 90),    // moduleGlassBorder (coral w/alpha)
-        MakeColor4(232, 234, 238, 245)
+        MakeColor4(199, 98, 90, 255), MakeColor4(199, 98, 90, 255), MakeColor4(199, 98, 90, 255),
+        MakeColor4(199, 98, 90, 255), MakeColor4(232, 234, 238, 255), MakeColor4(0, 0, 0, 200),
+        MakeColor4(18, 20, 26, 200), MakeColor4(24, 27, 34, 200), MakeColor4(232, 234, 238, 240),
+        MakeColor4(0, 0, 0, 200), MakeColor4(122, 130, 144, 220), MakeColor4(24, 27, 34, 130),
+        MakeColor4(18, 20, 26, 200), MakeColor4(199, 98, 90, 90), MakeColor4(232, 234, 238, 245),
+        false, false
     };
 }
 
@@ -10296,59 +10424,77 @@ void RenderHUD(
     ImDrawList* fg = ImGui::GetForegroundDrawList();
     ImGuiIO& io = ImGui::GetIO();
 
-    struct ModLine { std::string text; ImU32 accent; float width; };
+    struct ModLine {
+        std::string name;
+        std::string tag;
+        ImU32 accent;
+        float width;
+        float nameWidth;
+        float tagWidth;
+    };
     static thread_local std::vector<ModLine> mods;
     mods.clear();
     if (mods.capacity() < 32) mods.reserve(32);
 
-    auto pushMod = [&](const std::string& text, ImU32 accent) {
-        if (text.empty()) return;
-        mods.push_back({ text, accent, ImGui::CalcTextSize(text.c_str()).x });
+    auto pushMod = [&](const std::string& name, const std::string& tag = "") {
+        if (name.empty()) return;
+        float nw = ImGui::CalcTextSize(name.c_str()).x;
+        float tw = tag.empty() ? 0.0f : ImGui::CalcTextSize((" " + tag).c_str()).x;
+        mods.push_back({ name, tag, 0, nw + tw, nw, tw });
     };
 
-    char acBuf[64];
     if (cfg.armed) {
         int lo = (int)cfg.minCPS;
         int hi = (int)cfg.maxCPS;
         if (hi < lo) std::swap(hi, lo);
-        snprintf(acBuf, sizeof(acBuf), "Autoclicker %d-%d", lo, hi);
-        pushMod(acBuf, ToImU32(theme.accentPrimary));
+        char tagBuf[32];
+        snprintf(tagBuf, sizeof(tagBuf), "%d-%d", lo, hi);
+        pushMod("Autoclicker", tagBuf);
     }
-    if (cfg.clickInChests)     pushMod("Click in Chests", ToImU32(theme.accentTertiary));
-    if (cfg.closestPlayerInfo) pushMod("Closest Player", ToImU32(theme.accentSecondary));
-    if (cfg.fightStatus)       pushMod("Fight Status", ToImU32(theme.accentPrimary));
-    if (cfg.rightClick)        pushMod("Rightclick", ToImU32(theme.accentTertiary));
-    if (cfg.aimAssist)         pushMod("Aim Assist", ToImU32(theme.accentPrimary));
-    if (cfg.triggerbot)        pushMod("Triggerbot", ToImU32(theme.accentSecondary));
-    if (cfg.killAura)          pushMod("Kill Aura", ToImU32(theme.accentSecondary));
-    if (cfg.speedBridge)       pushMod("SpeedBridge", ToImU32(theme.accentPrimary));
-    if (cfg.autoRodEnabled)    pushMod("Auto Rod", ToImU32(theme.accentPrimary));
-    if (cfg.autoToolEnabled)   pushMod("AutoTool", ToImU32(theme.accentPrimary));
-    if (cfg.chestEsp)          pushMod("Chest ESP", ToImU32(theme.accentSecondary));
-    if (cfg.blockEsp)          pushMod("Block ESP", ToImU32(theme.accentSecondary));
-    if (cfg.chestStealer)      pushMod("Chest Stealer", ToImU32(theme.accentTertiary));
-    if (cfg.nametags)          pushMod("Nametags", ToImU32(theme.accentPrimary));
-    if (cfg.nickHiderEnabled)  pushMod("Nick Hider", ToImU32(theme.accentTertiary));
-    if (cfg.gtbHelper)         pushMod("GTB Helper", ToImU32(theme.accentTertiary));
-    if (cfg.pixelPartyAssist)  pushMod("Pixel Party", ToImU32(theme.accentSecondary));
-    if (cfg.jitter)            pushMod("Jitter", ToImU32(theme.accentSecondary));
-    if (cfg.breakBlocks)       pushMod("Break Blocks", ToImU32(theme.accentTertiary));
-    if (cfg.reachEnabled)      pushMod("Reach", ToImU32(theme.accentPrimary));
-    if (cfg.velocityEnabled)   pushMod("Velocity", ToImU32(theme.accentTertiary));
-    if (cfg.antiDebuffEnabled) pushMod("AntiDebuff", ToImU32(theme.accentPrimary));
-    if (cfg.bedPlates)         pushMod("BedPlates", ToImU32(theme.accentSecondary));
-    if (cfg.hitDelayFixEnabled) pushMod("Hit Delay Fix", ToImU32(theme.accentPrimary));
+    if (cfg.clickInChests)     pushMod("Click in Chests");
+    if (cfg.closestPlayerInfo) pushMod("Closest Player");
+    if (cfg.fightStatus)       pushMod("Fight Status");
+    if (cfg.rightClick)        pushMod("Rightclick");
+    if (cfg.aimAssist)         pushMod("Aim Assist");
+    if (cfg.triggerbot)        pushMod("Triggerbot");
+    if (cfg.killAura)          pushMod("Kill Aura");
+    if (cfg.speedBridge)       pushMod("SpeedBridge");
+    if (cfg.autoRodEnabled)    pushMod("Auto Rod");
+    if (cfg.autoToolEnabled)   pushMod("AutoTool");
+    if (cfg.chestEsp)          pushMod("Chest ESP");
+    if (cfg.blockEsp)          pushMod("Block ESP");
+    if (cfg.chestStealer)      pushMod("Chest Stealer");
+    if (cfg.nametags)          pushMod("Nametags");
+    if (cfg.nickHiderEnabled)  pushMod("Nick Hider");
+    if (cfg.gtbHelper)         pushMod("GTB Helper");
+    if (cfg.pixelPartyAssist)  pushMod("Pixel Party");
+    if (cfg.jitter)            pushMod("Jitter");
+    if (cfg.breakBlocks)       pushMod("Break Blocks");
+    if (cfg.reachEnabled)      pushMod("Reach");
+    if (cfg.velocityEnabled)   pushMod("Velocity");
+    if (cfg.antiDebuffEnabled) pushMod("AntiDebuff");
+    if (cfg.bedPlates)         pushMod("BedPlates");
+    if (cfg.hitDelayFixEnabled) pushMod("Hit Delay Fix");
 
     std::sort(mods.begin(), mods.end(), [](const ModLine& a, const ModLine& b) {
         if (a.width != b.width) return a.width > b.width;
-        return a.text < b.text;
+        return a.name < b.name;
     });
 
+    for (size_t i = 0; i < mods.size(); i++) {
+        if (theme.isGradient) {
+            float t = mods.size() > 1 ? (float)i / (float)(mods.size() - 1) : 0.0f;
+            Color4 c = theme.isTriColor
+                ? LerpColor4Tri(theme.accentPrimary, theme.accentSecondary, theme.accentTertiary, t)
+                : LerpColor4(theme.accentPrimary, theme.accentSecondary, t);
+            mods[i].accent = ToImU32(c);
+        } else {
+            mods[i].accent = ToImU32(theme.accentPrimary);
+        }
+    }
+
     // Honor the HUD layout anchor + scale so the module list can be moved AND
-    // resized in the HUD editor. The block is anchored via the shared
-    // HudElementPixelPos helper (same as the editor box and the other panels),
-    // and all metrics are multiplied by the element scale. Previously scale was
-    // ignored, so resizing the module list in the editor had no visible effect.
+    // resized in the HUD editor.
     lc::HudElementLayout modLayout = hudLayout.Resolve(lc::ELEM_MODULELIST);
     const float scale = modLayout.scale;
 
@@ -10358,27 +10504,34 @@ void RenderHUD(
     const float gapY       = 2.0f * scale;
     const float fontH      = ImGui::GetFontSize() * scale;
     const float shadowOff  = (std::max)(1.0f, scale);
-    const float rightInset = 6.0f * scale; // keeps a small gap when flush-right
-    const int style = (std::max)(0, (std::min)(4, cfg.moduleListStyle));
+    const float rightInset = 6.0f * scale;
+    const int style = (std::max)(0, (std::min)(6, cfg.moduleListStyle));
     ImFont* font = ImGui::GetFont();
 
-    const char* logoText = "aoko client";
-    const float boxH = padY + fontH + padY;
+    const char* logoPart1 = "aoko";
+    const char* logoPart2 = " client";
+    const float logoP1W = ImGui::CalcTextSize(logoPart1).x * scale;
+    const float logoP2W = ImGui::CalcTextSize(logoPart2).x * scale;
+    const float logoW   = (logoP1W + logoP2W);
+    const float logoH   = fontH;
+    const float logoGap = 8.0f * scale;
+    const float boxH    = padY + fontH + padY;
 
     // ── Measuring pass: compute the block bounds (right-aligned bars). ──
     float blockW = 0.0f;
     float blockH = 0.0f;
-    float logoW = 0.0f, logoH = 0.0f, logoGap = 0.0f;
     if (cfg.showLogo) {
-        logoW   = ImGui::CalcTextSize(logoText).x * scale;
-        logoH   = fontH;
-        logoGap = 8.0f * scale;
-        blockW  = (std::max)(blockW, logoW + rightInset);
-        blockH += logoH + logoGap;
+        float logoBoxW = (style == 0 || style == 2 || style == 3 || style == 4)
+            ? (barW + padX + logoW + padX)
+            : (logoW + 6.0f * scale);
+        blockW  = (std::max)(blockW, logoBoxW + rightInset);
+        blockH += (style == 0 || style == 2 || style == 3 || style == 4) ? (boxH + logoGap) : (logoH + logoGap);
     }
     for (size_t i = 0; i < mods.size(); i++) {
         float textW = mods[i].width * scale;
-        float boxW  = barW + padX + textW + padX;
+        float boxW  = (style == 1 || style == 5 || style == 6)
+            ? (textW + 6.0f * scale)
+            : (barW + padX + textW + padX);
         blockW = (std::max)(blockW, boxW + rightInset);
         blockH += boxH;
         if (i + 1 < mods.size()) blockH += gapY;
@@ -10390,52 +10543,197 @@ void RenderHUD(
         float y = tl.y;
 
         if (cfg.showLogo) {
-            float logoX = x1 - logoW;
-            fg->AddText(font, fontH, ImVec2(logoX + shadowOff, y + shadowOff), ToImU32(theme.logoShadow), logoText);
-            fg->AddText(font, fontH, ImVec2(logoX, y), ToImU32(theme.logoColor), logoText);
-            y += logoH + logoGap;
+            if (style == 0) {
+                // Default: Dark panel card with left accent bar
+                float boxW = barW + padX + logoW + padX;
+                float x0 = x1 - boxW;
+                fg->AddRectFilled(ImVec2(x0, y), ImVec2(x1, y + boxH), ToImU32(theme.moduleBg));
+                fg->AddRectFilled(ImVec2(x0, y), ImVec2(x0 + barW, y + boxH), ToImU32(theme.accentPrimary));
+                fg->AddRect(ImVec2(x0, y), ImVec2(x1, y + boxH), ToImU32(theme.moduleBorder));
+                ImVec2 tx(x0 + barW + padX, y + padY);
+                fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), ToImU32(theme.logoShadow), logoPart1);
+                fg->AddText(font, fontH, tx, ToImU32(theme.accentPrimary), logoPart1);
+                fg->AddText(font, fontH, ImVec2(tx.x + logoP1W + shadowOff, tx.y + shadowOff), ToImU32(theme.logoShadow), logoPart2);
+                fg->AddText(font, fontH, ImVec2(tx.x + logoP1W, tx.y), ToImU32(theme.moduleText), logoPart2);
+                y += boxH + logoGap;
+            } else if (style == 1) {
+                // Minimal: Right-aligned text with right bar
+                float logoX = x1 - logoW - 4.0f * scale;
+                fg->AddRectFilled(ImVec2(x1 - 2.5f * scale, y), ImVec2(x1, y + logoH), ToImU32(theme.accentPrimary));
+                fg->AddText(font, fontH, ImVec2(logoX + shadowOff, y + shadowOff), ToImU32(theme.logoShadow), logoPart1);
+                fg->AddText(font, fontH, ImVec2(logoX, y), ToImU32(theme.accentPrimary), logoPart1);
+                fg->AddText(font, fontH, ImVec2(logoX + logoP1W + shadowOff, y + shadowOff), ToImU32(theme.logoShadow), logoPart2);
+                fg->AddText(font, fontH, ImVec2(logoX + logoP1W, y), ToImU32(theme.moduleText), logoPart2);
+                y += logoH + logoGap;
+            } else if (style == 2) {
+                // Outlined: Outlined badge
+                float boxW = barW + padX + logoW + padX;
+                float x0 = x1 - boxW;
+                fg->AddRectFilled(ImVec2(x0, y), ImVec2(x1, y + boxH), ToImU32(theme.moduleOutlinedBg));
+                fg->AddRect(ImVec2(x0, y), ImVec2(x1, y + boxH), ToImU32(theme.accentPrimary), 4.0f, 0, 1.5f);
+                ImVec2 tx(x0 + barW + padX, y + padY);
+                fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), ToImU32(theme.logoShadow), logoPart1);
+                fg->AddText(font, fontH, tx, ToImU32(theme.accentPrimary), logoPart1);
+                fg->AddText(font, fontH, ImVec2(tx.x + logoP1W + shadowOff, tx.y + shadowOff), ToImU32(theme.logoShadow), logoPart2);
+                fg->AddText(font, fontH, ImVec2(tx.x + logoP1W, tx.y), ToImU32(theme.moduleText), logoPart2);
+                y += boxH + logoGap;
+            } else if (style == 3) {
+                // Glass: Glass badge
+                float boxW = barW + padX + logoW + padX;
+                float x0 = x1 - boxW;
+                fg->AddRectFilled(ImVec2(x0, y), ImVec2(x1, y + boxH), ToImU32(theme.moduleMinimalBg), 4.0f);
+                fg->AddRect(ImVec2(x0, y), ImVec2(x1, y + boxH), ToImU32(theme.moduleGlassBorder), 4.0f, 0, 1.0f);
+                fg->AddRectFilled(ImVec2(x0 + 1.0f * scale, y + 1.0f * scale), ImVec2(x0 + barW + 1.0f * scale, y + boxH - 1.0f * scale), ToImU32(theme.accentPrimary));
+                ImVec2 tx(x0 + barW + padX, y + padY);
+                fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), ToImU32(theme.logoShadow), logoPart1);
+                fg->AddText(font, fontH, tx, ToImU32(theme.accentPrimary), logoPart1);
+                fg->AddText(font, fontH, ImVec2(tx.x + logoP1W + shadowOff, tx.y + shadowOff), ToImU32(theme.logoShadow), logoPart2);
+                fg->AddText(font, fontH, ImVec2(tx.x + logoP1W, tx.y), ToImU32(theme.moduleText), logoPart2);
+                y += boxH + logoGap;
+            } else if (style == 4) {
+                // Bold: Solid accent pill
+                float boxW = barW + padX + logoW + padX;
+                float x0 = x1 - boxW;
+                fg->AddRectFilled(ImVec2(x0, y), ImVec2(x1, y + boxH), ToImU32(theme.accentPrimary), 4.0f);
+                fg->AddRect(ImVec2(x0, y), ImVec2(x1, y + boxH), ToImU32(theme.moduleBorder), 4.0f, 0, 1.0f);
+                ImVec2 tx(x0 + barW + padX, y + padY);
+                fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), ToImU32(theme.logoShadow), logoPart1);
+                fg->AddText(font, fontH, tx, ToImU32(theme.moduleBoldText), logoPart1);
+                fg->AddText(font, fontH, ImVec2(tx.x + logoP1W + shadowOff, tx.y + shadowOff), ToImU32(theme.logoShadow), logoPart2);
+                fg->AddText(font, fontH, ImVec2(tx.x + logoP1W, tx.y), ToImU32(theme.moduleBoldText), logoPart2);
+                y += boxH + logoGap;
+            } else if (style == 5) {
+                // Classic: Minecraft-style right-aligned header with right bar
+                const char* cP1 = "Aoko";
+                const char* cP2 = " Client";
+                float cP1W = ImGui::CalcTextSize(cP1).x * scale;
+                float logoX = x1 - logoW - 4.0f * scale;
+                fg->AddRectFilled(ImVec2(x1 - 2.5f * scale, y), ImVec2(x1, y + logoH), ToImU32(theme.accentPrimary));
+                fg->AddText(font, fontH, ImVec2(logoX + shadowOff, y + shadowOff), ToImU32(theme.logoShadow), cP1);
+                fg->AddText(font, fontH, ImVec2(logoX, y), ToImU32(theme.accentPrimary), cP1);
+                fg->AddText(font, fontH, ImVec2(logoX + cP1W + shadowOff, y + shadowOff), ToImU32(theme.logoShadow), cP2);
+                fg->AddText(font, fontH, ImVec2(logoX + cP1W, y), ToImU32(theme.moduleText), cP2);
+                y += logoH + logoGap;
+            } else {
+                // Modern: Clean lowercase pill with right bar
+                float logoX = x1 - logoW - 5.0f * scale;
+                fg->AddRectFilled(ImVec2(logoX - 3.0f * scale, y - 1.0f * scale), ImVec2(x1, y + logoH + 1.0f * scale), ToImU32(theme.moduleMinimalBg), 2.0f);
+                fg->AddRectFilled(ImVec2(x1 - 2.0f * scale, y - 1.0f * scale), ImVec2(x1, y + logoH + 1.0f * scale), ToImU32(theme.accentPrimary));
+                fg->AddText(font, fontH, ImVec2(logoX + shadowOff, y + shadowOff), ToImU32(theme.logoShadow), logoPart1);
+                fg->AddText(font, fontH, ImVec2(logoX, y), ToImU32(theme.accentPrimary), logoPart1);
+                fg->AddText(font, fontH, ImVec2(logoX + logoP1W + shadowOff, y + shadowOff), ToImU32(theme.logoShadow), logoPart2);
+                fg->AddText(font, fontH, ImVec2(logoX + logoP1W, y), ToImU32(theme.moduleTagText), logoPart2);
+                y += logoH + logoGap;
+            }
         }
 
         for (size_t i = 0; i < mods.size(); i++) {
             const ModLine& m = mods[i];
             float textW = m.width * scale;
+            float nameW = m.nameWidth * scale;
             float boxW  = barW + padX + textW + padX;
             float x0 = x1 - boxW;
             float y0 = y;
             float y1 = y + boxH;
 
             if (style == 0) {
+                // Default: Left bar + text + dim tag
                 fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleBg));
                 fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + barW, y1), m.accent);
                 fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleBorder));
                 ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
-                fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), ToImU32(theme.moduleTextShadow), m.text.c_str());
-                fg->AddText(font, fontH, tx, ToImU32(theme.moduleText), m.text.c_str());
+                fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), ToImU32(theme.moduleTextShadow), m.name.c_str());
+                fg->AddText(font, fontH, tx, ToImU32(theme.moduleText), m.name.c_str());
+                if (!m.tag.empty()) {
+                    std::string tagStr = " " + m.tag;
+                    ImVec2 tagTx(tx.x + nameW, tx.y);
+                    fg->AddText(font, fontH, ImVec2(tagTx.x + shadowOff, tagTx.y + shadowOff), ToImU32(theme.moduleTextShadow), tagStr.c_str());
+                    fg->AddText(font, fontH, tagTx, ToImU32(theme.moduleTagText), tagStr.c_str());
+                }
             } else if (style == 1) {
-                fg->AddRectFilled(ImVec2(x1 - textW - 4.0f * scale, y0), ImVec2(x1, y1), ToImU32(theme.moduleMinimalBg));
+                // Minimal: Right bar + colored name + dim tag
+                float minX0 = x1 - textW - 6.0f * scale;
+                fg->AddRectFilled(ImVec2(minX0, y0), ImVec2(x1, y1), ToImU32(theme.moduleMinimalBg));
                 fg->AddRectFilled(ImVec2(x1 - 2.0f * scale, y0), ImVec2(x1, y1), m.accent);
-                ImVec2 tx = ImVec2(x1 - textW - 2.0f * scale, y0 + padY);
-                fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), ToImU32(theme.moduleTextShadow), m.text.c_str());
-                fg->AddText(font, fontH, tx, m.accent, m.text.c_str());
+                ImVec2 tx = ImVec2(minX0 + 2.0f * scale, y0 + padY);
+                fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), ToImU32(theme.moduleTextShadow), m.name.c_str());
+                fg->AddText(font, fontH, tx, m.accent, m.name.c_str());
+                if (!m.tag.empty()) {
+                    std::string tagStr = " " + m.tag;
+                    ImVec2 tagTx(tx.x + nameW, tx.y);
+                    fg->AddText(font, fontH, ImVec2(tagTx.x + shadowOff, tagTx.y + shadowOff), ToImU32(theme.moduleTextShadow), tagStr.c_str());
+                    fg->AddText(font, fontH, tagTx, ToImU32(theme.moduleTagText), tagStr.c_str());
+                }
             } else if (style == 2) {
+                // Outlined: Border with accent + colored name + dim tag
                 fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleOutlinedBg));
                 fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), m.accent, 4.0f, 0, 1.5f);
                 ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
-                fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), ToImU32(theme.moduleTextShadow), m.text.c_str());
-                fg->AddText(font, fontH, tx, m.accent, m.text.c_str());
+                fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), ToImU32(theme.moduleTextShadow), m.name.c_str());
+                fg->AddText(font, fontH, tx, m.accent, m.name.c_str());
+                if (!m.tag.empty()) {
+                    std::string tagStr = " " + m.tag;
+                    ImVec2 tagTx(tx.x + nameW, tx.y);
+                    fg->AddText(font, fontH, ImVec2(tagTx.x + shadowOff, tagTx.y + shadowOff), ToImU32(theme.moduleTextShadow), tagStr.c_str());
+                    fg->AddText(font, fontH, tagTx, ToImU32(theme.moduleTagText), tagStr.c_str());
+                }
             } else if (style == 3) {
+                // Glass: Frosted glass panel with specular border and left pip
                 fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleMinimalBg), 4.0f);
                 fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleGlassBorder), 4.0f, 0, 1.0f);
                 fg->AddRectFilled(ImVec2(x0 + 1.0f * scale, y0 + 1.0f * scale), ImVec2(x0 + barW + 1.0f * scale, y1 - 1.0f * scale), m.accent);
                 ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
-                fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), ToImU32(theme.moduleTextShadow), m.text.c_str());
-                fg->AddText(font, fontH, tx, ToImU32(theme.moduleText), m.text.c_str());
-            } else {
+                fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), ToImU32(theme.moduleTextShadow), m.name.c_str());
+                fg->AddText(font, fontH, tx, ToImU32(theme.moduleText), m.name.c_str());
+                if (!m.tag.empty()) {
+                    std::string tagStr = " " + m.tag;
+                    ImVec2 tagTx(tx.x + nameW, tx.y);
+                    fg->AddText(font, fontH, ImVec2(tagTx.x + shadowOff, tagTx.y + shadowOff), ToImU32(theme.moduleTextShadow), tagStr.c_str());
+                    fg->AddText(font, fontH, tagTx, ToImU32(theme.moduleTagText), tagStr.c_str());
+                }
+            } else if (style == 4) {
+                // Bold: Solid accent block fill
                 fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), m.accent, 4.0f);
                 fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleBorder), 4.0f, 0, 1.0f);
                 ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
-                fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), ToImU32(theme.moduleTextShadow), m.text.c_str());
-                fg->AddText(font, fontH, tx, ToImU32(theme.moduleBoldText), m.text.c_str());
+                fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), ToImU32(theme.moduleTextShadow), m.name.c_str());
+                fg->AddText(font, fontH, tx, ToImU32(theme.moduleBoldText), m.name.c_str());
+                if (!m.tag.empty()) {
+                    std::string tagStr = " " + m.tag;
+                    ImVec2 tagTx(tx.x + nameW, tx.y);
+                    fg->AddText(font, fontH, ImVec2(tagTx.x + shadowOff, tagTx.y + shadowOff), ToImU32(theme.moduleTextShadow), tagStr.c_str());
+                    fg->AddText(font, fontH, tagTx, ToImU32(theme.moduleBoldText), tagStr.c_str());
+                }
+            } else if (style == 5) {
+                // Classic: Minecraft-style right-side bar with shadow and colored name + dim tag
+                float minX0 = x1 - textW - 6.0f * scale;
+                fg->AddRectFilled(ImVec2(minX0, y0), ImVec2(x1, y1), ToImU32(theme.moduleMinimalBg));
+                fg->AddRectFilled(ImVec2(x1 - 2.5f * scale, y0), ImVec2(x1, y1), m.accent);
+                ImVec2 tx = ImVec2(minX0 + 2.0f * scale, y0 + padY);
+                fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), ToImU32(theme.moduleTextShadow), m.name.c_str());
+                fg->AddText(font, fontH, tx, m.accent, m.name.c_str());
+                if (!m.tag.empty()) {
+                    std::string tagStr = " " + m.tag;
+                    ImVec2 tagTx(tx.x + nameW, tx.y);
+                    fg->AddText(font, fontH, ImVec2(tagTx.x + shadowOff, tagTx.y + shadowOff), ToImU32(theme.moduleTextShadow), tagStr.c_str());
+                    fg->AddText(font, fontH, tagTx, ToImU32(theme.moduleTagText), tagStr.c_str());
+                }
+            } else {
+                // Modern: Clean lowercase with right bar and subtle background
+                std::string lowName = ToLowerAscii(m.name);
+                std::string lowTag = ToLowerAscii(m.tag);
+                float minX0 = x1 - textW - 6.0f * scale;
+                fg->AddRectFilled(ImVec2(minX0, y0), ImVec2(x1, y1), ToImU32(theme.moduleMinimalBg), 2.0f);
+                fg->AddRectFilled(ImVec2(x1 - 2.0f * scale, y0), ImVec2(x1, y1), m.accent);
+                ImVec2 tx = ImVec2(minX0 + 2.0f * scale, y0 + padY);
+                fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), ToImU32(theme.moduleTextShadow), lowName.c_str());
+                fg->AddText(font, fontH, tx, m.accent, lowName.c_str());
+                if (!lowTag.empty()) {
+                    std::string tagStr = " " + lowTag;
+                    ImVec2 tagTx(tx.x + nameW, tx.y);
+                    fg->AddText(font, fontH, ImVec2(tagTx.x + shadowOff, tagTx.y + shadowOff), ToImU32(theme.moduleTextShadow), tagStr.c_str());
+                    fg->AddText(font, fontH, tagTx, ToImU32(theme.moduleTagText), tagStr.c_str());
+                }
             }
 
             y += boxH + gapY;
@@ -11267,30 +11565,33 @@ void RenderNametags(
         ImDrawList* fg = ImGui::GetForegroundDrawList();
         ImVec2 pMin(px, py);
         ImVec2 pMax(px + maxW + pad * 2.0f, py + totalH + pad * 2.0f + 2.0f);
-        fg->AddRectFilled(pMin, pMax, IM_COL32(0, 0, 0, 160), 3.0f);
+        fg->AddRectFilled(pMin, pMax, ToImU32(nametagTheme.moduleBg), 4.0f);
+        fg->AddRect(pMin, pMax, ToImU32(nametagTheme.moduleGlassBorder), 4.0f, 0, 1.0f);
         float curY = py + pad;
         float centerX = px + (maxW + pad * 2.0f) * 0.5f;
         float nameX = std::floor(centerX - nameSz.x * 0.5f);
-        fg->AddText(ImGui::GetFont(), nameFontSize, ImVec2(nameX + 1, curY + 1), IM_COL32(0, 0, 0, 255), rec.displayName.c_str());
+        fg->AddText(ImGui::GetFont(), nameFontSize, ImVec2(nameX + 1, curY + 1), ToImU32(nametagTheme.moduleTextShadow), rec.displayName.c_str());
         fg->AddText(ImGui::GetFont(), nameFontSize, ImVec2(nameX, curY), ToImU32(nametagTheme.moduleText), rec.displayName.c_str());
         curY += nameSz.y + 2.0f;
         if (!statsText.empty()) {
             float statsX = std::floor(centerX - statsSz.x * 0.5f);
-            ImU32 statCol = hpClamped <= 8.0f ? IM_COL32(255, 100, 100, 250) : IM_COL32(200, 220, 255, 250);
-            fg->AddText(ImGui::GetFont(), infoFontSize, ImVec2(statsX + 1, curY + 1), IM_COL32(0, 0, 0, 255), statsText.c_str());
+            ImU32 statCol = hpClamped <= 8.0f ? IM_COL32(255, 100, 100, 245) : ToImU32(nametagTheme.moduleTagText);
+            fg->AddText(ImGui::GetFont(), infoFontSize, ImVec2(statsX + 1, curY + 1), ToImU32(nametagTheme.moduleTextShadow), statsText.c_str());
             fg->AddText(ImGui::GetFont(), infoFontSize, ImVec2(statsX, curY), statCol, statsText.c_str());
             curY += statsSz.y + 2.0f;
         }
         if (!rec.heldText.empty()) {
             float heldX = std::floor(centerX - itemSz.x * 0.5f);
-            fg->AddText(ImGui::GetFont(), infoFontSize, ImVec2(heldX + 1, curY + 1), IM_COL32(0, 0, 0, 255), rec.heldText.c_str());
-            fg->AddText(ImGui::GetFont(), infoFontSize, ImVec2(heldX, curY), IM_COL32(255, 200, 80, 250), rec.heldText.c_str());
+            fg->AddText(ImGui::GetFont(), infoFontSize, ImVec2(heldX + 1, curY + 1), ToImU32(nametagTheme.moduleTextShadow), rec.heldText.c_str());
+            fg->AddText(ImGui::GetFont(), infoFontSize, ImVec2(heldX, curY), ToImU32(nametagTheme.accentSecondary), rec.heldText.c_str());
         }
         if (showHealth) {
             float barW = (pMax.x - pMin.x) * hpPct;
             ImU32 hpCol = IM_COL32((int)(255 * (1.0f - hpPct)), (int)(220 * hpPct + 35), 60, 255);
             fg->AddRectFilled(ImVec2(pMin.x, pMax.y),
-                              ImVec2(pMin.x + barW, pMax.y + std::floor(3.0f * nameScale)), hpCol);
+                              ImVec2(pMax.x, pMax.y + std::floor(3.0f * nameScale)), IM_COL32(20, 24, 32, 180), 1.5f);
+            fg->AddRectFilled(ImVec2(pMin.x, pMax.y),
+                              ImVec2(pMin.x + barW, pMax.y + std::floor(3.0f * nameScale)), hpCol, 1.5f);
         }
         if (count < kEntityJsonCap) {
             if (count > 0) ss << ",";
@@ -11339,6 +11640,7 @@ static void RenderFightStatus(int w, int h) {
         headY >= 0.0f && headY <= h;
     if (!onScreen) return;
 
+    OverlayTheme fightTheme = ResolveOverlayTheme(g_config.guiTheme);
     ImDrawList* fg = ImGui::GetForegroundDrawList();
     const float rawHeight = std::fabs(feetY - headY);
     const float barHeight = (std::max)(48.0f, (std::min)(110.0f, rawHeight));
@@ -11361,16 +11663,16 @@ static void RenderFightStatus(int w, int h) {
         IM_COL32(16, 18, 24, 210), 2.0f);
     if (advantage > 0.0f) {
         fg->AddRectFilled(ImVec2(barX0, midY - barHeight * 0.5f * advantage),
-            ImVec2(barX1, midY), IM_COL32(70, 220, 105, 245), 2.0f);
+            ImVec2(barX1, midY), ToImU32(fightTheme.accentPrimary), 2.0f);
     } else if (advantage < 0.0f) {
         fg->AddRectFilled(ImVec2(barX0, midY),
             ImVec2(barX1, midY + barHeight * 0.5f * -advantage),
             IM_COL32(235, 75, 75, 245), 2.0f);
     }
     fg->AddLine(ImVec2(barX0 - 1.0f, midY), ImVec2(barX1 + 1.0f, midY),
-        IM_COL32(235, 235, 240, 225), 1.0f);
+        ToImU32(fightTheme.moduleGlassBorder), 1.0f);
     fg->AddRect(ImVec2(barX0, topY), ImVec2(barX1, bottomY),
-        IM_COL32(225, 225, 235, 210), 2.0f, 0, 1.0f);
+        ToImU32(fightTheme.moduleGlassBorder), 2.0f, 0, 1.0f);
 
     const char* stateText = snapshot.result.state == fightstatus::FIGHT_WINNING
         ? "WINNING" : snapshot.result.state == fightstatus::FIGHT_LOSING
@@ -11384,22 +11686,23 @@ static void RenderFightStatus(int w, int h) {
             snapshot.result.confidence);
     }
     const ImU32 stateColor = snapshot.result.state == fightstatus::FIGHT_WINNING
-        ? IM_COL32(90, 235, 120, 250)
+        ? ToImU32(fightTheme.accentPrimary)
         : snapshot.result.state == fightstatus::FIGHT_LOSING
-        ? IM_COL32(245, 90, 90, 250) : IM_COL32(235, 220, 120, 250);
+        ? IM_COL32(245, 90, 90, 250) : ToImU32(fightTheme.accentSecondary);
     const float smallFont = (std::max)(11.0f, ImGui::GetFontSize() * 0.82f);
     auto drawText = [&](const char* value, float y, ImU32 color, float size) {
         ImVec2 textSize = ImGui::CalcTextSize(value);
         textSize.x *= size / ImGui::GetFontSize();
         const float x = drawRight ? barX1 + 5.0f : barX0 - 5.0f - textSize.x;
         fg->AddText(ImGui::GetFont(), size, ImVec2(x + 1.0f, y + 1.0f),
-            IM_COL32(0, 0, 0, 220), value);
+            ToImU32(fightTheme.moduleTextShadow), value);
         fg->AddText(ImGui::GetFont(), size, ImVec2(x, y), color, value);
     };
     drawText(stateText, midY - ImGui::GetFontSize() - 2.0f,
         stateColor, ImGui::GetFontSize());
-    drawText(prediction, midY + 3.0f, IM_COL32(235, 238, 245, 240), smallFont);
+    drawText(prediction, midY + 3.0f, ToImU32(fightTheme.moduleTagText), smallFont);
 }
+
 void RenderPixelPartyAssist(
     int w,
     int h,
@@ -11435,6 +11738,7 @@ void RenderPixelPartyAssist(
     if (!ppSnap.status.empty() && !ppSnap.targetFound)
         subRow = ppSnap.status;
 
+    OverlayTheme ppTheme = ResolveOverlayTheme(config.guiTheme);
     ImDrawList* fg = ImGui::GetForegroundDrawList();
     const float fontSz = ImGui::GetFontSize();
     const float smallSz = std::floor(fontSz * 0.82f);
@@ -11458,24 +11762,24 @@ void RenderPixelPartyAssist(
     float rx = std::floor(cx - contentW * 0.5f);
     float ry = std::floor(by - contentH);
 
-    fg->AddRectFilled(ImVec2(rx, ry), ImVec2(rx + contentW, ry + contentH), IM_COL32(10, 10, 18, 210), 6.0f);
-    fg->AddRect(ImVec2(rx, ry), ImVec2(rx + contentW, ry + contentH), IM_COL32(255, 180, 80, 120), 6.0f, 0, 1.0f);
+    fg->AddRectFilled(ImVec2(rx, ry), ImVec2(rx + contentW, ry + contentH), ToImU32(ppTheme.moduleBg), 6.0f);
+    fg->AddRect(ImVec2(rx, ry), ImVec2(rx + contentW, ry + contentH), ToImU32(ppTheme.moduleGlassBorder), 6.0f, 0, 1.0f);
 
     float curY = ry + padY;
     float ttx = std::floor(cx - titleSz.x * 0.5f);
-    fg->AddText(ImGui::GetFont(), smallSz, ImVec2(ttx + 1, curY + 1), IM_COL32(0, 0, 0, 160), titleRow.c_str());
-    fg->AddText(ImGui::GetFont(), smallSz, ImVec2(ttx, curY), IM_COL32(255, 200, 120, 245), titleRow.c_str());
+    fg->AddText(ImGui::GetFont(), smallSz, ImVec2(ttx + 1, curY + 1), ToImU32(ppTheme.moduleTextShadow), titleRow.c_str());
+    fg->AddText(ImGui::GetFont(), smallSz, ImVec2(ttx, curY), ToImU32(ppTheme.accentPrimary), titleRow.c_str());
     curY += smallSz + gapRow;
 
     float mtx = std::floor(cx - mainSz.x * 0.5f);
-    fg->AddText(ImVec2(mtx + 1, curY + 1), IM_COL32(0, 0, 0, 160), mainRow);
-    fg->AddText(ImVec2(mtx, curY), IM_COL32(255, 220, 140, 245), mainRow);
+    fg->AddText(ImVec2(mtx + 1, curY + 1), ToImU32(ppTheme.moduleTextShadow), mainRow);
+    fg->AddText(ImVec2(mtx, curY), ToImU32(ppTheme.moduleText), mainRow);
     curY += fontSz + gapRow;
 
     if (!subRow.empty()) {
         float stx = std::floor(cx - subSz.x * 0.5f);
-        fg->AddText(ImGui::GetFont(), smallSz, ImVec2(stx + 1, curY + 1), IM_COL32(0, 0, 0, 160), subRow.c_str());
-        fg->AddText(ImGui::GetFont(), smallSz, ImVec2(stx, curY), IM_COL32(180, 200, 220, 220), subRow.c_str());
+        fg->AddText(ImGui::GetFont(), smallSz, ImVec2(stx + 1, curY + 1), ToImU32(ppTheme.moduleTextShadow), subRow.c_str());
+        fg->AddText(ImGui::GetFont(), smallSz, ImVec2(stx, curY), ToImU32(ppTheme.moduleTagText), subRow.c_str());
     }
 }
 
@@ -11556,12 +11860,13 @@ void RenderClosestPlayerInfo(
 
     ImVec2 pMin(rx, ry);
     ImVec2 pMax(rx + contentW, ry + contentH);
-    fg->AddRectFilled(pMin, pMax, IM_COL32(10, 10, 18, 210), 6.0f);
-    fg->AddRect(pMin, pMax, WithAlpha(theme.accentPrimary, 120), 6.0f, 0, 1.0f);
+    fg->AddRectFilled(pMin, pMax, ToImU32(theme.moduleBg), 6.0f);
+    fg->AddRect(pMin, pMax, ToImU32(theme.moduleGlassBorder), 6.0f, 0, 1.0f);
+    fg->AddRectFilled(ImVec2(rx, ry), ImVec2(rx + 3.0f * cpLayout.scale, ry + contentH), ToImU32(theme.accentPrimary), 3.0f);
 
     float curY = ry + padY;
     float ntx = std::floor(cx - nameSz.x * 0.5f);
-    fg->AddText(ImVec2(ntx + 1, curY + 1), IM_COL32(0, 0, 0, 160), nameRow);
+    fg->AddText(ImVec2(ntx + 1, curY + 1), ToImU32(theme.moduleTextShadow), nameRow);
     fg->AddText(ImVec2(ntx, curY), ToImU32(theme.moduleText), nameRow);
     curY += fontSz + gapRow;
 
@@ -11570,14 +11875,14 @@ void RenderClosestPlayerInfo(
     float barX1 = rx + contentW - padX;
     float barFill = barX0 + (barX1 - barX0) * hpPct;
     ImU32 barCol = IM_COL32((int)(255 * (1.0f - hpPct)), (int)(220 * hpPct + 35), 60, 255);
-    fg->AddRectFilled(ImVec2(barX0, curY), ImVec2(barX1, curY + hpBarH), IM_COL32(40, 40, 40, 200), 2.0f);
+    fg->AddRectFilled(ImVec2(barX0, curY), ImVec2(barX1, curY + hpBarH), IM_COL32(20, 24, 32, 200), 2.0f);
     fg->AddRectFilled(ImVec2(barX0, curY), ImVec2(barFill, curY + hpBarH), barCol, 2.0f);
     curY += hpBarH + gapRow;
 
     if (!statsRow.empty()) {
         float stx = std::floor(cx - statsSz.x * 0.5f);
-        fg->AddText(ImGui::GetFont(), smallSz, ImVec2(stx + 1, curY + 1), IM_COL32(0, 0, 0, 160), statsRow.c_str());
-        ImU32 sCol = health <= 6.0f ? IM_COL32(255, 100, 100, 240) : IM_COL32(160, 200, 255, 230);
+        fg->AddText(ImGui::GetFont(), smallSz, ImVec2(stx + 1, curY + 1), ToImU32(theme.moduleTextShadow), statsRow.c_str());
+        ImU32 sCol = health <= 6.0f ? IM_COL32(255, 100, 100, 240) : ToImU32(theme.moduleTagText);
         fg->AddText(ImGui::GetFont(), smallSz, ImVec2(stx, curY), sCol, statsRow.c_str());
     }
 }
@@ -11751,8 +12056,12 @@ void RenderChestESP(int w, int h, const Config& config) {
 
         const double dist = std::sqrt(chest.distSq);
         float t = (std::min)((float)(dist / 40.0), 1.0f);
-        ImU32 boxColor = IM_COL32(255, 165 + (int)(90 * t), 0 + (int)(80 * t), (int)(220 - 40 * t));
-        fg->AddRectFilled(ImVec2(left, top), ImVec2(right, bottom), IM_COL32(0, 0, 0, 90));
+        OverlayTheme chestTheme = ResolveOverlayTheme(config.guiTheme);
+        ImU32 boxColor = chestTheme.isGradient
+            ? ToImU32(LerpColor4(chestTheme.accentPrimary, chestTheme.accentSecondary, t))
+            : ToImU32(chestTheme.accentPrimary);
+        ImU32 boxBg = WithAlpha(chestTheme.accentPrimary, 30);
+        fg->AddRectFilled(ImVec2(left, top), ImVec2(right, bottom), boxBg);
         fg->AddRect(ImVec2(left, top), ImVec2(right, bottom), boxColor, 0.0f, 0, 1.5f);
     }
 }
@@ -12272,6 +12581,7 @@ void RenderBlockESP(
     const double vX = cam.camX, vY = cam.camY, vZ = cam.camZ;
 
     ImDrawList* fg = ImGui::GetForegroundDrawList();
+    OverlayTheme blockTheme = ResolveOverlayTheme(config.guiTheme);
 
     struct ColorAgg18 { unsigned int color; int count; double nearest; float nsx, nsy; bool hasScreen; };
     static thread_local std::vector<ColorAgg18> aggs;
@@ -12309,7 +12619,7 @@ void RenderBlockESP(
                 left = (std::max)(left, 0.0f); top = (std::max)(top, 0.0f);
                 right = (std::min)(right, (float)w); bottom = (std::min)(bottom, (float)h);
                 if (right > left && bottom > top) {
-                    fg->AddRectFilled(ImVec2(left, top), ImVec2(right, bottom), IM_COL32(0, 0, 0, 70));
+                    fg->AddRectFilled(ImVec2(left, top), ImVec2(right, bottom), ToImU32(blockTheme.moduleBg));
                     fg->AddRect(ImVec2(left, top), ImVec2(right, bottom), b.color, 0.0f, 0, 1.5f);
                 }
             }
@@ -12356,24 +12666,23 @@ void RenderBlockESP(
         contentW *= beLayout.scale; contentH *= beLayout.scale;
         ImVec2 beTL = lc::HudElementPixelPos(beLayout, contentW, contentH, w, h);
         ImVec2 pMin(beTL.x, beTL.y), pMax(beTL.x + contentW, beTL.y + contentH);
-        fg->AddRectFilled(pMin, pMax, IM_COL32(12, 14, 20, 210), 6.0f);
-        fg->AddRect(pMin, pMax, IM_COL32(70, 80, 100, 220), 6.0f, 0, 1.0f);
+        fg->AddRectFilled(pMin, pMax, ToImU32(blockTheme.moduleBg), 6.0f);
+        fg->AddRect(pMin, pMax, ToImU32(blockTheme.moduleGlassBorder), 6.0f, 0, 1.0f);
 
         float curY = beTL.y + padY;
-        fg->AddText(ImVec2(beTL.x + padX + 1, curY + 1), IM_COL32(0, 0, 0, 160), title.c_str());
-        fg->AddText(ImVec2(beTL.x + padX, curY), IM_COL32(220, 230, 245, 255), title.c_str());
+        fg->AddText(ImVec2(beTL.x + padX + 1, curY + 1), ToImU32(blockTheme.moduleTextShadow), title.c_str());
+        fg->AddText(ImVec2(beTL.x + padX, curY), ToImU32(blockTheme.accentPrimary), title.c_str());
         curY += rowH;
         for (size_t i = 0; i < rows.size(); i++) {
             float swY = curY + (rowH - sw) * 0.5f;
             fg->AddRectFilled(ImVec2(beTL.x + padX, swY), ImVec2(beTL.x + padX + sw, swY + sw), rowColors[i], 2.0f);
-            fg->AddText(ImVec2(beTL.x + padX + sw + 6.0f + 1, curY + 1), IM_COL32(0, 0, 0, 160), rows[i].c_str());
-            fg->AddText(ImVec2(beTL.x + padX + sw + 6.0f, curY), IM_COL32(225, 228, 235, 255), rows[i].c_str());
+            fg->AddText(ImVec2(beTL.x + padX + sw + 6.0f + 1, curY + 1), ToImU32(blockTheme.moduleTextShadow), rows[i].c_str());
+            fg->AddText(ImVec2(beTL.x + padX + sw + 6.0f, curY), ToImU32(blockTheme.moduleText), rows[i].c_str());
             curY += rowH;
         }
     }
 }
 
-// Vape-style world-space BedPlates callout: distance + block icons.
 void RenderBedPlates(int w, int h, const Config& config) {
     if (!config.bedPlates) return;
 
@@ -12387,10 +12696,11 @@ void RenderBedPlates(int w, int h, const Config& config) {
     const Matrix4x4& proj = cam.proj;
     const double vX = cam.camX, vY = cam.camY, vZ = cam.camZ;
 
+    OverlayTheme bedTheme = ResolveOverlayTheme(config.guiTheme);
     ImDrawList* fg = ImGui::GetForegroundDrawList();
     const bool showDist = config.bedPlatesShowDistance;
-    const ImU32 bg = IM_COL32(0, 0, 0, 150);
-    const ImU32 border = IM_COL32(45, 45, 45, 255);
+    const ImU32 bg = ToImU32(bedTheme.moduleBg);
+    const ImU32 border = ToImU32(bedTheme.moduleGlassBorder);
 
     for (const auto& plate : plates) {
         float sx = 0, sy = 0;
@@ -12420,8 +12730,8 @@ void RenderBedPlates(int w, int h, const Config& config) {
 
         if (!distLine.empty()) {
             float dtx = std::floor(px + (panelW - distSz.x) * 0.5f);
-            fg->AddText(ImVec2(dtx + 1, py + 2 + 1), IM_COL32(0, 0, 0, 200), distLine.c_str());
-            fg->AddText(ImVec2(dtx, py + 2), IM_COL32(255, 255, 255, 255), distLine.c_str());
+            fg->AddText(ImVec2(dtx + 1, py + 2 + 1), ToImU32(bedTheme.moduleTextShadow), distLine.c_str());
+            fg->AddText(ImVec2(dtx, py + 2), ToImU32(bedTheme.accentPrimary), distLine.c_str());
         }
 
         if (iconCount == 0) {
@@ -13201,7 +13511,7 @@ void ParseConfig(const std::string& line) {
         g_config.showModuleList = showModuleListRaw.empty() ? true : (showModuleListRaw == "true");
 
         int style = reader.GetInt("moduleListStyle", -1);
-        if (style >= 0) g_config.moduleListStyle = (std::max)(0, (std::min)(4, style));
+        if (style >= 0) g_config.moduleListStyle = (std::max)(0, (std::min)(6, style));
 
         std::string showLogoRaw = reader.GetString("showLogo");
         g_config.showLogo = showLogoRaw.empty() ? true : (showLogoRaw == "true");

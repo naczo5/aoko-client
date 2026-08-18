@@ -27,6 +27,7 @@ public partial class MainWindow : Window
         public required Color SliderBackground { get; init; }
         public required Color SliderForeground { get; init; }
         public required Color Accent { get; init; }
+        public Color? AccentSecondary { get; init; }
         public required Color Text { get; init; }
         public required Color DimText { get; init; }
         public required Color TabSelected { get; init; }
@@ -45,7 +46,13 @@ public partial class MainWindow : Window
 
     // Built-in palette names that may not be overwritten or removed by the user.
     private static readonly HashSet<string> BuiltInPaletteNames =
-        new(new[] { "Slate", "Ink", "Graphite", "Steel" }, StringComparer.OrdinalIgnoreCase);
+        new(new[]
+        {
+            "Slate", "Ink", "Graphite", "Steel",
+            "Blend", "Lush", "Water", "Lime Water", "Digital Horizon",
+            "Coral", "Magic", "Blossom", "Pastel", "Sunkist", "Nord",
+            "Cherry", "Aubergine", "Snowy Sky"
+        }, StringComparer.OrdinalIgnoreCase);
 
     private readonly ObservableCollection<CustomPaletteCard> _customPaletteCards = new();
 
@@ -101,6 +108,7 @@ public partial class MainWindow : Window
             SliderBackground = (Color)ColorConverter.ConvertFromString("#181B22"),
             SliderForeground = (Color)ColorConverter.ConvertFromString("#2A2F38"),
             Accent = (Color)ColorConverter.ConvertFromString("#C7625A"),
+            AccentSecondary = (Color)ColorConverter.ConvertFromString("#C7625A"),
             Text = (Color)ColorConverter.ConvertFromString("#E8EAEE"),
             DimText = (Color)ColorConverter.ConvertFromString("#7A8290"),
             TabSelected = (Color)ColorConverter.ConvertFromString("#1F2229"),
@@ -113,6 +121,7 @@ public partial class MainWindow : Window
             SliderBackground = (Color)ColorConverter.ConvertFromString("#16181C"),
             SliderForeground = (Color)ColorConverter.ConvertFromString("#262830"),
             Accent = (Color)ColorConverter.ConvertFromString("#B0B6C0"),
+            AccentSecondary = (Color)ColorConverter.ConvertFromString("#B0B6C0"),
             Text = (Color)ColorConverter.ConvertFromString("#E8EAEE"),
             DimText = (Color)ColorConverter.ConvertFromString("#7A828F"),
             TabSelected = (Color)ColorConverter.ConvertFromString("#1D1F23"),
@@ -125,6 +134,7 @@ public partial class MainWindow : Window
             SliderBackground = (Color)ColorConverter.ConvertFromString("#19191C"),
             SliderForeground = (Color)ColorConverter.ConvertFromString("#2A2A2D"),
             Accent = (Color)ColorConverter.ConvertFromString("#B89B82"),
+            AccentSecondary = (Color)ColorConverter.ConvertFromString("#B89B82"),
             Text = (Color)ColorConverter.ConvertFromString("#E8E8EA"),
             DimText = (Color)ColorConverter.ConvertFromString("#82827E"),
             TabSelected = (Color)ColorConverter.ConvertFromString("#222226"),
@@ -137,10 +147,193 @@ public partial class MainWindow : Window
             SliderBackground = (Color)ColorConverter.ConvertFromString("#161A21"),
             SliderForeground = (Color)ColorConverter.ConvertFromString("#262C35"),
             Accent = (Color)ColorConverter.ConvertFromString("#6B8DAB"),
+            AccentSecondary = (Color)ColorConverter.ConvertFromString("#6B8DAB"),
             Text = (Color)ColorConverter.ConvertFromString("#E5E8EE"),
             DimText = (Color)ColorConverter.ConvertFromString("#7286A0"),
             TabSelected = (Color)ColorConverter.ConvertFromString("#1F232C"),
             TabHover = (Color)ColorConverter.ConvertFromString("#161A21")
+        },
+        ["Blend"] = new GuiPalette
+        {
+            Background = (Color)ColorConverter.ConvertFromString("#070B14"),
+            Panel = (Color)ColorConverter.ConvertFromString("#0D1424"),
+            SliderBackground = (Color)ColorConverter.ConvertFromString("#131E33"),
+            SliderForeground = (Color)ColorConverter.ConvertFromString("#1C2B49"),
+            Accent = (Color)ColorConverter.ConvertFromString("#4794FD"),
+            AccentSecondary = (Color)ColorConverter.ConvertFromString("#47FDA0"),
+            Text = (Color)ColorConverter.ConvertFromString("#EDF3F7"),
+            DimText = (Color)ColorConverter.ConvertFromString("#7B94B5"),
+            TabSelected = (Color)ColorConverter.ConvertFromString("#16233B"),
+            TabHover = (Color)ColorConverter.ConvertFromString("#10192A")
+        },
+        ["Lush"] = new GuiPalette
+        {
+            Background = (Color)ColorConverter.ConvertFromString("#080D09"),
+            Panel = (Color)ColorConverter.ConvertFromString("#0F1710"),
+            SliderBackground = (Color)ColorConverter.ConvertFromString("#17241A"),
+            SliderForeground = (Color)ColorConverter.ConvertFromString("#223325"),
+            Accent = (Color)ColorConverter.ConvertFromString("#A8E063"),
+            AccentSecondary = (Color)ColorConverter.ConvertFromString("#56AB2F"),
+            Text = (Color)ColorConverter.ConvertFromString("#EEF5EE"),
+            DimText = (Color)ColorConverter.ConvertFromString("#7A9C7D"),
+            TabSelected = (Color)ColorConverter.ConvertFromString("#1B291D"),
+            TabHover = (Color)ColorConverter.ConvertFromString("#131D15")
+        },
+        ["Water"] = new GuiPalette
+        {
+            Background = (Color)ColorConverter.ConvertFromString("#060B12"),
+            Panel = (Color)ColorConverter.ConvertFromString("#0B1624"),
+            SliderBackground = (Color)ColorConverter.ConvertFromString("#102136"),
+            SliderForeground = (Color)ColorConverter.ConvertFromString("#18304D"),
+            Accent = (Color)ColorConverter.ConvertFromString("#0CE8C7"),
+            AccentSecondary = (Color)ColorConverter.ConvertFromString("#0CA3E8"),
+            Text = (Color)ColorConverter.ConvertFromString("#EAF7F8"),
+            DimText = (Color)ColorConverter.ConvertFromString("#709CB8"),
+            TabSelected = (Color)ColorConverter.ConvertFromString("#12253D"),
+            TabHover = (Color)ColorConverter.ConvertFromString("#0E1D30")
+        },
+        ["Lime Water"] = new GuiPalette
+        {
+            Background = (Color)ColorConverter.ConvertFromString("#060E0E"),
+            Panel = (Color)ColorConverter.ConvertFromString("#0B1B1B"),
+            SliderBackground = (Color)ColorConverter.ConvertFromString("#112828"),
+            SliderForeground = (Color)ColorConverter.ConvertFromString("#1A3A3A"),
+            Accent = (Color)ColorConverter.ConvertFromString("#12FFF7"),
+            AccentSecondary = (Color)ColorConverter.ConvertFromString("#B3FFAB"),
+            Text = (Color)ColorConverter.ConvertFromString("#F0FAF9"),
+            DimText = (Color)ColorConverter.ConvertFromString("#70A5A0"),
+            TabSelected = (Color)ColorConverter.ConvertFromString("#142E2E"),
+            TabHover = (Color)ColorConverter.ConvertFromString("#0E2222")
+        },
+        ["Digital Horizon"] = new GuiPalette
+        {
+            Background = (Color)ColorConverter.ConvertFromString("#090A14"),
+            Panel = (Color)ColorConverter.ConvertFromString("#121324"),
+            SliderBackground = (Color)ColorConverter.ConvertFromString("#1B1D33"),
+            SliderForeground = (Color)ColorConverter.ConvertFromString("#262947"),
+            Accent = (Color)ColorConverter.ConvertFromString("#5FC3E4"),
+            AccentSecondary = (Color)ColorConverter.ConvertFromString("#E55D87"),
+            Text = (Color)ColorConverter.ConvertFromString("#F3EDF5"),
+            DimText = (Color)ColorConverter.ConvertFromString("#8E7FA8"),
+            TabSelected = (Color)ColorConverter.ConvertFromString("#1E213D"),
+            TabHover = (Color)ColorConverter.ConvertFromString("#15172C")
+        },
+        ["Coral"] = new GuiPalette
+        {
+            Background = (Color)ColorConverter.ConvertFromString("#0A0B0F"),
+            Panel = (Color)ColorConverter.ConvertFromString("#14151C"),
+            SliderBackground = (Color)ColorConverter.ConvertFromString("#1E202B"),
+            SliderForeground = (Color)ColorConverter.ConvertFromString("#2D3040"),
+            Accent = (Color)ColorConverter.ConvertFromString("#F4A896"),
+            AccentSecondary = (Color)ColorConverter.ConvertFromString("#348597"),
+            Text = (Color)ColorConverter.ConvertFromString("#F7EDEB"),
+            DimText = (Color)ColorConverter.ConvertFromString("#A08785"),
+            TabSelected = (Color)ColorConverter.ConvertFromString("#222430"),
+            TabHover = (Color)ColorConverter.ConvertFromString("#191B24")
+        },
+        ["Magic"] = new GuiPalette
+        {
+            Background = (Color)ColorConverter.ConvertFromString("#060714"),
+            Panel = (Color)ColorConverter.ConvertFromString("#0D0F24"),
+            SliderBackground = (Color)ColorConverter.ConvertFromString("#151838"),
+            SliderForeground = (Color)ColorConverter.ConvertFromString("#202554"),
+            Accent = (Color)ColorConverter.ConvertFromString("#7F9EFF"),
+            AccentSecondary = (Color)ColorConverter.ConvertFromString("#8E2DE2"),
+            Text = (Color)ColorConverter.ConvertFromString("#EDF1FF"),
+            DimText = (Color)ColorConverter.ConvertFromString("#808EC7"),
+            TabSelected = (Color)ColorConverter.ConvertFromString("#171B3D"),
+            TabHover = (Color)ColorConverter.ConvertFromString("#10132B")
+        },
+        ["Blossom"] = new GuiPalette
+        {
+            Background = (Color)ColorConverter.ConvertFromString("#0B0812"),
+            Panel = (Color)ColorConverter.ConvertFromString("#161121"),
+            SliderBackground = (Color)ColorConverter.ConvertFromString("#221B30"),
+            SliderForeground = (Color)ColorConverter.ConvertFromString("#302742"),
+            Accent = (Color)ColorConverter.ConvertFromString("#E2D0F9"),
+            AccentSecondary = (Color)ColorConverter.ConvertFromString("#317773"),
+            Text = (Color)ColorConverter.ConvertFromString("#F7F2FD"),
+            DimText = (Color)ColorConverter.ConvertFromString("#9E8CAE"),
+            TabSelected = (Color)ColorConverter.ConvertFromString("#251D36"),
+            TabHover = (Color)ColorConverter.ConvertFromString("#1A1426")
+        },
+        ["Pastel"] = new GuiPalette
+        {
+            Background = (Color)ColorConverter.ConvertFromString("#0D0A10"),
+            Panel = (Color)ColorConverter.ConvertFromString("#18131E"),
+            SliderBackground = (Color)ColorConverter.ConvertFromString("#241D2B"),
+            SliderForeground = (Color)ColorConverter.ConvertFromString("#332A3D"),
+            Accent = (Color)ColorConverter.ConvertFromString("#F39BB2"),
+            AccentSecondary = (Color)ColorConverter.ConvertFromString("#CFC4F3"),
+            Text = (Color)ColorConverter.ConvertFromString("#FBF3F6"),
+            DimText = (Color)ColorConverter.ConvertFromString("#A8909D"),
+            TabSelected = (Color)ColorConverter.ConvertFromString("#292131"),
+            TabHover = (Color)ColorConverter.ConvertFromString("#1C1722")
+        },
+        ["Sunkist"] = new GuiPalette
+        {
+            Background = (Color)ColorConverter.ConvertFromString("#0E0B07"),
+            Panel = (Color)ColorConverter.ConvertFromString("#1A150D"),
+            SliderBackground = (Color)ColorConverter.ConvertFromString("#262014"),
+            SliderForeground = (Color)ColorConverter.ConvertFromString("#382F1E"),
+            Accent = (Color)ColorConverter.ConvertFromString("#F2C94C"),
+            AccentSecondary = (Color)ColorConverter.ConvertFromString("#F2994A"),
+            Text = (Color)ColorConverter.ConvertFromString("#FFF9ED"),
+            DimText = (Color)ColorConverter.ConvertFromString("#A89675"),
+            TabSelected = (Color)ColorConverter.ConvertFromString("#2E2517"),
+            TabHover = (Color)ColorConverter.ConvertFromString("#1E1810")
+        },
+        ["Nord"] = new GuiPalette
+        {
+            Background = (Color)ColorConverter.ConvertFromString("#0B0E12"),
+            Panel = (Color)ColorConverter.ConvertFromString("#12181F"),
+            SliderBackground = (Color)ColorConverter.ConvertFromString("#1B242E"),
+            SliderForeground = (Color)ColorConverter.ConvertFromString("#263340"),
+            Accent = (Color)ColorConverter.ConvertFromString("#8FBCBB"),
+            AccentSecondary = (Color)ColorConverter.ConvertFromString("#A3BE8C"),
+            Text = (Color)ColorConverter.ConvertFromString("#ECEFF4"),
+            DimText = (Color)ColorConverter.ConvertFromString("#7B889B"),
+            TabSelected = (Color)ColorConverter.ConvertFromString("#1E2833"),
+            TabHover = (Color)ColorConverter.ConvertFromString("#151C24")
+        },
+        ["Cherry"] = new GuiPalette
+        {
+            Background = (Color)ColorConverter.ConvertFromString("#0F080C"),
+            Panel = (Color)ColorConverter.ConvertFromString("#1C1018"),
+            SliderBackground = (Color)ColorConverter.ConvertFromString("#2B1925"),
+            SliderForeground = (Color)ColorConverter.ConvertFromString("#3D2434"),
+            Accent = (Color)ColorConverter.ConvertFromString("#BB377D"),
+            AccentSecondary = (Color)ColorConverter.ConvertFromString("#FBD3E9"),
+            Text = (Color)ColorConverter.ConvertFromString("#FCF2F7"),
+            DimText = (Color)ColorConverter.ConvertFromString("#A87C93"),
+            TabSelected = (Color)ColorConverter.ConvertFromString("#301D2A"),
+            TabHover = (Color)ColorConverter.ConvertFromString("#21141D")
+        },
+        ["Aubergine"] = new GuiPalette
+        {
+            Background = (Color)ColorConverter.ConvertFromString("#0E060D"),
+            Panel = (Color)ColorConverter.ConvertFromString("#1A0C18"),
+            SliderBackground = (Color)ColorConverter.ConvertFromString("#281325"),
+            SliderForeground = (Color)ColorConverter.ConvertFromString("#3B1D37"),
+            Accent = (Color)ColorConverter.ConvertFromString("#AA076B"),
+            AccentSecondary = (Color)ColorConverter.ConvertFromString("#61045F"),
+            Text = (Color)ColorConverter.ConvertFromString("#FAEBF7"),
+            DimText = (Color)ColorConverter.ConvertFromString("#9E6E95"),
+            TabSelected = (Color)ColorConverter.ConvertFromString("#2F162B"),
+            TabHover = (Color)ColorConverter.ConvertFromString("#200F1E")
+        },
+        ["Snowy Sky"] = new GuiPalette
+        {
+            Background = (Color)ColorConverter.ConvertFromString("#060C10"),
+            Panel = (Color)ColorConverter.ConvertFromString("#0C1820"),
+            SliderBackground = (Color)ColorConverter.ConvertFromString("#132430"),
+            SliderForeground = (Color)ColorConverter.ConvertFromString("#1D3445"),
+            Accent = (Color)ColorConverter.ConvertFromString("#01ABB3"),
+            AccentSecondary = (Color)ColorConverter.ConvertFromString("#12E8E8"),
+            Text = (Color)ColorConverter.ConvertFromString("#EAF8FA"),
+            DimText = (Color)ColorConverter.ConvertFromString("#75A2AC"),
+            TabSelected = (Color)ColorConverter.ConvertFromString("#152836"),
+            TabHover = (Color)ColorConverter.ConvertFromString("#0E1B24")
         }
     };
 
@@ -938,6 +1131,8 @@ public partial class MainWindow : Window
             "outlined" => "Outlined",
             "glass" => "Glass",
             "bold" => "Bold",
+            "classic" => "Classic",
+            "modern" => "Modern",
             _ => "Default"
         };
     }

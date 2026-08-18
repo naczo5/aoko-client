@@ -534,7 +534,7 @@ static void ParseConfig(const std::string& line) {
     g_config.rightMinCPS   = lc::ClampFloat(reader.GetFloat("rightMinCPS", g_config.rightMinCPS), 1.0f, 25.0f);
     g_config.rightMaxCPS   = lc::ClampFloat(reader.GetFloat("rightMaxCPS", g_config.rightMaxCPS), 1.0f, 25.0f);
     if (g_config.rightMaxCPS < g_config.rightMinCPS) g_config.rightMaxCPS = g_config.rightMinCPS;
-    g_config.moduleListStyle = lc::ClampInt(reader.GetInt("moduleListStyle", 0), 0, 4);
+    g_config.moduleListStyle = lc::ClampInt(reader.GetInt("moduleListStyle", 0), 0, 6);
     std::string showLogoRaw = reader.GetString("showLogo");
     g_config.showLogo = showLogoRaw.empty() ? true : (showLogoRaw == "true");
     std::string guiThemeRaw = reader.GetString("guiTheme");
@@ -682,11 +682,13 @@ struct OverlayTheme {
     ImU32 accentSecondary;
     ImU32 accentTertiary;
     ImU32 logoColor;
+    ImU32 logoSecondary;
     ImU32 logoShadow;
     ImU32 moduleBg;
     ImU32 moduleBorder;
     ImU32 moduleText;
     ImU32 moduleTextShadow;
+    ImU32 moduleTagText;
     ImU32 moduleMinimalBg;
     ImU32 moduleOutlinedBg;
     ImU32 moduleGlassBorder;
@@ -694,7 +696,45 @@ struct OverlayTheme {
     ImU32 gtbBorder;
     ImU32 gtbTitle;
     ImU32 gtbRow;
+    bool isGradient;
+    bool isTriColor;
 };
+
+static ImU32 LerpImU32(ImU32 c1, ImU32 c2, float t) {
+    t = (std::max)(0.0f, (std::min)(1.0f, t));
+    int r1 = (c1 >> IM_COL32_R_SHIFT) & 0xFF;
+    int g1 = (c1 >> IM_COL32_G_SHIFT) & 0xFF;
+    int b1 = (c1 >> IM_COL32_B_SHIFT) & 0xFF;
+    int a1 = (c1 >> IM_COL32_A_SHIFT) & 0xFF;
+
+    int r2 = (c2 >> IM_COL32_R_SHIFT) & 0xFF;
+    int g2 = (c2 >> IM_COL32_G_SHIFT) & 0xFF;
+    int b2 = (c2 >> IM_COL32_B_SHIFT) & 0xFF;
+    int a2 = (c2 >> IM_COL32_A_SHIFT) & 0xFF;
+
+    int r = (int)(r1 + (r2 - r1) * t);
+    int g = (int)(g1 + (g2 - g1) * t);
+    int b = (int)(b1 + (b2 - b1) * t);
+    int a = (int)(a1 + (a2 - a1) * t);
+
+    return IM_COL32(r, g, b, a);
+}
+
+static ImU32 LerpImU32Tri(ImU32 c1, ImU32 c2, ImU32 c3, float t) {
+    t = (std::max)(0.0f, (std::min)(1.0f, t));
+    if (t <= 0.5f) {
+        return LerpImU32(c1, c2, t * 2.0f);
+    } else {
+        return LerpImU32(c2, c3, (t - 0.5f) * 2.0f);
+    }
+}
+
+static inline ImU32 WithAlpha(ImU32 col, int a) {
+    int r = (col >> IM_COL32_R_SHIFT) & 0xFF;
+    int g = (col >> IM_COL32_G_SHIFT) & 0xFF;
+    int b = (col >> IM_COL32_B_SHIFT) & 0xFF;
+    return IM_COL32(r, g, b, a);
+}
 
 static std::string ToLowerAscii(std::string value)
 {
@@ -706,93 +746,203 @@ static OverlayTheme ResolveOverlayTheme(const std::string& guiTheme)
 {
     std::string key = ToLowerAscii(guiTheme);
 
-    // Each theme uses a SINGLE accent (matches the external GUI's AccentBrush).
-    // moduleBg / moduleBorder mirror PanelColor / SliderBgColor from App.xaml so
-    // the in-game module list reads as the same surface the WPF window uses.
-    // GTB slots: gtbBorder = accent w/alpha; gtbTitle/Row = text/accent.
-
     if (key == "ink") {
-        // Ink: pure mono, white-grey accent
         return {
-            IM_COL32(176, 182, 192, 255), // accentPrimary
-            IM_COL32(176, 182, 192, 255), // accentSecondary (same)
-            IM_COL32(176, 182, 192, 255), // accentTertiary (same)
-            IM_COL32(232, 234, 238, 255), // logoColor (text)
-            IM_COL32(0, 0, 0, 200),       // logoShadow
-            IM_COL32(16, 17, 21, 200),    // moduleBg (#101115)
-            IM_COL32(22, 24, 28, 200),    // moduleBorder (#16181C)
-            IM_COL32(232, 234, 238, 240), // moduleText
-            IM_COL32(0, 0, 0, 200),       // moduleTextShadow
-            IM_COL32(22, 24, 28, 130),    // moduleMinimalBg
-            IM_COL32(16, 17, 21, 200),    // moduleOutlinedBg
-            IM_COL32(176, 182, 192, 90),  // moduleGlassBorder
-            IM_COL32(232, 234, 238, 245), // moduleBoldText
-            IM_COL32(176, 182, 192, 200), // gtbBorder
-            IM_COL32(232, 234, 238, 245), // gtbTitle
-            IM_COL32(176, 182, 192, 235)  // gtbRow (uses accent)
+            IM_COL32(176, 182, 192, 255), IM_COL32(176, 182, 192, 255), IM_COL32(176, 182, 192, 255),
+            IM_COL32(176, 182, 192, 255), IM_COL32(232, 234, 238, 255), IM_COL32(0, 0, 0, 200),
+            IM_COL32(16, 17, 21, 200), IM_COL32(22, 24, 28, 200), IM_COL32(232, 234, 238, 240),
+            IM_COL32(0, 0, 0, 200), IM_COL32(122, 130, 143, 220), IM_COL32(22, 24, 28, 130),
+            IM_COL32(16, 17, 21, 200), IM_COL32(176, 182, 192, 90), IM_COL32(232, 234, 238, 245),
+            IM_COL32(176, 182, 192, 200), IM_COL32(232, 234, 238, 245), IM_COL32(176, 182, 192, 235),
+            false, false
         };
     }
     if (key == "graphite") {
-        // Graphite: warm mono, beige accent
         return {
-            IM_COL32(184, 155, 130, 255),
-            IM_COL32(184, 155, 130, 255),
-            IM_COL32(184, 155, 130, 255),
-            IM_COL32(232, 232, 234, 255),
-            IM_COL32(0, 0, 0, 200),
-            IM_COL32(19, 19, 22, 200),    // #131316
-            IM_COL32(25, 25, 28, 200),    // #19191C
-            IM_COL32(232, 232, 234, 240),
-            IM_COL32(0, 0, 0, 200),
-            IM_COL32(25, 25, 28, 130),
-            IM_COL32(19, 19, 22, 200),
-            IM_COL32(184, 155, 130, 90),
-            IM_COL32(232, 232, 234, 245),
-            IM_COL32(184, 155, 130, 200),
-            IM_COL32(232, 232, 234, 245),
-            IM_COL32(184, 155, 130, 235)
+            IM_COL32(184, 155, 130, 255), IM_COL32(184, 155, 130, 255), IM_COL32(184, 155, 130, 255),
+            IM_COL32(184, 155, 130, 255), IM_COL32(232, 232, 234, 255), IM_COL32(0, 0, 0, 200),
+            IM_COL32(19, 19, 22, 200), IM_COL32(25, 25, 28, 200), IM_COL32(232, 232, 234, 240),
+            IM_COL32(0, 0, 0, 200), IM_COL32(130, 130, 126, 220), IM_COL32(25, 25, 28, 130),
+            IM_COL32(19, 19, 22, 200), IM_COL32(184, 155, 130, 90), IM_COL32(232, 232, 234, 245),
+            IM_COL32(184, 155, 130, 200), IM_COL32(232, 232, 234, 245), IM_COL32(184, 155, 130, 235),
+            false, false
         };
     }
     if (key == "steel") {
-        // Steel: cool blue-grey, steel-blue accent
         return {
-            IM_COL32(107, 141, 171, 255),
-            IM_COL32(107, 141, 171, 255),
-            IM_COL32(107, 141, 171, 255),
-            IM_COL32(229, 232, 238, 255),
-            IM_COL32(0, 0, 0, 200),
-            IM_COL32(15, 18, 24, 200),    // #0F1218
-            IM_COL32(22, 26, 33, 200),    // #161A21
-            IM_COL32(229, 232, 238, 240),
-            IM_COL32(0, 0, 0, 200),
-            IM_COL32(22, 26, 33, 130),
-            IM_COL32(15, 18, 24, 200),
-            IM_COL32(107, 141, 171, 90),
-            IM_COL32(229, 232, 238, 245),
-            IM_COL32(107, 141, 171, 200),
-            IM_COL32(229, 232, 238, 245),
-            IM_COL32(107, 141, 171, 235)
+            IM_COL32(107, 141, 171, 255), IM_COL32(107, 141, 171, 255), IM_COL32(107, 141, 171, 255),
+            IM_COL32(107, 141, 171, 255), IM_COL32(229, 232, 238, 255), IM_COL32(0, 0, 0, 200),
+            IM_COL32(15, 18, 24, 200), IM_COL32(22, 26, 33, 200), IM_COL32(229, 232, 238, 240),
+            IM_COL32(0, 0, 0, 200), IM_COL32(114, 134, 160, 220), IM_COL32(22, 26, 33, 130),
+            IM_COL32(15, 18, 24, 200), IM_COL32(107, 141, 171, 90), IM_COL32(229, 232, 238, 245),
+            IM_COL32(107, 141, 171, 200), IM_COL32(229, 232, 238, 245), IM_COL32(107, 141, 171, 235),
+            false, false
+        };
+    }
+    if (key == "blend") {
+        return {
+            IM_COL32(71, 148, 253, 255), IM_COL32(71, 253, 160, 255), IM_COL32(71, 253, 160, 255),
+            IM_COL32(71, 148, 253, 255), IM_COL32(71, 253, 160, 255), IM_COL32(0, 0, 0, 200),
+            IM_COL32(13, 20, 36, 200), IM_COL32(19, 30, 51, 200), IM_COL32(237, 243, 247, 240),
+            IM_COL32(0, 0, 0, 200), IM_COL32(123, 148, 181, 220), IM_COL32(19, 30, 51, 130),
+            IM_COL32(13, 20, 36, 200), IM_COL32(71, 148, 253, 90), IM_COL32(5, 11, 23, 245),
+            IM_COL32(71, 148, 253, 200), IM_COL32(237, 243, 247, 245), IM_COL32(71, 148, 253, 235),
+            true, false
+        };
+    }
+    if (key == "lush") {
+        return {
+            IM_COL32(168, 224, 99, 255), IM_COL32(86, 171, 47, 255), IM_COL32(86, 171, 47, 255),
+            IM_COL32(168, 224, 99, 255), IM_COL32(86, 171, 47, 255), IM_COL32(0, 0, 0, 200),
+            IM_COL32(15, 23, 16, 200), IM_COL32(23, 36, 26, 200), IM_COL32(238, 245, 238, 240),
+            IM_COL32(0, 0, 0, 200), IM_COL32(122, 156, 125, 220), IM_COL32(23, 36, 26, 130),
+            IM_COL32(15, 23, 16, 200), IM_COL32(168, 224, 99, 90), IM_COL32(6, 13, 8, 245),
+            IM_COL32(168, 224, 99, 200), IM_COL32(238, 245, 238, 245), IM_COL32(168, 224, 99, 235),
+            true, false
+        };
+    }
+    if (key == "water" || key == "ocean") {
+        return {
+            IM_COL32(12, 232, 199, 255), IM_COL32(12, 163, 232, 255), IM_COL32(12, 163, 232, 255),
+            IM_COL32(12, 232, 199, 255), IM_COL32(12, 163, 232, 255), IM_COL32(0, 0, 0, 200),
+            IM_COL32(11, 22, 36, 200), IM_COL32(16, 33, 54, 200), IM_COL32(234, 247, 248, 240),
+            IM_COL32(0, 0, 0, 200), IM_COL32(112, 156, 184, 220), IM_COL32(16, 33, 54, 130),
+            IM_COL32(11, 22, 36, 200), IM_COL32(12, 232, 199, 90), IM_COL32(5, 11, 18, 245),
+            IM_COL32(12, 232, 199, 200), IM_COL32(234, 247, 248, 245), IM_COL32(12, 232, 199, 235),
+            true, false
+        };
+    }
+    if (key == "lime water" || key == "limewater") {
+        return {
+            IM_COL32(18, 255, 247, 255), IM_COL32(179, 255, 171, 255), IM_COL32(179, 255, 171, 255),
+            IM_COL32(18, 255, 247, 255), IM_COL32(179, 255, 171, 255), IM_COL32(0, 0, 0, 200),
+            IM_COL32(11, 27, 27, 200), IM_COL32(17, 40, 40, 200), IM_COL32(240, 250, 249, 240),
+            IM_COL32(0, 0, 0, 200), IM_COL32(112, 165, 160, 220), IM_COL32(17, 40, 40, 130),
+            IM_COL32(11, 27, 27, 200), IM_COL32(18, 255, 247, 90), IM_COL32(4, 12, 11, 245),
+            IM_COL32(18, 255, 247, 200), IM_COL32(240, 250, 249, 245), IM_COL32(18, 255, 247, 235),
+            true, false
+        };
+    }
+    if (key == "digital horizon" || key == "digitalhorizon") {
+        return {
+            IM_COL32(95, 195, 228, 255), IM_COL32(229, 93, 135, 255), IM_COL32(229, 93, 135, 255),
+            IM_COL32(95, 195, 228, 255), IM_COL32(229, 93, 135, 255), IM_COL32(0, 0, 0, 200),
+            IM_COL32(18, 19, 36, 200), IM_COL32(27, 29, 51, 200), IM_COL32(243, 237, 245, 240),
+            IM_COL32(0, 0, 0, 200), IM_COL32(142, 127, 168, 220), IM_COL32(27, 29, 51, 130),
+            IM_COL32(18, 19, 36, 200), IM_COL32(95, 195, 228, 90), IM_COL32(9, 10, 20, 245),
+            IM_COL32(95, 195, 228, 200), IM_COL32(243, 237, 245, 245), IM_COL32(95, 195, 228, 235),
+            true, false
+        };
+    }
+    if (key == "coral") {
+        return {
+            IM_COL32(244, 168, 150, 255), IM_COL32(52, 133, 151, 255), IM_COL32(52, 133, 151, 255),
+            IM_COL32(244, 168, 150, 255), IM_COL32(52, 133, 151, 255), IM_COL32(0, 0, 0, 200),
+            IM_COL32(20, 21, 28, 200), IM_COL32(30, 32, 43, 200), IM_COL32(247, 237, 235, 240),
+            IM_COL32(0, 0, 0, 200), IM_COL32(160, 135, 133, 220), IM_COL32(30, 32, 43, 130),
+            IM_COL32(20, 21, 28, 200), IM_COL32(244, 168, 150, 90), IM_COL32(10, 11, 15, 245),
+            IM_COL32(244, 168, 150, 200), IM_COL32(247, 237, 235, 245), IM_COL32(244, 168, 150, 235),
+            true, false
+        };
+    }
+    if (key == "magic") {
+        return {
+            IM_COL32(127, 158, 255, 255), IM_COL32(142, 45, 226, 255), IM_COL32(74, 0, 224, 255),
+            IM_COL32(127, 158, 255, 255), IM_COL32(142, 45, 226, 255), IM_COL32(0, 0, 0, 200),
+            IM_COL32(13, 15, 36, 200), IM_COL32(21, 24, 56, 200), IM_COL32(237, 241, 255, 240),
+            IM_COL32(0, 0, 0, 200), IM_COL32(128, 142, 199, 220), IM_COL32(21, 24, 56, 130),
+            IM_COL32(13, 15, 36, 200), IM_COL32(127, 158, 255, 90), IM_COL32(6, 7, 20, 245),
+            IM_COL32(127, 158, 255, 200), IM_COL32(237, 241, 255, 245), IM_COL32(127, 158, 255, 235),
+            true, true
+        };
+    }
+    if (key == "blossom") {
+        return {
+            IM_COL32(226, 208, 249, 255), IM_COL32(49, 119, 115, 255), IM_COL32(49, 119, 115, 255),
+            IM_COL32(226, 208, 249, 255), IM_COL32(49, 119, 115, 255), IM_COL32(0, 0, 0, 200),
+            IM_COL32(22, 17, 33, 200), IM_COL32(34, 27, 48, 200), IM_COL32(247, 242, 253, 240),
+            IM_COL32(0, 0, 0, 200), IM_COL32(158, 140, 174, 220), IM_COL32(34, 27, 48, 130),
+            IM_COL32(22, 17, 33, 200), IM_COL32(226, 208, 249, 90), IM_COL32(11, 8, 18, 245),
+            IM_COL32(226, 208, 249, 200), IM_COL32(247, 242, 253, 245), IM_COL32(226, 208, 249, 235),
+            true, false
+        };
+    }
+    if (key == "pastel") {
+        return {
+            IM_COL32(243, 155, 178, 255), IM_COL32(207, 196, 243, 255), IM_COL32(207, 196, 243, 255),
+            IM_COL32(243, 155, 178, 255), IM_COL32(207, 196, 243, 255), IM_COL32(0, 0, 0, 200),
+            IM_COL32(24, 19, 30, 200), IM_COL32(36, 29, 43, 200), IM_COL32(251, 243, 246, 240),
+            IM_COL32(0, 0, 0, 200), IM_COL32(168, 144, 157, 220), IM_COL32(36, 29, 43, 130),
+            IM_COL32(24, 19, 30, 200), IM_COL32(243, 155, 178, 90), IM_COL32(13, 10, 16, 245),
+            IM_COL32(243, 155, 178, 200), IM_COL32(251, 243, 246, 245), IM_COL32(243, 155, 178, 235),
+            true, false
+        };
+    }
+    if (key == "sunkist") {
+        return {
+            IM_COL32(242, 201, 76, 255), IM_COL32(242, 153, 74, 255), IM_COL32(242, 153, 74, 255),
+            IM_COL32(242, 201, 76, 255), IM_COL32(242, 153, 74, 255), IM_COL32(0, 0, 0, 200),
+            IM_COL32(26, 21, 13, 200), IM_COL32(38, 32, 20, 200), IM_COL32(255, 249, 237, 240),
+            IM_COL32(0, 0, 0, 200), IM_COL32(168, 150, 117, 220), IM_COL32(38, 32, 20, 130),
+            IM_COL32(26, 21, 13, 200), IM_COL32(242, 201, 76, 90), IM_COL32(14, 11, 7, 245),
+            IM_COL32(242, 201, 76, 200), IM_COL32(255, 249, 237, 245), IM_COL32(242, 201, 76, 235),
+            true, false
+        };
+    }
+    if (key == "nord") {
+        return {
+            IM_COL32(143, 188, 187, 255), IM_COL32(163, 190, 140, 255), IM_COL32(236, 239, 244, 255),
+            IM_COL32(143, 188, 187, 255), IM_COL32(163, 190, 140, 255), IM_COL32(0, 0, 0, 200),
+            IM_COL32(18, 24, 31, 200), IM_COL32(27, 36, 46, 200), IM_COL32(236, 239, 244, 240),
+            IM_COL32(0, 0, 0, 200), IM_COL32(123, 136, 155, 220), IM_COL32(27, 36, 46, 130),
+            IM_COL32(18, 24, 31, 200), IM_COL32(143, 188, 187, 90), IM_COL32(11, 14, 18, 245),
+            IM_COL32(143, 188, 187, 200), IM_COL32(236, 239, 244, 245), IM_COL32(143, 188, 187, 235),
+            true, true
+        };
+    }
+    if (key == "cherry") {
+        return {
+            IM_COL32(187, 55, 125, 255), IM_COL32(251, 211, 233, 255), IM_COL32(251, 211, 233, 255),
+            IM_COL32(187, 55, 125, 255), IM_COL32(251, 211, 233, 255), IM_COL32(0, 0, 0, 200),
+            IM_COL32(28, 16, 24, 200), IM_COL32(43, 25, 37, 200), IM_COL32(252, 242, 247, 240),
+            IM_COL32(0, 0, 0, 200), IM_COL32(168, 124, 147, 220), IM_COL32(43, 25, 37, 130),
+            IM_COL32(28, 16, 24, 200), IM_COL32(187, 55, 125, 90), IM_COL32(15, 8, 12, 245),
+            IM_COL32(187, 55, 125, 200), IM_COL32(252, 242, 247, 245), IM_COL32(187, 55, 125, 235),
+            true, false
+        };
+    }
+    if (key == "aubergine") {
+        return {
+            IM_COL32(170, 7, 107, 255), IM_COL32(97, 4, 95, 255), IM_COL32(97, 4, 95, 255),
+            IM_COL32(170, 7, 107, 255), IM_COL32(97, 4, 95, 255), IM_COL32(0, 0, 0, 200),
+            IM_COL32(26, 12, 24, 200), IM_COL32(40, 19, 37, 200), IM_COL32(250, 235, 247, 240),
+            IM_COL32(0, 0, 0, 200), IM_COL32(158, 110, 149, 220), IM_COL32(40, 19, 37, 130),
+            IM_COL32(26, 12, 24, 200), IM_COL32(170, 7, 107, 90), IM_COL32(14, 6, 13, 245),
+            IM_COL32(170, 7, 107, 200), IM_COL32(250, 235, 247, 245), IM_COL32(170, 7, 107, 235),
+            true, false
+        };
+    }
+    if (key == "snowy sky" || key == "snowysky" || key == "frost") {
+        return {
+            IM_COL32(1, 171, 179, 255), IM_COL32(18, 232, 232, 255), IM_COL32(234, 234, 234, 255),
+            IM_COL32(1, 171, 179, 255), IM_COL32(18, 232, 232, 255), IM_COL32(0, 0, 0, 200),
+            IM_COL32(12, 24, 32, 200), IM_COL32(19, 36, 48, 200), IM_COL32(234, 248, 250, 240),
+            IM_COL32(0, 0, 0, 200), IM_COL32(117, 162, 172, 220), IM_COL32(19, 36, 48, 130),
+            IM_COL32(12, 24, 32, 200), IM_COL32(1, 171, 179, 90), IM_COL32(6, 12, 16, 245),
+            IM_COL32(1, 171, 179, 200), IM_COL32(234, 248, 250, 245), IM_COL32(1, 171, 179, 235),
+            true, true
         };
     }
 
     // Default = Slate (monochrome navy + coral accent)
     return {
-        IM_COL32(199, 98, 90, 255),   // coral #C7625A
-        IM_COL32(199, 98, 90, 255),
-        IM_COL32(199, 98, 90, 255),
-        IM_COL32(232, 234, 238, 255), // logoColor (text)
-        IM_COL32(0, 0, 0, 200),
-        IM_COL32(18, 20, 26, 200),    // moduleBg (#12141A panel)
-        IM_COL32(24, 27, 34, 200),    // moduleBorder (#181B22 slider-bg)
-        IM_COL32(232, 234, 238, 240),
-        IM_COL32(0, 0, 0, 200),
-        IM_COL32(24, 27, 34, 130),    // moduleMinimalBg
-        IM_COL32(18, 20, 26, 200),    // moduleOutlinedBg
-        IM_COL32(199, 98, 90, 90),    // moduleGlassBorder (coral w/alpha)
-        IM_COL32(232, 234, 238, 245), // moduleBoldText
-        IM_COL32(199, 98, 90, 200),   // gtbBorder (coral w/alpha)
-        IM_COL32(232, 234, 238, 245), // gtbTitle
-        IM_COL32(199, 98, 90, 235)    // gtbRow (coral)
+        IM_COL32(199, 98, 90, 255), IM_COL32(199, 98, 90, 255), IM_COL32(199, 98, 90, 255),
+        IM_COL32(199, 98, 90, 255), IM_COL32(232, 234, 238, 255), IM_COL32(0, 0, 0, 200),
+        IM_COL32(18, 20, 26, 200), IM_COL32(24, 27, 34, 200), IM_COL32(232, 234, 238, 240),
+        IM_COL32(0, 0, 0, 200), IM_COL32(122, 130, 144, 220), IM_COL32(24, 27, 34, 130),
+        IM_COL32(18, 20, 26, 200), IM_COL32(199, 98, 90, 90), IM_COL32(232, 234, 238, 245),
+        IM_COL32(199, 98, 90, 200), IM_COL32(232, 234, 238, 245), IM_COL32(199, 98, 90, 235),
+        false, false
     };
 }
 
@@ -2281,6 +2431,7 @@ static DWORD g_nextHitDelayFixResolveMs_121 = 0;
 static bool g_loggedHitDelayFixResolveFailure_121 = false;
 static jclass   g_hitResultClass_121 = nullptr;       // net.minecraft.class_239
 static jclass   g_blockHitResultClass_121 = nullptr;  // net.minecraft.class_3965
+static jclass   g_entityHitResultClass_121 = nullptr; // net.minecraft.class_3966
 
 static void EnsureHitResultCaches(JNIEnv* env) {
     TRACE261_PATH("enter");
@@ -2326,6 +2477,26 @@ static void EnsureHitResultCaches(JNIEnv* env) {
             }
         }
     }
+    if (!g_entityHitResultClass_121) {
+        TRACE261_PATH("resolve-entityhitresult-class");
+        const char* names[] = {
+            "net.minecraft.class_3966",
+            "net.minecraft.world.phys.EntityHitResult",
+            "net.minecraft.util.hit.EntityHitResult",
+            nullptr
+        };
+        for (int i = 0; names[i]; i++) {
+            jclass c = LoadClassWithLoader(env, g_gameClassLoader, names[i]);
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            TRACE261_BRANCH("entityHitResultClassCandidateHit", c != nullptr);
+            if (c) {
+                g_entityHitResultClass_121 = (jclass)env->NewGlobalRef(c);
+                TRACE261_VALUE("entityHitResultClassSource", names[i]);
+                env->DeleteLocalRef(c);
+                break;
+            }
+        }
+    }
 }
 
 static jmethodID ResolveHitResultGetType(JNIEnv* env) {
@@ -2336,7 +2507,7 @@ static jmethodID ResolveHitResultGetType(JNIEnv* env) {
 
     // Most stable route: HitResult.getType() : HitResult.Type (enum)
     // Try a few known signatures across mappings.
-    const char* names[] = { "getType", "method_17783", nullptr };
+    const char* names[] = { "getType", "method_17783", "m_6662_", nullptr };
     const char* sigs[] = {
         "()Lnet/minecraft/class_239$class_240;",     // Yarn inner class name
         "()Lnet/minecraft/class_239$Type;",          // alternate inner name
@@ -2358,6 +2529,14 @@ static jmethodID ResolveHitResultGetType(JNIEnv* env) {
 
 static int GetHitResultTypeOrdinal(JNIEnv* env, jobject hitObj) {
     if (!env || !hitObj) return -1;
+
+    EnsureHitResultCaches(env);
+    if (g_blockHitResultClass_121 && env->IsInstanceOf(hitObj, g_blockHitResultClass_121)) {
+        return 1; // BLOCK
+    }
+    if (g_entityHitResultClass_121 && env->IsInstanceOf(hitObj, g_entityHitResultClass_121)) {
+        return 2; // ENTITY
+    }
 
     jmethodID mGetType = ResolveHitResultGetType(env);
     if (!mGetType) return -1;
@@ -2402,8 +2581,13 @@ static void EnsureCrosshairTargetField(JNIEnv* env, jclass mcCls) {
     // Some runtimes keep a readable name; the descriptor is still the obf HitResult type.
     if (!fid) {
         TRACE261_PATH("crosshair-known-name-signature-scan");
-        const char* names[] = { "hitResult", "crosshairTarget", "field_1765", nullptr };
-        const char* sigs[]  = { "Lnet/minecraft/world/phys/HitResult;", "Lnet/minecraft/class_239;", nullptr };
+        const char* names[] = { "hitResult", "crosshairTarget", "field_1765", "f_91077_", nullptr };
+        const char* sigs[]  = {
+            "Lnet/minecraft/world/phys/HitResult;",
+            "Lnet/minecraft/class_239;",
+            "Lnet/minecraft/util/hit/HitResult;",
+            nullptr
+        };
         for (int ni = 0; names[ni] && !fid; ni++) {
             for (int si = 0; sigs[si] && !fid; si++) {
                 fid = tryField(names[ni], sigs[si]);
@@ -11217,6 +11401,7 @@ static void CleanupJniGlobals(JNIEnv* env) {
     DeleteGlobalRefSafe(env, g_gameProfileClass_121);
     DeleteGlobalRefSafe(env, g_hitResultClass_121);
     DeleteGlobalRefSafe(env, g_blockHitResultClass_121);
+    DeleteGlobalRefSafe(env, g_entityHitResultClass_121);
     for (int i = 0; i < 4; i++) DeleteGlobalRefSafe(env, g_chestBlockEntityClasses[i]);
     DeleteGlobalRefSafe(env, g_blockEntityClass_121);
     DeleteGlobalRefSafe(env, g_blockPosClass_121);
@@ -12959,10 +13144,11 @@ static void UpdateJniState() {
         // Use cached descriptors instead of repeated GetFieldID on every call.
         bool breakingBlock = false;
         {
-            static const char* s_gameModeNames[] = { "field_1761", "gameMode", nullptr };
+            static const char* s_gameModeNames[] = { "field_1761", "gameMode", "f_91072_", nullptr };
             static const char* s_gameModeSigs[]  = {
                 "Lnet/minecraft/class_636;",
                 "Lnet/minecraft/client/multiplayer/MultiPlayerGameMode;",
+                "Lnet/minecraft/client/network/ClientPlayerInteractionManager;",
                 nullptr
             };
             static jfieldID s_gameModeField = nullptr;
@@ -12981,10 +13167,9 @@ static void UpdateJniState() {
                     if (imCls) {
                         static jfieldID s_brkFld = nullptr;
                         if (!s_brkFld) {
-                            s_brkFld = env->GetFieldID(imCls, "field_3716", "Z");
-                            if (env->ExceptionCheck()) { env->ExceptionClear(); s_brkFld = nullptr; }
-                            if (!s_brkFld) {
-                                s_brkFld = env->GetFieldID(imCls, "isDestroying", "Z");
+                            const char* bNames[] = { "field_3716", "isDestroying", "destroyingBlock", "f_105202_", nullptr };
+                            for (int i = 0; bNames[i] && !s_brkFld; ++i) {
+                                s_brkFld = env->GetFieldID(imCls, bNames[i], "Z");
                                 if (env->ExceptionCheck()) { env->ExceptionClear(); s_brkFld = nullptr; }
                             }
                         }
@@ -13698,8 +13883,10 @@ static bool EnsureAutoRodModernMappings(JNIEnv* env, jobject player, bool needRo
         return false;
     }
 
+    EnsureAutoRodPlayerTickMapping121(env, player);
+
     if (!g_autoRodGetInventory121) {
-        const char* names[] = { "method_31548", "getInventory", nullptr };
+        const char* names[] = { "method_31548", "getInventory", "m_150109_", nullptr };
         const char* sigs[] = {
             "()Lnet/minecraft/class_1661;",
             "()Lnet/minecraft/world/entity/player/Inventory;",
@@ -13727,7 +13914,7 @@ static bool EnsureAutoRodModernMappings(JNIEnv* env, jobject player, bool needRo
                 }
             }
             if (needRodClass && !g_autoRodInventoryGetItem121) {
-                const char* names[] = { "method_5438", "getItem", "getStack", nullptr };
+                const char* names[] = { "method_5438", "getItem", "getStack", "m_8020_", "getStackInSlot", nullptr };
                 const char* sigs[] = {
                     "(I)Lnet/minecraft/class_1799;",
                     "(I)Lnet/minecraft/world/item/ItemStack;",
@@ -13746,7 +13933,7 @@ static bool EnsureAutoRodModernMappings(JNIEnv* env, jobject player, bool needRo
     }
 
     if (!g_autoRodGameModeField121) {
-        const char* names[] = { "field_1761", "gameMode", nullptr };
+        const char* names[] = { "field_1761", "gameMode", "f_91072_", nullptr };
         const char* sigs[] = {
             "Lnet/minecraft/class_636;",
             "Lnet/minecraft/client/multiplayer/MultiPlayerGameMode;",
@@ -13849,7 +14036,7 @@ static bool EnsureAutoRodModernMappings(JNIEnv* env, jobject player, bool needRo
         };
         jclass stackCls = LoadAutoRodClass121(env, stackClasses);
         if (stackCls) {
-            const char* names[] = { "method_7909", "getItem", nullptr };
+            const char* names[] = { "method_7909", "getItem", "m_41720_", nullptr };
             const char* sigs[] = {
                 "()Lnet/minecraft/class_1792;",
                 "()Lnet/minecraft/world/item/Item;",
@@ -14108,10 +14295,14 @@ static jfieldID  g_autoToolBlockHitDirField121 = nullptr;
 static jmethodID g_autoToolPlayerIsSneaking121 = nullptr;
 static jmethodID g_autoToolItemStackGetItem121 = nullptr;
 static jmethodID g_autoToolItemStackIsEmpty121 = nullptr;
-static jmethodID g_autoToolAttackBlock121 = nullptr;
-static jmethodID g_autoToolCancelBreaking121 = nullptr;
+static jfieldID  g_autoToolCarriedIndexField121 = nullptr;
 static jclass    g_autoToolSwordItemClass121 = nullptr;
 static jclass    g_autoToolAxeItemClass121 = nullptr;
+static jclass    g_autoToolPickaxeItemClass121 = nullptr;
+static jclass    g_autoToolShovelItemClass121 = nullptr;
+static jclass    g_autoToolHoeItemClass121 = nullptr;
+static jclass    g_autoToolShearsItemClass121 = nullptr;
+static jclass    g_autoToolMaceItemClass121 = nullptr;
 static jclass    g_autoToolChestBlockClass121 = nullptr;
 static jclass    g_autoToolEnderChestBlockClass121 = nullptr;
 static jclass    g_autoToolTrappedChestBlockClass121 = nullptr;
@@ -14127,11 +14318,15 @@ static void ResetAutoToolModernCaches(JNIEnv* env) {
     g_autoToolPlayerIsSneaking121 = nullptr;
     g_autoToolItemStackGetItem121 = nullptr;
     g_autoToolItemStackIsEmpty121 = nullptr;
-    g_autoToolAttackBlock121 = nullptr;
-    g_autoToolCancelBreaking121 = nullptr;
+    g_autoToolCarriedIndexField121 = nullptr;
     if (env) {
         if (g_autoToolSwordItemClass121) { env->DeleteGlobalRef(g_autoToolSwordItemClass121); g_autoToolSwordItemClass121 = nullptr; }
         if (g_autoToolAxeItemClass121) { env->DeleteGlobalRef(g_autoToolAxeItemClass121); g_autoToolAxeItemClass121 = nullptr; }
+        if (g_autoToolPickaxeItemClass121) { env->DeleteGlobalRef(g_autoToolPickaxeItemClass121); g_autoToolPickaxeItemClass121 = nullptr; }
+        if (g_autoToolShovelItemClass121) { env->DeleteGlobalRef(g_autoToolShovelItemClass121); g_autoToolShovelItemClass121 = nullptr; }
+        if (g_autoToolHoeItemClass121) { env->DeleteGlobalRef(g_autoToolHoeItemClass121); g_autoToolHoeItemClass121 = nullptr; }
+        if (g_autoToolShearsItemClass121) { env->DeleteGlobalRef(g_autoToolShearsItemClass121); g_autoToolShearsItemClass121 = nullptr; }
+        if (g_autoToolMaceItemClass121) { env->DeleteGlobalRef(g_autoToolMaceItemClass121); g_autoToolMaceItemClass121 = nullptr; }
         if (g_autoToolChestBlockClass121) { env->DeleteGlobalRef(g_autoToolChestBlockClass121); g_autoToolChestBlockClass121 = nullptr; }
         if (g_autoToolEnderChestBlockClass121) { env->DeleteGlobalRef(g_autoToolEnderChestBlockClass121); g_autoToolEnderChestBlockClass121 = nullptr; }
         if (g_autoToolTrappedChestBlockClass121) { env->DeleteGlobalRef(g_autoToolTrappedChestBlockClass121); g_autoToolTrappedChestBlockClass121 = nullptr; }
@@ -14141,13 +14336,105 @@ static void ResetAutoToolModernCaches(JNIEnv* env) {
 static bool EnsureAutoToolModernMappings(JNIEnv* env, jobject player) {
     if (!env || !player || !g_mcInstance) return false;
 
-    if (!EnsureAutoRodModernMappings(env, player, true)) return false;
+    jclass playerCls = env->GetObjectClass(player);
+    jclass mcCls = env->GetObjectClass(g_mcInstance);
+    if (!playerCls || !mcCls) {
+        if (playerCls) env->DeleteLocalRef(playerCls);
+        if (mcCls) env->DeleteLocalRef(mcCls);
+        return false;
+    }
+
+    if (!g_autoRodGetInventory121) {
+        const char* names[] = { "method_31548", "getInventory", "m_150109_", nullptr };
+        const char* sigs[] = {
+            "()Lnet/minecraft/class_1661;",
+            "()Lnet/minecraft/world/entity/player/Inventory;",
+            "()Lnet/minecraft/entity/player/PlayerInventory;",
+            nullptr
+        };
+        for (int ni = 0; names[ni] && !g_autoRodGetInventory121; ++ni) {
+            for (int si = 0; sigs[si] && !g_autoRodGetInventory121; ++si) {
+                g_autoRodGetInventory121 = env->GetMethodID(playerCls, names[ni], sigs[si]);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoRodGetInventory121 = nullptr; }
+            }
+        }
+    }
+
+    jobject inventory = nullptr;
+    if (g_autoRodGetInventory121) {
+        inventory = env->CallObjectMethod(player, g_autoRodGetInventory121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); inventory = nullptr; }
+    }
+    if (!inventory) {
+        static jfieldID s_playerInvFld = nullptr;
+        if (!s_playerInvFld) {
+            const char* fNames[] = { "field_7514", "inventory", "f_36095_", nullptr };
+            const char* fSigs[] = {
+                "Lnet/minecraft/class_1661;",
+                "Lnet/minecraft/world/entity/player/Inventory;",
+                "Lnet/minecraft/entity/player/PlayerInventory;",
+                nullptr
+            };
+            for (int ni = 0; fNames[ni] && !s_playerInvFld; ++ni) {
+                for (int si = 0; fSigs[si] && !s_playerInvFld; ++si) {
+                    s_playerInvFld = env->GetFieldID(playerCls, fNames[ni], fSigs[si]);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); s_playerInvFld = nullptr; }
+                }
+            }
+        }
+        if (s_playerInvFld) {
+            inventory = env->GetObjectField(player, s_playerInvFld);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); inventory = nullptr; }
+        }
+    }
+
+    if (inventory) {
+        jclass invCls = env->GetObjectClass(inventory);
+        if (invCls) {
+            if (!g_autoRodSelectedSlotField121) {
+                const char* names[] = { "field_7545", "selected", "selectedSlot", "f_35977_", nullptr };
+                for (int i = 0; names[i] && !g_autoRodSelectedSlotField121; ++i) {
+                    g_autoRodSelectedSlotField121 = env->GetFieldID(invCls, names[i], "I");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoRodSelectedSlotField121 = nullptr; }
+                }
+            }
+            if (!g_autoRodInventoryGetItem121) {
+                const char* names[] = { "method_5438", "getItem", "getStack", "m_8020_", "getStackInSlot", nullptr };
+                const char* sigs[] = {
+                    "(I)Lnet/minecraft/class_1799;",
+                    "(I)Lnet/minecraft/world/item/ItemStack;",
+                    "(I)Lnet/minecraft/item/ItemStack;",
+                    nullptr
+                };
+                for (int ni = 0; names[ni] && !g_autoRodInventoryGetItem121; ++ni) {
+                    for (int si = 0; sigs[si] && !g_autoRodInventoryGetItem121; ++si) {
+                        g_autoRodInventoryGetItem121 = env->GetMethodID(invCls, names[ni], sigs[si]);
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoRodInventoryGetItem121 = nullptr; }
+                    }
+                }
+            }
+            env->DeleteLocalRef(invCls);
+        }
+        env->DeleteLocalRef(inventory);
+    }
 
     if (!g_crosshairTargetField_121) {
-        jclass mcCls = env->GetObjectClass(g_mcInstance);
-        if (mcCls) {
-            EnsureCrosshairTargetField(env, mcCls);
-            env->DeleteLocalRef(mcCls);
+        EnsureCrosshairTargetField(env, mcCls);
+    }
+
+    if (!g_autoRodGameModeField121) {
+        const char* names[] = { "field_1761", "gameMode", "f_91072_", nullptr };
+        const char* sigs[] = {
+            "Lnet/minecraft/class_636;",
+            "Lnet/minecraft/client/multiplayer/MultiPlayerGameMode;",
+            "Lnet/minecraft/client/network/ClientPlayerInteractionManager;",
+            nullptr
+        };
+        for (int ni = 0; names[ni] && !g_autoRodGameModeField121; ++ni) {
+            for (int si = 0; sigs[si] && !g_autoRodGameModeField121; ++si) {
+                g_autoRodGameModeField121 = env->GetFieldID(mcCls, names[ni], sigs[si]);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoRodGameModeField121 = nullptr; }
+            }
         }
     }
 
@@ -14161,6 +14448,7 @@ static bool EnsureAutoToolModernMappings(JNIEnv* env, jobject player) {
                 const char* sigs[] = {
                     "(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/state/BlockState;",
                     "(Lnet/minecraft/class_2338;)Lnet/minecraft/class_2680;",
+                    "(Lnet/minecraft/util/math/BlockPos;)Lnet/minecraft/block/BlockState;",
                     nullptr
                 };
                 for (int ni = 0; names[ni] && !g_autoToolWorldGetBlockState121; ++ni) {
@@ -14221,18 +14509,20 @@ static bool EnsureAutoToolModernMappings(JNIEnv* env, jobject player) {
 
     if (!g_autoToolDestroySpeedMethod121 || !g_autoToolItemStackGetItem121 || !g_autoToolItemStackIsEmpty121) {
         const char* stackClasses[] = {
-            "net.minecraft.world.item.ItemStack",
             "net.minecraft.class_1799",
+            "net.minecraft.world.item.ItemStack",
             "net.minecraft.item.ItemStack",
             nullptr
         };
         jclass stackCls = LoadAutoRodClass121(env, stackClasses);
         if (stackCls) {
             if (!g_autoToolDestroySpeedMethod121) {
-                const char* names[] = { "getDestroySpeed", "method_7924", "getMiningSpeedMultiplier", "m_41671_", nullptr };
+                const char* names[] = { "getMiningSpeedMultiplier", "method_7924", "getDestroySpeed", "m_41671_", nullptr };
                 const char* sigs[] = {
-                    "(Lnet/minecraft/world/level/block/state/BlockState;)F",
                     "(Lnet/minecraft/class_2680;)F",
+                    "(Lnet/minecraft/world/level/block/state/BlockState;)F",
+                    "(Lnet/minecraft/block/BlockState;)F",
+                    "(Lnet/minecraft/block/state/IBlockState;)F",
                     nullptr
                 };
                 for (int ni = 0; names[ni] && !g_autoToolDestroySpeedMethod121; ++ni) {
@@ -14243,10 +14533,10 @@ static bool EnsureAutoToolModernMappings(JNIEnv* env, jobject player) {
                 }
             }
             if (!g_autoToolItemStackGetItem121) {
-                const char* names[] = { "getItem", "method_7909", "m_41720_", nullptr };
+                const char* names[] = { "method_7909", "getItem", "m_41720_", nullptr };
                 const char* sigs[] = {
-                    "()Lnet/minecraft/world/item/Item;",
                     "()Lnet/minecraft/class_1792;",
+                    "()Lnet/minecraft/world/item/Item;",
                     "()Lnet/minecraft/item/Item;",
                     nullptr
                 };
@@ -14270,8 +14560,8 @@ static bool EnsureAutoToolModernMappings(JNIEnv* env, jobject player) {
 
     if (!g_autoToolSwordItemClass121) {
         const char* swordClasses[] = {
-            "net.minecraft.world.item.SwordItem",
             "net.minecraft.class_1829",
+            "net.minecraft.world.item.SwordItem",
             "net.minecraft.item.SwordItem",
             nullptr
         };
@@ -14284,8 +14574,8 @@ static bool EnsureAutoToolModernMappings(JNIEnv* env, jobject player) {
 
     if (!g_autoToolAxeItemClass121) {
         const char* axeClasses[] = {
-            "net.minecraft.world.item.AxeItem",
             "net.minecraft.class_1743",
+            "net.minecraft.world.item.AxeItem",
             "net.minecraft.item.AxeItem",
             nullptr
         };
@@ -14296,51 +14586,104 @@ static bool EnsureAutoToolModernMappings(JNIEnv* env, jobject player) {
         }
     }
 
+    if (!g_autoToolPickaxeItemClass121) {
+        const char* pickaxeClasses[] = {
+            "net.minecraft.class_1810",
+            "net.minecraft.world.item.PickaxeItem",
+            "net.minecraft.item.PickaxeItem",
+            nullptr
+        };
+        jclass pickCls = LoadAutoRodClass121(env, pickaxeClasses);
+        if (pickCls) {
+            g_autoToolPickaxeItemClass121 = (jclass)env->NewGlobalRef(pickCls);
+            env->DeleteLocalRef(pickCls);
+        }
+    }
+
+    if (!g_autoToolShovelItemClass121) {
+        const char* shovelClasses[] = {
+            "net.minecraft.class_1821",
+            "net.minecraft.world.item.ShovelItem",
+            "net.minecraft.item.ShovelItem",
+            nullptr
+        };
+        jclass shvCls = LoadAutoRodClass121(env, shovelClasses);
+        if (shvCls) {
+            g_autoToolShovelItemClass121 = (jclass)env->NewGlobalRef(shvCls);
+            env->DeleteLocalRef(shvCls);
+        }
+    }
+
+    if (!g_autoToolHoeItemClass121) {
+        const char* hoeClasses[] = {
+            "net.minecraft.class_1794",
+            "net.minecraft.world.item.HoeItem",
+            "net.minecraft.item.HoeItem",
+            nullptr
+        };
+        jclass hoeCls = LoadAutoRodClass121(env, hoeClasses);
+        if (hoeCls) {
+            g_autoToolHoeItemClass121 = (jclass)env->NewGlobalRef(hoeCls);
+            env->DeleteLocalRef(hoeCls);
+        }
+    }
+
+    if (!g_autoToolShearsItemClass121) {
+        const char* shearsClasses[] = {
+            "net.minecraft.class_1820",
+            "net.minecraft.world.item.ShearsItem",
+            "net.minecraft.item.ShearsItem",
+            nullptr
+        };
+        jclass shsCls = LoadAutoRodClass121(env, shearsClasses);
+        if (shsCls) {
+            g_autoToolShearsItemClass121 = (jclass)env->NewGlobalRef(shsCls);
+            env->DeleteLocalRef(shsCls);
+        }
+    }
+
+    if (!g_autoToolMaceItemClass121) {
+        const char* maceClasses[] = {
+            "net.minecraft.class_9362",
+            "net.minecraft.world.item.MaceItem",
+            "net.minecraft.item.MaceItem",
+            nullptr
+        };
+        jclass maceCls = LoadAutoRodClass121(env, maceClasses);
+        if (maceCls) {
+            g_autoToolMaceItemClass121 = (jclass)env->NewGlobalRef(maceCls);
+            env->DeleteLocalRef(maceCls);
+        }
+    }
+
     if (!g_autoToolPlayerIsSneaking121) {
-        jclass playerCls = env->GetObjectClass(player);
-        if (playerCls) {
-            const char* names[] = { "isShiftKeyDown", "isSneaking", "isCrouching", "method_5715", "method_18276", "m_6144_", "m_6047_", nullptr };
-            for (int ni = 0; names[ni] && !g_autoToolPlayerIsSneaking121; ++ni) {
-                g_autoToolPlayerIsSneaking121 = env->GetMethodID(playerCls, names[ni], "()Z");
-                if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolPlayerIsSneaking121 = nullptr; }
-            }
-            env->DeleteLocalRef(playerCls);
+        const char* names[] = { "isShiftKeyDown", "isSneaking", "isCrouching", "method_5715", "method_18276", "m_6144_", "m_6047_", nullptr };
+        for (int ni = 0; names[ni] && !g_autoToolPlayerIsSneaking121; ++ni) {
+            g_autoToolPlayerIsSneaking121 = env->GetMethodID(playerCls, names[ni], "()Z");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolPlayerIsSneaking121 = nullptr; }
         }
     }
 
-    jobject gameMode = g_autoRodGameModeField121 ? env->GetObjectField(g_mcInstance, g_autoRodGameModeField121) : nullptr;
-    if (env->ExceptionCheck()) { env->ExceptionClear(); gameMode = nullptr; }
-    if (gameMode) {
-        jclass modeCls = env->GetObjectClass(gameMode);
-        if (modeCls) {
-            if (!g_autoToolCancelBreaking121) {
-                const char* names[] = { "cancelBlockBreaking", "stopDestroying", "method_2925", nullptr };
-                for (int i = 0; names[i] && !g_autoToolCancelBreaking121; ++i) {
-                    g_autoToolCancelBreaking121 = env->GetMethodID(modeCls, names[i], "()V");
-                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolCancelBreaking121 = nullptr; }
+    if (g_autoRodGameModeField121 && !g_autoToolCarriedIndexField121) {
+        jobject gm = env->GetObjectField(g_mcInstance, g_autoRodGameModeField121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); gm = nullptr; }
+        if (gm) {
+            jclass gmCls = env->GetObjectClass(gm);
+            if (gmCls) {
+                const char* names[] = { "field_3712", "carriedIndex", "f_105200_", nullptr };
+                for (int i = 0; names[i] && !g_autoToolCarriedIndexField121; ++i) {
+                    g_autoToolCarriedIndexField121 = env->GetFieldID(gmCls, names[i], "I");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolCarriedIndexField121 = nullptr; }
                 }
+                env->DeleteLocalRef(gmCls);
             }
-            if (!g_autoToolAttackBlock121) {
-                const char* names[] = { "attackBlock", "startDestroyBlock", "method_2910", nullptr };
-                const char* sigs[] = {
-                    "(Lnet/minecraft/core/BlockPos;Lnet/minecraft/core/Direction;)Z",
-                    "(Lnet/minecraft/class_2338;Lnet/minecraft/class_2350;)Z",
-                    "(Lnet/minecraft/util/math/BlockPos;Lnet/minecraft/util/math/Direction;)Z",
-                    nullptr
-                };
-                for (int ni = 0; names[ni] && !g_autoToolAttackBlock121; ++ni) {
-                    for (int si = 0; sigs[si] && !g_autoToolAttackBlock121; ++si) {
-                        g_autoToolAttackBlock121 = env->GetMethodID(modeCls, names[ni], sigs[si]);
-                        if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoToolAttackBlock121 = nullptr; }
-                    }
-                }
-            }
-            env->DeleteLocalRef(modeCls);
+            env->DeleteLocalRef(gm);
         }
-        env->DeleteLocalRef(gameMode);
     }
 
-    return g_autoRodGetInventory121 != nullptr && g_autoRodSelectedSlotField121 != nullptr && g_autoRodInventoryGetItem121 != nullptr;
+    env->DeleteLocalRef(playerCls);
+    env->DeleteLocalRef(mcCls);
+    return g_autoRodSelectedSlotField121 != nullptr && g_autoRodInventoryGetItem121 != nullptr;
 }
 
 static bool IsAutoToolChestBlockModern(JNIEnv* env, jobject block) {
@@ -14367,7 +14710,20 @@ static bool IsAutoToolChestBlockModern(JNIEnv* env, jobject block) {
 static void ApplyAutoToolSlotModern(JNIEnv* env, jobject inventory, int targetSlot) {
     if (!env || !inventory || !g_autoRodSelectedSlotField121) return;
     env->SetIntField(inventory, g_autoRodSelectedSlotField121, targetSlot);
-    if (env->ExceptionCheck()) env->ExceptionClear();
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return; }
+
+    // Invalidate MultiPlayerGameMode carriedIndex if present so client emits carried-item change in vanilla order
+    if (g_autoRodGameModeField121 && g_mcInstance) {
+        jobject gm = env->GetObjectField(g_mcInstance, g_autoRodGameModeField121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); gm = nullptr; }
+        if (gm) {
+            if (g_autoToolCarriedIndexField121) {
+                env->SetIntField(gm, g_autoToolCarriedIndexField121, -1);
+                if (env->ExceptionCheck()) env->ExceptionClear();
+            }
+            env->DeleteLocalRef(gm);
+        }
+    }
 }
 
 static bool IsAutoRodTransactionActive121() {
@@ -14414,8 +14770,34 @@ static void UpdateAutoToolModern(JNIEnv* env, const Config& cfg) {
         return;
     }
 
-    jobject inventory = env->CallObjectMethod(player, g_autoRodGetInventory121);
-    if (env->ExceptionCheck()) { env->ExceptionClear(); inventory = nullptr; }
+    jobject inventory = nullptr;
+    if (g_autoRodGetInventory121) {
+        inventory = env->CallObjectMethod(player, g_autoRodGetInventory121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); inventory = nullptr; }
+    }
+    if (!inventory) {
+        jclass pCls = env->GetObjectClass(player);
+        if (pCls) {
+            const char* fNames[] = { "field_7514", "inventory", "f_36095_", nullptr };
+            const char* fSigs[] = {
+                "Lnet/minecraft/class_1661;",
+                "Lnet/minecraft/world/entity/player/Inventory;",
+                "Lnet/minecraft/entity/player/PlayerInventory;",
+                nullptr
+            };
+            for (int ni = 0; fNames[ni] && !inventory; ++ni) {
+                for (int si = 0; fSigs[si] && !inventory; ++si) {
+                    jfieldID fid = env->GetFieldID(pCls, fNames[ni], fSigs[si]);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); fid = nullptr; }
+                    if (fid) {
+                        inventory = env->GetObjectField(player, fid);
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); inventory = nullptr; }
+                    }
+                }
+            }
+            env->DeleteLocalRef(pCls);
+        }
+    }
     if (!inventory) {
         env->PopLocalFrame(nullptr);
         return;
@@ -14458,6 +14840,7 @@ static void UpdateAutoToolModern(JNIEnv* env, const Config& cfg) {
                         const char* mSigs[] = {
                             "()Lnet/minecraft/core/BlockPos;",
                             "()Lnet/minecraft/class_2338;",
+                            "()Lnet/minecraft/util/math/BlockPos;",
                             nullptr
                         };
                         for (int ni = 0; mNames[ni] && !g_autoToolBlockHitGetPosMethod121; ++ni) {
@@ -14471,6 +14854,7 @@ static void UpdateAutoToolModern(JNIEnv* env, const Config& cfg) {
                             const char* fSigs[] = {
                                 "Lnet/minecraft/core/BlockPos;",
                                 "Lnet/minecraft/class_2338;",
+                                "Lnet/minecraft/util/math/BlockPos;",
                                 nullptr
                             };
                             for (int ni = 0; fNames[ni] && !g_autoToolBlockHitPosField121; ++ni) {
@@ -14496,7 +14880,7 @@ static void UpdateAutoToolModern(JNIEnv* env, const Config& cfg) {
                 jobject world = g_worldField_121 ? env->GetObjectField(g_mcInstance, g_worldField_121) : nullptr;
                 if (env->ExceptionCheck()) { env->ExceptionClear(); world = nullptr; }
 
-                if (blockPos && world && g_autoToolWorldGetBlockState121 && g_autoToolDestroySpeedMethod121) {
+                if (blockPos && world && g_autoToolWorldGetBlockState121) {
                     jobject blockState = env->CallObjectMethod(world, g_autoToolWorldGetBlockState121, blockPos);
                     if (env->ExceptionCheck()) { env->ExceptionClear(); blockState = nullptr; }
                     if (blockState) {
@@ -14523,8 +14907,11 @@ static void UpdateAutoToolModern(JNIEnv* env, const Config& cfg) {
                                 continue;
                             }
 
-                            float speed = env->CallFloatMethod(stack, g_autoToolDestroySpeedMethod121, blockState);
-                            if (env->ExceptionCheck()) { env->ExceptionClear(); speed = 1.0f; }
+                            float speed = 1.0f;
+                            if (g_autoToolDestroySpeedMethod121) {
+                                speed = env->CallFloatMethod(stack, g_autoToolDestroySpeedMethod121, blockState);
+                                if (env->ExceptionCheck()) { env->ExceptionClear(); speed = 1.0f; }
+                            }
 
                             if (g_autoToolItemStackGetItem121 && g_autoToolSwordItemClass121) {
                                 jobject item = env->CallObjectMethod(stack, g_autoToolItemStackGetItem121);
@@ -14571,6 +14958,8 @@ static void UpdateAutoToolModern(JNIEnv* env, const Config& cfg) {
                                 float score = 0.0f;
                                 if (g_autoToolSwordItemClass121 && env->IsInstanceOf(item, g_autoToolSwordItemClass121)) {
                                     score = 10.0f;
+                                } else if (g_autoToolMaceItemClass121 && env->IsInstanceOf(item, g_autoToolMaceItemClass121)) {
+                                    score = 9.5f;
                                 } else if (g_autoToolAxeItemClass121 && env->IsInstanceOf(item, g_autoToolAxeItemClass121)) {
                                     score = 8.0f;
                                 }
@@ -14609,6 +14998,8 @@ static void UpdateAutoToolModern(JNIEnv* env, const Config& cfg) {
                     float score = 0.0f;
                     if (g_autoToolSwordItemClass121 && env->IsInstanceOf(item, g_autoToolSwordItemClass121)) {
                         score = 10.0f;
+                    } else if (g_autoToolMaceItemClass121 && env->IsInstanceOf(item, g_autoToolMaceItemClass121)) {
+                        score = 9.5f;
                     } else if (g_autoToolAxeItemClass121 && env->IsInstanceOf(item, g_autoToolAxeItemClass121)) {
                         score = 8.0f;
                     }
@@ -15339,15 +15730,16 @@ static void RenderOverlayPanels(
                 ImVec2 pMin(rx, ry);
                 ImVec2 pMax(rx + contentW, ry + contentH);
 
-                // Background + outline
-                fg->AddRectFilled(pMin, pMax, IM_COL32(10, 10, 18, 210), 6.0f);
-                fg->AddRect(pMin, pMax, overlayTheme.accentPrimary, 6.0f, 0, 1.0f);
+                // Background + outline + left accent bar
+                fg->AddRectFilled(pMin, pMax, overlayTheme.moduleBg, 6.0f);
+                fg->AddRect(pMin, pMax, overlayTheme.moduleGlassBorder, 6.0f, 0, 1.0f);
+                fg->AddRectFilled(ImVec2(rx, ry), ImVec2(rx + 3.0f * cpLayout.scale, ry + contentH), overlayTheme.accentPrimary, 3.0f);
 
                 float curY = ry + padY;
 
                 // Name + distance row (white)
                 float ntx = std::floor(cx - nameSz.x * 0.5f);
-                fg->AddText(ImVec2(ntx + 1, curY + 1), IM_COL32(0,0,0,160), nameRow);
+                fg->AddText(ImVec2(ntx + 1, curY + 1), overlayTheme.moduleTextShadow, nameRow);
                 fg->AddText(ImVec2(ntx, curY), overlayTheme.moduleText, nameRow);
                 curY += fontSz + gapRow;
 
@@ -15357,15 +15749,15 @@ static void RenderOverlayPanels(
                 float barX1 = rx + contentW - padX;
                 float barFill = barX0 + (barX1 - barX0) * hpPct;
                 ImU32 barCol = IM_COL32((int)(255*(1.0f-hpPct)), (int)(220*hpPct+35), 60, 255);
-                fg->AddRectFilled(ImVec2(barX0, curY), ImVec2(barX1, curY + hpBarH), IM_COL32(40,40,40,200), 2.0f);
+                fg->AddRectFilled(ImVec2(barX0, curY), ImVec2(barX1, curY + hpBarH), IM_COL32(20, 24, 32, 200), 2.0f);
                 fg->AddRectFilled(ImVec2(barX0, curY), ImVec2(barFill, curY + hpBarH), barCol, 2.0f);
                 curY += hpBarH + gapRow;
 
                 // Stats row (smaller, soft colour)
                 if (!statsRow.empty()) {
                     float stx = std::floor(cx - statsSz.x * 0.5f);
-                    fg->AddText(ImGui::GetFont(), smallSz, ImVec2(stx + 1, curY + 1), IM_COL32(0,0,0,160), statsRow.c_str());
-                    ImU32 sCol = cp.hp <= 6.0f ? IM_COL32(255, 100, 100, 240) : IM_COL32(160, 200, 255, 230);
+                    fg->AddText(ImGui::GetFont(), smallSz, ImVec2(stx + 1, curY + 1), overlayTheme.moduleTextShadow, statsRow.c_str());
+                    ImU32 sCol = cp.hp <= 6.0f ? IM_COL32(255, 100, 100, 240) : overlayTheme.moduleTagText;
                     fg->AddText(ImGui::GetFont(), smallSz, ImVec2(stx, curY), sCol, statsRow.c_str());
                 }
             }
@@ -15408,7 +15800,7 @@ static void RenderOverlayPanels(
                         fg->AddLine(
                             ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f),
                             ImVec2(sx, sy),
-                            IM_COL32(255, 180, 80, 90), 1.5f);
+                            WithAlpha(overlayTheme.accentPrimary, 120), 1.5f);
                     }
                 }
 
@@ -15460,23 +15852,23 @@ static void RenderOverlayPanels(
                 ImVec2 pMax(rx + contentW, ry + contentH);
 
                 fg->AddRectFilled(pMin, pMax, overlayTheme.moduleBg, 6.0f);
-                fg->AddRect(pMin, pMax, overlayTheme.gtbBorder, 6.0f, 0, 1.0f);
+                fg->AddRect(pMin, pMax, overlayTheme.moduleGlassBorder, 6.0f, 0, 1.0f);
 
                 float curY = ry + padY;
                 float ttx = std::floor(cx - titleSz.x * 0.5f);
-                fg->AddText(ImGui::GetFont(), smallSz, ImVec2(ttx + 1, curY + 1), IM_COL32(0, 0, 0, 160), titleRow.c_str());
-                fg->AddText(ImGui::GetFont(), smallSz, ImVec2(ttx, curY), overlayTheme.gtbTitle, titleRow.c_str());
+                fg->AddText(ImGui::GetFont(), smallSz, ImVec2(ttx + 1, curY + 1), overlayTheme.moduleTextShadow, titleRow.c_str());
+                fg->AddText(ImGui::GetFont(), smallSz, ImVec2(ttx, curY), overlayTheme.accentPrimary, titleRow.c_str());
                 curY += smallSz + gapRow;
 
                 float mtx = std::floor(cx - mainSz.x * 0.5f);
-                fg->AddText(ImVec2(mtx + 1, curY + 1), IM_COL32(0, 0, 0, 160), mainRow);
-                fg->AddText(ImVec2(mtx, curY), IM_COL32(255, 220, 140, 245), mainRow);
+                fg->AddText(ImVec2(mtx + 1, curY + 1), overlayTheme.moduleTextShadow, mainRow);
+                fg->AddText(ImVec2(mtx, curY), overlayTheme.moduleText, mainRow);
                 curY += fontSz + gapRow;
 
                 if (!subRow.empty()) {
                     float stx = std::floor(cx - subSz.x * 0.5f);
-                    fg->AddText(ImGui::GetFont(), smallSz, ImVec2(stx + 1, curY + 1), IM_COL32(0, 0, 0, 160), subRow.c_str());
-                    fg->AddText(ImGui::GetFont(), smallSz, ImVec2(stx, curY), IM_COL32(180, 200, 220, 220), subRow.c_str());
+                    fg->AddText(ImGui::GetFont(), smallSz, ImVec2(stx + 1, curY + 1), overlayTheme.moduleTextShadow, subRow.c_str());
+                    fg->AddText(ImGui::GetFont(), smallSz, ImVec2(stx, curY), overlayTheme.moduleTagText, subRow.c_str());
                 }
             }
 
@@ -15715,25 +16107,25 @@ static void RenderOverlayPanels(
                                     float pad = std::floor(4.0f * nameScale * nametagLayoutScale);
                                     float rx = std::floor(sx - maxW / 2.0f);
                                     float ry = std::floor(sy - totalH - pad * 2.0f);
-
                                     ImVec2 pMin = ImVec2(rx - pad, ry);
                                     ImVec2 pMax = ImVec2(rx + maxW + pad, ry + totalH + pad * 2.0f + 2.0f);
 
-                                    fg->AddRectFilled(pMin, pMax, IM_COL32(0, 0, 0, 160), 3.0f);
+                                    fg->AddRectFilled(pMin, pMax, overlayTheme.moduleBg, 4.0f);
+                                    fg->AddRect(pMin, pMax, overlayTheme.moduleGlassBorder, 4.0f, 0, 1.0f);
 
                                     float curY = ry + pad;
                                     
                                     // Name
                                     float nx = std::floor(sx - nameSz.x / 2.0f);
-                                    fg->AddText(ImGui::GetFont(), nameFontSize, ImVec2(nx + 1, curY + 1), IM_COL32(0, 0, 0, 255), nameText.c_str());
+                                    fg->AddText(ImGui::GetFont(), nameFontSize, ImVec2(nx + 1, curY + 1), overlayTheme.moduleTextShadow, nameText.c_str());
                                     fg->AddText(ImGui::GetFont(), nameFontSize, ImVec2(nx, curY), overlayTheme.moduleText, nameText.c_str());
                                     curY += nameSz.y + 2.0f;
                                     
                                     // Stats
                                     if (!statsText.empty()) {
                                         float stx = std::floor(sx - statsSz.x / 2.0f);
-                                        ImU32 statCol = it.hp <= 8.0 ? IM_COL32(255, 100, 100, 250) : IM_COL32(200, 220, 255, 250);
-                                        fg->AddText(ImGui::GetFont(), infoFontSize, ImVec2(stx + 1, curY + 1), IM_COL32(0, 0, 0, 255), statsText.c_str());
+                                        ImU32 statCol = it.hp <= 8.0 ? IM_COL32(255, 100, 100, 245) : overlayTheme.moduleTagText;
+                                        fg->AddText(ImGui::GetFont(), infoFontSize, ImVec2(stx + 1, curY + 1), overlayTheme.moduleTextShadow, statsText.c_str());
                                         fg->AddText(ImGui::GetFont(), infoFontSize, ImVec2(stx, curY), statCol, statsText.c_str());
                                         curY += statsSz.y + 2.0f;
                                     }
@@ -15741,8 +16133,8 @@ static void RenderOverlayPanels(
                                     // Item
                                     if (cfg.nametagShowHeldItem && !it.heldItem.empty()) {
                                         float itx = std::floor(sx - itemSz.x / 2.0f);
-                                        fg->AddText(ImGui::GetFont(), infoFontSize, ImVec2(itx + 1, curY + 1), IM_COL32(0, 0, 0, 255), it.heldItem.c_str());
-                                        fg->AddText(ImGui::GetFont(), infoFontSize, ImVec2(itx, curY), IM_COL32(255, 200, 80, 250), it.heldItem.c_str());
+                                        fg->AddText(ImGui::GetFont(), infoFontSize, ImVec2(itx + 1, curY + 1), overlayTheme.moduleTextShadow, it.heldItem.c_str());
+                                        fg->AddText(ImGui::GetFont(), infoFontSize, ImVec2(itx, curY), overlayTheme.accentSecondary, it.heldItem.c_str());
                                     }
 
                                     if (cfg.nametagHealth) {
@@ -15750,7 +16142,9 @@ static void RenderOverlayPanels(
                                         float barW  = (pMax.x - pMin.x) * hpPct;
                                         ImU32 col   = IM_COL32((int)(255 * (1.0f - hpPct)), (int)(220 * hpPct + 35), 60, 255);
                                         fg->AddRectFilled(ImVec2(pMin.x, pMax.y),
-                                                          ImVec2(pMin.x + barW, pMax.y + std::floor(3.0f * nameScale)), col);
+                                                          ImVec2(pMax.x, pMax.y + std::floor(3.0f * nameScale)), IM_COL32(20, 24, 32, 180), 1.5f);
+                                        fg->AddRectFilled(ImVec2(pMin.x, pMax.y),
+                                                          ImVec2(pMin.x + barW, pMax.y + std::floor(3.0f * nameScale)), col, 1.5f);
                                     }
                                     drawnTags++;
                                 }
@@ -15799,9 +16193,6 @@ static void RenderOverlayPanels(
                     const int winW = (int)io.DisplaySize.x;
                     const int winH = (int)io.DisplaySize.y;
                     const float fov = cpCamState.fov;
-                    const ImU32 espColor    = IM_COL32(255, 165, 0, 220);  // orange
-                    const ImU32 espColorFar = IM_COL32(255, 255, 80, 180); // yellow-ish far
-                    const ImU32 espBg       = IM_COL32(0, 0, 0, 90);
                     const float lineThick   = 1.5f;
 
                     const int chestEspRange = lc::ClampChestEspRange(cfg.chestEspRange);
@@ -15885,12 +16276,12 @@ static void RenderOverlayPanels(
                         }
                         if (!chestSmoothFound) s_chestSmooth.push_back({ chestKey, minSX, minSY, maxSX, maxSY, overlayNowMs });
 
-                        // Color fades with distance: close = orange, far = yellow
+                        // Color fades with distance
                         float t = std::min((float)(chestDist / 40.0f), 1.0f);
-                        ImU32 c0r = (ImU32)(255);
-                        ImU32 c0g = (ImU32)(165 + (int)(90 * t));
-                        ImU32 c0b = (ImU32)(0 + (int)(80 * t));
-                        ImU32 boxColor = IM_COL32(c0r, c0g, c0b, (int)(220 - 40 * t));
+                        ImU32 boxColor = overlayTheme.isGradient
+                            ? LerpImU32(overlayTheme.accentPrimary, overlayTheme.accentSecondary, t)
+                            : overlayTheme.accentPrimary;
+                        ImU32 espBg = WithAlpha(overlayTheme.accentPrimary, 30);
 
                         // Background
                         fg->AddRectFilled(ImVec2(minSX, minSY), ImVec2(maxSX, maxSY), espBg);
@@ -15918,19 +16309,21 @@ static void RenderOverlayPanels(
                         projectAura({snap.x, snap.y + 1.8, snap.z}, &hx, &hy)) {
                         float height = std::abs(fy - hy);
                         float halfWidth = height * (0.6f / 1.8f) * 0.5f;
-                        ImU32 color = IM_COL32(86, 255, 86, 230);
+                        ImU32 color = overlayTheme.accentPrimary;
+                        fg->AddRectFilled(ImVec2(hx - halfWidth, hy), ImVec2(hx + halfWidth, fy), WithAlpha(overlayTheme.accentPrimary, 30));
                         fg->AddRect(ImVec2(hx - halfWidth, hy), ImVec2(hx + halfWidth, fy), color, 0, 0, 2.0f);
                         if (cfg.killAuraDebugHealth) {
                             char hp[48]; snprintf(hp, sizeof(hp), "Health %.1f", snap.health);
-                            fg->AddText(ImVec2(hx + halfWidth + 4, hy), IM_COL32(255,255,255,230), hp);
+                            fg->AddText(ImVec2(hx + halfWidth + 5, hy + 1), overlayTheme.moduleTextShadow, hp);
+                            fg->AddText(ImVec2(hx + halfWidth + 4, hy), overlayTheme.moduleText, hp);
                         }
                     }
                 }
                 if (snap.hasAimPoint && cfg.killAuraVisualizeAim) {
                     float ax = 0, ay = 0;
                     if (projectAura({snap.aimX, snap.aimY, snap.aimZ}, &ax, &ay)) {
-                        fg->AddCircleFilled(ImVec2(ax, ay), 4.0f, IM_COL32(0,255,255,210), 16);
-                        fg->AddCircle(ImVec2(ax, ay), 7.0f, IM_COL32(0,255,0,220), 16, 1.5f);
+                        fg->AddCircleFilled(ImVec2(ax, ay), 4.0f, overlayTheme.accentPrimary, 16);
+                        fg->AddCircle(ImVec2(ax, ay), 7.0f, overlayTheme.accentSecondary, 16, 1.5f);
                     }
                 }
             }
@@ -15952,7 +16345,7 @@ static void RenderOverlayPanels(
                 const bool       espMatsOk = sharedMatsOk;
                 const Matrix4x4  espProj  = sharedProj;
                 const Matrix4x4  espView  = sharedView;
-                const ImU32 espBg = IM_COL32(0, 0, 0, 70);
+                const ImU32 espBg = IM_COL32(0, 0, 0, 75);
 
                 // Track nearest projected center per color for tracers + HUD.
                 struct ColorAgg { unsigned int color; int count; double nearest; float nsx, nsy; bool hasScreen; };
@@ -16058,17 +16451,17 @@ static void RenderOverlayPanels(
                     ImVec2 pMin(beTL.x, beTL.y);
                     ImVec2 pMax(beTL.x + contentW, beTL.y + contentH);
                     fg->AddRectFilled(pMin, pMax, overlayTheme.moduleBg, 6.0f);
-                    fg->AddRect(pMin, pMax, overlayTheme.gtbBorder, 6.0f, 0, 1.0f);
+                    fg->AddRect(pMin, pMax, overlayTheme.moduleGlassBorder, 6.0f, 0, 1.0f);
 
                     float curY = beTL.y + padY;
-                    fg->AddText(ImVec2(beTL.x + padX + 1, curY + 1), IM_COL32(0, 0, 0, 160), title.c_str());
-                    fg->AddText(ImVec2(beTL.x + padX, curY), overlayTheme.gtbTitle, title.c_str());
+                    fg->AddText(ImVec2(beTL.x + padX + 1, curY + 1), overlayTheme.moduleTextShadow, title.c_str());
+                    fg->AddText(ImVec2(beTL.x + padX, curY), overlayTheme.accentPrimary, title.c_str());
                     curY += rowH;
 
                     for (size_t i = 0; i < rows.size(); i++) {
                         float swY = curY + (rowH - sw) * 0.5f;
                         fg->AddRectFilled(ImVec2(beTL.x + padX, swY), ImVec2(beTL.x + padX + sw, swY + sw), rowColors[i], 2.0f);
-                        fg->AddText(ImVec2(beTL.x + padX + sw + 6.0f + 1, curY + 1), IM_COL32(0, 0, 0, 160), rows[i].c_str());
+                        fg->AddText(ImVec2(beTL.x + padX + sw + 6.0f + 1, curY + 1), overlayTheme.moduleTextShadow, rows[i].c_str());
                         fg->AddText(ImVec2(beTL.x + padX + sw + 6.0f, curY), overlayTheme.moduleText, rows[i].c_str());
                         curY += rowH;
                     }
@@ -16084,8 +16477,8 @@ static void RenderOverlayPanels(
                 const int winWBed = (int)io.DisplaySize.x;
                 const int winHBed = (int)io.DisplaySize.y;
                 const bool showDist = cfg.bedPlatesShowDistance;
-                const ImU32 bedBg = IM_COL32(0, 0, 0, 150);
-                const ImU32 bedBorder = IM_COL32(45, 45, 45, 255);
+                const ImU32 bedBg = overlayTheme.moduleBg;
+                const ImU32 bedBorder = overlayTheme.moduleGlassBorder;
 
                 for (const auto& plate : plates) {
                     LegoVec3 target = { (double)plate.x + 0.5, (double)plate.y + 1.2, (double)plate.z + 0.5 };
@@ -16116,8 +16509,8 @@ static void RenderOverlayPanels(
 
                     if (!distLine.empty()) {
                         float dtx = std::floor(bx0 + (panelW - distSz.x) * 0.5f);
-                        fg->AddText(ImVec2(dtx + 1, by0 + 2 + 1), IM_COL32(0, 0, 0, 200), distLine.c_str());
-                        fg->AddText(ImVec2(dtx, by0 + 2), IM_COL32(255, 255, 255, 255), distLine.c_str());
+                        fg->AddText(ImVec2(dtx + 1, by0 + 2 + 1), overlayTheme.moduleTextShadow, distLine.c_str());
+                        fg->AddText(ImVec2(dtx, by0 + 2), overlayTheme.accentPrimary, distLine.c_str());
                     }
 
                     if (iconCount == 0) {
@@ -16222,51 +16615,59 @@ static void RenderOverlayPanels(
 
             bool renderModuleList = TRACE261_IF("renderModuleList", cfg.showModuleList);
             if (renderModuleList) {
-                // Module list (top-right) - original-like (right aligned colored bars)
-                struct ModLine { const char* text; ImU32 accent; float width; };
+                // Module list (top-right)
+                struct ModLine {
+                    std::string name;
+                    std::string tag;
+                    ImU32 accent;
+                    float width;
+                    float nameWidth;
+                    float tagWidth;
+                };
                 ModLine mods[32];
                 int modCount = 0;
 
-                auto pushMod = [&](const char* text, ImU32 accent) {
-                    if (!text || !*text) return;
+                auto pushMod = [&](const std::string& name, const std::string& tag = "") {
+                    if (name.empty()) return;
                     if (modCount >= (int)(sizeof(mods) / sizeof(mods[0]))) return;
-                    ModLine m{ text, accent, ImGui::CalcTextSize(text).x };
-                    mods[modCount++] = m;
+                    float nw = ImGui::CalcTextSize(name.c_str()).x;
+                    float tw = tag.empty() ? 0.0f : ImGui::CalcTextSize((" " + tag).c_str()).x;
+                    mods[modCount++] = { name, tag, 0, nw + tw, nw, tw };
                 };
 
-                char acBuf[64];
                 if (cfg.armed) {
                     int lo = (int)cfg.minCPS;
                     int hi = (int)cfg.maxCPS;
                     if (hi < lo) std::swap(hi, lo);
-                    snprintf(acBuf, sizeof(acBuf), "Autoclicker %d-%d", lo, hi);
-                    pushMod(acBuf, overlayTheme.accentPrimary);
+                    char tagBuf[32];
+                    snprintf(tagBuf, sizeof(tagBuf), "%d-%d", lo, hi);
+                    pushMod("Autoclicker", tagBuf);
                 }
-                if (cfg.clickInChests) pushMod("Click in Chests", overlayTheme.accentTertiary);
-                if (cfg.closestPlayer) pushMod("Closest Player", overlayTheme.accentSecondary);
-                if (cfg.fightStatus) pushMod("Fight Status", overlayTheme.accentPrimary);
-                if (cfg.rightClick)    pushMod("Rightclick", overlayTheme.accentTertiary);
-                if (cfg.aimAssist)     pushMod("Aim Assist", overlayTheme.accentPrimary);
-                if (cfg.triggerbot)    pushMod("Triggerbot", overlayTheme.accentSecondary);
-                if (cfg.killAura)      pushMod("Kill Aura", overlayTheme.accentSecondary);
-                if (cfg.speedBridge)   pushMod("SpeedBridge", overlayTheme.accentPrimary);
-                if (cfg.autoRodEnabled) pushMod("Auto Rod", overlayTheme.accentPrimary);
-                if (cfg.autoToolEnabled) pushMod("AutoTool", overlayTheme.accentPrimary);
-                if (cfg.chestStealer)  pushMod("Chest Stealer", overlayTheme.accentTertiary);
-                if (cfg.chestEsp)      pushMod("Chest ESP", overlayTheme.accentSecondary);
-                if (cfg.blockEsp)      pushMod("Block ESP", overlayTheme.accentSecondary);
-                if (cfg.nametags)      pushMod("Nametags", overlayTheme.accentPrimary);
-                if (cfg.nickHiderEnabled) pushMod("Nick Hider", overlayTheme.accentTertiary);
-                if (cfg.gtbHelper)     pushMod("GTB Helper", overlayTheme.accentTertiary);
-                if (cfg.pixelPartyAssist) pushMod("Pixel Party", overlayTheme.accentSecondary);
-                if (cfg.jitter)        pushMod("Jitter", overlayTheme.accentSecondary);
-                if (cfg.breakBlocks)   pushMod("Break Blocks", overlayTheme.accentTertiary);
-                if (cfg.reachEnabled)  pushMod("Reach", overlayTheme.accentPrimary);
-                if (cfg.velocityEnabled) pushMod("Velocity", overlayTheme.accentTertiary);
-                if (cfg.autoTotemEnabled) pushMod("AutoTotem", overlayTheme.accentPrimary);
-                if (cfg.antiDebuffEnabled) pushMod("AntiDebuff", overlayTheme.accentPrimary);
-                if (cfg.bedPlates)     pushMod("BedPlates", overlayTheme.accentSecondary);
-                if (cfg.hitDelayFixEnabled) pushMod("Hit Delay Fix", overlayTheme.accentPrimary);
+                if (cfg.clickInChests) pushMod("Click in Chests");
+                if (cfg.closestPlayer) pushMod("Closest Player");
+                if (cfg.fightStatus) pushMod("Fight Status");
+                if (cfg.rightClick)    pushMod("Rightclick");
+                if (cfg.aimAssist)     pushMod("Aim Assist");
+                if (cfg.triggerbot)    pushMod("Triggerbot");
+                if (cfg.killAura)      pushMod("Kill Aura");
+                if (cfg.speedBridge)   pushMod("SpeedBridge");
+                if (cfg.autoRodEnabled) pushMod("Auto Rod");
+                if (cfg.autoToolEnabled) pushMod("AutoTool");
+                if (cfg.chestStealer)  pushMod("Chest Stealer");
+                if (cfg.chestEsp)      pushMod("Chest ESP");
+                if (cfg.blockEsp)      pushMod("Block ESP");
+                if (cfg.nametags)      pushMod("Nametags");
+                if (cfg.nickHiderEnabled) pushMod("Nick Hider");
+                if (cfg.gtbHelper)     pushMod("GTB Helper");
+                if (cfg.pixelPartyAssist) pushMod("Pixel Party");
+                if (cfg.jitter)        pushMod("Jitter");
+                if (cfg.breakBlocks)   pushMod("Break Blocks");
+                if (cfg.reachEnabled)  pushMod("Reach");
+                if (cfg.velocityEnabled) pushMod("Velocity");
+                if (cfg.autoTotemEnabled) pushMod("AutoTotem");
+                if (cfg.antiDebuffEnabled) pushMod("AntiDebuff");
+                if (cfg.bedPlates)     pushMod("BedPlates");
+                if (cfg.hitDelayFixEnabled) pushMod("Hit Delay Fix");
 
                 // Sort by width descending (staggered original look)
                 for (int a = 0; a < modCount; a++) {
@@ -16277,13 +16678,20 @@ static void RenderOverlayPanels(
                     }
                 }
 
+                for (int i = 0; i < modCount; i++) {
+                    if (overlayTheme.isGradient) {
+                        float t = modCount > 1 ? (float)i / (float)(modCount - 1) : 0.0f;
+                        mods[i].accent = overlayTheme.isTriColor
+                            ? LerpImU32Tri(overlayTheme.accentPrimary, overlayTheme.accentSecondary, overlayTheme.accentTertiary, t)
+                            : LerpImU32(overlayTheme.accentPrimary, overlayTheme.accentSecondary, t);
+                    } else {
+                        mods[i].accent = overlayTheme.accentPrimary;
+                    }
+                }
+
                 // Honor the HUD layout anchor + scale so the module list can be
-                // moved/resized in the HUD editor like the other screen-anchored
-                // panels (closestplayer, pixelparty). Previously this was hard-coded
-                // to the top-right corner and ignored g_hudLayout entirely, so the
-                // editor box moved but the list never did.
-                lc::HudElementLayout mlLayout;
-                mlLayout = hudLayout.Resolve(lc::ELEM_MODULELIST);
+                // moved/resized in the HUD editor like the other screen-anchored panels.
+                lc::HudElementLayout mlLayout = hudLayout.Resolve(lc::ELEM_MODULELIST);
                 const float scale = mlLayout.scale;
 
                 const float padX      = 8.0f * scale;
@@ -16292,85 +16700,236 @@ static void RenderOverlayPanels(
                 const float gapY      = 2.0f * scale;
                 const float fontH     = ImGui::GetFontSize() * scale;
                 const float shadowOff = (std::max)(1.0f, scale);
-                const float rightInset = 6.0f * scale; // keeps a small gap when flush-right
-                const int style = (std::max)(0, (std::min)(4, cfg.moduleListStyle));
+                const float rightInset = 6.0f * scale;
+                const int style = (std::max)(0, (std::min)(6, cfg.moduleListStyle));
                 ImFont* font = ImGui::GetFont();
 
-                const char* logoText = "aoko client";
-                const float boxH = padY + fontH + padY;
+                const char* logoPart1 = "aoko";
+                const char* logoPart2 = " client";
+                const float logoP1W = ImGui::CalcTextSize(logoPart1).x * scale;
+                const float logoP2W = ImGui::CalcTextSize(logoPart2).x * scale;
+                const float logoW   = (logoP1W + logoP2W);
+                const float logoH   = fontH;
+                const float logoGap = 8.0f * scale;
+                const float boxH    = padY + fontH + padY;
 
                 // ── Measuring pass: compute the block bounds (right-aligned bars). ──
                 float blockW = 0.0f;
                 float blockH = 0.0f;
-                float logoW = 0.0f, logoH = 0.0f, logoGap = 0.0f;
                 if (cfg.showLogo) {
-                    logoW   = ImGui::CalcTextSize(logoText).x * scale;
-                    logoH   = fontH;
-                    logoGap = 8.0f * scale;
-                    blockW  = (std::max)(blockW, logoW + rightInset);
-                    blockH += logoH + logoGap;
+                    float logoBoxW = (style == 0 || style == 2 || style == 3 || style == 4)
+                        ? (barW + padX + logoW + padX)
+                        : (logoW + 6.0f * scale);
+                    blockW  = (std::max)(blockW, logoBoxW + rightInset);
+                    blockH += (style == 0 || style == 2 || style == 3 || style == 4) ? (boxH + logoGap) : (logoH + logoGap);
                 }
                 for (int i = 0; i < modCount; i++) {
                     float textW = mods[i].width * scale;
-                    float boxW  = barW + padX + textW + padX;
+                    float boxW  = (style == 1 || style == 5 || style == 6)
+                        ? (textW + 6.0f * scale)
+                        : (barW + padX + textW + padX);
                     blockW = (std::max)(blockW, boxW + rightInset);
                     blockH += boxH;
                     if (i + 1 < modCount) blockH += gapY;
                 }
 
                 if (modCount > 0 || cfg.showLogo) {
-                    // Anchor the whole block via the shared HUD layout helper.
                     ImVec2 tl = lc::HudElementPixelPos(mlLayout, blockW, blockH, winW, winH);
                     const float x1 = tl.x + blockW - rightInset; // right edge of bars
                     float y = tl.y;
 
                     if (cfg.showLogo) {
-                        float logoX = x1 - logoW;
-                        fg->AddText(font, fontH, ImVec2(logoX + shadowOff, y + shadowOff), overlayTheme.logoShadow, logoText);
-                        fg->AddText(font, fontH, ImVec2(logoX, y), overlayTheme.logoColor, logoText);
-                        y += logoH + logoGap;
+                        if (style == 0) {
+                            // Default: Dark panel card with left accent bar
+                            float boxW = barW + padX + logoW + padX;
+                            float x0 = x1 - boxW;
+                            fg->AddRectFilled(ImVec2(x0, y), ImVec2(x1, y + boxH), overlayTheme.moduleBg);
+                            fg->AddRectFilled(ImVec2(x0, y), ImVec2(x0 + barW, y + boxH), overlayTheme.accentPrimary);
+                            fg->AddRect(ImVec2(x0, y), ImVec2(x1, y + boxH), overlayTheme.moduleBorder);
+                            ImVec2 tx(x0 + barW + padX, y + padY);
+                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.logoShadow, logoPart1);
+                            fg->AddText(font, fontH, tx, overlayTheme.accentPrimary, logoPart1);
+                            fg->AddText(font, fontH, ImVec2(tx.x + logoP1W + shadowOff, tx.y + shadowOff), overlayTheme.logoShadow, logoPart2);
+                            fg->AddText(font, fontH, ImVec2(tx.x + logoP1W, tx.y), overlayTheme.moduleText, logoPart2);
+                            y += boxH + logoGap;
+                        } else if (style == 1) {
+                            // Minimal: Right-aligned text with right bar
+                            float logoX = x1 - logoW - 4.0f * scale;
+                            fg->AddRectFilled(ImVec2(x1 - 2.5f * scale, y), ImVec2(x1, y + logoH), overlayTheme.accentPrimary);
+                            fg->AddText(font, fontH, ImVec2(logoX + shadowOff, y + shadowOff), overlayTheme.logoShadow, logoPart1);
+                            fg->AddText(font, fontH, ImVec2(logoX, y), overlayTheme.accentPrimary, logoPart1);
+                            fg->AddText(font, fontH, ImVec2(logoX + logoP1W + shadowOff, y + shadowOff), overlayTheme.logoShadow, logoPart2);
+                            fg->AddText(font, fontH, ImVec2(logoX + logoP1W, y), overlayTheme.moduleText, logoPart2);
+                            y += logoH + logoGap;
+                        } else if (style == 2) {
+                            // Outlined: Outlined badge
+                            float boxW = barW + padX + logoW + padX;
+                            float x0 = x1 - boxW;
+                            fg->AddRectFilled(ImVec2(x0, y), ImVec2(x1, y + boxH), overlayTheme.moduleOutlinedBg);
+                            fg->AddRect(ImVec2(x0, y), ImVec2(x1, y + boxH), overlayTheme.accentPrimary, 4.0f, 0, 1.5f);
+                            ImVec2 tx(x0 + barW + padX, y + padY);
+                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.logoShadow, logoPart1);
+                            fg->AddText(font, fontH, tx, overlayTheme.accentPrimary, logoPart1);
+                            fg->AddText(font, fontH, ImVec2(tx.x + logoP1W + shadowOff, tx.y + shadowOff), overlayTheme.logoShadow, logoPart2);
+                            fg->AddText(font, fontH, ImVec2(tx.x + logoP1W, tx.y), overlayTheme.moduleText, logoPart2);
+                            y += boxH + logoGap;
+                        } else if (style == 3) {
+                            // Glass: Glass badge
+                            float boxW = barW + padX + logoW + padX;
+                            float x0 = x1 - boxW;
+                            fg->AddRectFilled(ImVec2(x0, y), ImVec2(x1, y + boxH), overlayTheme.moduleMinimalBg, 4.0f);
+                            fg->AddRect(ImVec2(x0, y), ImVec2(x1, y + boxH), overlayTheme.moduleGlassBorder, 4.0f, 0, 1.0f);
+                            fg->AddRectFilled(ImVec2(x0 + 1.0f * scale, y + 1.0f * scale), ImVec2(x0 + barW + 1.0f * scale, y + boxH - 1.0f * scale), overlayTheme.accentPrimary);
+                            ImVec2 tx(x0 + barW + padX, y + padY);
+                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.logoShadow, logoPart1);
+                            fg->AddText(font, fontH, tx, overlayTheme.accentPrimary, logoPart1);
+                            fg->AddText(font, fontH, ImVec2(tx.x + logoP1W + shadowOff, tx.y + shadowOff), overlayTheme.logoShadow, logoPart2);
+                            fg->AddText(font, fontH, ImVec2(tx.x + logoP1W, tx.y), overlayTheme.moduleText, logoPart2);
+                            y += boxH + logoGap;
+                        } else if (style == 4) {
+                            // Bold: Solid accent pill
+                            float boxW = barW + padX + logoW + padX;
+                            float x0 = x1 - boxW;
+                            fg->AddRectFilled(ImVec2(x0, y), ImVec2(x1, y + boxH), overlayTheme.accentPrimary, 4.0f);
+                            fg->AddRect(ImVec2(x0, y), ImVec2(x1, y + boxH), overlayTheme.moduleBorder, 4.0f, 0, 1.0f);
+                            ImVec2 tx(x0 + barW + padX, y + padY);
+                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.logoShadow, logoPart1);
+                            fg->AddText(font, fontH, tx, overlayTheme.moduleBoldText, logoPart1);
+                            fg->AddText(font, fontH, ImVec2(tx.x + logoP1W + shadowOff, tx.y + shadowOff), overlayTheme.logoShadow, logoPart2);
+                            fg->AddText(font, fontH, ImVec2(tx.x + logoP1W, tx.y), overlayTheme.moduleBoldText, logoPart2);
+                            y += boxH + logoGap;
+                        } else if (style == 5) {
+                            // Classic: Minecraft-style right-aligned header with right bar
+                            const char* cP1 = "Aoko";
+                            const char* cP2 = " Client";
+                            float cP1W = ImGui::CalcTextSize(cP1).x * scale;
+                            float logoX = x1 - logoW - 4.0f * scale;
+                            fg->AddRectFilled(ImVec2(x1 - 2.5f * scale, y), ImVec2(x1, y + logoH), overlayTheme.accentPrimary);
+                            fg->AddText(font, fontH, ImVec2(logoX + shadowOff, y + shadowOff), overlayTheme.logoShadow, cP1);
+                            fg->AddText(font, fontH, ImVec2(logoX, y), overlayTheme.accentPrimary, cP1);
+                            fg->AddText(font, fontH, ImVec2(logoX + cP1W + shadowOff, y + shadowOff), overlayTheme.logoShadow, cP2);
+                            fg->AddText(font, fontH, ImVec2(logoX + cP1W, y), overlayTheme.moduleText, cP2);
+                            y += logoH + logoGap;
+                        } else {
+                            // Modern: Clean lowercase pill with right bar
+                            float logoX = x1 - logoW - 5.0f * scale;
+                            fg->AddRectFilled(ImVec2(logoX - 3.0f * scale, y - 1.0f * scale), ImVec2(x1, y + logoH + 1.0f * scale), overlayTheme.moduleMinimalBg, 2.0f);
+                            fg->AddRectFilled(ImVec2(x1 - 2.0f * scale, y - 1.0f * scale), ImVec2(x1, y + logoH + 1.0f * scale), overlayTheme.accentPrimary);
+                            fg->AddText(font, fontH, ImVec2(logoX + shadowOff, y + shadowOff), overlayTheme.logoShadow, logoPart1);
+                            fg->AddText(font, fontH, ImVec2(logoX, y), overlayTheme.accentPrimary, logoPart1);
+                            fg->AddText(font, fontH, ImVec2(logoX + logoP1W + shadowOff, y + shadowOff), overlayTheme.logoShadow, logoPart2);
+                            fg->AddText(font, fontH, ImVec2(logoX + logoP1W, y), overlayTheme.moduleTagText, logoPart2);
+                            y += logoH + logoGap;
+                        }
                     }
 
                     for (int i = 0; i < modCount; i++) {
                         const ModLine& m = mods[i];
                         float textW = m.width * scale;
+                        float nameW = m.nameWidth * scale;
                         float boxW  = barW + padX + textW + padX;
                         float x0 = x1 - boxW;
                         float y0 = y;
                         float y1 = y + boxH;
 
                         if (style == 0) {
+                            // Default: Left bar + text + dim tag
                             fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleBg);
                             fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + barW, y1), m.accent);
                             fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleBorder);
                             ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
-                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.moduleTextShadow, m.text);
-                            fg->AddText(font, fontH, tx, overlayTheme.moduleText, m.text);
+                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.moduleTextShadow, m.name.c_str());
+                            fg->AddText(font, fontH, tx, overlayTheme.moduleText, m.name.c_str());
+                            if (!m.tag.empty()) {
+                                std::string tagStr = " " + m.tag;
+                                ImVec2 tagTx(tx.x + nameW, tx.y);
+                                fg->AddText(font, fontH, ImVec2(tagTx.x + shadowOff, tagTx.y + shadowOff), overlayTheme.moduleTextShadow, tagStr.c_str());
+                                fg->AddText(font, fontH, tagTx, overlayTheme.moduleTagText, tagStr.c_str());
+                            }
                         } else if (style == 1) {
-                            fg->AddRectFilled(ImVec2(x1 - textW - 4.0f * scale, y0), ImVec2(x1, y1), overlayTheme.moduleMinimalBg);
+                            // Minimal: Right bar + colored name + dim tag
+                            float minX0 = x1 - textW - 6.0f * scale;
+                            fg->AddRectFilled(ImVec2(minX0, y0), ImVec2(x1, y1), overlayTheme.moduleMinimalBg);
                             fg->AddRectFilled(ImVec2(x1 - 2.0f * scale, y0), ImVec2(x1, y1), m.accent);
-                            ImVec2 tx = ImVec2(x1 - textW - 2.0f * scale, y0 + padY);
-                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.moduleTextShadow, m.text);
-                            fg->AddText(font, fontH, tx, m.accent, m.text);
+                            ImVec2 tx = ImVec2(minX0 + 2.0f * scale, y0 + padY);
+                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.moduleTextShadow, m.name.c_str());
+                            fg->AddText(font, fontH, tx, m.accent, m.name.c_str());
+                            if (!m.tag.empty()) {
+                                std::string tagStr = " " + m.tag;
+                                ImVec2 tagTx(tx.x + nameW, tx.y);
+                                fg->AddText(font, fontH, ImVec2(tagTx.x + shadowOff, tagTx.y + shadowOff), overlayTheme.moduleTextShadow, tagStr.c_str());
+                                fg->AddText(font, fontH, tagTx, overlayTheme.moduleTagText, tagStr.c_str());
+                            }
                         } else if (style == 2) {
+                            // Outlined: Border with accent + colored name + dim tag
                             fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleOutlinedBg);
                             fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), m.accent, 4.0f, 0, 1.5f);
                             ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
-                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.moduleTextShadow, m.text);
-                            fg->AddText(font, fontH, tx, m.accent, m.text);
+                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.moduleTextShadow, m.name.c_str());
+                            fg->AddText(font, fontH, tx, m.accent, m.name.c_str());
+                            if (!m.tag.empty()) {
+                                std::string tagStr = " " + m.tag;
+                                ImVec2 tagTx(tx.x + nameW, tx.y);
+                                fg->AddText(font, fontH, ImVec2(tagTx.x + shadowOff, tagTx.y + shadowOff), overlayTheme.moduleTextShadow, tagStr.c_str());
+                                fg->AddText(font, fontH, tagTx, overlayTheme.moduleTagText, tagStr.c_str());
+                            }
                         } else if (style == 3) {
+                            // Glass: Frosted glass panel with specular border and left pip
                             fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleMinimalBg, 4.0f);
                             fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleGlassBorder, 4.0f, 0, 1.0f);
                             fg->AddRectFilled(ImVec2(x0 + 1.0f * scale, y0 + 1.0f * scale), ImVec2(x0 + barW + 1.0f * scale, y1 - 1.0f * scale), m.accent);
                             ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
-                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.moduleTextShadow, m.text);
-                            fg->AddText(font, fontH, tx, overlayTheme.moduleText, m.text);
-                        } else {
+                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.moduleTextShadow, m.name.c_str());
+                            fg->AddText(font, fontH, tx, overlayTheme.moduleText, m.name.c_str());
+                            if (!m.tag.empty()) {
+                                std::string tagStr = " " + m.tag;
+                                ImVec2 tagTx(tx.x + nameW, tx.y);
+                                fg->AddText(font, fontH, ImVec2(tagTx.x + shadowOff, tagTx.y + shadowOff), overlayTheme.moduleTextShadow, tagStr.c_str());
+                                fg->AddText(font, fontH, tagTx, overlayTheme.moduleTagText, tagStr.c_str());
+                            }
+                        } else if (style == 4) {
+                            // Bold: Solid accent block fill
                             fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), m.accent, 4.0f);
                             fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleBorder, 4.0f, 0, 1.0f);
                             ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
-                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.moduleTextShadow, m.text);
-                            fg->AddText(font, fontH, tx, overlayTheme.moduleBoldText, m.text);
+                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.moduleTextShadow, m.name.c_str());
+                            fg->AddText(font, fontH, tx, overlayTheme.moduleBoldText, m.name.c_str());
+                            if (!m.tag.empty()) {
+                                std::string tagStr = " " + m.tag;
+                                ImVec2 tagTx(tx.x + nameW, tx.y);
+                                fg->AddText(font, fontH, ImVec2(tagTx.x + shadowOff, tagTx.y + shadowOff), overlayTheme.moduleTextShadow, tagStr.c_str());
+                                fg->AddText(font, fontH, tagTx, overlayTheme.moduleBoldText, tagStr.c_str());
+                            }
+                        } else if (style == 5) {
+                            // Classic: Minecraft-style right-side bar with shadow and colored name + dim tag
+                            float minX0 = x1 - textW - 6.0f * scale;
+                            fg->AddRectFilled(ImVec2(minX0, y0), ImVec2(x1, y1), overlayTheme.moduleMinimalBg);
+                            fg->AddRectFilled(ImVec2(x1 - 2.5f * scale, y0), ImVec2(x1, y1), m.accent);
+                            ImVec2 tx = ImVec2(minX0 + 2.0f * scale, y0 + padY);
+                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.moduleTextShadow, m.name.c_str());
+                            fg->AddText(font, fontH, tx, m.accent, m.name.c_str());
+                            if (!m.tag.empty()) {
+                                std::string tagStr = " " + m.tag;
+                                ImVec2 tagTx(tx.x + nameW, tx.y);
+                                fg->AddText(font, fontH, ImVec2(tagTx.x + shadowOff, tagTx.y + shadowOff), overlayTheme.moduleTextShadow, tagStr.c_str());
+                                fg->AddText(font, fontH, tagTx, overlayTheme.moduleTagText, tagStr.c_str());
+                            }
+                        } else {
+                            // Modern: Clean lowercase with right bar and subtle background
+                            std::string lowName = ToLowerAscii(m.name);
+                            std::string lowTag = ToLowerAscii(m.tag);
+                            float minX0 = x1 - textW - 6.0f * scale;
+                            fg->AddRectFilled(ImVec2(minX0, y0), ImVec2(x1, y1), overlayTheme.moduleMinimalBg, 2.0f);
+                            fg->AddRectFilled(ImVec2(x1 - 2.0f * scale, y0), ImVec2(x1, y1), m.accent);
+                            ImVec2 tx = ImVec2(minX0 + 2.0f * scale, y0 + padY);
+                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.moduleTextShadow, lowName.c_str());
+                            fg->AddText(font, fontH, tx, m.accent, lowName.c_str());
+                            if (!lowTag.empty()) {
+                                std::string tagStr = " " + lowTag;
+                                ImVec2 tagTx(tx.x + nameW, tx.y);
+                                fg->AddText(font, fontH, ImVec2(tagTx.x + shadowOff, tagTx.y + shadowOff), overlayTheme.moduleTextShadow, tagStr.c_str());
+                                fg->AddText(font, fontH, tagTx, overlayTheme.moduleTagText, tagStr.c_str());
+                            }
                         }
 
                         y += boxH + gapY;

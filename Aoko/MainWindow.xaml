@@ -1278,6 +1278,272 @@
                                             </StackPanel>
                                         </StackPanel>
                                     </Button>
+
+                                    <Button Width="170" Margin="0,0,8,8" Style="{StaticResource PreviewCardButtonStyle}" Tag="Blend" Click="GuiPaletteButton_Click">
+                                        <StackPanel>
+                                            <TextBlock Text="Blend" Foreground="{DynamicResource TextBrush}" FontSize="12" FontWeight="SemiBold"/>
+                                            <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                                                <Border Width="34" Height="12" CornerRadius="3" Background="#070B14" Margin="0,0,4,0"/>
+                                                <Border Width="34" Height="12" CornerRadius="3" Background="#0D1424" Margin="0,0,4,0"/>
+                                                <Border Width="34" Height="12" CornerRadius="3" Background="#131E33" Margin="0,0,4,0"/>
+                                                <Border Width="34" Height="12" CornerRadius="3">
+                                                    <Border.Background>
+                                                        <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                                                            <GradientStop Color="#4794FD" Offset="0"/>
+                                                            <GradientStop Color="#47FDA0" Offset="1"/>
+                                                        </LinearGradientBrush>
+                                                    </Border.Background>
+                                                </Border>
+                                            </StackPanel>
+                                        </StackPanel>
+                                    </Button>
+
+                                    <Button Width="170" Margin="0,0,8,8" Style="{StaticResource PreviewCardButtonStyle}" Tag="Lush" Click="GuiPaletteButton_Click">
+                                        <StackPanel>
+                                            <TextBlock Text="Lush" Foreground="{DynamicResource TextBrush}" FontSize="12" FontWeight="SemiBold"/>
+                                            <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                                                <Border Width="34" Height="12" CornerRadius="3" Background="#080D09" Margin="0,0,4,0"/>
+                                                <Border Width="34" Height="12" CornerRadius="3" Background="#0F1710" Margin="0,0,4,0"/>
+                                                <Border Width="34" Height="12" CornerRadius="3" Background="#17241A" Margin="0,0,4,0"/>
+                                                <Border Width="34" Height="12" CornerRadius="3">
+                                                    <Border.Background>
+                                                        <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                                                            <GradientStop Color="#A8E063" Offset="0"/>
+                                                            <GradientStop Color="#56AB2F" Offset="1"/>
+                                                        </LinearGradientBrush>
+                                                    </Border.Background>
+                                                </Border>
+                                            </StackPanel>
+                                        </StackPanel>
+                                    </Button>
+
+                                    <Button Width="170" Margin="0,0,8,8" Style="{StaticResource PreviewCardButtonStyle}" Tag="Water" Click="GuiPaletteButton_Click">
+                                        <StackPanel>
+                                            <TextBlock Text="Water" Foreground="{DynamicResource TextBrush}" FontSize="12" FontWeight="SemiBold"/>
+                                            <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                                                <Border Width="34" Height="12" CornerRadius="3" Background="#060B12" Margin="0,0,4,0"/>
+                                                <Border Width="34" Height="12" CornerRadius="3" Background="#0B1624" Margin="0,0,4,0"/>
+                                                <Border Width="34" Height="12" CornerRadius="3" Background="#102136" Margin="0,0,4,0"/>
+                                                <Border Width="34" Height="12" CornerRadius="3">
+                                                    <Border.Background>
+                                                        <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                                                            <GradientStop Color="#0CE8C7" Offset="0"/>
+                                                            <GradientStop Color="#0CA3E8" Offset="1"/>
+                                                        </LinearGradientBrush>
+                                                    </Border.Background>
+                                                </Border>
+                                            </StackPanel>
+                                        </StackPanel>
+                                    </Button>
+
+                                    <Button Width="170" Margin="0,0,8,8" Style="{StaticResource PreviewCardButtonStyle}" Tag="Lime Water" Click="GuiPaletteButton_Click">
+                                        <StackPanel>
+                                            <TextBlock Text="Lime Water" Foreground="{DynamicResource TextBrush}" FontSize="12" FontWeight="SemiBold"/>
+                                            <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                                                <Border Width="34" Height="12" CornerRadius="3" Background="#060E0E" Margin="0,0,4,0"/>
+                                                <Border Width="34" Height="12" CornerRadius="3" Background="#0B1B1B" Margin="0,0,4,0"/>
+                                                <Border Width="34" Height="12" CornerRadius="3" Background="#112828" Margin="0,0,4,0"/>
+                                                <Border Width="34" Height="12" CornerRadius="3">
+                                                    <Border.Background>
+                                                        <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                                                            <GradientStop Color="#12FFF7" Offset="0"/>
+                                                            <GradientStop Color="#B3FFAB" Offset="1"/>
+                                                        </LinearGradientBrush>
+                                                    </Border.Background>
+                                                </Border>
+                                            </StackPanel>
+                                        </StackPanel>
+                                    </Button>
+
+                                    <Button Width="170" Margin="0,0,8,8" Style="{StaticResource PreviewCardButtonStyle}" Tag="Digital Horizon" Click="GuiPaletteButton_Click">
+                                        <StackPanel>
+                                            <TextBlock Text="Digital Horizon" Foreground="{DynamicResource TextBrush}" FontSize="12" FontWeight="SemiBold"/>
+                                            <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                                                <Border Width="34" Height="12" CornerRadius="3" Background="#090A14" Margin="0,0,4,0"/>
+                                                <Border Width="34" Height="12" CornerRadius="3" Background="#121324" Margin="0,0,4,0"/>
+                                                <Border Width="34" Height="12" CornerRadius="3" Background="#1B1D33" Margin="0,0,4,0"/>
+                                                <Border Width="34" Height="12" CornerRadius="3">
+                                                    <Border.Background>
+                                                        <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                                                            <GradientStop Color="#5FC3E4" Offset="0"/>
+                                                            <GradientStop Color="#E55D87" Offset="1"/>
+                                                        </LinearGradientBrush>
+                                                    </Border.Background>
+                                                </Border>
+                                            </StackPanel>
+                                        </StackPanel>
+                                    </Button>
+
+                                    <Button Width="170" Margin="0,0,8,8" Style="{StaticResource PreviewCardButtonStyle}" Tag="Coral" Click="GuiPaletteButton_Click">
+                                        <StackPanel>
+                                            <TextBlock Text="Coral" Foreground="{DynamicResource TextBrush}" FontSize="12" FontWeight="SemiBold"/>
+                                            <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                                                <Border Width="34" Height="12" CornerRadius="3" Background="#0A0B0F" Margin="0,0,4,0"/>
+                                                <Border Width="34" Height="12" CornerRadius="3" Background="#14151C" Margin="0,0,4,0"/>
+                                                <Border Width="34" Height="12" CornerRadius="3" Background="#1E202B" Margin="0,0,4,0"/>
+                                                <Border Width="34" Height="12" CornerRadius="3">
+                                                    <Border.Background>
+                                                        <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                                                            <GradientStop Color="#F4A896" Offset="0"/>
+                                                            <GradientStop Color="#348597" Offset="1"/>
+                                                        </LinearGradientBrush>
+                                                    </Border.Background>
+                                                </Border>
+                                            </StackPanel>
+                                        </StackPanel>
+                                    </Button>
+
+                                    <Button Width="170" Margin="0,0,8,8" Style="{StaticResource PreviewCardButtonStyle}" Tag="Magic" Click="GuiPaletteButton_Click">
+                                        <StackPanel>
+                                            <TextBlock Text="Magic" Foreground="{DynamicResource TextBrush}" FontSize="12" FontWeight="SemiBold"/>
+                                            <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                                                <Border Width="34" Height="12" CornerRadius="3" Background="#060714" Margin="0,0,4,0"/>
+                                                <Border Width="34" Height="12" CornerRadius="3" Background="#0D0F24" Margin="0,0,4,0"/>
+                                                <Border Width="34" Height="12" CornerRadius="3" Background="#151838" Margin="0,0,4,0"/>
+                                                <Border Width="34" Height="12" CornerRadius="3">
+                                                    <Border.Background>
+                                                        <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                                                            <GradientStop Color="#7F9EFF" Offset="0"/>
+                                                            <GradientStop Color="#8E2DE2" Offset="1"/>
+                                                        </LinearGradientBrush>
+                                                    </Border.Background>
+                                                </Border>
+                                            </StackPanel>
+                                        </StackPanel>
+                                    </Button>
+
+                                    <Button Width="170" Margin="0,0,8,8" Style="{StaticResource PreviewCardButtonStyle}" Tag="Blossom" Click="GuiPaletteButton_Click">
+                                        <StackPanel>
+                                            <TextBlock Text="Blossom" Foreground="{DynamicResource TextBrush}" FontSize="12" FontWeight="SemiBold"/>
+                                            <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                                                <Border Width="34" Height="12" CornerRadius="3" Background="#0B0812" Margin="0,0,4,0"/>
+                                                <Border Width="34" Height="12" CornerRadius="3" Background="#161121" Margin="0,0,4,0"/>
+                                                <Border Width="34" Height="12" CornerRadius="3" Background="#221B30" Margin="0,0,4,0"/>
+                                                <Border Width="34" Height="12" CornerRadius="3">
+                                                    <Border.Background>
+                                                        <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                                                            <GradientStop Color="#E2D0F9" Offset="0"/>
+                                                            <GradientStop Color="#317773" Offset="1"/>
+                                                        </LinearGradientBrush>
+                                                    </Border.Background>
+                                                </Border>
+                                            </StackPanel>
+                                        </StackPanel>
+                                    </Button>
+
+                                    <Button Width="170" Margin="0,0,8,8" Style="{StaticResource PreviewCardButtonStyle}" Tag="Pastel" Click="GuiPaletteButton_Click">
+                                        <StackPanel>
+                                            <TextBlock Text="Pastel" Foreground="{DynamicResource TextBrush}" FontSize="12" FontWeight="SemiBold"/>
+                                            <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                                                <Border Width="34" Height="12" CornerRadius="3" Background="#0D0A10" Margin="0,0,4,0"/>
+                                                <Border Width="34" Height="12" CornerRadius="3" Background="#18131E" Margin="0,0,4,0"/>
+                                                <Border Width="34" Height="12" CornerRadius="3" Background="#241D2B" Margin="0,0,4,0"/>
+                                                <Border Width="34" Height="12" CornerRadius="3">
+                                                    <Border.Background>
+                                                        <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                                                            <GradientStop Color="#F39BB2" Offset="0"/>
+                                                            <GradientStop Color="#CFC4F3" Offset="1"/>
+                                                        </LinearGradientBrush>
+                                                    </Border.Background>
+                                                </Border>
+                                            </StackPanel>
+                                        </StackPanel>
+                                    </Button>
+
+                                    <Button Width="170" Margin="0,0,8,8" Style="{StaticResource PreviewCardButtonStyle}" Tag="Sunkist" Click="GuiPaletteButton_Click">
+                                        <StackPanel>
+                                            <TextBlock Text="Sunkist" Foreground="{DynamicResource TextBrush}" FontSize="12" FontWeight="SemiBold"/>
+                                            <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                                                <Border Width="34" Height="12" CornerRadius="3" Background="#0E0B07" Margin="0,0,4,0"/>
+                                                <Border Width="34" Height="12" CornerRadius="3" Background="#1A150D" Margin="0,0,4,0"/>
+                                                <Border Width="34" Height="12" CornerRadius="3" Background="#262014" Margin="0,0,4,0"/>
+                                                <Border Width="34" Height="12" CornerRadius="3">
+                                                    <Border.Background>
+                                                        <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                                                            <GradientStop Color="#F2C94C" Offset="0"/>
+                                                            <GradientStop Color="#F2994A" Offset="1"/>
+                                                        </LinearGradientBrush>
+                                                    </Border.Background>
+                                                </Border>
+                                            </StackPanel>
+                                        </StackPanel>
+                                    </Button>
+
+                                    <Button Width="170" Margin="0,0,8,8" Style="{StaticResource PreviewCardButtonStyle}" Tag="Nord" Click="GuiPaletteButton_Click">
+                                        <StackPanel>
+                                            <TextBlock Text="Nord" Foreground="{DynamicResource TextBrush}" FontSize="12" FontWeight="SemiBold"/>
+                                            <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                                                <Border Width="34" Height="12" CornerRadius="3" Background="#0B0E12" Margin="0,0,4,0"/>
+                                                <Border Width="34" Height="12" CornerRadius="3" Background="#12181F" Margin="0,0,4,0"/>
+                                                <Border Width="34" Height="12" CornerRadius="3" Background="#1B242E" Margin="0,0,4,0"/>
+                                                <Border Width="34" Height="12" CornerRadius="3">
+                                                    <Border.Background>
+                                                        <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                                                            <GradientStop Color="#8FBCBB" Offset="0"/>
+                                                            <GradientStop Color="#A3BE8C" Offset="1"/>
+                                                        </LinearGradientBrush>
+                                                    </Border.Background>
+                                                </Border>
+                                            </StackPanel>
+                                        </StackPanel>
+                                    </Button>
+
+                                    <Button Width="170" Margin="0,0,8,8" Style="{StaticResource PreviewCardButtonStyle}" Tag="Cherry" Click="GuiPaletteButton_Click">
+                                        <StackPanel>
+                                            <TextBlock Text="Cherry" Foreground="{DynamicResource TextBrush}" FontSize="12" FontWeight="SemiBold"/>
+                                            <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                                                <Border Width="34" Height="12" CornerRadius="3" Background="#0F080C" Margin="0,0,4,0"/>
+                                                <Border Width="34" Height="12" CornerRadius="3" Background="#1C1018" Margin="0,0,4,0"/>
+                                                <Border Width="34" Height="12" CornerRadius="3" Background="#2B1925" Margin="0,0,4,0"/>
+                                                <Border Width="34" Height="12" CornerRadius="3">
+                                                    <Border.Background>
+                                                        <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                                                            <GradientStop Color="#BB377D" Offset="0"/>
+                                                            <GradientStop Color="#FBD3E9" Offset="1"/>
+                                                        </LinearGradientBrush>
+                                                    </Border.Background>
+                                                </Border>
+                                            </StackPanel>
+                                        </StackPanel>
+                                    </Button>
+
+                                    <Button Width="170" Margin="0,0,8,8" Style="{StaticResource PreviewCardButtonStyle}" Tag="Aubergine" Click="GuiPaletteButton_Click">
+                                        <StackPanel>
+                                            <TextBlock Text="Aubergine" Foreground="{DynamicResource TextBrush}" FontSize="12" FontWeight="SemiBold"/>
+                                            <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                                                <Border Width="34" Height="12" CornerRadius="3" Background="#0E060D" Margin="0,0,4,0"/>
+                                                <Border Width="34" Height="12" CornerRadius="3" Background="#1A0C18" Margin="0,0,4,0"/>
+                                                <Border Width="34" Height="12" CornerRadius="3" Background="#281325" Margin="0,0,4,0"/>
+                                                <Border Width="34" Height="12" CornerRadius="3">
+                                                    <Border.Background>
+                                                        <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                                                            <GradientStop Color="#AA076B" Offset="0"/>
+                                                            <GradientStop Color="#61045F" Offset="1"/>
+                                                        </LinearGradientBrush>
+                                                    </Border.Background>
+                                                </Border>
+                                            </StackPanel>
+                                        </StackPanel>
+                                    </Button>
+
+                                    <Button Width="170" Margin="0,0,8,8" Style="{StaticResource PreviewCardButtonStyle}" Tag="Snowy Sky" Click="GuiPaletteButton_Click">
+                                        <StackPanel>
+                                            <TextBlock Text="Snowy Sky" Foreground="{DynamicResource TextBrush}" FontSize="12" FontWeight="SemiBold"/>
+                                            <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
+                                                <Border Width="34" Height="12" CornerRadius="3" Background="#060C10" Margin="0,0,4,0"/>
+                                                <Border Width="34" Height="12" CornerRadius="3" Background="#0C1820" Margin="0,0,4,0"/>
+                                                <Border Width="34" Height="12" CornerRadius="3" Background="#132430" Margin="0,0,4,0"/>
+                                                <Border Width="34" Height="12" CornerRadius="3">
+                                                    <Border.Background>
+                                                        <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                                                            <GradientStop Color="#01ABB3" Offset="0"/>
+                                                            <GradientStop Color="#12E8E8" Offset="1"/>
+                                                        </LinearGradientBrush>
+                                                    </Border.Background>
+                                                </Border>
+                                            </StackPanel>
+                                        </StackPanel>
+                                    </Button>
                                 </WrapPanel>
                                 <TextBlock Foreground="{DynamicResource DimTextBrush}" FontSize="11">
                                     <Run Text="Current palette: "/>
@@ -1438,6 +1704,30 @@
                                             <TextBlock Text="Bold" Foreground="{DynamicResource TextBrush}" FontSize="12" FontWeight="SemiBold"/>
                                             <Border Height="18" Margin="0,6,0,0" Background="{DynamicResource AccentBrush}" CornerRadius="3">
                                                 <TextBlock Text="Autoclicker" Foreground="White" FontSize="10" Margin="10,2,0,0"/>
+                                            </Border>
+                                        </StackPanel>
+                                    </Button>
+
+                                    <Button Width="170" Margin="0,0,8,8" Style="{StaticResource PreviewCardButtonStyle}" Tag="Classic" Click="ModuleStyleButton_Click">
+                                        <StackPanel>
+                                            <TextBlock Text="Classic" Foreground="{DynamicResource TextBrush}" FontSize="12" FontWeight="SemiBold"/>
+                                            <Border Height="18" Margin="0,6,0,0" Background="#20000000" CornerRadius="3">
+                                                <Grid>
+                                                    <Border Width="3" HorizontalAlignment="Right" Background="{DynamicResource AccentBrush}"/>
+                                                    <TextBlock Text="Autoclicker" Foreground="{DynamicResource AccentBrush}" FontSize="10" HorizontalAlignment="Right" Margin="0,2,6,0" FontFamily="Consolas"/>
+                                                </Grid>
+                                            </Border>
+                                        </StackPanel>
+                                    </Button>
+
+                                    <Button Width="170" Margin="0,0,8,8" Style="{StaticResource PreviewCardButtonStyle}" Tag="Modern" Click="ModuleStyleButton_Click">
+                                        <StackPanel>
+                                            <TextBlock Text="Modern" Foreground="{DynamicResource TextBrush}" FontSize="12" FontWeight="SemiBold"/>
+                                            <Border Height="18" Margin="0,6,0,0" Background="#16000000" CornerRadius="3">
+                                                <Grid>
+                                                    <Border Width="3" HorizontalAlignment="Right" Background="{DynamicResource AccentBrush}"/>
+                                                    <TextBlock Text="autoclicker 12-16" Foreground="{DynamicResource AccentBrush}" FontSize="10" HorizontalAlignment="Right" Margin="0,2,6,0"/>
+                                                </Grid>
                                             </Border>
                                         </StackPanel>
                                     </Button>
