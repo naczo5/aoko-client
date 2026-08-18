@@ -842,6 +842,8 @@ public class GameStateClient : INotifyPropertyChanged
             "outlined" => 2,
             "glass" => 3,
             "bold" => 4,
+            "classic" => 5,
+            "modern" => 6,
             _ => 0
         };
     }

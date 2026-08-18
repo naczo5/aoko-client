@@ -13,6 +13,7 @@ Operating guide for coding agents working in `aoko-client` (`legoclickerC`). Bui
    - `diagnose-bridge-crash`: Root-cause runbook for JVM `hs_err` crash dumps and bridge debug logs.
    - `release-verification`: PR compile gate vs `New-GitHubRelease.ps1` on `main`.
    - `write-docs`: README, website/docs site, AGENTS.md, and skills stay aligned with current modules; silent on removals.
+   - `design-aesthetic`: Visual design, typography, color palettes, and UI/UX aesthetic rules across website, docs, WPF GUI, and overlays (Mahoyo / Tsukihime blue glass style).
    - `karpathy-guidelines`: Behavioral guidelines for simpler, surgical code changes.
 2. `README.md` — user-facing feature list and quick start.
 

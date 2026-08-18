@@ -350,4 +350,54 @@ public class GameStateAndProfileTests
                 Directory.Delete(root, recursive: true);
         }
     }
+
+    [Theory]
+    [InlineData("Slate")]
+    [InlineData("Ink")]
+    [InlineData("Graphite")]
+    [InlineData("Steel")]
+    [InlineData("Blend")]
+    [InlineData("Lush")]
+    [InlineData("Water")]
+    [InlineData("Lime Water")]
+    [InlineData("Digital Horizon")]
+    [InlineData("Coral")]
+    [InlineData("Magic")]
+    [InlineData("Blossom")]
+    [InlineData("Pastel")]
+    [InlineData("Sunkist")]
+    [InlineData("Nord")]
+    [InlineData("Cherry")]
+    [InlineData("Aubergine")]
+    [InlineData("Snowy Sky")]
+    public void ThemeManager_ContainsCuratedThemes(string themeName)
+    {
+        Assert.True(ThemeManager.Themes.ContainsKey(themeName), $"ThemeManager should contain {themeName}");
+        var colors = ThemeManager.Themes[themeName];
+        Assert.NotEqual(default, colors.Accent);
+        Assert.NotEqual(default, colors.Background);
+    }
+
+    [Theory]
+    [InlineData("Default", 0)]
+    [InlineData("default", 0)]
+    [InlineData("Minimal", 1)]
+    [InlineData("minimal", 1)]
+    [InlineData("Outlined", 2)]
+    [InlineData("outlined", 2)]
+    [InlineData("Glass", 3)]
+    [InlineData("glass", 3)]
+    [InlineData("Bold", 4)]
+    [InlineData("bold", 4)]
+    [InlineData("Classic", 5)]
+    [InlineData("classic", 5)]
+    [InlineData("Modern", 6)]
+    [InlineData("modern", 6)]
+    [InlineData("Unknown", 0)]
+    [InlineData(null, 0)]
+    public void GameStateClient_ModuleListStyleToIndex_MapsAllStyles(string? styleName, int expectedIndex)
+    {
+        int index = GameStateClient.ModuleListStyleToIndex(styleName);
+        Assert.Equal(expectedIndex, index);
+    }
 }
