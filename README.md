@@ -1,5 +1,7 @@
 # aoko client
 
+[![Downloads](https://img.shields.io/github/downloads/naczo5/aoko-client/total)](https://github.com/naczo5/aoko-client/releases)
+
 aoko client is an open-source Windows utility client and external overlay for Lunar Client and standalone Minecraft instances.
 
 # Showcase
