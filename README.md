@@ -1,20 +1,14 @@
 # aoko client
 
-[![Release](https://img.shields.io/github/v/release/naczo5/aoko-client)](https://github.com/naczo5/aoko-client/releases/latest)
-[![Downloads](https://img.shields.io/github/downloads/naczo5/aoko-client/total)](https://github.com/naczo5/aoko-client/releases)
-[![Stars](https://img.shields.io/github/stars/naczo5/aoko-client)](https://github.com/naczo5/aoko-client/stargazers)
-[![License](https://img.shields.io/github/license/naczo5/aoko-client)](https://github.com/naczo5/aoko-client/blob/main/LICENSE)
+[![Release](https://img.shields.io/github/v/release/naczo5/aoko-client?style=flat-square&color=475569&labelColor=1e293b)](https://github.com/naczo5/aoko-client/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/naczo5/aoko-client/total?style=flat-square&color=475569&labelColor=1e293b)](https://github.com/naczo5/aoko-client/releases)
+[![Stars](https://img.shields.io/github/stars/naczo5/aoko-client?style=flat-square&color=475569&labelColor=1e293b&logo=github)](https://github.com/naczo5/aoko-client/stargazers)
+[![License](https://img.shields.io/github/license/naczo5/aoko-client?style=flat-square&color=475569&labelColor=1e293b)](https://github.com/naczo5/aoko-client/blob/main/LICENSE)
 
 aoko client is an open-source Windows utility client and external overlay for Lunar Client and standalone Minecraft instances.
 
 # Showcase
 [![Watch the showcase video](website/public/screenshots/thumbnail.png)](https://www.youtube.com/watch?v=eR7QKAWw8D4)
-
-## Documentation
-
-- Full docs (landing page + per-module guides): https://naczo5.github.io/aoko-client/
-- Module reference index: https://naczo5.github.io/aoko-client/getting-started/
-- Docs source lives in [`website/`](website/) (Astro + Starlight); see [Website](#website) below.
 
 ## Current status
 
@@ -40,8 +34,10 @@ aoko client is an open-source Windows utility client and external overlay for Lu
 - GTB Helper & Pixel Party Assist
 - Discord Rich Presence
 - Nametags, Closest Player panel, Fight Status, Chest ESP, Block ESP, BedPlates
+- In-Game ClickGUI (Dear ImGui midnight blue glass menu with category tabs, real-time search, animated collapsible module cards, pill toggles, and inline keybind configuration)
+- GUI Modes (Hybrid External WPF + In-Game ClickGUI, External Only, In-Game Only)
 - In-game HUD Editor & module list styling
-- Per-module keybinds (all unbound by default)
+- Per-module keybinds (all unbound by default, configurable in WPF & ClickGUI)
 - Profiles saved in `%AppData%\Aoko\profiles\`
 - GUI customization (slate palettes, module list style, show logo)
 
@@ -85,19 +81,6 @@ scoop update aoko
 
 To remove it, run `scoop uninstall aoko`. Scoop updates only the application
 files; your profiles and custom palettes stay in `%AppData%\Aoko`.
-
-### Maintainer setup
-
-Each published stable GitHub release must include exactly one root-level
-`Aoko.zip`. The `Update Scoop manifest` workflow downloads that asset, verifies
-its contents, calculates its SHA-256 hash, and updates `bucket/aoko.json`
-automatically.
-
-One time: in **Settings → Actions → General**, allow workflows to have
-**Read and write permissions**. If `main` has branch protection, allow this
-workflow's `github-actions[bot]` push (or add an equivalent branch-protection
-bypass). The workflow commits only `bucket/aoko.json`; no Scoop-specific
-release step is needed after that.
 
 ## Build
 
@@ -145,34 +128,6 @@ aoko/
 |- website/                    # Docs site (Astro + Starlight) + landing page in public/
 `- README.md
 ```
-
-## Website
-
-The documentation site and marketing landing page live in [`website/`](website/) as an
-[Astro](https://astro.build/) + [Starlight](https://starlight.astro.build/) project:
-
-- `website/public/` — the hand-rolled landing page (`index.html`, `style.css`, `main.js`,
-  favicons, `screenshots/`), served at the site root.
-- `website/src/content/docs/` — per-module documentation in Markdown (the sidebar/categories
-  mirror the in-GUI module layout).
-
-### Local development
-
-```text
-cd website
-npm install
-npm run dev      # local preview at http://localhost:4321/aoko-client/
-npm run build    # static output in website/dist/
-```
-
-### Deployment
-
-Pushing changes under `website/**` to `main` or `dev` triggers
-[`.github/workflows/docs.yml`](.github/workflows/docs.yml), which builds the site with the
-official Astro action and publishes it to GitHub Pages.
-
-> One-time setup: in the repository **Settings → Pages**, set the **Source** to
-> **GitHub Actions** (previously this repo served the static `docs/` folder from a branch).
 
 ## Architecture
 
