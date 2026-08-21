@@ -21,13 +21,13 @@ aoko supports both **Lunar Client** and **standalone Minecraft instances** acros
 | **26.1** | `bridge_261.dll` | Standalone Fabric (Mojmap) & Lunar | Supported |
 | **26.2** | `bridge_261.dll` | Standalone Fabric (OpenGL & Vulkan auto-detect) & Lunar | Supported |
 
-Some modules are version-gated — for example, **Triggerbot**, **AutoTotem**, and **Vulkan overlay rendering** are available on modern versions (1.21.x / 26.1 / 26.2). Each module page details its version support.
+Some modules are version-gated. For example, **Triggerbot**, **AutoTotem**, and **Vulkan overlay rendering** are available on modern versions (1.21.x / 26.1 / 26.2). Each module page details its version support.
 
 ## Requirements
 
 - Windows 10/11 x64
 - Lunar Client or a standalone Minecraft client (1.8.9 Forge, modern Fabric)
-- The release `Aoko.exe` is self-contained — no .NET install needed to run it.
+- The release `Aoko.exe` is self-contained with no .NET install required to run.
 - .NET 8 SDK + MinGW-w64 + JDK 17 headers are only needed to build from source.
 
 ## Quick start

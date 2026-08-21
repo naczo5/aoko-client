@@ -20,7 +20,7 @@ aoko draws an in-game **module list** of your active modules and an optional **l
 ## Usage notes
 
 - The module list shows which modules are currently active and updates live as you toggle them.
-- Choose a **style** that matches your overlay preference — from the plain `Default` to `Glass` or `Bold`.
+- Choose a **style** that matches your overlay preference, such as `Default`, `Glass`, or `Bold`.
 - The module list position can be moved with the [HUD Editor](/aoko-client/modules/visual/hud-editor/).
 
 :::tip

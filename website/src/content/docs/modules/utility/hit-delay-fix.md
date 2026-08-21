@@ -7,7 +7,7 @@ Hit Delay Fix removes the built-in 1.8.9 attack cooldown (`leftClickCounter`) wh
 
 ## Overview
 
-In Minecraft 1.8.9, missing a hit or clicking a block sets an internal click counter delay of 10 ticks (0.5 seconds), preventing subsequent hits during that interval. Hit Delay Fix resets this counter, ensuring hits are never delayed.
+In Minecraft 1.8.9, missing a hit or clicking a block sets an internal click counter delay of 10 ticks (0.5 seconds), preventing subsequent hits during that interval. Hit Delay Fix resets this counter every tick so hits register immediately.
 
 ## Configuration Options
 

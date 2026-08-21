@@ -7,7 +7,7 @@ description: Enhanced player tags showing health, armor, and held item.
 
 ## Version support
 
-1.8.9 · 1.21.x · 26.1 · 26.2 — note that **Held item** and **Max count** are only available on 1.21.x / 26.1 / 26.2.
+1.8.9 · 1.21.x · 26.1 · 26.2. Note that **Held item** and **Max count** are available only on 1.21.x / 26.1 / 26.2.
 
 ## Settings
 

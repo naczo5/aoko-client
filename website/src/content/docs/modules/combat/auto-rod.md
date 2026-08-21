@@ -31,7 +31,7 @@ Disabling **Verify forced slot** allows the forced slot to contain another usabl
 
 ## Eligibility and input behavior
 
-An accepted action input is consumed so Minecraft does not also process it. It passes through without performing an action when Auto Rod is disabled or unsupported, the bridge is disconnected, Minecraft is not focused, no world is active, or any screen is open—including chat, inventory, pause, and menus. A queued request is revalidated by the native bridge immediately before interaction.
+An accepted action input is consumed so Minecraft does not also process it. It passes through without performing an action when Auto Rod is disabled or unsupported, the bridge is disconnected, Minecraft is not focused, no world is active, or any screen is open, including chat, inventory, pause, and menus. A queued request is revalidated by the native bridge immediately before interaction.
 
 The bridge changes the selected-slot field without emitting held-item or use packets from its worker. It waits two real client ticks for Minecraft to synchronize the selected item through its normal tick path, then submits one right-click to Minecraft's input loop. In fixed mode it restores the exact original slot after the configured 1–40 tick extension delay (four ticks by default). In hold mode it restores after the action bind is released, while always leaving at least one tick after the use input. A safety timeout restores the original slot if a release is lost. The existing one-tick restoration settle phase remains unchanged. It does not send raw packet spam and never searches for a sword or assumes the default `1`–`9` hotbar keybinds.
 

@@ -15,6 +15,7 @@ Operating guide for coding agents working in `aoko-client` (`legoclickerC`). Bui
    - `write-docs`: README, website/docs site, AGENTS.md, and skills stay aligned with current modules; silent on removals.
    - `design-aesthetic`: Visual design, typography, color palettes, and UI/UX aesthetic rules across website, docs, WPF GUI, and overlays (Mahoyo / Tsukihime blue glass style).
    - `karpathy-guidelines`: Behavioral guidelines for simpler, surgical code changes.
+   - `unslop`: Cut AI tells and promotional puffery from any writing, docs, and communication.
 2. `README.md` — user-facing feature list and quick start.
 
 ## Repository Overview

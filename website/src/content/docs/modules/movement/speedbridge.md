@@ -21,7 +21,7 @@ description: Edge-sneak bridging assist with timing and condition gates.
 ## Usage notes
 
 - The condition gates (**Block only**, **Holding sneak only**, **Looking down only**) keep the assist from triggering during normal movement.
-- **Delay** tunes the sneak timing — adjust it to match your bridging speed and the server's tick behavior.
+- **Delay** tunes the sneak timing to match your bridging speed and server tick behavior.
 
 :::tip
 The default gates are conservative on purpose. If the assist feels like it isn't engaging, relax one gate at a time rather than disabling all of them.

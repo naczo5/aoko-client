@@ -8,11 +8,11 @@ description: The panic action instantly disables every module and hides the clie
 When triggered, panic:
 
 - disarms the autoclicker and stops all clicking;
-- disables every module — aim assist, triggerbot, auto rod, autotool, speedbridge, GTB helper, PixelParty assist, nametags, closest player, fight status, chest ESP, chest stealer, block ESP, bedplates, reach, velocity, autototem, and antidebuff;
+- disables all combat, movement, render, and utility modules;
 - hides the in-game module list and logo;
 - disables Discord Rich Presence;
-- puts the loader window into a stealth mode;
-- disconnects the bridge and shuts the loader down.
+- puts the loader window into stealth mode;
+- disconnects the bridge and shuts down the loader.
 
 ## Usage
 
@@ -20,5 +20,5 @@ When triggered, panic:
 - Panic can be triggered from the GUI or its bound key.
 
 :::tip
-Panic intentionally never persists a disabled left-click into your saved config — your normal settings are intact the next time you launch.
+Panic intentionally never persists a disabled left-click into your saved config. Your normal settings remain intact the next time you launch.
 :::

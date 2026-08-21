@@ -3,11 +3,11 @@ title: Discord Rich Presence
 description: Surfaces aoko's state, version, and active module count in Discord.
 ---
 
-*Discord Rich Presence* (RPC) shows your aoko status in your Discord profile — the current state, injected version, and number of active modules.
+*Discord Rich Presence* (RPC) displays your aoko status in Discord, including current state, injected version, and active module count.
 
 ## Version support
 
-Loader feature — works regardless of the injected Lunar version.
+Loader feature. Works across all supported versions.
 
 ## Settings
 

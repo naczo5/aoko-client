@@ -7,7 +7,7 @@ description: Attacks automatically when an entity is under your crosshair and th
 
 ## Version support
 
-1.21.x · 26.1 · 26.2 — **not available on 1.8.9**.
+1.21.x · 26.1 · 26.2. Not available on 1.8.9.
 
 ## Settings
 
@@ -15,7 +15,7 @@ description: Attacks automatically when an entity is under your crosshair and th
 | ------- | ----------- | --------------- |
 | Only on crosshair | Only fire when an entity is actually under the crosshair. | On |
 | Only if can attack | Only fire when a valid, attackable target is in range. | On |
-| Cooldown threshold | Minimum attack-cooldown recovery (%) required before firing — higher means it waits for a fuller charge. | `1`–`100` / `92` |
+| Cooldown threshold | Minimum attack-cooldown recovery (%) required before firing. Higher values wait for a fuller charge. | `1`–`100` / `92` |
 | Hit chance | Probability (%) that any given ready opportunity actually fires. | `1`–`100` / `100` |
 | Require click | Only operate while you are physically holding the left mouse button. | On |
 

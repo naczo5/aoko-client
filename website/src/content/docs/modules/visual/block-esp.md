@@ -23,10 +23,10 @@ description: Highlights configurable block types through walls, with boxes, trac
 ## Usage notes
 
 - The **Blocks** list defines which block registry IDs are highlighted; it ships with a default preset and is fully editable.
-- **Range** trades coverage for performance — a larger range scans more area but costs more each frame.
+- **Range** trades coverage for performance. A larger range scans more area but requires more frame time.
 - **Max count** caps how many matches render so dense areas stay readable.
 - The block list HUD panel can be moved with the [HUD Editor](/aoko-client/modules/visual/hud-editor/).
 
 :::caution
-This effectively works as a targeted X-ray for the block types you choose. Expect it to be against the rules on most public servers — best reserved for private worlds.
+This acts as a targeted X-ray for selected block types. Expect it to be prohibited on public servers.
 :::

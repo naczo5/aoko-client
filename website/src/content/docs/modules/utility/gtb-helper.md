@@ -26,5 +26,5 @@ This module is a single toggle. When enabled it surfaces:
 - The hint overlay position can be moved with the [HUD Editor](/aoko-client/modules/visual/hud-editor/).
 
 :::tip
-This is an information-only overlay — it shows you likely answers but does not type or chat for you.
+This is an information-only overlay that displays candidate words without sending chat messages.
 :::

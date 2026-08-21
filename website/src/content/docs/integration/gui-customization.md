@@ -7,7 +7,7 @@ aoko's external GUI and in-game overlays can be themed to your taste. The select
 
 ## Version support
 
-Loader feature — applies to the external GUI and overlays on all versions.
+Loader feature. Applies to the external GUI, overlays, and in-game ClickGUI across all versions.
 
 ## Settings
 

@@ -3,7 +3,7 @@ title: Closest Player
 description: On-screen panel tracking the nearest player's direction, distance, and gear.
 ---
 
-*Closest Player* shows an on-screen panel that tracks the nearest player — their direction, exact distance, and equipment.
+*Closest Player* shows an on-screen panel tracking the nearest player's direction, exact distance, and equipment.
 
 ## Version support
 

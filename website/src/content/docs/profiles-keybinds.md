@@ -5,7 +5,7 @@ description: How aoko stores configs and how per-module keybinds work.
 
 ## Profiles & configs
 
-aoko saves your full module configuration — every toggle, slider, and the active theme — as JSON config files.
+aoko saves your full module configuration, including toggles, sliders, and active theme, as JSON config files.
 
 - Configs live in `%AppData%\Aoko\profiles\`.
 - Each saved config is a `*.json` file named after the config.
@@ -23,5 +23,5 @@ Every module can be bound to a key from its card in the external GUI. Bindings a
 - A key toggles its module on/off while the Minecraft window is focused.
 
 :::tip
-Bind **Panic** to a key you can reach instantly — it disables every module and hides the client in one press. See the [Panic](/aoko-client/panic/) page.
+Bind **Panic** to a key you can reach instantly. It disables every module and closes the client in one keypress. See the [Panic](/aoko-client/panic/) page.
 :::

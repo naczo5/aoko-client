@@ -7,7 +7,7 @@ description: Keeps a Totem of Undying equipped, with inventory-only and anarchy 
 
 ## Version support
 
-1.21.x · 26.1 · 26.2 — **not available on 1.8.9**.
+1.21.x · 26.1 · 26.2. Not available on 1.8.9.
 
 ## Settings
 
@@ -21,9 +21,9 @@ description: Keeps a Totem of Undying equipped, with inventory-only and anarchy 
 
 ## Usage notes
 
-- **Ghost (inventory only)** keeps a totem in the off-hand by pulling from your inventory and avoids riskier interactions — the recommended default.
+- **Ghost (inventory only)** keeps a totem in the off-hand by pulling from your inventory and avoids riskier interactions. This is the recommended default.
 - **Anarchy** mode is intended for anarchy/private servers where more aggressive totem replacement is acceptable.
-- The **Health** threshold controls how low you must drop before a re-equip is attempted; **Delay** adds a small human-like pause.
+- The **Health** threshold controls how low you must drop before a re-equip is attempted; **Delay** adds a small pause.
 
 :::caution
 Anarchy mode performs more aggressive inventory interactions. Prefer **Ghost** mode on normal servers.
