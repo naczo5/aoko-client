@@ -1,6 +1,9 @@
 # aoko client
 
+[![Release](https://img.shields.io/github/v/release/naczo5/aoko-client)](https://github.com/naczo5/aoko-client/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/naczo5/aoko-client/total)](https://github.com/naczo5/aoko-client/releases)
+[![Stars](https://img.shields.io/github/stars/naczo5/aoko-client)](https://github.com/naczo5/aoko-client/stargazers)
+[![License](https://img.shields.io/github/license/naczo5/aoko-client)](https://github.com/naczo5/aoko-client/blob/main/LICENSE)
 
 aoko client is an open-source Windows utility client and external overlay for Lunar Client and standalone Minecraft instances.
 
@@ -62,7 +65,7 @@ aoko client is an open-source Windows utility client and external overlay for Lu
 3. Click **Inject**.
 4. Use the external GUI.
 
-_It is generally recommended to inject while in a server/world, to ensure are modules initialize correctly_
+_Inject while in a server or world so modules initialize cleanly._
 
 ## Install and update with Scoop
 
@@ -125,7 +128,7 @@ Run from repository root unless noted.
 ## Notes on versions
 
 - `bridge_261.dll` is the modern bridge used for both 26.1 and 1.21 injection.
-- `bridge.dll` is used for 1.8.9 injection, sometimes reffered to as 'legacy'.
+- `bridge.dll` is used for 1.8.9 injection, sometimes referred to as 'legacy'.
 ## Project structure
 
 ```text
@@ -183,10 +186,9 @@ official Astro action and publishes it to GitHub Pages.
 
 Pull requests are welcome for bug fixes and new modules.
 
-- When reporting a bug you can use the issues tab, attach the logs if possible, they are located in the client's directory.
+- When reporting bugs on the Issues tab, attach log files from the client directory.
 - New modules should be tested on major/actest servers.
-- It should be mentioned if they do not bypass and what is
-therefore their usecase (like private or anarchy servers).
+- Note whether new modules bypass anticheats, or if they are intended for private/anarchy servers.
 
 ## Support
 
