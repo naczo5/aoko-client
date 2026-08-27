@@ -96,6 +96,26 @@ window.AOKO_PREVIEW_DATA = {
           ],
         },
         {
+          title: 'Throwpot',
+          keybind: true,
+          status: 'Available',
+          controls: [
+            { type: 'switch', label: 'Enable Throwpot', on: false, main: true },
+            { type: 'note', text: 'Instantly throws the first healing splash potion (Instant Health / Regeneration) in your hotbar via action bind, then restores your original slot.' },
+          ],
+        },
+        {
+          title: 'AutoHeal',
+          keybind: true,
+          status: 'Available',
+          controls: [
+            { type: 'switch', label: 'Enable AutoHeal', on: false, main: true },
+            { type: 'slider', label: 'Health threshold (HP)', min: 1, max: 20, value: 17, step: 1, decimals: 0 },
+            { type: 'slider', label: 'Re-throw cooldown (ms)', min: 50, max: 2000, value: 500, step: 10, decimals: 0 },
+            { type: 'note', text: 'Automatically throws a healing splash potion when health drops below threshold while looking down.' },
+          ],
+        },
+        {
           title: 'Kill Aura',
           toggle: { on: false, main: true },
           keybind: true,
@@ -274,6 +294,16 @@ window.AOKO_PREVIEW_DATA = {
           controls: [
             { type: 'switch', label: 'Enable Hit Delay Fix', on: false, main: true },
             { type: 'note', text: 'Removes the 1.8.9 attack cooldown delay for faster hit registration.' },
+          ],
+        },
+        {
+          title: 'Refill',
+          keybind: true,
+          status: 'Available',
+          controls: [
+            { type: 'switch', label: 'Enable Refill', on: false, main: true },
+            { type: 'slider', label: 'Delay (ms)', min: 50, max: 500, value: 120, step: 10, decimals: 0 },
+            { type: 'note', text: 'Moves healing potions and golden apples from backpack into empty hotbar slots while your inventory is open.' },
           ],
         },
         {

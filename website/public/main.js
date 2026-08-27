@@ -99,10 +99,13 @@
       }
       navigator.clipboard.writeText(textToCopy.trim()).then(function () {
         copyBtn.classList.add('copied');
-        copyBtn.textContent = 'copied!';
+        const textSpan = copyBtn.querySelector('.copy-text');
+        if (textSpan) textSpan.textContent = 'copied!';
+        else copyBtn.textContent = 'copied!';
         setTimeout(function () {
           copyBtn.classList.remove('copied');
-          copyBtn.textContent = 'copy';
+          if (textSpan) textSpan.textContent = 'copy';
+          else copyBtn.textContent = 'copy';
         }, 2000);
       }).catch(function (err) {
         console.error('Failed to copy: ', err);
