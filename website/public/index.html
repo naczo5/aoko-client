@@ -84,29 +84,30 @@
           <a href="#registry" class="btn-text">explore modules <span class="arrow">↓</span></a>
         </div>
 
-        <!-- TERMINAL PREVIEW FOR SCOOP INSTALL -->
-        <div class="terminal-preview">
-          <div class="terminal-bar">
-            <div class="terminal-dots">
-              <span class="t-dot red"></span>
-              <span class="t-dot yellow"></span>
-              <span class="t-dot green"></span>
+        <!-- QUICK INSTALL (SCOOP) -->
+        <div class="install-card" id="scoop-install-card">
+          <div class="install-card-bar">
+            <div class="install-card-title">
+              <span class="install-card-dot"></span>
+              <span>powershell · scoop install</span>
             </div>
-            <span class="terminal-title">powershell — scoop installation</span>
-            <button type="button" class="btn-copy-scoop" id="copy-scoop-cmd" title="Copy commands">copy</button>
-          </div>
-          <div class="terminal-body" id="scoop-cmd-text">
-            <div class="terminal-line">
-              <span class="t-prompt">PS C:\&gt;</span>
-              <span class="t-cmd">scoop bucket add aoko https://github.com/naczo5/aoko-client</span>
-            </div>
-            <div class="terminal-line">
-              <span class="t-prompt">PS C:\&gt;</span>
-              <span class="t-cmd">scoop install aoko</span>
+            <div class="install-card-actions">
+              <button type="button" class="scoop-help-btn" id="scoop-help-toggle" title="What is Scoop?">what is scoop? <span class="help-badge">?</span></button>
+              <button type="button" class="btn-copy-scoop" id="copy-scoop-cmd" title="Copy commands">
+                <svg class="copy-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                <span class="copy-text">copy</span>
+              </button>
             </div>
           </div>
-          <div class="terminal-footer">
-            <button type="button" class="scoop-help-btn" id="scoop-help-toggle">What is Scoop? <span class="help-badge">?</span></button>
+          <div class="install-card-body" id="scoop-cmd-text">
+            <div class="install-line">
+              <span class="t-prompt">&gt;</span>
+              <span class="t-cmd"><span class="cmd-kw">scoop</span> bucket add aoko https://github.com/naczo5/aoko-client</span>
+            </div>
+            <div class="install-line">
+              <span class="t-prompt">&gt;</span>
+              <span class="t-cmd"><span class="cmd-kw">scoop</span> install aoko</span>
+            </div>
           </div>
         </div>
 
@@ -120,8 +121,8 @@
       <!-- PREVIEW LAUNCHER -->
       <div class="launcher" id="launcher">
         <div class="launcher-bar">
-          <span class="tl-dot"></span><span class="tl-dot"></span><span class="tl-dot"></span>
-          <span class="launcher-title">aoko client · interactive preview</span>
+          <span class="launcher-dot"></span>
+          <span class="launcher-title">interactive preview</span>
         </div>
         <div class="launcher-screen">
           <div class="launcher-glow" aria-hidden="true"></div>
@@ -147,7 +148,7 @@
     </div>
 
     <div class="reg-group" data-group="combat">
-      <div class="reg-label">combat<span class="reg-count">9</span></div>
+      <div class="reg-label">combat<span class="reg-count">10</span></div>
       <div class="reg-rows">
         <details class="mod">
           <summary><span class="mod-i">▸</span><span class="mod-name">killaura</span><span class="mod-tag">combat</span></summary>
@@ -170,6 +171,14 @@
           <p>Auto/forced hotbar selection with one-use action bind and exact previous slot restoration.</p>
         </details>
         <details class="mod">
+          <summary><span class="mod-i">▸</span><span class="mod-name">throwpot</span><span class="mod-tag">combat</span></summary>
+          <p>Instantly throws the first healing splash potion in your hotbar via action bind and restores your slot.</p>
+        </details>
+        <details class="mod">
+          <summary><span class="mod-i">▸</span><span class="mod-name">autoheal</span><span class="mod-tag">combat</span></summary>
+          <p>Automatically throws a healing splash potion when your health drops below a configurable threshold.</p>
+        </details>
+        <details class="mod">
           <summary><span class="mod-i">▸</span><span class="mod-name">reach</span><span class="mod-tag">combat</span></summary>
           <p>Reach extender with a tunable range and hit-chance gate.</p>
         </details>
@@ -180,10 +189,6 @@
         <details class="mod">
           <summary><span class="mod-i">▸</span><span class="mod-name">autototem</span><span class="mod-tag">survival</span></summary>
           <p>Ghost (inventory-only) and anarchy modes, health threshold, and elytra switch.</p>
-        </details>
-        <details class="mod">
-          <summary><span class="mod-i">▸</span><span class="mod-name">antidebuff</span><span class="mod-tag">survival</span></summary>
-          <p>Hides Blindness/Nausea client-side, plus Darkness on 1.21 / 26.1.</p>
         </details>
       </div>
     </div>
@@ -196,14 +201,14 @@
           <p>Edge sneak assist with block-only, hold-sneak, looking-down, and safety timing controls.</p>
         </details>
         <details class="mod">
-          <summary><span class="mod-i">▸</span><span class="mod-name">blockparty assist</span><span class="mod-tag">assist</span></summary>
-          <p>Reads the safe color and helps you get there in PixelParty / BlockParty rounds.</p>
+          <summary><span class="mod-i">▸</span><span class="mod-name">pixel party assist</span><span class="mod-tag">assist</span></summary>
+          <p>Scans matching floor tile colors and assists pathing in PixelParty / BlockParty rounds.</p>
         </details>
       </div>
     </div>
 
     <div class="reg-group" data-group="visual">
-      <div class="reg-label">visual<span class="reg-count">6</span></div>
+      <div class="reg-label">visual<span class="reg-count">7</span></div>
       <div class="reg-rows">
         <details class="mod">
           <summary><span class="mod-i">▸</span><span class="mod-name">nametags</span><span class="mod-tag">esp</span></summary>
@@ -230,18 +235,30 @@
           <p>Highlights player beds with in-world bounding boxes and distance indicators.</p>
         </details>
         <details class="mod">
-          <summary><span class="mod-i">▸</span><span class="mod-name">module list &amp; logo</span><span class="mod-tag">hud</span></summary>
-          <p>Configurable in-game module list (default, minimal, outlined, glass, bold) with optional logo.</p>
+          <summary><span class="mod-i">▸</span><span class="mod-name">module list &amp; hud editor</span><span class="mod-tag">hud</span></summary>
+          <p>Configurable in-game module list (default, minimal, outlined, glass, bold), logo, and in-game HUD positioning editor.</p>
         </details>
       </div>
     </div>
 
     <div class="reg-group" data-group="utility">
-      <div class="reg-label">utility<span class="reg-count">6</span></div>
+      <div class="reg-label">utility<span class="reg-count">8</span></div>
       <div class="reg-rows">
+        <details class="mod">
+          <summary><span class="mod-i">▸</span><span class="mod-name">refill</span><span class="mod-tag">inventory</span></summary>
+          <p>Moves healing potions and golden apples from backpack into empty hotbar slots while your inventory is open.</p>
+        </details>
         <details class="mod">
           <summary><span class="mod-i">▸</span><span class="mod-name">autotool</span><span class="mod-tag">inventory</span></summary>
           <p>Auto weapon swap on hover, optimal block mining tool selection, and Bedwars mode.</p>
+        </details>
+        <details class="mod">
+          <summary><span class="mod-i">▸</span><span class="mod-name">chest stealer</span><span class="mod-tag">inventory</span></summary>
+          <p>External cursor-based stealer with menu checks that empties containers fast.</p>
+        </details>
+        <details class="mod">
+          <summary><span class="mod-i">▸</span><span class="mod-name">antidebuff</span><span class="mod-tag">survival</span></summary>
+          <p>Hides Blindness and Nausea client-side, plus Darkness on 1.21.x / 26.1 / 26.2.</p>
         </details>
         <details class="mod">
           <summary><span class="mod-i">▸</span><span class="mod-name">nick hider</span><span class="mod-tag">stealth</span></summary>
@@ -250,10 +267,6 @@
         <details class="mod">
           <summary><span class="mod-i">▸</span><span class="mod-name">hit delay fix</span><span class="mod-tag">combat</span></summary>
           <p>Removes 1.8.9 attack cooldown delays for responsive hits.</p>
-        </details>
-        <details class="mod">
-          <summary><span class="mod-i">▸</span><span class="mod-name">chest stealer</span><span class="mod-tag">inventory</span></summary>
-          <p>External cursor-based stealer with menu checks that empties containers fast.</p>
         </details>
         <details class="mod">
           <summary><span class="mod-i">▸</span><span class="mod-name">gtb helper</span><span class="mod-tag">overlay</span></summary>
@@ -393,18 +406,24 @@
         
         <h4>How to install Scoop:</h4>
         <p>Open PowerShell and run:</p>
-        <div class="terminal-preview modal-terminal">
-          <div class="terminal-bar">
-            <span class="terminal-title">powershell — install scoop</span>
-            <button type="button" class="btn-copy-scoop" id="copy-scoop-install-cmd" title="Copy commands">copy</button>
+        <div class="install-card modal-terminal">
+          <div class="install-card-bar">
+            <div class="install-card-title">
+              <span class="install-card-dot"></span>
+              <span>powershell · install scoop</span>
+            </div>
+            <button type="button" class="btn-copy-scoop" id="copy-scoop-install-cmd" title="Copy commands">
+              <svg class="copy-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+              <span class="copy-text">copy</span>
+            </button>
           </div>
-          <div class="terminal-body" id="scoop-install-cmd-text">
-            <div class="terminal-line">
-              <span class="t-prompt">PS C:\&gt;</span>
+          <div class="install-card-body" id="scoop-install-cmd-text">
+            <div class="install-line">
+              <span class="t-prompt">&gt;</span>
               <span class="t-cmd">Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser</span>
             </div>
-            <div class="terminal-line">
-              <span class="t-prompt">PS C:\&gt;</span>
+            <div class="install-line">
+              <span class="t-prompt">&gt;</span>
               <span class="t-cmd">Invoke-RestMethod -Uri https://get.scoop.sh | Invoke-Expression</span>
             </div>
           </div>
