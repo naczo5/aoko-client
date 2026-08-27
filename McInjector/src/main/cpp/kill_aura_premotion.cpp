@@ -13,6 +13,7 @@ namespace {
 
 static void (*s_log)(const std::string&) = nullptr;
 static AttackHandler s_attackHandler = nullptr;
+static AttackGateHandler s_attackGate = nullptr;
 static volatile LONG s_handlersRegistered = 0;
 static volatile LONG s_ready = 0; // walking-player breakpoint path
 static volatile LONG s_sendQueueReady = 0;
@@ -73,6 +74,9 @@ static CRITICAL_SECTION s_pendingCs;
 static volatile LONG s_pendingCsInit = 0;
 static jobject s_pendingTarget = nullptr; // global ref
 static volatile LONG s_pendingAttack = 0;
+static volatile LONGLONG s_pendingQueuedMs = 0;
+// A queued attack older than this is dropped instead of firing on a stale target.
+static const LONGLONG kPendingAttackMaxAgeMs = 400;
 
 static const int kMaxReturnSites = 32;
 static jlocation s_returnSites[kMaxReturnSites] = {};
@@ -224,8 +228,16 @@ static jobject TakePendingTarget(JNIEnv* env)
 static void FirePendingAttack(JNIEnv* env, jobject player)
 {
     if (!env || !player || !s_attackHandler) return;
+    const LONGLONG queuedMs = InterlockedCompareExchange64(&s_pendingQueuedMs, 0, 0);
     jobject targetGlobal = TakePendingTarget(env);
     if (!targetGlobal) return;
+
+    if (queuedMs != 0 && (LONGLONG)GetTickCount64() - queuedMs > kPendingAttackMaxAgeMs) {
+        // Target likely lost or gate kept denying; do not attack on stale state.
+        Log("KillAura PreMotion: dropped stale queued attack");
+        env->DeleteGlobalRef(targetGlobal);
+        return;
+    }
 
     s_attackHandler(env, player, targetGlobal);
     if (InterlockedCompareExchange(&s_loggedFiredAttack, 1, 0) == 0)
@@ -386,10 +398,19 @@ static void OnWalkingEntry(jvmtiEnv* jvmti, JNIEnv* env, jthread thread)
     const bool silentWanted = InterlockedCompareExchange(&s_silentEngaged, 0, 0) != 0
         && InterlockedCompareExchange(&s_combatValid, 0, 0) != 0;
     const bool pendingWanted = InterlockedCompareExchange(&s_pendingAttack, 0, 0) != 0;
-    if (!silentWanted && !pendingWanted) return;
+    if (!silentWanted && !pendingWanted && !s_attackGate) return;
 
     jobject player = ResolvePlayer(jvmti, env, thread);
     if (!player) return;
+
+    // Per-tick resource gate: auto-block actions execute here, exactly once per
+    // movement tick, and may deny this tick's queued attack.
+    const bool gateOpen = s_attackGate ? s_attackGate(env, player) : true;
+
+    if (!silentWanted && !pendingWanted) {
+        env->DeleteLocalRef(player);
+        return;
+    }
 
     bool stamped = false;
     if (silentWanted)
@@ -397,7 +418,7 @@ static void OnWalkingEntry(jvmtiEnv* jvmti, JNIEnv* env, jthread thread)
 
     // OpenMyau: attack in pre-motion (before this method sends C03).
     if (pendingWanted) {
-        if (!silentWanted || stamped)
+        if ((!silentWanted || stamped) && gateOpen)
             FirePendingAttack(env, player);
     }
 
@@ -529,9 +550,17 @@ static void JNICALL NativeOnPacket(JNIEnv* env, jclass, jobject packet)
     if (isLookPkt && silentWanted)
         PatchMotionLook(env, packet, s_combatYaw, s_combatPitch);
 
-    if (isLookPkt && InterlockedCompareExchange(&s_pendingAttack, 0, 0) != 0) {
+    if (isLookPkt) {
+        // Per-tick resource gate: runs once per movement packet whether or not
+        // an attack is queued, so auto-block start/release cycles stay aligned
+        // to server ticks.
+        bool gateOpen = true;
         jobject player = ResolveMcPlayer(env);
-        if (player) {
+        if (s_attackGate)
+            gateOpen = s_attackGate(env, player); // null player tolerated by gates
+
+        if (player && gateOpen &&
+            InterlockedCompareExchange(&s_pendingAttack, 0, 0) != 0) {
             const bool alreadyStamped = InterlockedCompareExchange(&s_inStamp, 0, 0) != 0;
             float savedYaw = 0.0f, savedPitch = 0.0f;
             bool tempStamped = false;
@@ -542,8 +571,8 @@ static void JNICALL NativeOnPacket(JNIEnv* env, jclass, jobject packet)
 
             if (tempStamped)
                 EndTempAttackStamp(env, player, savedYaw, savedPitch);
-            env->DeleteLocalRef(player);
         }
+        if (player) env->DeleteLocalRef(player);
     }
 
     InterlockedExchange(&s_inSendQueueNative, 0);
@@ -941,6 +970,11 @@ void SetAttackHandler(AttackHandler handler)
     s_attackHandler = handler;
 }
 
+void SetAttackGate(AttackGateHandler handler)
+{
+    s_attackGate = handler;
+}
+
 void SetSilentCombatAngles(bool silentEngaged, float yaw, float pitch, float bodyYaw, bool valid)
 {
     s_combatYaw = yaw;
@@ -967,6 +1001,7 @@ bool QueueAttack(JNIEnv* env, jobject target)
     }
     s_pendingTarget = global;
     InterlockedExchange(&s_pendingAttack, 1);
+    InterlockedExchange64(&s_pendingQueuedMs, (LONGLONG)GetTickCount64());
     LeaveCriticalSection(&s_pendingCs);
     if (InterlockedCompareExchange(&s_loggedQueuedAttack, 1, 0) == 0)
         Log("KillAura PreMotion: queued attack for next movement packet");
@@ -984,6 +1019,7 @@ void ClearPendingAttack(JNIEnv* env)
         s_pendingTarget = nullptr;
     }
     InterlockedExchange(&s_pendingAttack, 0);
+    InterlockedExchange64(&s_pendingQueuedMs, 0);
     LeaveCriticalSection(&s_pendingCs);
 }
 

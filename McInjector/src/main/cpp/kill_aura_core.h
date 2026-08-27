@@ -436,6 +436,14 @@ inline AutoBlockResult StepAutoBlock(AutoBlockState& state, const AutoBlockInput
         } else state.blockTick = 0;
         break;
     case BLOCK_HYPIXEL:
+        // Exact Rise "Watchdog 1.8" pattern (Hypixel 1.8.x): re-send use-item
+        // every tick while a target is in range, never release during the
+        // engagement, and let attacks fire in the SAME tick — old Watchdog
+        // tolerates attacking while the server sees the sword blocking.
+        state.fakeBlocking = false;
+        out.actions |= ACTION_BLINK_OFF;
+        if (!in.diggingOrPlacing) out.actions |= ACTION_START_BLOCK;
+        break;
     case BLOCK_BLINK:
     case BLOCK_LEGIT:
         state.fakeBlocking = in.mode != BLOCK_LEGIT;

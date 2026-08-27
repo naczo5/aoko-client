@@ -67,6 +67,7 @@ public partial class MainWindow : Window
     private bool _controlMode;
     private string? _pendingKeybindModuleId;
     private bool _pendingAutoRodActionBind;
+    private bool _pendingThrowpotActionBind;
     private int _uiUpdateQueued;
     private readonly CancellationTokenSource _updateCheckCancellation = new();
     private string? _latestReleaseUrl;
@@ -85,6 +86,7 @@ public partial class MainWindow : Window
         ["nickhider"] = "Nick Hider",
         ["chestesp"] = "Chest ESP",
         ["cheststealer"] = "Chest Stealer",
+        ["refill"] = "Refill",
         ["blockesp"] = "Block ESP",
         ["bedplates"] = "BedPlates",
         ["closestplayer"] = "Closest Player",
@@ -93,6 +95,8 @@ public partial class MainWindow : Window
         ["velocity"] = "Velocity",
         ["autototem"] = "AutoTotem",
         ["autorod"] = "Auto Rod",
+        ["throwpot"] = "Throwpot",
+        ["autoheal"] = "AutoHeal",
         ["autotool"] = "AutoTool",
         ["antidebuff"] = "AntiDebuff",
         ["hitdelayfix"] = "Hit Delay Fix",
@@ -506,10 +510,13 @@ public partial class MainWindow : Window
         bool gtbSupported = IsModuleSupported("gtbhelper");
         bool pixelPartySupported = IsModuleSupported("pixelpartyassist");
         bool chestStealerSupported = IsModuleSupported("cheststealer");
+        bool refillSupported = IsModuleSupported("refill");
         bool reachSupported = IsModuleSupported("reach");
         bool velocitySupported = IsModuleSupported("velocity");
         bool autoTotemSupported = IsModuleSupported("autototem");
         bool autoRodSupported = IsModuleSupported("autorod");
+        bool throwpotSupported = IsModuleSupported("throwpot");
+        bool autoHealSupported = IsModuleSupported("autoheal");
         bool autoToolSupported = IsModuleSupported("autotool");
         bool antiDebuffSupported = IsModuleSupported("antidebuff");
         bool hitDelayFixSupported = IsModuleSupported("hitdelayfix");
@@ -522,10 +529,13 @@ public partial class MainWindow : Window
         GtbHelperCard.IsEnabled = gtbSupported;
         PixelPartyAssistCard.IsEnabled = pixelPartySupported;
         ChestStealerCard.IsEnabled = chestStealerSupported;
+        RefillCard.IsEnabled = refillSupported;
         ReachCard.IsEnabled = reachSupported;
         VelocityCard.IsEnabled = velocitySupported;
         AutoTotemCard.IsEnabled = autoTotemSupported;
         AutoRodCard.IsEnabled = autoRodSupported;
+        ThrowpotCard.IsEnabled = throwpotSupported;
+        AutoHealCard.IsEnabled = autoHealSupported;
         AutoToolCard.IsEnabled = autoToolSupported;
         AntiDebuffCard.IsEnabled = antiDebuffSupported;
         HitDelayFixCard.IsEnabled = hitDelayFixSupported;
@@ -537,10 +547,13 @@ public partial class MainWindow : Window
         if (!gtbSupported && clicker.GtbHelperEnabled) clicker.GtbHelperEnabled = false;
         if (!pixelPartySupported && clicker.PixelPartyAssistEnabled) clicker.PixelPartyAssistEnabled = false;
         if (!chestStealerSupported && clicker.ChestStealerEnabled) clicker.ChestStealerEnabled = false;
+        if (!refillSupported && clicker.RefillEnabled) clicker.RefillEnabled = false;
         if (!reachSupported && clicker.ReachEnabled) clicker.ReachEnabled = false;
         if (!velocitySupported && clicker.VelocityEnabled) clicker.VelocityEnabled = false;
         if (!autoTotemSupported && clicker.AutoTotemEnabled) clicker.AutoTotemEnabled = false;
         if (!autoRodSupported && clicker.AutoRodEnabled) clicker.AutoRodEnabled = false;
+        if (!throwpotSupported && clicker.ThrowpotEnabled) clicker.ThrowpotEnabled = false;
+        if (!autoHealSupported && clicker.AutoHealEnabled) clicker.AutoHealEnabled = false;
         if (!autoToolSupported && clicker.AutoToolEnabled) clicker.AutoToolEnabled = false;
         if (!antiDebuffSupported && clicker.AntiDebuffEnabled) clicker.AntiDebuffEnabled = false;
         if (!hitDelayFixSupported && clicker.HitDelayFixEnabled) clicker.HitDelayFixEnabled = false;
@@ -557,10 +570,13 @@ public partial class MainWindow : Window
         VelocityAvailabilityText.Text = velocitySupported ? "Available" : "Unavailable on current bridge";
         AutoTotemAvailabilityText.Text = autoTotemSupported ? "Available" : "Unavailable on current bridge";
         AutoRodAvailabilityText.Text = autoRodSupported ? "Available" : "Unavailable on current bridge";
+        ThrowpotAvailabilityText.Text = throwpotSupported ? "Available" : "Unavailable on current bridge";
+        AutoHealAvailabilityText.Text = autoHealSupported ? "Available" : "Unavailable on current bridge";
         AutoToolAvailabilityText.Text = autoToolSupported ? "Available" : "Unavailable on current bridge";
         AntiDebuffAvailabilityText.Text = antiDebuffSupported ? "Available" : "Unavailable on current bridge";
         HitDelayFixAvailabilityText.Text = hitDelayFixSupported ? "Available" : "Unavailable on current bridge";
         ChestStealerAvailabilityText.Text = chestStealerSupported ? "Available" : "Unavailable on current bridge";
+        RefillAvailabilityText.Text = refillSupported ? "Available" : "Unavailable on current bridge";
         GtbHelperAvailabilityText.Text = gtbSupported
             ? "Hypixel Guess The Build helper using action-bar hints."
             : "Unavailable on current bridge";
@@ -575,10 +591,14 @@ public partial class MainWindow : Window
         KeybindGtbHelperButton.IsEnabled = gtbSupported;
         KeybindPixelPartyAssistButton.IsEnabled = pixelPartySupported;
         KeybindChestStealerButton.IsEnabled = chestStealerSupported;
+        KeybindRefillButton.IsEnabled = refillSupported;
         KeybindReachButton.IsEnabled = reachSupported;
         KeybindVelocityButton.IsEnabled = velocitySupported;
         KeybindAutoTotemButton.IsEnabled = autoTotemSupported;
         KeybindAutoRodButton.IsEnabled = autoRodSupported;
+        KeybindThrowpotButton.IsEnabled = throwpotSupported;
+        KeybindAutoHealButton.IsEnabled = autoHealSupported;
+        ThrowpotActionBindButton.IsEnabled = throwpotSupported;
         AutoRodActionBindButton.IsEnabled = autoRodSupported;
         KeybindAutoToolButton.IsEnabled = autoToolSupported;
         KeybindAntiDebuffButton.IsEnabled = antiDebuffSupported;
@@ -1252,6 +1272,8 @@ public partial class MainWindow : Window
         }
 
         _pendingKeybindModuleId = null;
+        _pendingAutoRodActionBind = false;
+        _pendingThrowpotActionBind = false;
         InputHooks.StopKeyCapture();
         ShowInTaskbar = false;
         WindowState = WindowState.Minimized;
@@ -1504,8 +1526,9 @@ public partial class MainWindow : Window
         if (sender is not Button btn || btn.Tag is not string moduleId) return;
         if (!IsModuleSupported(moduleId)) return;
         _pendingAutoRodActionBind = false;
+        _pendingThrowpotActionBind = false;
         _pendingKeybindModuleId = moduleId;
-        InputHooks.StartKeyCapture();
+        InputHooks.StartKeyCapture(allowMouse: true);
         UpdateKeybindButtons();
     }
 
@@ -1513,8 +1536,20 @@ public partial class MainWindow : Window
     {
         if (!IsModuleSupported("autorod")) return;
         _pendingKeybindModuleId = null;
+        _pendingThrowpotActionBind = false;
         _pendingAutoRodActionBind = true;
         AutoRodActionBindStatusText.Text = "Press a keyboard or mouse button (Esc = unbind).";
+        InputHooks.StartKeyCapture(allowMouse: true);
+        UpdateKeybindButtons();
+    }
+
+    private void ThrowpotActionBindButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (!IsModuleSupported("throwpot")) return;
+        _pendingKeybindModuleId = null;
+        _pendingAutoRodActionBind = false;
+        _pendingThrowpotActionBind = true;
+        ThrowpotActionBindStatusText.Text = "Press a keyboard or mouse button (Esc = unbind).";
         InputHooks.StartKeyCapture(allowMouse: true);
         UpdateKeybindButtons();
     }
@@ -1597,12 +1632,23 @@ public partial class MainWindow : Window
             return;
         }
 
+        if (_pendingThrowpotActionBind)
+        {
+            bool assigned = InputHooks.SetThrowpotActionKey(finalVk);
+            _pendingThrowpotActionBind = false;
+            ThrowpotActionBindStatusText.Text = assigned
+                ? "Action bind updated."
+                : "Conflict: that input is already used by a general module bind.";
+            Dispatcher.BeginInvoke(UpdateKeybindButtons);
+            return;
+        }
+
         string? moduleId = _pendingKeybindModuleId;
         if (string.IsNullOrWhiteSpace(moduleId)) return;
 
         bool generalAssigned = InputHooks.SetModuleKey(moduleId, finalVk);
         if (!generalAssigned)
-            AutoRodActionBindStatusText.Text = "Conflict: that input is used by the Auto Rod action bind.";
+            AutoRodActionBindStatusText.Text = "Conflict: that input is used by an action bind.";
         _pendingKeybindModuleId = null;
         Dispatcher.BeginInvoke(UpdateKeybindButtons);
     }
@@ -1626,6 +1672,7 @@ public partial class MainWindow : Window
         SetKeybindButtonContent(KeybindNickHiderButton, "nickhider");
         SetKeybindButtonContent(KeybindChestEspButton, "chestesp");
         SetKeybindButtonContent(KeybindChestStealerButton, "cheststealer");
+        SetKeybindButtonContent(KeybindRefillButton, "refill");
         SetKeybindButtonContent(KeybindBlockEspButton, "blockesp");
         SetKeybindButtonContent(KeybindBedPlatesButton, "bedplates");
         SetKeybindButtonContent(KeybindClosestPlayerButton, "closestplayer");
@@ -1634,6 +1681,8 @@ public partial class MainWindow : Window
         SetKeybindButtonContent(KeybindVelocityButton, "velocity");
         SetKeybindButtonContent(KeybindAutoTotemButton, "autototem");
         SetKeybindButtonContent(KeybindAutoRodButton, "autorod");
+        SetKeybindButtonContent(KeybindThrowpotButton, "throwpot");
+        SetKeybindButtonContent(KeybindAutoHealButton, "autoheal");
         SetKeybindButtonContent(KeybindAutoToolButton, "autotool");
         SetKeybindButtonContent(KeybindAntiDebuffButton, "antidebuff");
         SetKeybindButtonContent(KeybindHitDelayFixButton, "hitdelayfix");
@@ -1641,6 +1690,9 @@ public partial class MainWindow : Window
         AutoRodActionBindButton.Content = _pendingAutoRodActionBind
             ? "Action: [Press key or mouse...]"
             : $"Action: {FormatVirtualKey(InputHooks.AutoRodActionKey)}";
+        ThrowpotActionBindButton.Content = _pendingThrowpotActionBind
+            ? "Action: [Press key or mouse...]"
+            : $"Action: {FormatVirtualKey(InputHooks.ThrowpotActionKey)}";
     }
 
     private void SetKeybindButtonContent(Button btn, string moduleId)
@@ -1652,7 +1704,7 @@ public partial class MainWindow : Window
         }
 
         if (_pendingKeybindModuleId == moduleId)
-            btn.Content = "Bind: [Press key...]";
+            btn.Content = "Bind: [Press key or mouse...]";
         else
             btn.Content = $"Bind: {FormatVirtualKey(InputHooks.GetModuleKey(moduleId))}";
     }

@@ -26,11 +26,14 @@ aoko client is an open-source Windows utility client and external overlay for Lu
 - Reach and Velocity controls
 - AutoTotem (inventory-only and anarchy modes)
 - Auto Rod (auto/forced hotbar selection, one-use action bind, exact slot restoration)
+- Throwpot (action bind instantly throws the first healing splash potion in your hotbar and restores your slot)
+- AutoHeal (automatically throws a healing splash potion when your health drops below a configurable threshold)
 - AutoTool (weapon swap on hover, optimal tool selection, Bedwars mode)
 - AntiDebuff (hides Blindness/Nausea client-side, plus Darkness on 1.21/26.1/26.2)
 - Nick Hider (JVMTI-based local name spoofing)
 - Hit Delay Fix (removes 1.8.9 attack cooldown delays)
 - Chest Stealer (external cursor-based with menu check)
+- Refill (shift-clicks Instant Health/Regen pots and golden apples into empty hotbar slots while your inventory is open)
 - GTB Helper & Pixel Party Assist
 - Discord Rich Presence
 - Nametags, Closest Player panel, Fight Status, Chest ESP, Block ESP, BedPlates

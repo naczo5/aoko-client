@@ -16,6 +16,13 @@ namespace ka_premotion {
 
 typedef bool (*AttackHandler)(JNIEnv* env, jobject selfPlayer, jobject target);
 
+// Per-tick resource gate invoked once per outbound movement packet, strictly
+// between two C03s, before a queued attack fires. The bridge executes its
+// auto-block / slot actions here and returns false to deny the attack on that
+// tick (Rise-style discipline: an attack never shares a server tick with
+// use-item/dig/slot packets).
+typedef bool (*AttackGateHandler)(JNIEnv* env, jobject selfPlayer);
+
 enum HookBackend {
     HOOK_UNAVAILABLE = 0,
     HOOK_BREAKPOINT = 1,
@@ -45,6 +52,9 @@ void BindC03LookFields(jclass c03ClassGlobal, jfieldID yawField, jfieldID pitchF
 // Bridge registers attack handler (1.8.9: OpenMyau C0A→sync→C02→local;
 // modern: MultiPlayerGameMode.attack).
 void SetAttackHandler(AttackHandler handler);
+
+// Bridge registers the per-tick auto-block/attack permission gate. May be null.
+void SetAttackGate(AttackGateHandler handler);
 
 // Resolves/arms the breakpoint or packet-retransformation backend.
 bool ArmSendQueueHook(JNIEnv* env, jclass netHandlerClass);

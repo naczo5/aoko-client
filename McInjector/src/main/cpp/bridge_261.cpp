@@ -35,6 +35,7 @@
 #include "json_config_reader.h"
 #include "bounded_newline_buffer.h"
 #include "auto_rod_core.h"
+#include "throwpot_core.h"
 #include "auto_tool_core.h"
 #include "bridge_capabilities.h"
 #include "nick_hider.h"
@@ -225,6 +226,8 @@ struct Config {
     bool  chestStealer   = false;
     int   chestStealerDelayMs = 120;
     bool  chestStealerMenuCheck = true;
+    bool  refill         = false;
+    int   refillDelayMs  = 120;
     bool  blockEsp       = false;
     bool  blockEspBoxes  = true;
     bool  blockEspTracers = false;
@@ -279,12 +282,17 @@ struct Config {
     int   autoTotemBehaviorMode = 0; // 0=Ghost (inventory only), 1=Anarchy
     bool  antiDebuffEnabled = false;
     bool  hitDelayFixEnabled = false;
+    bool  throwpotEnabled = false;
+    bool  autoHealEnabled = false;
+    int   autoHealHealth = 17;
+    int   autoHealDelayMs = 500;
     bool  autoRodEnabled = false;
     int   autoRodSlotMode = 0;
     bool  autoRodVerifyForcedSlot = true;
     int   autoRodExtensionTicks = autorod::kUseToRestoreTicks;
     bool  autoRodHoldToExtend = false;
     int   keybindAutoRod = 0;
+    int   keybindThrowpot = 0;
     bool  autoToolEnabled = false;
     bool  autoToolSwapWeapon = true;
     bool  autoToolInstantSwap = true;
@@ -321,6 +329,13 @@ static const size_t kAutoRodQueueLimit = 16;
 static std::deque<AutoRodRequest> g_autoRodQueue;
 static Mutex g_autoRodQueueMutex;
 static volatile LONG g_autoRodReleaseRequested = 0;
+// Throwpot one-shot request flag (defined here; used by ParseConfig below).
+static volatile LONG g_throwPotRequested = 0;
+// AutoHeal transaction state is defined with the other module transactions;
+// declared here because ParseConfig clears it when the module is disabled.
+struct AutoHealTransaction121;
+static Mutex g_autoHealTransactionMutex121;
+static void ClearAutoHealTransactionLocked121();
 
 static void ClearAutoRodQueue() {
     LockGuard lk(g_autoRodQueueMutex);
@@ -372,6 +387,10 @@ static void ParseConfig(const std::string& line) {
                                  autorod::kMinExtensionTicks, autorod::kMaxExtensionTicks),
                     reader.GetBool("holdToExtend", false)));
             }
+        } else if (reader.GetString("action") == "throwPot") {
+            // One-shot press; no hold/release semantics.
+            if (reader.GetBool("enabled", true))
+                InterlockedExchange(&g_throwPotRequested, 1);
         }
         return;
     }
@@ -501,6 +520,8 @@ static void ParseConfig(const std::string& line) {
     g_config.nametagRange = lc::ClampInt(reader.GetInt("nametagRange", g_config.nametagRange), 1, 8);
     g_config.chestEspRange = lc::ClampInt(reader.GetInt("chestEspRange", g_config.chestEspRange), 1, 8);
     g_config.chestStealerDelayMs = lc::ClampInt(reader.GetInt("chestStealerDelayMs", g_config.chestStealerDelayMs), 50, 500);
+    g_config.refill = reader.GetBool("refillEnabled");
+    g_config.refillDelayMs = lc::ClampInt(reader.GetInt("refillDelayMs", g_config.refillDelayMs), 50, 500);
     g_config.blockEsp        = reader.GetBool("blockEspEnabled");
     g_config.blockEspBoxes   = reader.GetBool("blockEspBoxes", true);
     g_config.blockEspTracers = reader.GetBool("blockEspTracers");
@@ -576,6 +597,16 @@ static void ParseConfig(const std::string& line) {
         autorod::kMinExtensionTicks, autorod::kMaxExtensionTicks);
     g_config.autoRodHoldToExtend = reader.GetBool("autoRodHoldToExtend", false);
     g_config.keybindAutoRod = lc::ClampInt(reader.GetInt("keybindAutoRod", g_config.keybindAutoRod), 0, 255);
+    g_config.throwpotEnabled = reader.GetBool("throwpotEnabled");
+    if (!g_config.throwpotEnabled) InterlockedExchange(&g_throwPotRequested, 0);
+    g_config.keybindThrowpot = lc::ClampInt(reader.GetInt("keybindThrowpot", g_config.keybindThrowpot), 0, 255);
+    g_config.autoHealEnabled = reader.GetBool("autoHealEnabled");
+    if (!g_config.autoHealEnabled) {
+        LockGuard healLk(g_autoHealTransactionMutex121);
+        ClearAutoHealTransactionLocked121();
+    }
+    g_config.autoHealHealth = lc::ClampInt(reader.GetInt("autoHealHealth", g_config.autoHealHealth), 1, 20);
+    g_config.autoHealDelayMs = lc::ClampInt(reader.GetInt("autoHealDelayMs", g_config.autoHealDelayMs), 50, 2000);
     g_config.autoToolEnabled = reader.GetBool("autoToolEnabled");
     g_config.autoToolSwapWeapon = reader.GetBool("autoToolSwapWeapon", true);
     g_config.autoToolInstantSwap = reader.GetBool("autoToolInstantSwap", true);
@@ -1071,6 +1102,7 @@ static float       g_jniAttackCooldown = 1.0f;
 static float       g_jniAttackCooldownPerTick = 0.08f;
 static std::string g_jniKillAuraUnavailableReason;
 static std::string g_jniChestStealerStateJson;
+static std::string g_jniRefillStateJson;
 static unsigned long long g_jniStateMs = 0;
 static unsigned long long g_lastEntitySeenMs = 0;
 static bool        g_loggedCooldownProgressResolve = false;
@@ -1222,6 +1254,82 @@ struct AutoRodTransaction121 {
 static AutoRodTransaction121 g_autoRodTransaction121;
 static Mutex g_autoRodTransactionMutex121;
 static const DWORD kAutoRodTransactionSafetyTimeoutMs121 = 15000;
+
+// ===== Throwpot (modern) =====
+// One-shot request flag; presses while a transaction is in flight are dropped.
+
+enum ThrowPotTransactionPhase121 {
+    THROW_POT_TRANSACTION_IDLE_121 = 0,
+    THROW_POT_TRANSACTION_SELECTED_121,
+    THROW_POT_TRANSACTION_USED_121,
+    THROW_POT_TRANSACTION_RESTORING_121
+};
+
+struct ThrowPotTransaction121 {
+    ThrowPotTransactionPhase121 phase;
+    int originalSlot;
+    int targetSlot;
+    int phaseStartTick;
+    DWORD startedMs;
+    bool suppressUse;
+
+    ThrowPotTransaction121()
+        : phase(THROW_POT_TRANSACTION_IDLE_121), originalSlot(autorod::kInvalidSlot),
+          targetSlot(autorod::kInvalidSlot), phaseStartTick(0), startedMs(0),
+          suppressUse(false) {}
+};
+
+static ThrowPotTransaction121 g_throwPotTransaction121;
+static Mutex g_throwPotTransactionMutex121;
+static const DWORD kThrowPotTransactionSafetyTimeoutMs121 = 15000;
+static DWORD g_throwPotLastLogMs121 = 0;
+
+static void ClearThrowPotTransactionLocked121() {
+    g_throwPotTransaction121 = ThrowPotTransaction121();
+}
+
+static bool IsThrowPotTransactionActive121() {
+    LockGuard lk(g_throwPotTransactionMutex121);
+    return g_throwPotTransaction121.phase != THROW_POT_TRANSACTION_IDLE_121;
+}
+
+// ===== AutoHeal (modern) =====
+// Same transaction shape as Throwpot but self-triggering on a health threshold.
+enum AutoHealTransactionPhase121 {
+    AUTO_HEAL_TRANSACTION_IDLE_121 = 0,
+    AUTO_HEAL_TRANSACTION_SELECTED_121,
+    AUTO_HEAL_TRANSACTION_USED_121,
+    AUTO_HEAL_TRANSACTION_RESTORING_121
+};
+
+struct AutoHealTransaction121 {
+    AutoHealTransactionPhase121 phase;
+    int originalSlot;
+    int targetSlot;
+    int phaseStartTick;
+    DWORD startedMs;
+    bool suppressUse;
+
+    AutoHealTransaction121()
+        : phase(AUTO_HEAL_TRANSACTION_IDLE_121), originalSlot(autorod::kInvalidSlot),
+          targetSlot(autorod::kInvalidSlot), phaseStartTick(0), startedMs(0),
+          suppressUse(false) {}
+};
+
+static AutoHealTransaction121 g_autoHealTransaction121;
+static const DWORD kAutoHealTransactionSafetyTimeoutMs121 = 15000;
+static DWORD g_autoHealLastHealMs121 = 0;
+static jmethodID g_autoHealGetHealthMethod121 = nullptr;
+static DWORD g_autoHealLastLogMs121 = 0;
+
+static void ClearAutoHealTransactionLocked121() {
+    g_autoHealTransaction121 = AutoHealTransaction121();
+}
+
+static bool IsAutoHealTransactionActive121() {
+    LockGuard lk(g_autoHealTransactionMutex121);
+    return g_autoHealTransaction121.phase != AUTO_HEAL_TRANSACTION_IDLE_121;
+}
 
 static void ClearAutoRodTransactionLocked121() {
     g_autoRodTransaction121 = AutoRodTransaction121();
@@ -2531,32 +2639,46 @@ static int GetHitResultTypeOrdinal(JNIEnv* env, jobject hitObj) {
     if (!env || !hitObj) return -1;
 
     EnsureHitResultCaches(env);
-    if (g_blockHitResultClass_121 && env->IsInstanceOf(hitObj, g_blockHitResultClass_121)) {
-        return 1; // BLOCK
+
+    jmethodID mGetType = ResolveHitResultGetType(env);
+    if (mGetType) {
+        jobject typeObj = env->CallObjectMethod(hitObj, mGetType);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); typeObj = nullptr; }
+        if (typeObj) {
+            int ordinal = -1;
+            jclass enumBase = env->FindClass("java/lang/Enum");
+            jmethodID mOrdinal = enumBase ? env->GetMethodID(enumBase, "ordinal", "()I") : nullptr;
+            jmethodID mName = enumBase ? env->GetMethodID(enumBase, "name", "()Ljava/lang/String;") : nullptr;
+            if (env->ExceptionCheck()) { env->ExceptionClear(); mOrdinal = nullptr; mName = nullptr; }
+            if (mOrdinal) {
+                ordinal = env->CallIntMethod(typeObj, mOrdinal);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); ordinal = -1; }
+            }
+            if (ordinal < 0 && mName) {
+                jstring nameStr = (jstring)env->CallObjectMethod(typeObj, mName);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); nameStr = nullptr; }
+                if (nameStr) {
+                    const char* chars = env->GetStringUTFChars(nameStr, nullptr);
+                    if (chars) {
+                        if (strcmp(chars, "MISS") == 0) ordinal = 0;
+                        else if (strcmp(chars, "BLOCK") == 0) ordinal = 1;
+                        else if (strcmp(chars, "ENTITY") == 0) ordinal = 2;
+                        env->ReleaseStringUTFChars(nameStr, chars);
+                    }
+                    env->DeleteLocalRef(nameStr);
+                }
+            }
+            if (enumBase) env->DeleteLocalRef(enumBase);
+            env->DeleteLocalRef(typeObj);
+            if (ordinal >= 0) return ordinal;
+        }
     }
+
     if (g_entityHitResultClass_121 && env->IsInstanceOf(hitObj, g_entityHitResultClass_121)) {
         return 2; // ENTITY
     }
 
-    jmethodID mGetType = ResolveHitResultGetType(env);
-    if (!mGetType) return -1;
-
-    jobject typeObj = env->CallObjectMethod(hitObj, mGetType);
-    if (env->ExceptionCheck()) { env->ExceptionClear(); typeObj = nullptr; }
-    if (!typeObj) return -1;
-
-    int ordinal = -1;
-    jclass enumBase = env->FindClass("java/lang/Enum");
-    jmethodID mOrdinal = enumBase ? env->GetMethodID(enumBase, "ordinal", "()I") : nullptr;
-    if (env->ExceptionCheck()) { env->ExceptionClear(); mOrdinal = nullptr; }
-    if (mOrdinal) {
-        ordinal = env->CallIntMethod(typeObj, mOrdinal);
-        if (env->ExceptionCheck()) { env->ExceptionClear(); ordinal = -1; }
-    }
-
-    if (enumBase) env->DeleteLocalRef(enumBase);
-    env->DeleteLocalRef(typeObj);
-    return ordinal;
+    return -1;
 }
 
 static void EnsureCrosshairTargetField(JNIEnv* env, jclass mcCls) {
@@ -3138,6 +3260,7 @@ static void LogNametagSuppressionMissingMappings121(JNIEnv* env, jobject worldOb
 static void ResetNametagSuppressionCaches121(JNIEnv* env, const char* reason);
 static void ResetAutoTotemCaches(JNIEnv* env);
 static void ResetAutoRodModernCaches(JNIEnv* env);
+static void ResetRefillModernCaches(JNIEnv* env);
 static void ResetAutoToolModernCaches(JNIEnv* env);
 static void ExecuteAutoRodModern(JNIEnv* env);
 static void ResetModernJniRuntimeCaches121(JNIEnv* env, const char* reason);
@@ -7198,6 +7321,686 @@ static std::string BuildModernChestStealerStateJson(JNIEnv* env, jobject screenO
     return out.str();
 }
 
+// ===== Refill (hotbar healing refill) =====
+// Observe-only: reports healing-item slot coordinates while the survival
+// inventory is open; the loader performs the shift-clicks with the physical
+// mouse so vanilla code emits every window click.
+
+static void LogThrowPotModernRateLimited(const char* message);
+
+static jfieldID g_refillSplashPotionField_121 = nullptr;
+static jfieldID g_refillPotionField_121 = nullptr;
+static jfieldID g_refillGoldenAppleField_121 = nullptr;
+static jfieldID g_refillEnchantedGoldenAppleField_121 = nullptr;
+static jmethodID g_itemGetDescriptionIdWithStack_121 = nullptr;
+static jmethodID g_itemStackGetTranslationKey_121 = nullptr;
+static jclass g_dataComponentsClass_121 = nullptr;
+static jfieldID g_dataComponentsPotionContentsField_121 = nullptr;
+static jmethodID g_itemStackGetComponent_121 = nullptr;
+static jmethodID g_itemStackGetHoverName_121 = nullptr;
+static jmethodID g_componentGetString_121 = nullptr;
+static DWORD g_lastRefillFilterLogMs121 = 0;
+
+static jfieldID ResolveRefillItemsStaticField121(
+    JNIEnv* env,
+    const char* const* names,
+    const char* const* sigs)
+{
+    if (!g_itemsClass_121) return nullptr;
+    for (int ni = 0; names[ni]; ni++) {
+        for (int si = 0; sigs[si]; si++) {
+            jfieldID fid = env->GetStaticFieldID(g_itemsClass_121, names[ni], sigs[si]);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); fid = nullptr; }
+            if (fid) return fid;
+        }
+    }
+    return nullptr;
+}
+
+static bool EnsureRefillItemMappings121(JNIEnv* env) {
+    if (!g_itemsClass_121) {
+        // Reuse the AutoTotem Items-class resolution when it has already run.
+        const char* itemsNames[] = {
+            "net.minecraft.class_1802",
+            "net.minecraft.world.item.Items",
+            "net.minecraft.item.Items",
+            nullptr
+        };
+        for (int i = 0; itemsNames[i] && !g_itemsClass_121; i++) {
+            jclass cls = LoadClassWithLoader(env, g_gameClassLoader, itemsNames[i]);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); cls = nullptr; }
+            if (cls) g_itemsClass_121 = (jclass)env->NewGlobalRef(cls);
+        }
+        if (!g_itemsClass_121) return false;
+    }
+
+    // ItemStack.getItem() may also be unresolved when AutoTotem never ran.
+    if (!g_itemStackGetItem_121) {
+        jclass stackCls = nullptr;
+        const char* stackNames[] = {
+            "net.minecraft.class_1799",
+            "net.minecraft.world.item.ItemStack",
+            "net.minecraft.item.ItemStack",
+            nullptr
+        };
+        for (int i = 0; stackNames[i] && !stackCls; i++) {
+            stackCls = LoadClassWithLoader(env, g_gameClassLoader, stackNames[i]);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); stackCls = nullptr; }
+        }
+        if (stackCls) {
+            const char* names[] = { "getItem", "method_7909", "m_41720_", nullptr };
+            const char* sigs[] = {
+                "()Lnet/minecraft/class_1792;",
+                "()Lnet/minecraft/world/item/Item;",
+                "()Lnet/minecraft/item/Item;",
+                nullptr
+            };
+            for (int ni = 0; names[ni] && !g_itemStackGetItem_121; ni++) {
+                for (int si = 0; sigs[si] && !g_itemStackGetItem_121; si++) {
+                    g_itemStackGetItem_121 = env->GetMethodID(stackCls, names[ni], sigs[si]);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_itemStackGetItem_121 = nullptr; }
+                }
+            }
+            env->DeleteLocalRef(stackCls);
+        }
+    }
+
+    if (!g_refillSplashPotionField_121) {
+        const char* names[] = { "SPLASH_POTION", "f_42736_", "field_8436", nullptr };
+        const char* sigs[] = { "Lnet/minecraft/class_1792;", "Lnet/minecraft/world/item/Item;", "Lnet/minecraft/item/Item;", nullptr };
+        g_refillSplashPotionField_121 = ResolveRefillItemsStaticField121(env, names, sigs);
+    }
+    if (!g_refillPotionField_121) {
+        const char* names[] = { "POTION", "f_42589_", "field_8574", nullptr };
+        const char* sigs[] = { "Lnet/minecraft/class_1792;", "Lnet/minecraft/world/item/Item;", "Lnet/minecraft/item/Item;", nullptr };
+        g_refillPotionField_121 = ResolveRefillItemsStaticField121(env, names, sigs);
+    }
+    if (!g_refillGoldenAppleField_121) {
+        const char* names[] = { "GOLDEN_APPLE", "f_42436_", "field_8463", nullptr };
+        const char* sigs[] = { "Lnet/minecraft/class_1792;", "Lnet/minecraft/world/item/Item;", "Lnet/minecraft/item/Item;", nullptr };
+        g_refillGoldenAppleField_121 = ResolveRefillItemsStaticField121(env, names, sigs);
+    }
+    if (!g_refillEnchantedGoldenAppleField_121) {
+        const char* names[] = { "ENCHANTED_GOLDEN_APPLE", "f_42437_", "field_8367", nullptr };
+        const char* sigs[] = { "Lnet/minecraft/class_1792;", "Lnet/minecraft/world/item/Item;", "Lnet/minecraft/item/Item;", nullptr };
+        g_refillEnchantedGoldenAppleField_121 = ResolveRefillItemsStaticField121(env, names, sigs);
+    }
+
+    // Modern Item.getDescriptionId(ItemStack) -> String (e.g. item.minecraft.splash_potion.effect.healing)
+    if (!g_itemGetDescriptionIdWithStack_121) {
+        jclass itemCls = nullptr;
+        const char* itemNames[] = {
+            "net.minecraft.class_1792",
+            "net.minecraft.world.item.Item",
+            "net.minecraft.item.Item",
+            nullptr
+        };
+        for (int i = 0; itemNames[i] && !itemCls; i++) {
+            itemCls = LoadClassWithLoader(env, g_gameClassLoader, itemNames[i]);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); itemCls = nullptr; }
+        }
+        if (itemCls) {
+            const char* names[] = { "getDescriptionId", "getTranslationKey", "method_7876", "m_5671_", nullptr };
+            const char* sigs[] = {
+                "(Lnet/minecraft/class_1799;)Ljava/lang/String;",
+                "(Lnet/minecraft/world/item/ItemStack;)Ljava/lang/String;",
+                "(Lnet/minecraft/item/ItemStack;)Ljava/lang/String;",
+                nullptr
+            };
+            for (int ni = 0; names[ni] && !g_itemGetDescriptionIdWithStack_121; ni++) {
+                for (int si = 0; sigs[si] && !g_itemGetDescriptionIdWithStack_121; si++) {
+                    g_itemGetDescriptionIdWithStack_121 = env->GetMethodID(itemCls, names[ni], sigs[si]);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_itemGetDescriptionIdWithStack_121 = nullptr; }
+                }
+            }
+            env->DeleteLocalRef(itemCls);
+        }
+    }
+
+    // Modern DataComponents.POTION_CONTENTS (1.20.5+ / 1.21 / 26.1 / 26.2)
+    if (!g_dataComponentsClass_121) {
+        const char* dcNames[] = {
+            "net.minecraft.class_9278",
+            "net.minecraft.core.component.DataComponents",
+            "net.minecraft.component.DataComponentTypes",
+            nullptr
+        };
+        for (int i = 0; dcNames[i] && !g_dataComponentsClass_121; i++) {
+            jclass cls = LoadClassWithLoader(env, g_gameClassLoader, dcNames[i]);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); cls = nullptr; }
+            if (cls) g_dataComponentsClass_121 = (jclass)env->NewGlobalRef(cls);
+        }
+    }
+    if (g_dataComponentsClass_121 && !g_dataComponentsPotionContentsField_121) {
+        const char* names[] = { "POTION_CONTENTS", "field_49386", "f_314188_", nullptr };
+        const char* sigs[] = {
+            "Lnet/minecraft/class_9331;",
+            "Lnet/minecraft/core/component/DataComponentType;",
+            "Lnet/minecraft/component/ComponentType;",
+            "Lnet/minecraft/component/type/PotionContentsComponent;",
+            nullptr
+        };
+        for (int ni = 0; names[ni] && !g_dataComponentsPotionContentsField_121; ni++) {
+            for (int si = 0; sigs[si] && !g_dataComponentsPotionContentsField_121; si++) {
+                g_dataComponentsPotionContentsField_121 = env->GetStaticFieldID(g_dataComponentsClass_121, names[ni], sigs[si]);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_dataComponentsPotionContentsField_121 = nullptr; }
+            }
+        }
+    }
+    if (!g_itemStackGetComponent_121) {
+        jclass stackCls = nullptr;
+        const char* stackNames[] = {
+            "net.minecraft.class_1799",
+            "net.minecraft.world.item.ItemStack",
+            "net.minecraft.item.ItemStack",
+            nullptr
+        };
+        for (int i = 0; stackNames[i] && !stackCls; i++) {
+            stackCls = LoadClassWithLoader(env, g_gameClassLoader, stackNames[i]);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); stackCls = nullptr; }
+        }
+        if (stackCls) {
+            const char* names[] = { "get", "method_57353", "m_323215_", nullptr };
+            const char* sigs[] = {
+                "(Lnet/minecraft/class_9331;)Ljava/lang/Object;",
+                "(Lnet/minecraft/core/component/DataComponentType;)Ljava/lang/Object;",
+                "(Lnet/minecraft/component/ComponentType;)Ljava/lang/Object;",
+                nullptr
+            };
+            for (int ni = 0; names[ni] && !g_itemStackGetComponent_121; ni++) {
+                for (int si = 0; si < 3 && sigs[si] && !g_itemStackGetComponent_121; si++) {
+                    g_itemStackGetComponent_121 = env->GetMethodID(stackCls, names[ni], sigs[si]);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_itemStackGetComponent_121 = nullptr; }
+                }
+            }
+            env->DeleteLocalRef(stackCls);
+        }
+    }
+
+    // Hover name -> Component.getString() fallback
+    if (!g_itemStackGetHoverName_121) {
+        jclass stackCls = nullptr;
+        const char* stackNames[] = {
+            "net.minecraft.class_1799",
+            "net.minecraft.world.item.ItemStack",
+            "net.minecraft.item.ItemStack",
+            nullptr
+        };
+        for (int i = 0; stackNames[i] && !stackCls; i++) {
+            stackCls = LoadClassWithLoader(env, g_gameClassLoader, stackNames[i]);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); stackCls = nullptr; }
+        }
+        if (stackCls) {
+            const char* names[] = { "getHoverName", "getName", "method_7864", "m_41786_", nullptr };
+            const char* sigs[] = {
+                "()Lnet/minecraft/class_2561;",
+                "()Lnet/minecraft/network/chat/Component;",
+                "()Lnet/minecraft/text/Text;",
+                nullptr
+            };
+            for (int ni = 0; names[ni] && !g_itemStackGetHoverName_121; ni++) {
+                for (int si = 0; sigs[si] && !g_itemStackGetHoverName_121; si++) {
+                    g_itemStackGetHoverName_121 = env->GetMethodID(stackCls, names[ni], sigs[si]);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_itemStackGetHoverName_121 = nullptr; }
+                }
+            }
+            env->DeleteLocalRef(stackCls);
+        }
+    }
+    if (!g_componentGetString_121) {
+        jclass compCls = nullptr;
+        const char* compNames[] = {
+            "net.minecraft.class_2561",
+            "net.minecraft.network.chat.Component",
+            "net.minecraft.text.Text",
+            nullptr
+        };
+        for (int i = 0; compNames[i] && !compCls; i++) {
+            compCls = LoadClassWithLoader(env, g_gameClassLoader, compNames[i]);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); compCls = nullptr; }
+        }
+        if (compCls) {
+            const char* names[] = { "getString", "method_10851", "m_130675_", nullptr };
+            const char* sigs[] = { "()Ljava/lang/String;", nullptr };
+            for (int ni = 0; names[ni] && !g_componentGetString_121; ni++) {
+                g_componentGetString_121 = env->GetMethodID(compCls, names[ni], sigs[0]);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_componentGetString_121 = nullptr; }
+            }
+            env->DeleteLocalRef(compCls);
+        }
+    }
+
+    // Legacy ItemStack translation key (0-arg)
+    if (!g_itemStackGetTranslationKey_121) {
+        jclass stackCls = nullptr;
+        const char* stackNames[] = {
+            "net.minecraft.class_1799",
+            "net.minecraft.world.item.ItemStack",
+            "net.minecraft.item.ItemStack",
+            nullptr
+        };
+        for (int i = 0; stackNames[i] && !stackCls; i++) {
+            stackCls = LoadClassWithLoader(env, g_gameClassLoader, stackNames[i]);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); stackCls = nullptr; }
+        }
+        if (stackCls) {
+            const char* names[] = { "getTranslationKey", "getDescriptionId", "method_7866", "m_41603_", nullptr };
+            const char* sigs[] = { "()Ljava/lang/String;", nullptr };
+            for (int ni = 0; names[ni] && !g_itemStackGetTranslationKey_121; ni++) {
+                g_itemStackGetTranslationKey_121 = env->GetMethodID(stackCls, names[ni], sigs[0]);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_itemStackGetTranslationKey_121 = nullptr; }
+            }
+            env->DeleteLocalRef(stackCls);
+        }
+    }
+
+    return true;
+}
+
+static bool ContainsHealingOrRegen(const std::string& raw) {
+    if (raw.empty()) return false;
+    std::string key = raw;
+    for (char& ch : key) ch = (char)std::tolower((unsigned char)ch);
+    return key.find("healing") != std::string::npos ||
+           key.find("regen") != std::string::npos ||
+           key.find("health") != std::string::npos ||
+           key.find("instant_health") != std::string::npos ||
+           key.find("leczenie") != std::string::npos ||
+           key.find("regeneracja") != std::string::npos ||
+           key.find("uzdrowienie") != std::string::npos ||
+           key.find("zdrowie") != std::string::npos;
+}
+
+// Mirrors Vape's Refill filter: only potions whose effect name contains
+// healing/regeneration count (e.g. ...effect.healing, ...strong_healing,
+// ...regeneration). Speed/strength/etc. are excluded. Golden apples pass.
+static bool IsRefillHealingPotionKey121(JNIEnv* env, jobject stackObj, jobject itemObj) {
+    if (!env || !stackObj) return false;
+
+    std::string detectedName;
+    std::string detectedCompMap;
+    std::string detectedDesc;
+
+    jclass stackCls = env->GetObjectClass(stackObj);
+    if (stackCls) {
+        // 1. DataComponentMap via getComponents() / method_57353() / m_323215_() (1.20.5+ / 1.21 / 26.2)
+        const char* compMapNames[] = { "getComponents", "method_57353", "m_323215_", "components", nullptr };
+        const char* compMapSigs[] = {
+            "()Lnet/minecraft/class_9323;",
+            "()Lnet/minecraft/core/component/DataComponentMap;",
+            "()Lnet/minecraft/component/ComponentMap;",
+            "()Lnet/minecraft/core/component/PatchedDataComponentMap;",
+            nullptr
+        };
+        for (int ni = 0; compMapNames[ni] && detectedCompMap.empty(); ni++) {
+            for (int si = 0; compMapSigs[si] && detectedCompMap.empty(); si++) {
+                jmethodID getCompMid = env->GetMethodID(stackCls, compMapNames[ni], compMapSigs[si]);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); getCompMid = nullptr; }
+                if (getCompMid) {
+                    jobject compMapObj = env->CallObjectMethod(stackObj, getCompMid);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); compMapObj = nullptr; }
+                    if (compMapObj) {
+                        jclass cmCls = env->GetObjectClass(compMapObj);
+                        if (cmCls) {
+                            jmethodID toStr = env->GetMethodID(cmCls, "toString", "()Ljava/lang/String;");
+                            if (env->ExceptionCheck()) { env->ExceptionClear(); toStr = nullptr; }
+                            if (toStr) {
+                                jstring sObj = (jstring)env->CallObjectMethod(compMapObj, toStr);
+                                if (env->ExceptionCheck()) { env->ExceptionClear(); sObj = nullptr; }
+                                if (sObj) {
+                                    const char* c = env->GetStringUTFChars(sObj, nullptr);
+                                    if (c) { detectedCompMap = c; env->ReleaseStringUTFChars(sObj, c); }
+                                    env->DeleteLocalRef(sObj);
+                                }
+                            }
+                            env->DeleteLocalRef(cmCls);
+                        }
+                        env->DeleteLocalRef(compMapObj);
+                    }
+                }
+            }
+        }
+
+        // 2. Hover Name / Display Name via getName() / getHoverName() / method_7864()
+        const char* nameMethodNames[] = { "getHoverName", "getName", "method_7864", "m_41786_", nullptr };
+        const char* nameMethodSigs[] = {
+            "()Lnet/minecraft/class_2561;",
+            "()Lnet/minecraft/network/chat/Component;",
+            "()Lnet/minecraft/text/Text;",
+            nullptr
+        };
+        for (int ni = 0; nameMethodNames[ni] && detectedName.empty(); ni++) {
+            for (int si = 0; nameMethodSigs[si] && detectedName.empty(); si++) {
+                jmethodID getNameMid = env->GetMethodID(stackCls, nameMethodNames[ni], nameMethodSigs[si]);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); getNameMid = nullptr; }
+                if (getNameMid) {
+                    jobject textObj = env->CallObjectMethod(stackObj, getNameMid);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); textObj = nullptr; }
+                    if (textObj) {
+                        detectedName = CallTextToString(env, textObj);
+                        env->DeleteLocalRef(textObj);
+                    }
+                }
+            }
+        }
+
+        env->DeleteLocalRef(stackCls);
+    }
+
+    if (ContainsHealingOrRegen(detectedCompMap)) return true;
+    if (ContainsHealingOrRegen(detectedName)) return true;
+
+    // 3. Modern Item.getDescriptionId(ItemStack)
+    if (itemObj) {
+        jclass itemCls = env->GetObjectClass(itemObj);
+        if (itemCls) {
+            const char* descNames[] = { "getDescriptionId", "getTranslationKey", "method_7876", "m_5671_", nullptr };
+            const char* descSigs[] = {
+                "(Lnet/minecraft/class_1799;)Ljava/lang/String;",
+                "(Lnet/minecraft/world/item/ItemStack;)Ljava/lang/String;",
+                "(Lnet/minecraft/item/ItemStack;)Ljava/lang/String;",
+                nullptr
+            };
+            for (int ni = 0; descNames[ni] && detectedDesc.empty(); ni++) {
+                for (int si = 0; descSigs[si] && detectedDesc.empty(); si++) {
+                    jmethodID descMid = env->GetMethodID(itemCls, descNames[ni], descSigs[si]);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); descMid = nullptr; }
+                    if (descMid) {
+                        jstring sObj = (jstring)env->CallObjectMethod(itemObj, descMid, stackObj);
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); sObj = nullptr; }
+                        if (sObj) {
+                            const char* c = env->GetStringUTFChars(sObj, nullptr);
+                            if (c) { detectedDesc = c; env->ReleaseStringUTFChars(sObj, c); }
+                            env->DeleteLocalRef(sObj);
+                        }
+                    }
+                }
+            }
+            env->DeleteLocalRef(itemCls);
+        }
+    }
+
+    if (ContainsHealingOrRegen(detectedDesc)) return true;
+
+    DWORD now = GetTickCount();
+    if (now - g_lastRefillFilterLogMs121 >= 5000) {
+        g_lastRefillFilterLogMs121 = now;
+        Log(std::string("Refill potion effect/translation check: name='") + detectedName + "' map='" + detectedCompMap + "' desc='" + detectedDesc + "'");
+    }
+    return false;
+}
+
+// Throwpot variant: only healing SPLASH potions qualify (drinkable potions
+// would be consumed rather than thrown; apples are not throwable either).
+static bool IsRefillHealingStackSplashOnly121(JNIEnv* env, jobject stackObj, jobject item) {
+    if (!env || !stackObj) return false;
+    if (!IsRefillHealingPotionKey121(env, stackObj, item)) return false;
+
+    if (g_itemsClass_121 && g_refillSplashPotionField_121 && item) {
+        jobject target = env->GetStaticObjectField(g_itemsClass_121, g_refillSplashPotionField_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); target = nullptr; }
+        if (target) {
+            bool same = env->IsSameObject(item, target) == JNI_TRUE;
+            env->DeleteLocalRef(target);
+            if (same) return true;
+        }
+    }
+
+    jclass objCls = env->GetObjectClass(stackObj);
+    if (objCls) {
+        jmethodID toStr = env->GetMethodID(objCls, "toString", "()Ljava/lang/String;");
+        if (env->ExceptionCheck()) { env->ExceptionClear(); toStr = nullptr; }
+        if (toStr) {
+            jstring strObj = (jstring)env->CallObjectMethod(stackObj, toStr);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); strObj = nullptr; }
+            if (strObj) {
+                const char* chars = env->GetStringUTFChars(strObj, nullptr);
+                bool match = false;
+                if (chars) {
+                    std::string s = chars;
+                    for (char& c : s) c = (char)std::tolower((unsigned char)c);
+                    match = s.find("splash") != std::string::npos || s.find("miotana") != std::string::npos;
+                    env->ReleaseStringUTFChars(strObj, chars);
+                }
+                env->DeleteLocalRef(strObj);
+                if (match) {
+                    env->DeleteLocalRef(objCls);
+                    return true;
+                }
+            }
+        }
+        env->DeleteLocalRef(objCls);
+    }
+    return true;
+}
+
+static bool IsRefillHealingStack121(JNIEnv* env, jobject stackObj) {
+    if (!env || !stackObj) return false;
+    jobject item = g_itemStackGetItem_121 ? env->CallObjectMethod(stackObj, g_itemStackGetItem_121) : nullptr;
+    if (env->ExceptionCheck()) { env->ExceptionClear(); item = nullptr; }
+
+    // 1. Potion check (Splash or Drinkable)
+    if (IsRefillHealingPotionKey121(env, stackObj, item)) {
+        if (item) env->DeleteLocalRef(item);
+        return true;
+    }
+
+    // 2. Golden Apple / Enchanted Golden Apple static item check
+    bool isGoldenApple = false;
+    if (item && g_itemsClass_121) {
+        auto matches = [&](jfieldID field) {
+            if (!field) return false;
+            jobject target = env->GetStaticObjectField(g_itemsClass_121, field);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); target = nullptr; return false; }
+            bool same = target && env->IsSameObject(item, target) == JNI_TRUE;
+            if (target) env->DeleteLocalRef(target);
+            return same;
+        };
+
+        if (g_refillGoldenAppleField_121 && matches(g_refillGoldenAppleField_121)) {
+            isGoldenApple = true;
+        }
+        if (!isGoldenApple && g_refillEnchantedGoldenAppleField_121 && matches(g_refillEnchantedGoldenAppleField_121)) {
+            isGoldenApple = true;
+        }
+    }
+
+    // 3. Fallback name check for Golden Apple
+    if (!isGoldenApple) {
+        jclass stackCls = env->GetObjectClass(stackObj);
+        if (stackCls) {
+            const char* nameMethodNames[] = { "getHoverName", "getName", "method_7864", "m_41786_", nullptr };
+            const char* nameMethodSigs[] = {
+                "()Lnet/minecraft/class_2561;",
+                "()Lnet/minecraft/network/chat/Component;",
+                "()Lnet/minecraft/text/Text;",
+                nullptr
+            };
+            for (int ni = 0; nameMethodNames[ni] && !isGoldenApple; ni++) {
+                for (int si = 0; nameMethodSigs[si] && !isGoldenApple; si++) {
+                    jmethodID getNameMid = env->GetMethodID(stackCls, nameMethodNames[ni], nameMethodSigs[si]);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); getNameMid = nullptr; }
+                    if (getNameMid) {
+                        jobject textObj = env->CallObjectMethod(stackObj, getNameMid);
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); textObj = nullptr; }
+                        if (textObj) {
+                            std::string name = CallTextToString(env, textObj);
+                            env->DeleteLocalRef(textObj);
+                            for (char& c : name) c = (char)std::tolower((unsigned char)c);
+                            if (name.find("golden apple") != std::string::npos ||
+                                name.find("jabłko") != std::string::npos ||
+                                name.find("gapple") != std::string::npos) {
+                                isGoldenApple = true;
+                            }
+                        }
+                    }
+                }
+            }
+            env->DeleteLocalRef(stackCls);
+        }
+    }
+
+    if (item) env->DeleteLocalRef(item);
+    return isGoldenApple;
+}
+
+static std::string BuildModernRefillStateJson(JNIEnv* env, jobject screenObj, const std::string& screenName, bool enabled) {
+    if (!enabled || !env || !screenObj) return "null";
+    // Exclude creative inventory screens
+    if (ScreenChainContainsClass121(screenName, "CreativeModeInventoryScreen") ||
+        ScreenChainContainsClass121(screenName, "CreativeInventoryScreen") ||
+        ScreenChainContainsClass121(screenName, "class_481")) {
+        return "null";
+    }
+    // Survival inventory only (Mojmap/Yarn InventoryScreen, Intermediary class_490)
+    if (!ScreenChainContainsClass121(screenName, "InventoryScreen") &&
+        !ScreenChainContainsClass121(screenName, "class_490")) {
+        return "null";
+    }
+    if (!EnsureRefillItemMappings121(env)) {
+        LogThrowPotModernRateLimited("refill item mappings unavailable");
+        return "null";
+    }
+
+    if (!ResolveModernChestStealerMappings(env, screenObj)) {
+        LogChestStealerMappingMissing121(MissingChestStealerMappingDetail121());
+        return "null";
+    }
+
+    jobject handlerObj = env->GetObjectField(screenObj, g_chestStealerScreenHandlerField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); handlerObj = nullptr; }
+    if (!handlerObj) return "null";
+
+    int windowId = env->GetIntField(handlerObj, g_chestStealerHandlerSyncIdField_121);
+    int guiX = env->GetIntField(screenObj, g_chestStealerScreenXField_121);
+    int guiY = env->GetIntField(screenObj, g_chestStealerScreenYField_121);
+    int screenWidth = env->GetIntField(screenObj, g_chestStealerScreenWidthField_121);
+    int screenHeight = env->GetIntField(screenObj, g_chestStealerScreenHeightField_121);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        env->DeleteLocalRef(handlerObj);
+        return "null";
+    }
+
+    jobject slotsObj = env->GetObjectField(handlerObj, g_chestStealerHandlerSlotsField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); slotsObj = nullptr; }
+    env->DeleteLocalRef(handlerObj);
+    if (!slotsObj) return "null";
+
+    jclass listAccessCls = nullptr;
+    jmethodID sizeMid = nullptr;
+    jmethodID getMid = nullptr;
+    if (!ResolveListAccess121(env, slotsObj, sizeMid, getMid, listAccessCls)) {
+        if (listAccessCls) env->DeleteLocalRef(listAccessCls);
+        env->DeleteLocalRef(slotsObj);
+        return "null";
+    }
+
+    int size = env->CallIntMethod(slotsObj, sizeMid);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); size = 0; }
+    // Player screen handler: 46 slots (9-35 backpack, 36-44 hotbar, 45 offhand).
+    if (size < 45 || screenWidth <= 0 || screenHeight <= 0) {
+        env->DeleteLocalRef(listAccessCls);
+        env->DeleteLocalRef(slotsObj);
+        return "null";
+    }
+
+    bool hotbarHasRoom = false;
+    for (int i = 36; i <= 44 && !hotbarHasRoom; i++) {
+        jobject slotObj = env->CallObjectMethod(slotsObj, getMid, i);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); continue; }
+        if (!slotObj) { hotbarHasRoom = true; continue; }
+        if (!ResolveModernChestStealerSlotMappings(env, slotObj)) {
+            env->DeleteLocalRef(slotObj);
+            continue;
+        }
+        bool hasStack = env->CallBooleanMethod(slotObj, g_chestStealerSlotHasStackMethod_121) == JNI_TRUE;
+        if (env->ExceptionCheck()) { env->ExceptionClear(); hasStack = false; }
+        if (!hasStack) {
+            hotbarHasRoom = true;
+        } else if (g_chestStealerSlotGetStackMethod_121) {
+            jobject st = env->CallObjectMethod(slotObj, g_chestStealerSlotGetStackMethod_121);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); st = nullptr; }
+            if (st) {
+                jclass stCls = env->GetObjectClass(st);
+                if (stCls) {
+                    const char* emptyNames[] = { "isEmpty", "method_7960", "m_41619_", nullptr };
+                    for (int ei = 0; emptyNames[ei]; ei++) {
+                        jmethodID emptyMid = env->GetMethodID(stCls, emptyNames[ei], "()Z");
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); emptyMid = nullptr; }
+                        if (emptyMid) {
+                            if (env->CallBooleanMethod(st, emptyMid) == JNI_TRUE) {
+                                hotbarHasRoom = true;
+                            }
+                            break;
+                        }
+                    }
+                    env->DeleteLocalRef(stCls);
+                }
+                env->DeleteLocalRef(st);
+            } else {
+                hotbarHasRoom = true;
+            }
+        }
+        env->DeleteLocalRef(slotObj);
+    }
+
+    std::ostringstream slotsJson;
+    int count = 0;
+    if (hotbarHasRoom) {
+        for (int i = 9; i <= 35; i++) {
+            jobject slotObj = env->CallObjectMethod(slotsObj, getMid, i);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); slotObj = nullptr; }
+            if (!slotObj) continue;
+            if (!ResolveModernChestStealerSlotMappings(env, slotObj)) {
+                LogChestStealerMappingMissing121(MissingChestStealerSlotMappingDetail121());
+                env->DeleteLocalRef(slotObj);
+                continue;
+            }
+            bool hasStack = env->CallBooleanMethod(slotObj, g_chestStealerSlotHasStackMethod_121) == JNI_TRUE;
+            if (env->ExceptionCheck()) { env->ExceptionClear(); hasStack = false; }
+            bool isHealing = false;
+            if (hasStack && g_chestStealerSlotGetStackMethod_121) {
+                jobject stackObj = env->CallObjectMethod(slotObj, g_chestStealerSlotGetStackMethod_121);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); stackObj = nullptr; }
+                if (stackObj) {
+                    isHealing = IsRefillHealingStack121(env, stackObj);
+                    env->DeleteLocalRef(stackObj);
+                }
+            }
+
+            if (isHealing) {
+                int slotNumber = env->GetIntField(slotObj, g_chestStealerSlotIdField_121);
+                int slotX = env->GetIntField(slotObj, g_chestStealerSlotXField_121);
+                int slotY = env->GetIntField(slotObj, g_chestStealerSlotYField_121);
+                if (env->ExceptionCheck()) {
+                    env->ExceptionClear();
+                } else {
+                    if (count > 0) slotsJson << ",";
+                    slotsJson << "{\"index\":" << i
+                              << ",\"slotNumber\":" << slotNumber
+                              << ",\"x\":" << (guiX + slotX + 8)
+                              << ",\"y\":" << (guiY + slotY + 8)
+                              << "}";
+                    count++;
+                }
+            }
+            env->DeleteLocalRef(slotObj);
+        }
+    }
+
+    env->DeleteLocalRef(listAccessCls);
+    env->DeleteLocalRef(slotsObj);
+
+    std::ostringstream out;
+    out << "{\"ready\":" << (count > 0 ? "true" : "false")
+        << ",\"windowId\":" << windowId
+        << ",\"screenWidth\":" << screenWidth
+        << ",\"screenHeight\":" << screenHeight
+        << ",\"slots\":[" << slotsJson.str() << "]}";
+    return out.str();
+}
+
 static void UpdateChestList(JNIEnv* env) {
     DWORD now = GetTickCount();
     if (now - g_lastChestScanMs < 100) return;
@@ -9169,16 +9972,9 @@ static bool KillAuraPerformAttack(JNIEnv* env, jobject selfObj, jobject targetOb
         return false;
     }
 
-    // OpenMyau order: swing, synchronize the selected stack, then attack. The
-    // game-mode attack method sends the modern interaction packet and applies
-    // the local attack effects.
-    env->CallVoidMethod(selfObj, g_silentAuraSwingMethod_121, g_silentAuraMainHand_121);
-    if (env->ExceptionCheck()) {
-        env->ExceptionClear();
-        env->DeleteLocalRef(gameMode);
-        SetKillAuraUnavailableReason("Swing invocation failed.");
-        return false;
-    }
+    // Vanilla-modern order (Minecraft.clickMouse / Rise >1.8): carried-item
+    // sync, interact-ATTACK packet via GameMode.attack, then the swing packet.
+    // Swinging before the attack is inverted and trips swing-order checks.
     env->CallVoidMethod(gameMode, g_killAuraSyncHeldItemMethod_121);
     if (env->ExceptionCheck()) {
         env->ExceptionClear();
@@ -9191,6 +9987,13 @@ static bool KillAuraPerformAttack(JNIEnv* env, jobject selfObj, jobject targetOb
         env->ExceptionClear();
         env->DeleteLocalRef(gameMode);
         SetKillAuraUnavailableReason("Entity attack invocation failed.");
+        return false;
+    }
+    env->CallVoidMethod(selfObj, g_silentAuraSwingMethod_121, g_silentAuraMainHand_121);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        env->DeleteLocalRef(gameMode);
+        SetKillAuraUnavailableReason("Swing invocation failed.");
         return false;
     }
     env->DeleteLocalRef(gameMode);
@@ -9370,6 +10173,99 @@ static void EnsureKillAuraPremotion121(JNIEnv* env) {
     }
 }
 
+// ---- Premotion per-tick resource gate (modern) -----------------------------
+// Auto-block start/release runs here — once per outbound movement packet,
+// strictly between two C03s — instead of on the worker thread, so use-item and
+// attack packets never share a server tick. The gate also releases blocking
+// when target/blocking conditions are lost.
+static volatile LONG g_killAuraGateArmed_121 = 0;      // killAura on && auto-block != NONE
+static volatile LONG g_killAuraGateMode_121 = 0;       // killaura::AutoBlockMode snapshot
+static volatile LONG g_killAuraGateHasTarget_121 = 0;  // chosen target within block range
+static volatile LONG g_killAuraGateCanBlock_121 = 0;   // held item supports native blocking
+static double g_killAuraGateRangeSq_121 = 0.0;
+static DWORD g_killAuraLastGateMs_121 = 0;
+
+static void KillAuraPublishGateInputs(const Config& cfg, bool hasTargetInRange, bool canBlock) {
+    InterlockedExchange(&g_killAuraGateMode_121, (LONG)cfg.killAuraAutoBlock);
+    g_killAuraGateRangeSq_121 = (double)cfg.killAuraAutoBlockRange * cfg.killAuraAutoBlockRange;
+    InterlockedExchange(&g_killAuraGateHasTarget_121, hasTargetInRange ? 1 : 0);
+    InterlockedExchange(&g_killAuraGateCanBlock_121, canBlock ? 1 : 0);
+    InterlockedExchange(&g_killAuraGateArmed_121,
+        cfg.killAuraAutoBlock != killaura::BLOCK_NONE ? 1 : 0);
+}
+
+static bool KillAuraPremotionTickGate(JNIEnv* env, jobject selfObj) {
+    if (!env || !selfObj) return true;
+    if (InterlockedCompareExchange(&g_killAuraGateArmed_121, 0, 0) == 0) return true;
+    if (!g_mcInstance || !g_gameModeFieldCached_121 || !g_silentAuraMainHand_121 ||
+        !g_killAuraUseItemMethod_121 || !g_killAuraReleaseItemMethod_121) return true;
+
+    // One step per movement tick even if both Premotion backends ever fire.
+    const DWORD now = GetTickCount();
+    if (g_killAuraLastGateMs_121 != 0 && now - g_killAuraLastGateMs_121 < 35) return true;
+    g_killAuraLastGateMs_121 = now;
+
+    const int mode = (int)InterlockedCompareExchange(&g_killAuraGateMode_121, 0, 0);
+    const double rangeSq = g_killAuraGateRangeSq_121;
+    const bool hasTarget = InterlockedCompareExchange(&g_killAuraGateHasTarget_121, 0, 0) != 0;
+    const bool canBlock = InterlockedCompareExchange(&g_killAuraGateCanBlock_121, 0, 0) != 0;
+
+    bool usingItem = false;
+    if (g_killAuraIsUsingItemMethod_121) {
+        usingItem = env->CallBooleanMethod(selfObj, g_killAuraIsUsingItemMethod_121) == JNI_TRUE;
+        if (env->ExceptionCheck()) { env->ExceptionClear(); usingItem = false; }
+    }
+
+    killaura::AutoBlockInput input;
+    input.mode = (killaura::AutoBlockMode)mode;
+    input.hasTarget = hasTarget;
+    input.canBlock = canBlock;
+    input.playerBlocking = usingItem;
+    input.usingItem = usingItem;
+    input.diggingOrPlacing = false;
+    input.slotsSynced = g_killAuraSyncHeldItemMethod_121 != nullptr;
+    input.hasSecondSword = false;
+    input.attackDelayMs = g_killAuraAttackDelayMs_121;
+
+    // Lost target / non-blockable item: release aura-owned blocking exactly
+    // once so later attacks never land while the server sees the sword in use.
+    const bool wasStateBlocking = g_killAuraAutoBlockState_121.isBlocking ||
+        g_killAuraAutoBlockState_121.fakeBlocking;
+    if (!hasTarget || !canBlock) {
+        bool acted = false;
+        if (wasStateBlocking && usingItem &&
+            mode != killaura::BLOCK_NONE && mode != killaura::BLOCK_FAKE) {
+            acted = KillAuraSetNativeBlocking(env, selfObj, false);
+        }
+        g_killAuraAutoBlockState_121 = killaura::AutoBlockState();
+        { LockGuard lk(g_killAuraRenderMutex_121); g_killAuraRenderSnapshot_121.blocking = false; }
+        return !acted;
+    }
+
+    killaura::AutoBlockResult result =
+        killaura::StepAutoBlock(g_killAuraAutoBlockState_121, input);
+    { LockGuard lk(g_killAuraRenderMutex_121); g_killAuraRenderSnapshot_121.blocking = g_killAuraAutoBlockState_121.isBlocking; }
+
+    const uint32_t unsupported = killaura::ACTION_SWAP_EMPTY | killaura::ACTION_SWAP_SWORD |
+        killaura::ACTION_INTERACT | killaura::ACTION_BLINK_ON;
+    if ((result.actions & unsupported) != 0) {
+        SetKillAuraUnavailableReason("Selected auto-block mode requires a validated modern slot, interaction, or Blink packet adapter.");
+        return false;
+    }
+
+    bool acted = false;
+    if ((result.actions & killaura::ACTION_STOP_BLOCK) != 0)
+        acted = KillAuraSetNativeBlocking(env, selfObj, false) || acted;
+    if ((result.actions & killaura::ACTION_START_BLOCK) != 0)
+        acted = KillAuraSetNativeBlocking(env, selfObj, true) || acted;
+
+    // Rise discipline: a tick that carried use packets never carries an attack
+    // — except BLOCK_HYPIXEL, whose Rise "Watchdog 1.8" reference deliberately
+    // sends use-item and the attack in the same tick.
+    if (acted && mode != killaura::BLOCK_HYPIXEL) return false;
+    return result.allowAttack;
+}
+
 static void UpdateKillAura(JNIEnv* env, const Config& cfg) {
     if (!cfg.killAura) {
         g_killAuraLastScanMs_121 = 0;
@@ -9382,12 +10278,24 @@ static void UpdateKillAura(JNIEnv* env, const Config& cfg) {
         { LockGuard lk(g_killAuraRenderMutex_121); g_killAuraRenderSnapshot_121 = KillAuraRenderSnapshot121(); }
         SetKillAuraUnavailableReason("");
         KillAuraResetState();
+        InterlockedExchange(&g_killAuraGateArmed_121, 0);
+        InterlockedExchange(&g_killAuraGateHasTarget_121, 0);
         ka_premotion::ClearPendingAttack(env);
         return;
     }
     if (!env || !g_mcInstance) return;
     if (IsWorldTransitionActive()) {
         ka_premotion::SuspendForWorldChange(env);
+        return;
+    }
+
+    // Tab-out guard: when the game window is not foreground, stop attacking and
+    // blocking immediately. Without this the aura keeps fighting while you are
+    // tabbed into the Aoko GUI.
+    if (g_hwnd && GetForegroundWindow() != g_hwnd) {
+        ka_premotion::SetSilentCombatAngles(false, 0.0f, 0.0f, 0.0f, false);
+        ka_premotion::ClearPendingAttack(env);
+        KillAuraPublishGateInputs(cfg, false, false);
         return;
     }
 
@@ -9790,39 +10698,18 @@ static void UpdateKillAura(JNIEnv* env, const Config& cfg) {
         g_killAuraRenderSnapshot_121.hasAimPoint = false;
         g_killAuraRenderSnapshot_121.blocking = g_killAuraAutoBlockState_121.isBlocking;
     }
-    bool autoBlockAllowAttack = true;
-    if (haveChosen && chosenEnt && cfg.killAuraAutoBlock != killaura::BLOCK_NONE) {
-        bool usingItem = false;
-        if (g_killAuraIsUsingItemMethod_121) {
-            usingItem = env->CallBooleanMethod(selfObj, g_killAuraIsUsingItemMethod_121) == JNI_TRUE;
-            if (env->ExceptionCheck()) { env->ExceptionClear(); usingItem = false; }
-        }
-        int attackDelayMs = g_killAuraAttackDelayMs_121;
-        killaura::AutoBlockInput blockInput;
-        blockInput.mode = (killaura::AutoBlockMode)cfg.killAuraAutoBlock;
-        blockInput.hasTarget = chDistSq <= (double)cfg.killAuraAutoBlockRange * cfg.killAuraAutoBlockRange;
-        blockInput.canBlock = heldItem.nativeBlocking;
-        blockInput.playerBlocking = usingItem;
-        blockInput.usingItem = usingItem;
-        blockInput.diggingOrPlacing = false;
-        blockInput.slotsSynced = g_killAuraSyncHeldItemMethod_121 != nullptr;
-        blockInput.hasSecondSword = false;
-        blockInput.attackDelayMs = attackDelayMs;
-        killaura::AutoBlockResult blockResult =
-            killaura::StepAutoBlock(g_killAuraAutoBlockState_121, blockInput);
-        autoBlockAllowAttack = blockResult.allowAttack;
-
-        const uint32_t unsupported = killaura::ACTION_SWAP_EMPTY | killaura::ACTION_SWAP_SWORD |
-            killaura::ACTION_INTERACT | killaura::ACTION_BLINK_ON;
-        if ((blockResult.actions & unsupported) != 0) {
-            SetKillAuraUnavailableReason("Selected auto-block mode requires a validated modern slot, interaction, or Blink packet adapter.");
-            autoBlockAllowAttack = false;
-        } else {
-            if ((blockResult.actions & killaura::ACTION_STOP_BLOCK) != 0)
-                autoBlockAllowAttack = KillAuraSetNativeBlocking(env, selfObj, false) && autoBlockAllowAttack;
-            if ((blockResult.actions & killaura::ACTION_START_BLOCK) != 0)
-                autoBlockAllowAttack = KillAuraSetNativeBlocking(env, selfObj, true) && autoBlockAllowAttack;
-        }
+    // Auto-block packets no longer emit from this worker thread. Inputs are
+    // published to the Premotion tick gate (KillAuraPremotionTickGate), which
+    // performs them once per movement tick so use-item and attack land in
+    // separate server ticks.
+    KillAuraPublishGateInputs(cfg,
+        haveChosen && chosenEnt &&
+        chDistSq <= (double)cfg.killAuraAutoBlockRange * cfg.killAuraAutoBlockRange,
+        heldItem.nativeBlocking);
+    if (!ka_premotion::IsOperational() && cfg.killAuraAutoBlock != killaura::BLOCK_NONE) {
+        // The gate runs inside the Premotion callback; without a backend there
+        // are no block packets at all, so nothing can mix with direct attacks.
+        InterlockedExchange(&g_killAuraGateArmed_121, 0);
     }
 
     if (haveChosen && chosenEnt) {
@@ -9986,7 +10873,7 @@ static void UpdateKillAura(JNIEnv* env, const Config& cfg) {
             if (rotMode == killaura::ROT_GROK && !grokEngage) onTarget = false;
             bool inAttackRange = killaura::DistanceToBox(eyes, targetBox) <= attackRange;
 
-            if (onTarget && inAttackRange && autoBlockAllowAttack) {
+            if (onTarget && inAttackRange) {
                 {
                         if (g_killAuraAttackDelayMs_121 <= 0) {
                             bool attacked = false;
@@ -11383,10 +12270,28 @@ static void ResetAutoTotemCaches(JNIEnv* env) {
     g_loggedAntiDebuffResolveFail_121 = false;
     g_lastAntiDebuffTickMs = 0;
     g_nextAntiDebuffResolveMs_121 = 0;
+
+    ResetRefillModernCaches(env);
+}
+
+static void ResetRefillModernCaches(JNIEnv* env) {
+    g_refillSplashPotionField_121 = nullptr;
+    g_refillPotionField_121 = nullptr;
+    g_refillGoldenAppleField_121 = nullptr;
+    g_refillEnchantedGoldenAppleField_121 = nullptr;
+    g_itemGetDescriptionIdWithStack_121 = nullptr;
+    g_itemStackGetTranslationKey_121 = nullptr;
+    DeleteGlobalRefSafe(env, g_dataComponentsClass_121);
+    g_dataComponentsPotionContentsField_121 = nullptr;
+    g_itemStackGetComponent_121 = nullptr;
+    g_itemStackGetHoverName_121 = nullptr;
+    g_componentGetString_121 = nullptr;
 }
 
 static void CleanupJniGlobals(JNIEnv* env) {
     if (!env) return;
+
+    ResetRefillModernCaches(env);
 
     DeleteGlobalRefSafe(env, g_gameClassLoader);
     DeleteGlobalRefSafe(env, g_mcInstance);
@@ -13088,8 +13993,10 @@ static void UpdateJniState() {
 
     bool chestStealerEnabled = false;
     bool chestStealerMenuCheck = true;
-    { LockGuard lk(g_configMutex); chestStealerEnabled = g_config.chestStealer; chestStealerMenuCheck = g_config.chestStealerMenuCheck; }
+    bool refillEnabled = false;
+    { LockGuard lk(g_configMutex); chestStealerEnabled = g_config.chestStealer; chestStealerMenuCheck = g_config.chestStealerMenuCheck; refillEnabled = g_config.refill; }
     std::string chestStealerStateJson = BuildModernChestStealerStateJson(env, scr, screenName, chestStealerEnabled, chestStealerMenuCheck);
+    std::string refillStateJson = BuildModernRefillStateJson(env, scr, screenName, refillEnabled);
     if (scr) env->DeleteLocalRef(scr);
 
     // Debug: log screen changes (helps diagnose Click-in-Chests matching).
@@ -13166,6 +14073,7 @@ static void UpdateJniState() {
                     jclass imCls = env->GetObjectClass(imObj);
                     if (imCls) {
                         static jfieldID s_brkFld = nullptr;
+                        static jfieldID s_progressFld = nullptr;
                         if (!s_brkFld) {
                             const char* bNames[] = { "field_3716", "isDestroying", "destroyingBlock", "f_105202_", nullptr };
                             for (int i = 0; bNames[i] && !s_brkFld; ++i) {
@@ -13173,25 +14081,27 @@ static void UpdateJniState() {
                                 if (env->ExceptionCheck()) { env->ExceptionClear(); s_brkFld = nullptr; }
                             }
                         }
+                        if (!s_progressFld) {
+                            const char* pNames[] = { "field_3715", "currentBreakingProgress", "destroyProgress", "f_105203_", nullptr };
+                            for (int i = 0; pNames[i] && !s_progressFld; ++i) {
+                                s_progressFld = env->GetFieldID(imCls, pNames[i], "F");
+                                if (env->ExceptionCheck()) { env->ExceptionClear(); s_progressFld = nullptr; }
+                            }
+                        }
                         if (s_brkFld) {
                             breakingBlock = (env->GetBooleanField(imObj, s_brkFld) == JNI_TRUE);
                             if (env->ExceptionCheck()) { env->ExceptionClear(); breakingBlock = false; }
+                        }
+                        if (!breakingBlock && s_progressFld) {
+                            float prog = env->GetFloatField(imObj, s_progressFld);
+                            if (env->ExceptionCheck()) { env->ExceptionClear(); prog = 0.0f; }
+                            if (prog > 0.0f) breakingBlock = true;
                         }
                         env->DeleteLocalRef(imCls);
                     }
                     env->DeleteLocalRef(imObj);
                 } else env->ExceptionClear();
             }
-        }
-
-        // Fallback: if we can't read the internal breaking flag, derive it from input + target.
-        // This is more reliable across clients/mappings and avoids "pause just by looking".
-        if (!breakingBlock) {
-            SHORT lmb = GetAsyncKeyState(VK_LBUTTON);
-            bool lmbDown = (lmb & 0x8000) != 0;
-            // Consider it "breaking" when LMB is held and hit result is a block.
-            // (Don't depend on cursor mode; and don't require guiOpen==false here because GUI clicks are blocked anyway.)
-            if (!guiOpen && lmbDown && lookingAtBlock) breakingBlock = true;
         }
 
         // Resolve and cache Minecraft.player field across known mappings.
@@ -13453,6 +14363,7 @@ static void UpdateJniState() {
             g_jniAttackCooldown = attackCooldown;
             g_jniAttackCooldownPerTick = attackCooldownPerTick;
             g_jniChestStealerStateJson = chestStealerStateJson;
+            g_jniRefillStateJson = refillStateJson;
             g_jniStateMs = nowMs;
         }
         return;
@@ -13913,7 +14824,7 @@ static bool EnsureAutoRodModernMappings(JNIEnv* env, jobject player, bool needRo
                     if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoRodSelectedSlotField121 = nullptr; }
                 }
             }
-            if (needRodClass && !g_autoRodInventoryGetItem121) {
+            if (!g_autoRodInventoryGetItem121) {
                 const char* names[] = { "method_5438", "getItem", "getStack", "m_8020_", "getStackInSlot", nullptr };
                 const char* sigs[] = {
                     "(I)Lnet/minecraft/class_1799;",
@@ -14027,7 +14938,7 @@ static bool EnsureAutoRodModernMappings(JNIEnv* env, jobject player, bool needRo
             env->DeleteLocalRef(rodCls);
         }
     }
-    if (needRodClass && !g_autoRodItemStackGetItem121) {
+    if (!g_autoRodItemStackGetItem121) {
         const char* stackClasses[] = {
             "net.minecraft.class_1799",
             "net.minecraft.world.item.ItemStack",
@@ -14059,8 +14970,8 @@ static bool EnsureAutoRodModernMappings(JNIEnv* env, jobject player, bool needRo
     env->DeleteLocalRef(mcCls);
     return g_autoRodGetInventory121 && g_autoRodSelectedSlotField121 &&
         g_autoRodPlayerTickCountField121 &&
-        (!needRodClass || (g_autoRodInventoryGetItem121 &&
-            g_autoRodItemStackGetItem121 && g_autoRodFishingRodClass121));
+        g_autoRodInventoryGetItem121 && g_autoRodItemStackGetItem121 &&
+        (!needRodClass || g_autoRodFishingRodClass121);
 }
 
 static bool SetAutoRodSelectedSlot121(JNIEnv* env, jobject inventory, int slot) {
@@ -14208,6 +15119,9 @@ static void ExecuteAutoRodModern(JNIEnv* env) {
         IsWorldTransitionActive() || !g_mcInstance || !g_playerField_121 ||
         !g_hwnd || GetForegroundWindow() != g_hwnd) return;
 
+    // Throwpot/AutoHeal own the held slot while their transactions are in flight.
+    if (IsThrowPotTransactionActive121() || IsAutoHealTransactionActive121()) return;
+
     AutoRodRequest mutableRequest(false, 0, true);
     if (!TryPopAutoRodRequest(&mutableRequest)) return;
     const AutoRodRequest request = mutableRequest;
@@ -14282,6 +15196,453 @@ static void ExecuteAutoRodModern(JNIEnv* env) {
 
     // Vanilla observes the selected field on its next tick and sends the held-item
     // change in normal packet order before the synthetic use input is issued.
+    env->PopLocalFrame(nullptr);
+}
+
+// ===== Throwpot (modern) =====
+
+static void LogThrowPotModernRateLimited(const char* message) {
+    DWORD now = GetTickCount();
+    if (now - g_throwPotLastLogMs121 < 5000) return;
+    g_throwPotLastLogMs121 = now;
+    Log(std::string("Throwpot: ") + (message ? message : "unknown"));
+}
+
+static bool SendThrowPotUseInput121() {
+    INPUT inputs[2] = {};
+    inputs[0].type = INPUT_MOUSE;
+    inputs[0].mi.dwFlags = MOUSEEVENTF_RIGHTDOWN;
+    inputs[1].type = INPUT_MOUSE;
+    inputs[1].mi.dwFlags = MOUSEEVENTF_RIGHTUP;
+    return SendInput(2, inputs, sizeof(INPUT)) == 2;
+}
+
+static bool IsAutoRodTransactionActive121();
+
+static void ExecuteThrowPotModern(JNIEnv* env) {
+    LockGuard transactionLock(g_throwPotTransactionMutex121);
+
+    if (g_throwPotTransaction121.phase != THROW_POT_TRANSACTION_IDLE_121) {
+        Config cfg;
+        { LockGuard lk(g_configMutex); cfg = g_config; }
+        bool guiOpen = false;
+        bool inWorld = false;
+        { LockGuard lk(g_jniStateMtx); guiOpen = g_jniGuiOpen; inWorld = g_jniInWorld; }
+
+        if (!g_stateJniReady || !g_mcInstance || !g_playerField_121) {
+            ClearThrowPotTransactionLocked121();
+            InterlockedExchange(&g_throwPotRequested, 0);
+            return;
+        }
+
+        if (env->PushLocalFrame(24) < 0) return;
+        jobject player = env->GetObjectField(g_mcInstance, g_playerField_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); player = nullptr; }
+        if (!player) {
+            env->PopLocalFrame(nullptr);
+            ClearThrowPotTransactionLocked121();
+            InterlockedExchange(&g_throwPotRequested, 0);
+            return;
+        }
+
+        int currentTick = 0;
+        if (!ReadAutoRodPlayerTick121(env, player, &currentTick) ||
+            !EnsureAutoRodModernMappings(env, player, false)) {
+            LogThrowPotModernRateLimited("pending transaction mappings unavailable");
+            env->PopLocalFrame(nullptr);
+            return;
+        }
+
+        jobject inventory = env->CallObjectMethod(player, g_autoRodGetInventory121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); inventory = nullptr; }
+        if (!inventory) {
+            env->PopLocalFrame(nullptr);
+            return;
+        }
+
+        const bool focusValid = g_hwnd && GetForegroundWindow() == g_hwnd;
+        int currentSlot = env->GetIntField(inventory, g_autoRodSelectedSlotField121);
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            currentSlot = autorod::kInvalidSlot;
+        }
+        if (!cfg.throwpotEnabled || !inWorld || guiOpen ||
+            IsWorldTransitionActive() || !focusValid ||
+            (g_throwPotTransaction121.phase == THROW_POT_TRANSACTION_SELECTED_121 &&
+             currentSlot != g_throwPotTransaction121.targetSlot)) {
+            // Once an unsafe context or manual slot change appears, this throw
+            // must never fire later even if the state recovers before restore.
+            g_throwPotTransaction121.suppressUse = true;
+        }
+        const bool timedOut = GetTickCount() - g_throwPotTransaction121.startedMs >=
+            kThrowPotTransactionSafetyTimeoutMs121;
+        if (timedOut) {
+            g_throwPotTransaction121.suppressUse = true;
+            LogThrowPotModernRateLimited("transaction safety timeout; restoring without use");
+        }
+
+        auto restoreOriginal = [&]() -> bool {
+            env->SetIntField(inventory, g_autoRodSelectedSlotField121,
+                g_throwPotTransaction121.originalSlot);
+            const bool ok = !env->ExceptionCheck();
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            return ok;
+        };
+
+        if (g_throwPotTransaction121.phase == THROW_POT_TRANSACTION_SELECTED_121 &&
+            (timedOut || throwpot::HasElapsedTicks(
+                currentTick, g_throwPotTransaction121.phaseStartTick,
+                autorod::kSelectToUseTicks))) {
+            if (g_throwPotTransaction121.suppressUse || timedOut) {
+                if (restoreOriginal()) {
+                    g_throwPotTransaction121.phase = THROW_POT_TRANSACTION_RESTORING_121;
+                    g_throwPotTransaction121.phaseStartTick = currentTick;
+                } else if (timedOut) {
+                    ClearThrowPotTransactionLocked121();
+                }
+            } else {
+                // Minecraft processes this one right-click in its normal input/tick phase.
+                // The worker emits no use-item or held-item packet directly.
+                g_throwPotTransaction121.phase = THROW_POT_TRANSACTION_USED_121;
+                g_throwPotTransaction121.phaseStartTick = currentTick;
+                if (!SendThrowPotUseInput121())
+                    LogThrowPotModernRateLimited("right-click input failed; delayed restore remains scheduled");
+            }
+        } else if (g_throwPotTransaction121.phase == THROW_POT_TRANSACTION_USED_121 &&
+                   (timedOut || throwpot::HasElapsedTicks(
+                       currentTick, g_throwPotTransaction121.phaseStartTick,
+                       throwpot::kUseToRestoreTicks))) {
+            if (restoreOriginal()) {
+                g_throwPotTransaction121.phase = THROW_POT_TRANSACTION_RESTORING_121;
+                g_throwPotTransaction121.phaseStartTick = currentTick;
+            } else if (timedOut) {
+                ClearThrowPotTransactionLocked121();
+            }
+        } else if (g_throwPotTransaction121.phase == THROW_POT_TRANSACTION_RESTORING_121 &&
+                   (timedOut || throwpot::HasElapsedTicks(
+                       currentTick, g_throwPotTransaction121.phaseStartTick,
+                       autorod::kRestoreSettleTicks))) {
+            ClearThrowPotTransactionLocked121();
+        }
+
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    Config cfg;
+    { LockGuard lk(g_configMutex); cfg = g_config; }
+    bool guiOpen = false;
+    bool inWorld = false;
+    { LockGuard lk(g_jniStateMtx); guiOpen = g_jniGuiOpen; inWorld = g_jniInWorld; }
+    if (!cfg.throwpotEnabled || !g_stateJniReady || !inWorld || guiOpen ||
+        IsWorldTransitionActive() || !g_mcInstance || !g_playerField_121 ||
+        !g_hwnd || GetForegroundWindow() != g_hwnd) return;
+
+    // AutoRod/AutoHeal own the held slot while their transactions are in
+    // flight; drop a press made during their casts instead of throwing late.
+    if (InterlockedExchange(&g_throwPotRequested, 0) == 0) return;
+    if (IsAutoRodTransactionActive121() || IsAutoHealTransactionActive121()) return;
+
+    if (env->PushLocalFrame(48) < 0) return;
+    jobject player = env->GetObjectField(g_mcInstance, g_playerField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); player = nullptr; }
+    if (!player) { env->PopLocalFrame(nullptr); return; }
+
+    int selectedTick = 0;
+    if (!ReadAutoRodPlayerTick121(env, player, &selectedTick)) {
+        LogThrowPotModernRateLimited("Entity tick mapping unavailable");
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    if (!EnsureAutoRodModernMappings(env, player, false) || !EnsureRefillItemMappings121(env)) {
+        LogThrowPotModernRateLimited("throwpot item mappings unavailable");
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    if (!g_autoRodGetInventory121 || !g_autoRodSelectedSlotField121 ||
+        !g_autoRodInventoryGetItem121 || !g_autoRodItemStackGetItem121) {
+        LogThrowPotModernRateLimited("throwpot inventory/item mappings unavailable");
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    jobject inventory = env->CallObjectMethod(player, g_autoRodGetInventory121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); inventory = nullptr; }
+    if (!inventory) { env->PopLocalFrame(nullptr); return; }
+
+    const int originalSlot = env->GetIntField(inventory, g_autoRodSelectedSlotField121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); env->PopLocalFrame(nullptr); return; }
+
+    bool potSlots[autorod::kHotbarSlots] = {};
+    for (int slot = 0; slot < autorod::kHotbarSlots; ++slot) {
+        jobject stack = env->CallObjectMethod(inventory, g_autoRodInventoryGetItem121, slot);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); stack = nullptr; }
+        if (!stack) continue;
+        jobject item = env->CallObjectMethod(stack, g_autoRodItemStackGetItem121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); item = nullptr; }
+        // Only healing splash potions: drinkable potions would be consumed
+        // instead of thrown, and non-healing effects are never worth throwing.
+        potSlots[slot] = item && g_refillSplashPotionField_121 &&
+            IsRefillHealingStackSplashOnly121(env, stack, item);
+        if (item) env->DeleteLocalRef(item);
+        env->DeleteLocalRef(stack);
+    }
+
+    const int targetSlot = throwpot::SelectPotSlot(potSlots);
+    if (targetSlot == autorod::kInvalidSlot) {
+        LogThrowPotModernRateLimited("no healing splash potion in hotbar");
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    g_throwPotTransaction121.phase = THROW_POT_TRANSACTION_SELECTED_121;
+    g_throwPotTransaction121.originalSlot = originalSlot;
+    g_throwPotTransaction121.targetSlot = targetSlot;
+    g_throwPotTransaction121.phaseStartTick = selectedTick;
+    g_throwPotTransaction121.startedMs = GetTickCount();
+    g_throwPotTransaction121.suppressUse = false;
+
+    env->SetIntField(inventory, g_autoRodSelectedSlotField121, targetSlot);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        ClearThrowPotTransactionLocked121();
+        LogThrowPotModernRateLimited("target selection failed");
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    // Vanilla observes the selected field on its next tick and sends the held-item
+    // change in normal packet order before the synthetic use input is issued.
+    env->PopLocalFrame(nullptr);
+}
+
+// ===== AutoHeal (modern) =====
+
+static bool EnsureAutoHealHealthMapping121(JNIEnv* env, jobject player) {
+    if (g_autoHealGetHealthMethod121) return true;
+    jclass leCls = nullptr;
+    const char* leNames[] = {
+        "net.minecraft.class_1309",
+        "net.minecraft.world.entity.LivingEntity",
+        nullptr
+    };
+    for (int i = 0; leNames[i] && !leCls; i++) {
+        leCls = LoadClassWithLoader(env, g_gameClassLoader, leNames[i]);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); leCls = nullptr; }
+    }
+    if (!leCls) return false;
+    const char* names[] = { "getHealth", "method_6032", nullptr };
+    for (int ni = 0; names[ni] && !g_autoHealGetHealthMethod121; ni++) {
+        g_autoHealGetHealthMethod121 = env->GetMethodID(leCls, names[ni], "()F");
+        if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoHealGetHealthMethod121 = nullptr; }
+    }
+    env->DeleteLocalRef(leCls);
+    return g_autoHealGetHealthMethod121 != nullptr;
+}
+
+static void ExecuteAutoHealModern(JNIEnv* env) {
+    LockGuard transactionLock(g_autoHealTransactionMutex121);
+
+    if (g_autoHealTransaction121.phase != AUTO_HEAL_TRANSACTION_IDLE_121) {
+        Config cfg;
+        { LockGuard lk(g_configMutex); cfg = g_config; }
+        bool guiOpen = false;
+        bool inWorld = false;
+        { LockGuard lk(g_jniStateMtx); guiOpen = g_jniGuiOpen; inWorld = g_jniInWorld; }
+
+        if (!g_stateJniReady || !g_mcInstance || !g_playerField_121) {
+            ClearAutoHealTransactionLocked121();
+            return;
+        }
+
+        if (env->PushLocalFrame(24) < 0) return;
+        jobject player = env->GetObjectField(g_mcInstance, g_playerField_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); player = nullptr; }
+        if (!player) {
+            env->PopLocalFrame(nullptr);
+            ClearAutoHealTransactionLocked121();
+            return;
+        }
+
+        int currentTick = 0;
+        if (!ReadAutoRodPlayerTick121(env, player, &currentTick) ||
+            !EnsureAutoRodModernMappings(env, player, false)) {
+            env->PopLocalFrame(nullptr);
+            return;
+        }
+
+        if (!g_autoRodGetInventory121 || !g_autoRodSelectedSlotField121) {
+            env->PopLocalFrame(nullptr);
+            return;
+        }
+
+        jobject inventory = env->CallObjectMethod(player, g_autoRodGetInventory121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); inventory = nullptr; }
+        if (!inventory) {
+            env->PopLocalFrame(nullptr);
+            return;
+        }
+
+        const bool focusValid = g_hwnd && GetForegroundWindow() == g_hwnd;
+        int currentSlot = env->GetIntField(inventory, g_autoRodSelectedSlotField121);
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            currentSlot = autorod::kInvalidSlot;
+        }
+        if (!cfg.autoHealEnabled || !inWorld || guiOpen ||
+            IsWorldTransitionActive() || !focusValid ||
+            (g_autoHealTransaction121.phase == AUTO_HEAL_TRANSACTION_SELECTED_121 &&
+             currentSlot != g_autoHealTransaction121.targetSlot)) {
+            g_autoHealTransaction121.suppressUse = true;
+        }
+        const bool timedOut = GetTickCount() - g_autoHealTransaction121.startedMs >=
+            kAutoHealTransactionSafetyTimeoutMs121;
+        if (timedOut) {
+            g_autoHealTransaction121.suppressUse = true;
+        }
+
+        auto restoreOriginal = [&]() -> bool {
+            env->SetIntField(inventory, g_autoRodSelectedSlotField121,
+                g_autoHealTransaction121.originalSlot);
+            const bool ok = !env->ExceptionCheck();
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            return ok;
+        };
+
+        if (g_autoHealTransaction121.phase == AUTO_HEAL_TRANSACTION_SELECTED_121 &&
+            (timedOut || throwpot::HasElapsedTicks(
+                currentTick, g_autoHealTransaction121.phaseStartTick,
+                autorod::kSelectToUseTicks))) {
+            if (g_autoHealTransaction121.suppressUse || timedOut) {
+                if (restoreOriginal()) {
+                    g_autoHealTransaction121.phase = AUTO_HEAL_TRANSACTION_RESTORING_121;
+                    g_autoHealTransaction121.phaseStartTick = currentTick;
+                } else if (timedOut) {
+                    ClearAutoHealTransactionLocked121();
+                }
+            } else {
+                g_autoHealTransaction121.phase = AUTO_HEAL_TRANSACTION_USED_121;
+                g_autoHealTransaction121.phaseStartTick = currentTick;
+                if (!SendThrowPotUseInput121())
+                    LogThrowPotModernRateLimited("AutoHeal right-click input failed");
+            }
+        } else if (g_autoHealTransaction121.phase == AUTO_HEAL_TRANSACTION_USED_121 &&
+                   (timedOut || throwpot::HasElapsedTicks(
+                       currentTick, g_autoHealTransaction121.phaseStartTick,
+                       throwpot::kUseToRestoreTicks))) {
+            if (restoreOriginal()) {
+                g_autoHealTransaction121.phase = AUTO_HEAL_TRANSACTION_RESTORING_121;
+                g_autoHealTransaction121.phaseStartTick = currentTick;
+            } else if (timedOut) {
+                ClearAutoHealTransactionLocked121();
+            }
+        } else if (g_autoHealTransaction121.phase == AUTO_HEAL_TRANSACTION_RESTORING_121 &&
+                   (timedOut || throwpot::HasElapsedTicks(
+                       currentTick, g_autoHealTransaction121.phaseStartTick,
+                       autorod::kRestoreSettleTicks))) {
+            ClearAutoHealTransactionLocked121();
+        }
+
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    Config cfg;
+    { LockGuard lk(g_configMutex); cfg = g_config; }
+    bool guiOpen = false;
+    bool inWorld = false;
+    { LockGuard lk(g_jniStateMtx); guiOpen = g_jniGuiOpen; inWorld = g_jniInWorld; }
+    if (!cfg.autoHealEnabled || !g_stateJniReady || !inWorld || guiOpen ||
+        IsWorldTransitionActive() || !g_mcInstance || !g_playerField_121 ||
+        !g_hwnd || GetForegroundWindow() != g_hwnd) return;
+
+    // One hotbar owner at a time: yield to Auto Rod / Throwpot transactions.
+    if (IsAutoRodTransactionActive121() || IsThrowPotTransactionActive121()) return;
+
+    if (GetTickCount() - g_autoHealLastHealMs121 < static_cast<DWORD>(cfg.autoHealDelayMs)) return;
+
+    // Only heal while already looking steeply down so the splash lands at the
+    // player's feet, never toward an opponent. No silent rotation is applied.
+    {
+        BgCamState camState;
+        { LockGuard lk(g_bgCamMutex); camState = g_bgCamState; }
+        if (!camState.camFound || !throwpot::IsLookingSteeplyDown(camState.pitch)) return;
+    }
+
+    if (env->PushLocalFrame(48) < 0) return;
+    jobject player = env->GetObjectField(g_mcInstance, g_playerField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); player = nullptr; }
+    if (!player) { env->PopLocalFrame(nullptr); return; }
+
+    int selectedTick = 0;
+    if (!ReadAutoRodPlayerTick121(env, player, &selectedTick)) {
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    if (!EnsureAutoRodModernMappings(env, player, false) || !EnsureRefillItemMappings121(env) ||
+        !EnsureAutoHealHealthMapping121(env, player)) {
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    if (!g_autoRodGetInventory121 || !g_autoRodSelectedSlotField121 ||
+        !g_autoRodInventoryGetItem121 || !g_autoRodItemStackGetItem121) {
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    const float health = env->CallFloatMethod(player, g_autoHealGetHealthMethod121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); env->PopLocalFrame(nullptr); return; }
+    if (!(health > 0.0f) || health > static_cast<float>(cfg.autoHealHealth)) {
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    jobject inventory = env->CallObjectMethod(player, g_autoRodGetInventory121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); inventory = nullptr; }
+    if (!inventory) { env->PopLocalFrame(nullptr); return; }
+
+    const int originalSlot = env->GetIntField(inventory, g_autoRodSelectedSlotField121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); env->PopLocalFrame(nullptr); return; }
+
+    bool potSlots[autorod::kHotbarSlots] = {};
+    for (int slot = 0; slot < autorod::kHotbarSlots; ++slot) {
+        jobject stack = env->CallObjectMethod(inventory, g_autoRodInventoryGetItem121, slot);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); stack = nullptr; }
+        if (!stack) continue;
+        jobject item = env->CallObjectMethod(stack, g_autoRodItemStackGetItem121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); item = nullptr; }
+        potSlots[slot] = item && g_refillSplashPotionField_121 &&
+            IsRefillHealingStackSplashOnly121(env, stack, item);
+        if (item) env->DeleteLocalRef(item);
+        env->DeleteLocalRef(stack);
+    }
+
+    const int targetSlot = throwpot::SelectPotSlot(potSlots);
+    if (targetSlot == autorod::kInvalidSlot) {
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    g_autoHealLastHealMs121 = GetTickCount();
+    g_autoHealTransaction121.phase = AUTO_HEAL_TRANSACTION_SELECTED_121;
+    g_autoHealTransaction121.originalSlot = originalSlot;
+    g_autoHealTransaction121.targetSlot = targetSlot;
+    g_autoHealTransaction121.phaseStartTick = selectedTick;
+    g_autoHealTransaction121.startedMs = GetTickCount();
+    g_autoHealTransaction121.suppressUse = false;
+
+    env->SetIntField(inventory, g_autoRodSelectedSlotField121, targetSlot);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        ClearAutoHealTransactionLocked121();
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
     env->PopLocalFrame(nullptr);
 }
 
@@ -14741,7 +16102,8 @@ static void UpdateAutoToolModern(JNIEnv* env, const Config& cfg) {
         return;
     }
 
-    if (IsAutoRodTransactionActive121()) {
+    if (IsAutoRodTransactionActive121() || IsThrowPotTransactionActive121() ||
+        IsAutoHealTransactionActive121()) {
         return;
     }
 
@@ -14819,7 +16181,8 @@ static void UpdateAutoToolModern(JNIEnv* env, const Config& cfg) {
     input.mouseDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 || breakingBlock;
     input.isSneaking = isSneaking;
     input.currentSlot = currentSlot;
-    input.pauseExclusive = IsAutoRodTransactionActive121();
+    input.pauseExclusive = IsAutoRodTransactionActive121() ||
+        IsThrowPotTransactionActive121() || IsAutoHealTransactionActive121();
     input.isBlockHit = false;
     input.isEntityHit = false;
     input.bestToolSlot = -1;
@@ -15043,6 +16406,8 @@ static DWORD WINAPI FastPollThreadProc(LPVOID) {
             if (g_stateJniReady) {
                 UpdateJniState();
                 ExecuteAutoRodModern(env);
+                ExecuteThrowPotModern(env);
+                ExecuteAutoHealModern(env);
                 {
                     Config cfg;
                     { LockGuard lk(g_configMutex); cfg = g_config; }
@@ -16652,8 +18017,11 @@ static void RenderOverlayPanels(
                 if (cfg.killAura)      pushMod("Kill Aura");
                 if (cfg.speedBridge)   pushMod("SpeedBridge");
                 if (cfg.autoRodEnabled) pushMod("Auto Rod");
+                if (cfg.throwpotEnabled) pushMod("Throwpot");
+                if (cfg.autoHealEnabled) pushMod("AutoHeal");
                 if (cfg.autoToolEnabled) pushMod("AutoTool");
                 if (cfg.chestStealer)  pushMod("Chest Stealer");
+                if (cfg.refill)        pushMod("Refill");
                 if (cfg.chestEsp)      pushMod("Chest ESP");
                 if (cfg.blockEsp)      pushMod("Block ESP");
                 if (cfg.nametags)      pushMod("Nametags");
@@ -17395,6 +18763,7 @@ glfw_done:;
             anti_debuff_jvmti::Install(g_jvm, Log);
             ka_premotion::Install(g_jvm, Log);
             ka_premotion::SetAttackHandler(KillAuraPremotionAttackHandler121);
+            ka_premotion::SetAttackGate(KillAuraPremotionTickGate);
             // Retry discovery a few times (MC may not be fully loaded yet)
             for (int attempt = 0; attempt < 5; attempt++) {
                 {
@@ -17502,6 +18871,7 @@ glfw_done:;
                 bool killAuraHasTarget = false;
                 bool killAuraBlocking = false;
                 std::string chestStealerStateJson;
+                std::string refillStateJson;
                 unsigned long long stateMs;
                 { LockGuard lk(g_jniStateMtx);
                     sn = g_jniScreenName;
@@ -17518,6 +18888,7 @@ glfw_done:;
                     if (sendFullState) {
                         killAuraUnavailableReason = g_jniKillAuraUnavailableReason;
                         chestStealerStateJson = g_jniChestStealerStateJson;
+                        refillStateJson = g_jniRefillStateJson;
                     }
                     stateMs = g_jniStateMs;
                 }
@@ -17624,6 +18995,8 @@ glfw_done:;
                 if (sendFullState) {
                     state += ",\"chestStealerState\":";
                     state += chestStealerStateJson.empty() ? "null" : chestStealerStateJson;
+                    state += ",\"refillState\":";
+                    state += refillStateJson.empty() ? "null" : refillStateJson;
                 }
 
                 bool ppFound = false;

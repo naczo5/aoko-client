@@ -124,6 +124,7 @@ public class Clicker : INotifyPropertyChanged
     
     private readonly object _sendInputLock = new();
     private readonly ChestStealerController _chestStealerController = new();
+    private readonly RefillController _refillController = new();
     public KillAuraSettings KillAuraSettings { get; } = new();
     private readonly INPUT[] _leftClickInputs;
     private readonly INPUT[] _rightClickInputs;
@@ -444,6 +445,7 @@ public class Clicker : INotifyPropertyChanged
         StopTriggerbotLoop();
         StopPixelPartyAssistInputLoop();
         _chestStealerController.Stop();
+        _refillController.Stop();
     }
 
     public void TriggerPanic()
@@ -486,12 +488,15 @@ public class Clicker : INotifyPropertyChanged
             FightStatusEnabled = false;
             ChestEspEnabled = false;
             ChestStealerEnabled = false;
+            RefillEnabled = false;
             BlockEspEnabled = false;
             BedPlatesEnabled = false;
             ReachEnabled = false;
             VelocityEnabled = false;
             AutoTotemEnabled = false;
             AutoRodEnabled = false;
+            ThrowpotEnabled = false;
+            AutoHealEnabled = false;
             AutoToolEnabled = false;
             AntiDebuffEnabled = false;
             HitDelayFixEnabled = false;
@@ -1028,6 +1033,39 @@ public class Clicker : INotifyPropertyChanged
         }
     }
 
+    private bool _refillEnabled = false;
+    public bool RefillEnabled
+    {
+        get => _refillEnabled;
+        set
+        {
+            if (_refillEnabled == value) return;
+            _refillEnabled = value;
+            if (value)
+                _refillController.Start();
+            else
+                _refillController.Stop();
+            OnPropertyChanged(nameof(RefillEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private int _refillDelayMs = 120;
+    public int RefillDelayMs
+    {
+        get => _refillDelayMs;
+        set
+        {
+            int clamped = Math.Clamp(value, 50, 500);
+            if (_refillDelayMs != clamped)
+            {
+                _refillDelayMs = clamped;
+                OnPropertyChanged(nameof(RefillDelayMs));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
     // === Block ESP / X-ray ===
 
     private bool _blockEspEnabled = false;
@@ -1509,6 +1547,74 @@ public class Clicker : INotifyPropertyChanged
         {
             if (InputHooks.SetAutoRodActionKey(value))
                 OnPropertyChanged(nameof(AutoRodActionKey));
+        }
+    }
+
+    private bool _throwpotEnabled = false;
+    public bool ThrowpotEnabled
+    {
+        get => _throwpotEnabled;
+        set
+        {
+            if (_throwpotEnabled == value) return;
+            _throwpotEnabled = value;
+            OnPropertyChanged(nameof(ThrowpotEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    public int ThrowpotActionKey
+    {
+        get => InputHooks.ThrowpotActionKey;
+        set
+        {
+            if (InputHooks.SetThrowpotActionKey(value))
+                OnPropertyChanged(nameof(ThrowpotActionKey));
+        }
+    }
+
+    private bool _autoHealEnabled = false;
+    public bool AutoHealEnabled
+    {
+        get => _autoHealEnabled;
+        set
+        {
+            if (_autoHealEnabled == value) return;
+            _autoHealEnabled = value;
+            OnPropertyChanged(nameof(AutoHealEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private int _autoHealHealth = 17;
+    public int AutoHealHealth
+    {
+        get => _autoHealHealth;
+        set
+        {
+            int clamped = Math.Clamp(value, 1, 20);
+            if (_autoHealHealth != clamped)
+            {
+                _autoHealHealth = clamped;
+                OnPropertyChanged(nameof(AutoHealHealth));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    private int _autoHealDelayMs = 500;
+    public int AutoHealDelayMs
+    {
+        get => _autoHealDelayMs;
+        set
+        {
+            int clamped = Math.Clamp(value, 50, 2000);
+            if (_autoHealDelayMs != clamped)
+            {
+                _autoHealDelayMs = clamped;
+                OnPropertyChanged(nameof(AutoHealDelayMs));
+                StateChanged?.Invoke();
+            }
         }
     }
 
@@ -2377,7 +2483,7 @@ public class Clicker : INotifyPropertyChanged
                     continue;
                 }
 
-                if (BreakBlocksEnabled && (state.BreakingBlock || IsMiningIntent))
+                if (BreakBlocksEnabled && (state.LookingAtBlock || state.BreakingBlock) && !state.LookingAtEntity && !state.LookingAtEntityLatched)
                 {
                     hadTarget = false;
                     await Task.Delay(12, token).ConfigureAwait(false);
@@ -2681,29 +2787,10 @@ public class Clicker : INotifyPropertyChanged
                         // Chest GUI clicks should never be treated as block-mining intent.
                         IsMiningIntent = false;
                     }
-                    else if (GameStateClient.Instance.SupportsStateField("breakingBlock"))
+                    else if ((state.LookingAtBlock || state.BreakingBlock) && !state.LookingAtEntity && !state.LookingAtEntityLatched)
                     {
-                        // Modern state payload: pause when we are actually breaking a block.
-                        if (!state.LookingAtBlock)
-                            IsMiningIntent = false;
-
-                        if (state.BreakingBlock || IsMiningIntent)
-                        {
-                            await Task.Delay(25, token).ConfigureAwait(false);
-                            continue;
-                        }
-                    }
-                    else
-                    {
-                        // Legacy fallback behavior (intent-based).
-                        if (!state.LookingAtBlock)
-                            IsMiningIntent = false;
-
-                        if (IsMiningIntent)
-                        {
-                            await Task.Delay(50, token).ConfigureAwait(false);
-                            continue;
-                        }
+                        await Task.Delay(25, token).ConfigureAwait(false);
+                        continue;
                     }
                 }
             }

@@ -69,6 +69,7 @@ internal static class GameStatePatchMerger
             Pitch = previous.Pitch,
             Entities = previous.Entities,
             ChestStealerState = previous.ChestStealerState,
+            RefillState = previous.RefillState,
             PixelPartyTargetFound = previous.PixelPartyTargetFound,
             PixelPartyTargetYaw = previous.PixelPartyTargetYaw,
             PixelPartyTargetDist = previous.PixelPartyTargetDist,
@@ -116,6 +117,10 @@ internal static class GameStatePatchMerger
                     if (value is null) merged.ChestStealerState = null;
                     else TryRead<ChestStealerState>(value, v => merged.ChestStealerState = v);
                     break;
+                case "refillState":
+                    if (value is null) merged.RefillState = null;
+                    else TryRead<RefillState>(value, v => merged.RefillState = v);
+                    break;
                 case "pixelPartyTargetFound": TryRead<bool>(value, v => merged.PixelPartyTargetFound = v); break;
                 case "pixelPartyTargetYaw": TryRead<float>(value, v => merged.PixelPartyTargetYaw = v); break;
                 case "pixelPartyTargetDist": TryRead<float>(value, v => merged.PixelPartyTargetDist = v); break;
@@ -131,6 +136,7 @@ internal static class GameStatePatchMerger
         {
             merged.Entities = new List<EntityInfo>();
             merged.ChestStealerState = null;
+            merged.RefillState = null;
         }
 
         return merged;

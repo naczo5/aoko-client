@@ -23,6 +23,7 @@
 #include "json_config_reader.h"
 #include "bounded_newline_buffer.h"
 #include "auto_rod_core.h"
+#include "throwpot_core.h"
 #include "auto_tool_core.h"
 #include "bridge_capabilities.h"
 #include "nick_hider.h"
@@ -170,6 +171,7 @@ static volatile LONG g_legacyRenderCallbacksInFlight = 0;
 static void ResetAutoRodLegacyJniCaches(JNIEnv* env);
 static void ResetAutoToolLegacyJniCaches(JNIEnv* env);
 static bool EnsureAutoRodLegacyMappings(JNIEnv* env, jobject player, bool needRodClass);
+static bool HasPendingThrowPotLegacyTransaction();
 
 class LegacyRenderCallbackLease {
     bool active_;
@@ -240,6 +242,8 @@ struct Config {
     bool chestStealer = false;
     int chestStealerDelayMs = 120;
     bool chestStealerMenuCheck = true;
+    bool refill = false;
+    int refillDelayMs = 120;
     bool blockEsp = false;
     bool blockEspBoxes = true;
     bool blockEspTracers = false;
@@ -267,6 +271,10 @@ struct Config {
     bool autoRodVerifyForcedSlot = true;
     int autoRodExtensionTicks = autorod::kUseToRestoreTicks;
     bool autoRodHoldToExtend = false;
+    bool throwpotEnabled = false;
+    bool autoHealEnabled = false;
+    int autoHealHealth = 17;
+    int autoHealDelayMs = 500;
     bool autoToolEnabled = false;
     bool autoToolSwapWeapon = true;
     bool autoToolInstantSwap = true;
@@ -292,10 +300,12 @@ struct Config {
     int keybindFightStatus = 0;
     int keybindChestEsp = 0;
     int keybindChestStealer = 0;
+    int keybindRefill = 0;
     int keybindBlockEsp = 0;
     int keybindBedPlates = 0;
     int keybindAutoRod = 0;
     int keybindAutoTool = 0;
+    int keybindThrowpot = 0;
     bool pixelPartyAssist = false;
     int pixelPartyScanRadius = 28;
     bool pixelPartyAutoLook = false;
@@ -445,6 +455,80 @@ static bool TryPopAutoRodRequest(AutoRodRequest* out) {
     g_autoRodQueue.pop_front();
     return true;
 }
+
+// ===== Throwpot (hotbar healing splash potion throw) =====
+// One-shot request flag: a press while a transaction is already running is
+// dropped rather than queued, so throws never fire late and surprise the user.
+static volatile LONG g_throwPotRequested = 0;
+
+enum ThrowPotLegacyPhase {
+    ThrowPotLegacyIdle = 0,
+    ThrowPotLegacySelected,
+    ThrowPotLegacyUsed,
+    ThrowPotLegacyRestoring
+};
+
+struct ThrowPotLegacyTransaction {
+    ThrowPotLegacyPhase phase;
+    int originalSlot;
+    int targetSlot;
+    int phaseStartTick;
+    DWORD startedAtMs;
+    bool cancelled;
+
+    ThrowPotLegacyTransaction()
+        : phase(ThrowPotLegacyIdle), originalSlot(autorod::kInvalidSlot),
+          targetSlot(autorod::kInvalidSlot), phaseStartTick(0),
+          startedAtMs(0), cancelled(false) {}
+};
+static ThrowPotLegacyTransaction g_throwPotTransaction18;
+static const DWORD kThrowPotTransactionTimeoutMs = 10000;
+
+static bool HasPendingThrowPotLegacyTransaction() {
+    return g_throwPotTransaction18.phase != ThrowPotLegacyIdle;
+}
+
+static void ResetThrowPotLegacyTransaction() {
+    g_throwPotTransaction18 = ThrowPotLegacyTransaction();
+}
+
+// ===== AutoHeal (auto health-threshold splash throw) =====
+// Same transaction shape as Throwpot but self-triggering: when the player's
+// health drops to/below the configured threshold and the cooldown has elapsed,
+// the first healing splash potion in the hotbar is thrown.
+enum AutoHealLegacyPhase {
+    AutoHealLegacyIdle = 0,
+    AutoHealLegacySelected,
+    AutoHealLegacyUsed,
+    AutoHealLegacyRestoring
+};
+
+struct AutoHealLegacyTransaction {
+    AutoHealLegacyPhase phase;
+    int originalSlot;
+    int targetSlot;
+    int phaseStartTick;
+    DWORD startedAtMs;
+    bool cancelled;
+
+    AutoHealLegacyTransaction()
+        : phase(AutoHealLegacyIdle), originalSlot(autorod::kInvalidSlot),
+          targetSlot(autorod::kInvalidSlot), phaseStartTick(0),
+          startedAtMs(0), cancelled(false) {}
+};
+static AutoHealLegacyTransaction g_autoHealTransaction18;
+static const DWORD kAutoHealTransactionTimeoutMs = 10000;
+static DWORD g_autoHealLastHealMs = 0;
+
+static bool HasPendingAutoHealLegacyTransaction() {
+    return g_autoHealTransaction18.phase != AutoHealLegacyIdle;
+}
+
+static void ResetAutoHealLegacyTransaction() {
+    g_autoHealTransaction18 = AutoHealLegacyTransaction();
+}
+
+
 static lc::HudLayout g_hudLayout = lc::HudLayout::DefaultLayout();
 static lc::HudEditorState g_hudEditor;
 static Mutex g_hudEditorMutex;
@@ -488,6 +572,7 @@ struct GameState {
     float attackCooldownPerTick = 0.08f;
     unsigned long long stateMs = 0;
     std::string chestStealerStateJson;
+    std::string refillStateJson;
     std::string killAuraUnavailableReason;
     bool killAuraHasTarget = false;
     bool killAuraBlocking = false;
@@ -4901,6 +4986,122 @@ static void ResolveKillAuraCandidateFiltersLegacy(JNIEnv* env, jobject selfObj) 
     if (walk) env->DeleteLocalRef(walk);
 }
 
+// ---- Premotion per-tick resource gate (legacy 1.8.9) -----------------------
+// Auto-block packets (C07 release / C08 use / C09 slot) are emitted here —
+// once per outbound movement packet, strictly between two C03s — instead of on
+// the worker thread. This keeps use-item and attack packets in separate server
+// ticks (Rise BadPacketsComponent discipline): the gate denies a queued attack
+// on any tick that carried a use/dig/slot packet, and releases blocking when
+// target/blocking conditions are lost so attacks never land while the server
+// still considers the sword in use.
+
+static volatile LONG g_killAuraGateArmed = 0;      // killAura on && auto-block != NONE
+static volatile LONG g_killAuraGateMode = 0;       // killaura::AutoBlockMode snapshot
+static volatile LONG g_killAuraGateHasTarget = 0;  // chosen target within block range
+static volatile LONG g_killAuraGateCanBlock = 0;   // held item is a weapon
+static volatile LONG g_killAuraGateCurrentSlot = -1;
+static volatile LONG g_killAuraGateEmptySlot = -1;
+static volatile LONG g_killAuraGateSwordSlot = -1;
+static double g_killAuraGateRangeSq = 0.0;
+static DWORD g_killAuraLastGateMs = 0;
+
+// Inputs are resolved on the bridge worker thread; the gate itself runs on the
+// JVM client thread inside the Premotion callback, so it must stay cheap and
+// never perform method-ID lookups or inventory scans there.
+static void KillAuraPublishGateInputsLegacy(const Config& cfg, bool haveTargetInRange,
+                                            bool canBlock, int currentSlot,
+                                            int emptySlot, int swordSlot) {
+    InterlockedExchange(&g_killAuraGateMode, (LONG)cfg.killAuraAutoBlock);
+    g_killAuraGateRangeSq = (double)cfg.killAuraAutoBlockRange * cfg.killAuraAutoBlockRange;
+    InterlockedExchange(&g_killAuraGateHasTarget, haveTargetInRange ? 1 : 0);
+    InterlockedExchange(&g_killAuraGateCanBlock, canBlock ? 1 : 0);
+    InterlockedExchange(&g_killAuraGateCurrentSlot, (LONG)currentSlot);
+    InterlockedExchange(&g_killAuraGateEmptySlot, (LONG)emptySlot);
+    InterlockedExchange(&g_killAuraGateSwordSlot, (LONG)swordSlot);
+    InterlockedExchange(&g_killAuraGateArmed,
+        cfg.killAuraAutoBlock != killaura::BLOCK_NONE ? 1 : 0);
+}
+
+static bool KillAuraPremotionTickGate(JNIEnv* env, jobject selfObj) {
+    if (!env || !selfObj || !g_mcInstance) return true;
+    if (InterlockedCompareExchange(&g_killAuraGateArmed, 0, 0) == 0) return true;
+
+    // One step per movement tick even if both Premotion backends ever fire.
+    const DWORD now = GetTickCount();
+    if (g_killAuraLastGateMs != 0 && now - g_killAuraLastGateMs < 35) return true;
+    g_killAuraLastGateMs = now;
+
+    const int mode = (int)InterlockedCompareExchange(&g_killAuraGateMode, 0, 0);
+    const double rangeSq = g_killAuraGateRangeSq;
+    const bool hasTarget = InterlockedCompareExchange(&g_killAuraGateHasTarget, 0, 0) != 0;
+    const bool canBlock = InterlockedCompareExchange(&g_killAuraGateCanBlock, 0, 0) != 0;
+    const int currentSlot = (int)InterlockedCompareExchange(&g_killAuraGateCurrentSlot, -1, -1);
+    const int emptySlot = (int)InterlockedCompareExchange(&g_killAuraGateEmptySlot, -1, -1);
+    const int swordSlot = (int)InterlockedCompareExchange(&g_killAuraGateSwordSlot, -1, -1);
+
+    bool usingItem = false;
+    if (g_killAuraIsUsingItem) {
+        usingItem = env->CallBooleanMethod(selfObj, g_killAuraIsUsingItem) == JNI_TRUE;
+        if (env->ExceptionCheck()) { env->ExceptionClear(); usingItem = false; }
+    }
+
+    killaura::AutoBlockInput input;
+    input.mode = (killaura::AutoBlockMode)mode;
+    input.hasTarget = hasTarget;
+    input.canBlock = canBlock;
+    input.playerBlocking = usingItem;
+    input.usingItem = usingItem;
+    input.diggingOrPlacing = false;
+    input.slotsSynced = currentSlot >= 0;
+    input.hasSecondSword = swordSlot >= 0;
+    input.attackDelayMs = g_killAuraAttackDelayMs;
+
+    // Lost target / non-weapon: release aura-owned blocking exactly once, then
+    // reset the state machine. Without this the sword stays server-side
+    // "in use" and every later attack flags BadPackets.
+    const bool wasStateBlocking = g_killAuraAutoBlockState.isBlocking ||
+        g_killAuraAutoBlockState.fakeBlocking;
+    if (!hasTarget || !input.canBlock) {
+        bool acted = false;
+        if (wasStateBlocking && usingItem &&
+            mode != killaura::BLOCK_NONE && mode != killaura::BLOCK_FAKE) {
+            acted = KillAuraStopBlockLegacy(env, selfObj);
+        }
+        g_killAuraAutoBlockState = killaura::AutoBlockState();
+        { LockGuard lk(g_killAuraUnavailableMutex); g_killAuraBlocking = false; }
+        return !acted;
+    }
+
+    killaura::AutoBlockResult result = killaura::StepAutoBlock(g_killAuraAutoBlockState, input);
+    { LockGuard lk(g_killAuraUnavailableMutex); g_killAuraBlocking = g_killAuraAutoBlockState.isBlocking; }
+
+    if ((result.actions & killaura::ACTION_BLINK_ON) != 0) {
+        SetKillAuraUnavailableReasonLegacy(
+            "Selected legacy mode requires ordered Blink packet buffering; broker is not armed.");
+        return false;
+    }
+
+    bool acted = false;
+    if ((result.actions & killaura::ACTION_STOP_BLOCK) != 0)
+        acted = KillAuraStopBlockLegacy(env, selfObj) || acted;
+    if ((result.actions & killaura::ACTION_SWAP_EMPTY) != 0 && emptySlot >= 0) {
+        bool slotsOk = KillAuraSendSlotLegacy(env, emptySlot);
+        if (mode == killaura::BLOCK_SPOOF)
+            slotsOk = KillAuraSendSlotLegacy(env, currentSlot) && slotsOk;
+        acted = slotsOk || acted;
+    }
+    if ((result.actions & killaura::ACTION_SWAP_SWORD) != 0 && swordSlot >= 0)
+        acted = KillAuraSendSlotLegacy(env, swordSlot) || acted;
+    if ((result.actions & killaura::ACTION_START_BLOCK) != 0)
+        acted = KillAuraStartBlockLegacy(env, selfObj) || acted;
+
+    // Rise discipline: a tick that carried use/dig/slot packets never carries
+    // an attack — except BLOCK_HYPIXEL, whose Rise "Watchdog 1.8" reference
+    // deliberately sends C08 and the attack in the same tick.
+    if (acted && mode != killaura::BLOCK_HYPIXEL) return false;
+    return result.allowAttack;
+}
+
 static void UpdateKillAuraLegacy(JNIEnv* env, const Config& cfg) {
     if (!cfg.killAura) {
         g_killAuraLastScanMs = 0;
@@ -4913,6 +5114,8 @@ static void UpdateKillAuraLegacy(JNIEnv* env, const Config& cfg) {
         SetKillAuraUnavailableReasonLegacy("");
         { LockGuard lk(g_killAuraUnavailableMutex); g_killAuraHasTarget = false; g_killAuraBlocking = false; }
         KillAuraResetState();
+        InterlockedExchange(&g_killAuraGateArmed, 0);
+        InterlockedExchange(&g_killAuraGateHasTarget, 0);
         ka_premotion::SuspendForWorldChange(env);
         return;
     }
@@ -4948,6 +5151,25 @@ static void UpdateKillAuraLegacy(JNIEnv* env, const Config& cfg) {
         SetKillAuraUnavailableReasonLegacy("Allow-tools class mappings are not validated on this legacy runtime.");
         return;
     }
+    // Resume/arm the Premotion backend BEFORE gating silent modes on
+    // IsOperational(). After SuspendForWorldChange the hook is suspended and
+    // the heartbeat is stale; checking availability first made resumption
+    // unreachable, so silent rotations stayed dead until Legit was selected.
+    EnsureKillAuraJniLegacy(env);
+    TryResolvePlayerCoreMappings(env);
+    if (now >= g_killAuraNextPremotionRefreshMs) {
+        g_killAuraNextPremotionRefreshMs = now + 1500;
+        // EnsureKillAuraJniLegacy / KillAuraTryArmSendQueue rebind C03 then resume.
+        if (g_killAuraSendQueueArmed && g_killAuraC03Class && g_killAuraC03Yaw && g_killAuraC03Pitch) {
+            ka_premotion::BindC03LookFields(
+                g_killAuraC03Class, g_killAuraC03Yaw, g_killAuraC03Pitch, g_killAuraC03Rotating);
+            if (g_mcInstance && g_thePlayerField)
+                ka_premotion::BindMcPlayerLookup(g_mcInstance, g_thePlayerField);
+            ka_premotion::ResumeAfterWorldChange();
+        }
+        ka_premotion::RefreshTargets(env);
+    }
+
     std::string premotionReasonLegacy;
     if ((cfg.killAuraRotMode == killaura::ROT_SILENT ||
          cfg.killAuraRotMode == killaura::ROT_LIQUID_BOUNCE ||
@@ -4992,20 +5214,6 @@ static void UpdateKillAuraLegacy(JNIEnv* env, const Config& cfg) {
         }
     }
 
-    EnsureKillAuraJniLegacy(env);
-    TryResolvePlayerCoreMappings(env);
-    if (now >= g_killAuraNextPremotionRefreshMs) {
-        g_killAuraNextPremotionRefreshMs = now + 1500;
-        // EnsureKillAuraJniLegacy / KillAuraTryArmSendQueue rebind C03 then resume.
-        if (g_killAuraSendQueueArmed && g_killAuraC03Class && g_killAuraC03Yaw && g_killAuraC03Pitch) {
-            ka_premotion::BindC03LookFields(
-                g_killAuraC03Class, g_killAuraC03Yaw, g_killAuraC03Pitch, g_killAuraC03Rotating);
-            if (g_mcInstance && g_thePlayerField)
-                ka_premotion::BindMcPlayerLookup(g_mcInstance, g_thePlayerField);
-            ka_premotion::ResumeAfterWorldChange();
-        }
-        ka_premotion::RefreshTargets(env);
-    }
     if (!KillAuraPacketAttackReady() || !g_rotationYawField || !g_rotationPitchField ||
         !g_theWorldField || !g_thePlayerField || !g_playerEntitiesField ||
         !g_posXField || !g_posYField || !g_posZField || !g_getHealthMethod ||
@@ -5040,6 +5248,19 @@ static void UpdateKillAuraLegacy(JNIEnv* env, const Config& cfg) {
     }
     SetKillAuraUnavailableReasonLegacy("");
     EnsureKillAuraAutoBlockLegacy(env, selfObj);
+
+    // Tab-out guard: when the game window is not foreground, stop attacking and
+    // blocking immediately (matches AutoRod / FastPlace eligibility). Without
+    // this the aura keeps fighting while you are tabbed into the Aoko GUI.
+    if (!g_gameHwnd || GetForegroundWindow() != g_gameHwnd) {
+        ka_premotion::SetSilentCombatAngles(false, 0.0f, 0.0f, 0.0f, false);
+        ka_premotion::ClearPendingAttack(env);
+        KillAuraPublishGateInputsLegacy(cfg, false,
+            InterlockedCompareExchange(&g_killAuraGateCanBlock, 0, 0) != 0, -1, -1, -1);
+        env->DeleteLocalRef(worldObj);
+        env->DeleteLocalRef(selfObj);
+        return;
+    }
 
     if (cfg.killAuraWeaponsOnly && !KillAuraHoldingWeaponLegacy(env, selfObj)) {
         env->DeleteLocalRef(worldObj);
@@ -5230,48 +5451,22 @@ static void UpdateKillAuraLegacy(JNIEnv* env, const Config& cfg) {
     }
     if (haveCur && haveBest && curRangeTier > bestRangeTier) haveCur = false;
 
-    bool autoBlockAllowAttack = true;
-    if (haveChosen && chosenEnt && cfg.killAuraAutoBlock != killaura::BLOCK_NONE) {
-        bool usingItem = false;
-        if (g_killAuraIsUsingItem) {
-            usingItem = env->CallBooleanMethod(selfObj, g_killAuraIsUsingItem) == JNI_TRUE;
-            if (env->ExceptionCheck()) { env->ExceptionClear(); usingItem = false; }
-        }
-        int currentSlot = KillAuraCurrentSlotLegacy(env, selfObj);
-        int emptySlot = KillAuraFindSlotLegacy(env, selfObj, currentSlot, false);
-        int swordSlot = KillAuraFindSlotLegacy(env, selfObj, currentSlot, true);
-        int attackDelayMs = g_killAuraAttackDelayMs;
-        killaura::AutoBlockInput input;
-        input.mode = (killaura::AutoBlockMode)cfg.killAuraAutoBlock;
-        input.hasTarget = chDistSq <= (double)cfg.killAuraAutoBlockRange * cfg.killAuraAutoBlockRange;
-        input.canBlock = KillAuraHoldingWeaponLegacy(env, selfObj);
-        input.playerBlocking = usingItem;
-        input.usingItem = usingItem;
-        input.diggingOrPlacing = false;
-        input.slotsSynced = currentSlot >= 0;
-        input.hasSecondSword = swordSlot >= 0;
-        input.attackDelayMs = attackDelayMs;
-        killaura::AutoBlockResult result = killaura::StepAutoBlock(g_killAuraAutoBlockState, input);
-        { LockGuard lk(g_killAuraUnavailableMutex); g_killAuraBlocking = g_killAuraAutoBlockState.isBlocking; }
-        autoBlockAllowAttack = result.allowAttack;
-        if ((result.actions & killaura::ACTION_BLINK_ON) != 0) {
-            SetKillAuraUnavailableReasonLegacy(
-                "Selected legacy mode requires ordered Blink packet buffering; broker is not armed.");
-            autoBlockAllowAttack = false;
-        } else {
-            if ((result.actions & killaura::ACTION_STOP_BLOCK) != 0)
-                autoBlockAllowAttack = KillAuraStopBlockLegacy(env, selfObj) && autoBlockAllowAttack;
-            if ((result.actions & killaura::ACTION_SWAP_EMPTY) != 0 && emptySlot >= 0) {
-                bool slotsOk = KillAuraSendSlotLegacy(env, emptySlot);
-                if (cfg.killAuraAutoBlock == killaura::BLOCK_SPOOF)
-                    slotsOk = KillAuraSendSlotLegacy(env, currentSlot) && slotsOk;
-                autoBlockAllowAttack = slotsOk && autoBlockAllowAttack;
-            }
-            if ((result.actions & killaura::ACTION_SWAP_SWORD) != 0 && swordSlot >= 0)
-                autoBlockAllowAttack = KillAuraSendSlotLegacy(env, swordSlot) && autoBlockAllowAttack;
-            if ((result.actions & killaura::ACTION_START_BLOCK) != 0)
-                autoBlockAllowAttack = KillAuraStartBlockLegacy(env, selfObj) && autoBlockAllowAttack;
-        }
+    // Auto-block packets no longer emit from this worker thread. The inputs are
+    // published to the Premotion tick gate (KillAuraPremotionTickGate), which
+    // performs them once per movement tick so use-item and attack land in
+    // separate server ticks.
+    const int gateCurrentSlot = KillAuraCurrentSlotLegacy(env, selfObj);
+    const int gateEmptySlot = KillAuraFindSlotLegacy(env, selfObj, gateCurrentSlot, false);
+    const int gateSwordSlot = KillAuraFindSlotLegacy(env, selfObj, gateCurrentSlot, true);
+    KillAuraPublishGateInputsLegacy(cfg,
+        haveChosen && chosenEnt &&
+        chDistSq <= (double)cfg.killAuraAutoBlockRange * cfg.killAuraAutoBlockRange,
+        KillAuraHoldingWeaponLegacy(env, selfObj),
+        gateCurrentSlot, gateEmptySlot, gateSwordSlot);
+    if (!ka_premotion::IsOperational() && cfg.killAuraAutoBlock != killaura::BLOCK_NONE) {
+        // Gate runs inside the Premotion callback; without a backend there are
+        // no block packets at all, so nothing can mix with direct attacks.
+        InterlockedExchange(&g_killAuraGateArmed, 0);
     }
 
     if (haveChosen && chosenEnt) {
@@ -5434,7 +5629,7 @@ static void UpdateKillAuraLegacy(JNIEnv* env, const Config& cfg) {
             if (rotMode == 2)
                 onTarget = onTarget || (std::abs(saaim::ShortestYawDelta(step.yaw, targetAng.yaw)) < 8.0f);
 
-            if (onTarget && inAttackRange && autoBlockAllowAttack) {
+            if (onTarget && inAttackRange) {
                     const bool cpsReady = g_killAuraAttackDelayMs <= 0;
 
                     if (cpsReady) {
@@ -7131,10 +7326,12 @@ static void UpdateAutoToolLegacy(JNIEnv* env, const Config& cfg, const GameState
         return;
     }
 
-    // Auto Rod writes the rod slot then waits two ticks to use. A held LMB
-    // autoclick makes Auto Tool snap back to the weapon in that window, which
-    // cancels the cast and can flag Grim for use/attack on the wrong item.
-    if (HasPendingAutoRodLegacyTransaction()) {
+    // Auto Rod / Throwpot write a hotbar slot then wait two ticks to use it.
+    // A held LMB autoclick makes Auto Tool snap back to the weapon in that
+    // window, which cancels the cast and can flag Grim for use/attack on the
+    // wrong item.
+    if (HasPendingAutoRodLegacyTransaction() || HasPendingThrowPotLegacyTransaction() ||
+        HasPendingAutoHealLegacyTransaction()) {
         return;
     }
 
@@ -7170,7 +7367,8 @@ static void UpdateAutoToolLegacy(JNIEnv* env, const Config& cfg, const GameState
     input.mouseDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 || state.breakingBlock;
     input.isSneaking = isSneaking;
     input.currentSlot = currentSlot;
-    input.pauseExclusive = HasPendingAutoRodLegacyTransaction();
+    input.pauseExclusive = HasPendingAutoRodLegacyTransaction() ||
+        HasPendingThrowPotLegacyTransaction() || HasPendingAutoHealLegacyTransaction();
     input.isBlockHit = false;
     input.isEntityHit = false;
     input.bestToolSlot = -1;
@@ -7869,6 +8067,281 @@ static std::string BuildChestStealerStateJson(JNIEnv* env, bool enabled, bool me
     return out.str();
 }
 
+// ===== Refill (hotbar healing refill) =====
+// Observe-only: reports healing-item slot coordinates while the survival
+// inventory is open; the loader performs the shift-clicks with the physical
+// mouse so vanilla code emits every window click.
+
+static jclass g_refillGuiInventoryClass18 = nullptr;
+static jclass g_refillPotionItemClass18 = nullptr;
+static jclass g_refillGoldenAppleItemClass18 = nullptr;
+static jmethodID g_refillStackGetItemMethod18 = nullptr;
+static jmethodID g_refillStackGetDamageMethod18 = nullptr;
+static jmethodID g_refillPotionGetEffectsMethod18 = nullptr;
+static jmethodID g_refillEffectGetIdMethod18 = nullptr;
+static DWORD g_lastRefillFilterLogMs18 = 0;
+
+static void LogRefillMappingMissing18(const char* detail) {
+    DWORD now = GetTickCount();
+    if (now - g_lastRefillFilterLogMs18 < 5000) return;
+    g_lastRefillFilterLogMs18 = now;
+    Log(std::string("Refill/Throwpot mapping unresolved: ") + (detail ? detail : "unknown"));
+}
+
+static void ResolveRefillMappings18(JNIEnv* env) {
+    jobject gcl = EnsureGameClassLoader(env);
+    if (!gcl) return;
+
+    if (!g_refillGuiInventoryClass18) {
+        jclass cls = LoadClassWithLoader(env, gcl, "net.minecraft.client.gui.inventory.GuiInventory");
+        if (env->ExceptionCheck()) { env->ExceptionClear(); cls = nullptr; }
+        if (cls) g_refillGuiInventoryClass18 = (jclass)env->NewGlobalRef(cls);
+        else LogRefillMappingMissing18("GuiInventory class");
+    }
+    if (!g_refillPotionItemClass18) {
+        jclass cls = LoadClassWithLoader(env, gcl, "net.minecraft.item.ItemPotion");
+        if (env->ExceptionCheck()) { env->ExceptionClear(); cls = nullptr; }
+        if (cls) {
+            g_refillPotionItemClass18 = (jclass)env->NewGlobalRef(cls);
+            // ItemPotion.getEffects(ItemStack) -> List<PotionEffect>
+            const char* names[] = { "getEffects", "func_77832_l", "func_77834_f", "h", "e", nullptr };
+            for (int ni = 0; names[ni] && !g_refillPotionGetEffectsMethod18; ni++) {
+                g_refillPotionGetEffectsMethod18 = env->GetMethodID(
+                    g_refillPotionItemClass18, names[ni], "(Lnet/minecraft/item/ItemStack;)Ljava/util/List;");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_refillPotionGetEffectsMethod18 = nullptr; }
+            }
+            if (!g_refillPotionGetEffectsMethod18)
+                LogRefillMappingMissing18("ItemPotion.getEffects");
+        } else {
+            LogRefillMappingMissing18("ItemPotion class");
+        }
+    }
+    if (!g_refillGoldenAppleItemClass18) {
+        jclass cls = LoadClassWithLoader(env, gcl, "net.minecraft.item.ItemAppleGold");
+        if (env->ExceptionCheck()) { env->ExceptionClear(); cls = nullptr; }
+        if (cls) g_refillGoldenAppleItemClass18 = (jclass)env->NewGlobalRef(cls);
+    }
+    if (!g_refillEffectGetIdMethod18) {
+        jclass effectCls = LoadClassWithLoader(env, gcl, "net.minecraft.potion.PotionEffect");
+        if (env->ExceptionCheck()) { env->ExceptionClear(); effectCls = nullptr; }
+        if (effectCls) {
+            // PotionEffect.getPotionID() -> int
+            const char* names[] = { "getPotionID", "func_76456_a", "func_76456_e", "a", nullptr };
+            for (int ni = 0; names[ni] && !g_refillEffectGetIdMethod18; ni++) {
+                g_refillEffectGetIdMethod18 = env->GetMethodID(effectCls, names[ni], "()I");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_refillEffectGetIdMethod18 = nullptr; }
+            }
+            if (!g_refillEffectGetIdMethod18)
+                LogRefillMappingMissing18("PotionEffect.getPotionID");
+            env->DeleteLocalRef(effectCls);
+        } else {
+            LogRefillMappingMissing18("PotionEffect class");
+        }
+    }
+    if (!g_refillStackGetItemMethod18 || !g_refillStackGetDamageMethod18) {
+        jclass stackCls = LoadClassWithLoader(env, gcl, "net.minecraft.item.ItemStack");
+        if (env->ExceptionCheck()) { env->ExceptionClear(); stackCls = nullptr; }
+        if (stackCls) {
+            if (!g_refillStackGetItemMethod18) {
+                const char* itemNames[] = { "getItem", "func_77973_b", nullptr };
+                for (int ni = 0; itemNames[ni] && !g_refillStackGetItemMethod18; ni++) {
+                    g_refillStackGetItemMethod18 = env->GetMethodID(stackCls, itemNames[ni], "()Lnet/minecraft/item/Item;");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_refillStackGetItemMethod18 = nullptr; }
+                }
+                if (!g_refillStackGetItemMethod18)
+                    LogRefillMappingMissing18("ItemStack.getItem");
+            }
+            if (!g_refillStackGetDamageMethod18) {
+                const char* dmgNames[] = { "getItemDamage", "func_77960_j", nullptr };
+                for (int ni = 0; dmgNames[ni] && !g_refillStackGetDamageMethod18; ni++) {
+                    g_refillStackGetDamageMethod18 = env->GetMethodID(stackCls, dmgNames[ni], "()I");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_refillStackGetDamageMethod18 = nullptr; }
+                }
+            }
+            env->DeleteLocalRef(stackCls);
+        }
+    }
+}
+
+// Mirrors Vape's Refill filter: only potions whose effects include
+// Instant Health or Regeneration count as healing. Other potions (speed,
+// strength, ...) are excluded.
+static bool IsRefillHealingPotion18(JNIEnv* env, jobject item, jobject stack) {
+    if (!g_refillPotionGetEffectsMethod18 || !g_refillEffectGetIdMethod18 || !g_listSizeMethod || !g_listGetMethod) {
+        // Fallback: decode the 1.8.9 potion damage value directly
+        // (bits 0-3 = base potion index; 1 = Regeneration, 5 = Instant Health).
+        if (stack && g_refillStackGetDamageMethod18) {
+            int dmg = env->CallIntMethod(stack, g_refillStackGetDamageMethod18);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); return false; }
+            const int baseIndex = dmg & 15;
+            return baseIndex == 1 || baseIndex == 5;
+        }
+        LogRefillMappingMissing18("potion-effect filter (no damage fallback)");
+        return false;
+    }
+
+    jobject effects = env->CallObjectMethod(item, g_refillPotionGetEffectsMethod18, stack);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return false; }
+    if (!effects) return false;
+
+    bool healing = false;
+    int size = env->CallIntMethod(effects, g_listSizeMethod);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+    } else {
+        for (int i = 0; i < size && !healing; ++i) {
+            jobject effect = env->CallObjectMethod(effects, g_listGetMethod, i);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); continue; }
+            if (effect) {
+                int id = env->CallIntMethod(effect, g_refillEffectGetIdMethod18);
+                if (env->ExceptionCheck()) {
+                    env->ExceptionClear();
+                } else {
+                    healing = (id == 6 /* Instant Health */ || id == 10 /* Regeneration */);
+                }
+                env->DeleteLocalRef(effect);
+            }
+        }
+    }
+    env->DeleteLocalRef(effects);
+    return healing;
+}
+
+static bool IsRefillHealingItem18(JNIEnv* env, jobject item, jobject stack) {
+    if (!item) return false;
+    if (g_refillGoldenAppleItemClass18 && env->IsInstanceOf(item, g_refillGoldenAppleItemClass18)) return true;
+    if (!g_refillPotionItemClass18 || !env->IsInstanceOf(item, g_refillPotionItemClass18)) return false;
+    return IsRefillHealingPotion18(env, item, stack);
+}
+
+static std::string BuildRefillStateJson(JNIEnv* env, bool enabled) {
+    if (!enabled || !env || !g_mcInstance || !g_currentScreenField) return "null";
+    ResolveRefillMappings18(env);
+
+    if (env->PushLocalFrame(128) < 0) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return "null";
+    }
+
+    jobject currentScreen = env->GetObjectField(g_mcInstance, g_currentScreenField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); currentScreen = nullptr; }
+    if (!currentScreen ||
+        !g_refillGuiInventoryClass18 ||
+        !env->IsInstanceOf(currentScreen, g_refillGuiInventoryClass18)) {
+        env->PopLocalFrame(nullptr);
+        return "null";
+    }
+
+    if (!ResolveChestStealerMappings(env, currentScreen)) {
+        LogChestStealerMappingMissing("refill container/slot geometry mappings");
+        env->PopLocalFrame(nullptr);
+        return "null";
+    }
+
+    jobject container = env->GetObjectField(currentScreen, g_guiContainerInventorySlotsField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); container = nullptr; }
+    if (!container || !g_containerWindowIdField || !g_containerInventorySlotsField ||
+        !g_slotGetHasStackMethod || !g_slotGetStackMethod ||
+        !g_slotSlotNumberField || !g_slotXDisplayPositionField || !g_slotYDisplayPositionField) {
+        env->PopLocalFrame(nullptr);
+        return "null";
+    }
+
+    int windowId = env->GetIntField(container, g_containerWindowIdField);
+    int guiLeft = env->GetIntField(currentScreen, g_guiLeftField);
+    int guiTop = env->GetIntField(currentScreen, g_guiTopField);
+    int screenWidth = env->GetIntField(currentScreen, g_guiWidthField);
+    int screenHeight = env->GetIntField(currentScreen, g_guiHeightField);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        env->PopLocalFrame(nullptr);
+        return "null";
+    }
+
+    jobject slotsList = env->GetObjectField(container, g_containerInventorySlotsField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); slotsList = nullptr; }
+    if (!slotsList) {
+        env->PopLocalFrame(nullptr);
+        return "null";
+    }
+
+    int size = env->CallIntMethod(slotsList, g_listSizeMethod);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); size = 0; }
+    // Survival inventory container: 45 slots (9-35 backpack, 36-44 hotbar).
+    if (size < 45 || screenWidth <= 0 || screenHeight <= 0) {
+        env->DeleteLocalRef(slotsList);
+        env->PopLocalFrame(nullptr);
+        return "null";
+    }
+
+    bool hotbarHasRoom = false;
+    for (int i = 36; i <= 44 && !hotbarHasRoom; ++i) {
+        jobject slot = env->CallObjectMethod(slotsList, g_listGetMethod, i);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); continue; }
+        if (slot) {
+            bool hasStack = env->CallBooleanMethod(slot, g_slotGetHasStackMethod) != JNI_FALSE;
+            if (env->ExceptionCheck()) { env->ExceptionClear(); hasStack = true; }
+            hotbarHasRoom = !hasStack;
+            env->DeleteLocalRef(slot);
+        }
+    }
+
+    std::ostringstream slotsJson;
+    int count = 0;
+    if (hotbarHasRoom) {
+        for (int i = 9; i <= 35; ++i) {
+            jobject slot = env->CallObjectMethod(slotsList, g_listGetMethod, i);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); slot = nullptr; }
+            if (!slot) continue;
+
+            bool hasStack = env->CallBooleanMethod(slot, g_slotGetHasStackMethod) != JNI_FALSE;
+            if (env->ExceptionCheck()) { env->ExceptionClear(); hasStack = false; }
+            bool isHealing = false;
+            if (hasStack && g_refillStackGetItemMethod18) {
+                jobject stack = env->CallObjectMethod(slot, g_slotGetStackMethod);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); stack = nullptr; }
+                if (stack) {
+                    jobject item = env->CallObjectMethod(stack, g_refillStackGetItemMethod18);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); item = nullptr; }
+                    isHealing = IsRefillHealingItem18(env, item, stack);
+                    if (item) env->DeleteLocalRef(item);
+                    env->DeleteLocalRef(stack);
+                }
+            }
+
+            if (isHealing) {
+                int slotNumber = env->GetIntField(slot, g_slotSlotNumberField);
+                int slotX = env->GetIntField(slot, g_slotXDisplayPositionField);
+                int slotY = env->GetIntField(slot, g_slotYDisplayPositionField);
+                if (env->ExceptionCheck()) {
+                    env->ExceptionClear();
+                } else {
+                    if (count > 0) slotsJson << ",";
+                    slotsJson << "{\"index\":" << i
+                              << ",\"slotNumber\":" << slotNumber
+                              << ",\"x\":" << (guiLeft + slotX + 8)
+                              << ",\"y\":" << (guiTop + slotY + 8)
+                              << "}";
+                    count++;
+                }
+            }
+            env->DeleteLocalRef(slot);
+        }
+    }
+
+    env->DeleteLocalRef(slotsList);
+
+    std::ostringstream out;
+    out << "{\"ready\":" << (count > 0 ? "true" : "false")
+        << ",\"windowId\":" << windowId
+        << ",\"screenWidth\":" << screenWidth
+        << ",\"screenHeight\":" << screenHeight
+        << ",\"slots\":[" << slotsJson.str() << "]}";
+
+    env->PopLocalFrame(nullptr);
+    return out.str();
+}
+
 static void UpdateChestStealer(JNIEnv* env, const Config& cfg) {
     if (!cfg.chestStealer) {
         ResetChestStealerRuntime();
@@ -8411,6 +8884,8 @@ static void ExecuteAutoRodLegacy(JNIEnv* env, const Config& cfg, const GameState
         ProcessPendingAutoRodLegacy(env, cfg, state);
         return;
     }
+    // Throwpot/AutoHeal own the held slot while their transactions are in flight.
+    if (HasPendingThrowPotLegacyTransaction() || HasPendingAutoHealLegacyTransaction()) return;
     if (!IsAutoRodLegacyEligible(cfg, state)) return;
 
     AutoRodRequest request(false, 0, true);
@@ -8480,6 +8955,481 @@ static void ExecuteAutoRodLegacy(JNIEnv* env, const Config& cfg, const GameState
     env->PopLocalFrame(nullptr);
 }
 
+// ===== Throwpot (legacy 1.8.9) =====
+
+static jclass g_throwPotSplashClass18 = nullptr;
+static DWORD g_throwPotLastLogMs18 = 0;
+
+static void LogThrowPotLegacyRateLimited(const char* message) {
+    DWORD now = GetTickCount();
+    if (now - g_throwPotLastLogMs18 < 5000) return;
+    g_throwPotLastLogMs18 = now;
+    Log(std::string("Throwpot: ") + (message ? message : "unknown"));
+}
+
+static bool IsThrowPotLegacyEligible(const Config& cfg, const GameState& state) {
+    return cfg.throwpotEnabled && state.mapped && state.inWorld && !state.guiOpen &&
+        g_mcInstance && g_thePlayerField && g_gameHwnd &&
+        GetForegroundWindow() == g_gameHwnd;
+}
+
+static const char* MissingAutoHealOrPotMapping18() {
+    if (!g_autoRodInventoryField18) return "player inventory field";
+    if (!g_autoRodCurrentItemField18) return "inventory.currentItem field";
+    if (!g_autoRodTicksExistedField18) return "player.ticksExisted field";
+    if (!g_autoRodGetStackInSlot18) return "inventory.getStackInSlot";
+    if (!g_refillStackGetItemMethod18) return "ItemStack.getItem";
+    if (!g_refillPotionItemClass18) return "ItemPotion class";
+    return nullptr;
+}
+
+static bool EnsureThrowPotMappingsLegacy(JNIEnv* env, jobject player) {
+    if (!EnsureAutoRodLegacyMappings(env, player, false)) {
+        LogRefillMappingMissing18(MissingAutoHealOrPotMapping18());
+        return false;
+    }
+    ResolveRefillMappings18(env);
+    // getEffects/getPotionID are optional (damage-value decode is the
+    // fallback); only the potion class and stack item access are mandatory.
+    if (!g_refillPotionItemClass18 || !g_refillStackGetItemMethod18) {
+        LogRefillMappingMissing18(MissingAutoHealOrPotMapping18());
+        return false;
+    }
+    if (!g_throwPotSplashClass18) {
+        jobject gcl = EnsureGameClassLoader(env);
+        if (gcl) {
+            jclass cls = LoadClassWithLoader(env, gcl, "net.minecraft.item.ItemSplashPotion");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); cls = nullptr; }
+            if (cls) g_throwPotSplashClass18 = (jclass)env->NewGlobalRef(cls);
+        }
+        // Optional: the damage-value splash bit is the fallback detector.
+    }
+    return true;
+}
+
+// Only healing splash potions are thrown; drinkable potions would be consumed
+// instead of splashed, and non-healing effects are never worth throwing.
+static bool IsHealingSplashPotionLegacy(JNIEnv* env, jobject item, jobject stack) {
+    if (!item || !stack) return false;
+    if (!g_refillPotionItemClass18 || !env->IsInstanceOf(item, g_refillPotionItemClass18)) return false;
+    bool splash = g_throwPotSplashClass18 && env->IsInstanceOf(item, g_throwPotSplashClass18);
+    if (!splash && g_refillStackGetDamageMethod18) {
+        int dmg = env->CallIntMethod(stack, g_refillStackGetDamageMethod18);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); return false; }
+        splash = (dmg & 0x4000) != 0; // 1.8.9 potion metadata splash bit
+    }
+    if (!splash) return false;
+    return IsRefillHealingPotion18(env, item, stack);
+}
+
+static bool SendThrowPotUseInputLegacy() {
+    INPUT inputs[2] = {};
+    inputs[0].type = INPUT_MOUSE;
+    inputs[0].mi.dwFlags = MOUSEEVENTF_RIGHTDOWN;
+    inputs[1].type = INPUT_MOUSE;
+    inputs[1].mi.dwFlags = MOUSEEVENTF_RIGHTUP;
+    return SendInput(2, inputs, sizeof(INPUT)) == 2;
+}
+
+static void AbortThrowPotLegacyTransaction(bool restoreNote) {
+    ResetThrowPotLegacyTransaction();
+    if (restoreNote) LogThrowPotLegacyRateLimited("transaction aborted");
+}
+
+static void ProcessPendingThrowPotLegacy(JNIEnv* env, const Config& cfg, const GameState& state) {
+    if (!HasPendingThrowPotLegacyTransaction()) return;
+    const bool timedOut = GetTickCount() - g_throwPotTransaction18.startedAtMs >= kThrowPotTransactionTimeoutMs;
+    if (env->PushLocalFrame(12) < 0) {
+        if (timedOut) AbortThrowPotLegacyTransaction(true);
+        return;
+    }
+
+    jobject player = g_mcInstance && g_thePlayerField
+        ? env->GetObjectField(g_mcInstance, g_thePlayerField) : nullptr;
+    if (env->ExceptionCheck()) { env->ExceptionClear(); player = nullptr; }
+    if (!player || !EnsureAutoRodLegacyMappings(env, player, false)) {
+        env->PopLocalFrame(nullptr);
+        if (timedOut) AbortThrowPotLegacyTransaction(true);
+        return;
+    }
+
+    jobject inventory = env->GetObjectField(player, g_autoRodInventoryField18);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); inventory = nullptr; }
+    int currentTick = 0;
+    if (!inventory || !ReadAutoRodLegacyTick(env, player, &currentTick)) {
+        env->PopLocalFrame(nullptr);
+        if (timedOut) AbortThrowPotLegacyTransaction(true);
+        return;
+    }
+
+    const long long tickDelta = static_cast<long long>(currentTick) - g_throwPotTransaction18.phaseStartTick;
+    if (tickDelta < 0) {
+        env->PopLocalFrame(nullptr);
+        AbortThrowPotLegacyTransaction(false);
+        return;
+    }
+
+    int currentSlot = env->GetIntField(inventory, g_autoRodCurrentItemField18);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        currentSlot = autorod::kInvalidSlot;
+    }
+    if (!IsThrowPotLegacyEligible(cfg, state) ||
+        (g_throwPotTransaction18.phase == ThrowPotLegacySelected &&
+         currentSlot != g_throwPotTransaction18.targetSlot)) {
+        g_throwPotTransaction18.cancelled = true;
+    }
+
+    if (g_throwPotTransaction18.phase == ThrowPotLegacySelected) {
+        const bool selectDelayElapsed = throwpot::HasElapsedTicks(
+            currentTick, g_throwPotTransaction18.phaseStartTick, autorod::kSelectToUseTicks);
+        if (!selectDelayElapsed && !timedOut) {
+            env->PopLocalFrame(nullptr);
+            return;
+        }
+
+        if (g_throwPotTransaction18.cancelled || timedOut) {
+            env->SetIntField(inventory, g_autoRodCurrentItemField18,
+                g_throwPotTransaction18.originalSlot);
+            const bool restored = !env->ExceptionCheck();
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            if (restored) {
+                g_throwPotTransaction18.phase = ThrowPotLegacyRestoring;
+                g_throwPotTransaction18.phaseStartTick = currentTick;
+            } else if (timedOut) {
+                ResetThrowPotLegacyTransaction();
+            }
+            env->PopLocalFrame(nullptr);
+            return;
+        }
+
+        // The synthetic right-click is handled by Minecraft's normal input loop.
+        // No interaction or held-item packet is emitted from this worker thread.
+        g_throwPotTransaction18.phase = ThrowPotLegacyUsed;
+        g_throwPotTransaction18.phaseStartTick = currentTick;
+        if (!SendThrowPotUseInputLegacy())
+            LogThrowPotLegacyRateLimited("right-click input failed; delayed restore armed");
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    if (g_throwPotTransaction18.phase == ThrowPotLegacyUsed) {
+        const bool restoreDelayElapsed = throwpot::HasElapsedTicks(
+            currentTick, g_throwPotTransaction18.phaseStartTick, throwpot::kUseToRestoreTicks);
+        if (!restoreDelayElapsed && !timedOut) {
+            env->PopLocalFrame(nullptr);
+            return;
+        }
+
+        env->SetIntField(inventory, g_autoRodCurrentItemField18, g_throwPotTransaction18.originalSlot);
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            if (timedOut) ResetThrowPotLegacyTransaction();
+            env->PopLocalFrame(nullptr);
+            return;
+        }
+        g_throwPotTransaction18.phase = ThrowPotLegacyRestoring;
+        g_throwPotTransaction18.phaseStartTick = currentTick;
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    const bool settleElapsed = throwpot::HasElapsedTicks(
+        currentTick, g_throwPotTransaction18.phaseStartTick, autorod::kRestoreSettleTicks);
+    env->PopLocalFrame(nullptr);
+    if (settleElapsed || timedOut)
+        ResetThrowPotLegacyTransaction();
+}
+
+static void ExecuteThrowPotLegacy(JNIEnv* env, const Config& cfg, const GameState& state) {
+    if (HasPendingThrowPotLegacyTransaction()) {
+        ProcessPendingThrowPotLegacy(env, cfg, state);
+        return;
+    }
+    // AutoRod owns the held slot while its transaction is in flight; drop a
+    // press made during a rod cast instead of throwing late.
+    if (InterlockedExchange(&g_throwPotRequested, 0) == 0) return;
+    if (HasPendingAutoRodLegacyTransaction() || HasPendingAutoHealLegacyTransaction()) return;
+    if (!IsThrowPotLegacyEligible(cfg, state)) return;
+
+    if (env->PushLocalFrame(48) < 0) return;
+
+    jobject player = env->GetObjectField(g_mcInstance, g_thePlayerField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); player = nullptr; }
+    if (!player) { env->PopLocalFrame(nullptr); return; }
+
+    if (!EnsureThrowPotMappingsLegacy(env, player)) {
+        LogThrowPotLegacyRateLimited("mappings unavailable");
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    jobject inventory = env->GetObjectField(player, g_autoRodInventoryField18);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); inventory = nullptr; }
+    int selectTick = 0;
+    if (!inventory || !ReadAutoRodLegacyTick(env, player, &selectTick)) {
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    const int originalSlot = env->GetIntField(inventory, g_autoRodCurrentItemField18);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); env->PopLocalFrame(nullptr); return; }
+
+    bool potSlots[autorod::kHotbarSlots] = {};
+    for (int slot = 0; slot < autorod::kHotbarSlots; ++slot) {
+        jobject stack = env->CallObjectMethod(inventory, g_autoRodGetStackInSlot18, slot);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); stack = nullptr; }
+        if (!stack) continue;
+        jobject item = env->CallObjectMethod(stack, g_autoRodItemStackGetItem18);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); item = nullptr; }
+        potSlots[slot] = IsHealingSplashPotionLegacy(env, item, stack);
+        if (item) env->DeleteLocalRef(item);
+        env->DeleteLocalRef(stack);
+    }
+
+    const int targetSlot = throwpot::SelectPotSlot(potSlots);
+    if (targetSlot == autorod::kInvalidSlot) {
+        LogThrowPotLegacyRateLimited("no healing splash potion in hotbar");
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    env->SetIntField(inventory, g_autoRodCurrentItemField18, targetSlot);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    g_throwPotTransaction18.phase = ThrowPotLegacySelected;
+    g_throwPotTransaction18.originalSlot = originalSlot;
+    g_throwPotTransaction18.targetSlot = targetSlot;
+    g_throwPotTransaction18.phaseStartTick = selectTick;
+    g_throwPotTransaction18.startedAtMs = GetTickCount();
+    g_throwPotTransaction18.cancelled = false;
+    env->PopLocalFrame(nullptr);
+}
+
+// ===== AutoHeal (legacy 1.8.9) =====
+
+static jmethodID g_autoHealGetHealthMethod18 = nullptr;
+
+static bool IsAutoHealLegacyEligible(const Config& cfg, const GameState& state) {
+    return cfg.autoHealEnabled && state.mapped && state.inWorld && !state.guiOpen &&
+        g_mcInstance && g_thePlayerField && g_gameHwnd &&
+        GetForegroundWindow() == g_gameHwnd;
+}
+
+static bool EnsureAutoHealMappingsLegacy(JNIEnv* env, jobject player) {
+    if (!EnsureAutoRodLegacyMappings(env, player, false)) return false;
+    ResolveRefillMappings18(env);
+    // getEffects/getPotionID are optional (damage-value decode is the fallback);
+    // only the potion class and stack item access are mandatory.
+    if (!g_refillPotionItemClass18 || !g_refillStackGetItemMethod18) {
+        return false;
+    }
+    if (!g_autoHealGetHealthMethod18) {
+        jclass playerCls = env->GetObjectClass(player);
+        if (!playerCls) return false;
+        const char* names[] = { "getHealth", "func_110143_aJ", "bn", nullptr };
+        for (int ni = 0; names[ni] && !g_autoHealGetHealthMethod18; ni++) {
+            g_autoHealGetHealthMethod18 = env->GetMethodID(playerCls, names[ni], "()F");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_autoHealGetHealthMethod18 = nullptr; }
+        }
+        env->DeleteLocalRef(playerCls);
+    }
+    return g_autoHealGetHealthMethod18 != nullptr;
+}
+
+static void AbortAutoHealLegacyTransaction(bool note) {
+    ResetAutoHealLegacyTransaction();
+    if (note) Log("AutoHeal: transaction aborted");
+}
+
+static void ProcessPendingAutoHealLegacy(JNIEnv* env, const Config& cfg, const GameState& state) {
+    if (!HasPendingAutoHealLegacyTransaction()) return;
+    const bool timedOut = GetTickCount() - g_autoHealTransaction18.startedAtMs >= kAutoHealTransactionTimeoutMs;
+    if (env->PushLocalFrame(12) < 0) {
+        if (timedOut) AbortAutoHealLegacyTransaction(true);
+        return;
+    }
+
+    jobject player = g_mcInstance && g_thePlayerField
+        ? env->GetObjectField(g_mcInstance, g_thePlayerField) : nullptr;
+    if (env->ExceptionCheck()) { env->ExceptionClear(); player = nullptr; }
+    if (!player || !EnsureAutoRodLegacyMappings(env, player, false)) {
+        env->PopLocalFrame(nullptr);
+        if (timedOut) AbortAutoHealLegacyTransaction(true);
+        return;
+    }
+
+    jobject inventory = env->GetObjectField(player, g_autoRodInventoryField18);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); inventory = nullptr; }
+    int currentTick = 0;
+    if (!inventory || !ReadAutoRodLegacyTick(env, player, &currentTick)) {
+        env->PopLocalFrame(nullptr);
+        if (timedOut) AbortAutoHealLegacyTransaction(true);
+        return;
+    }
+
+    const long long tickDelta = static_cast<long long>(currentTick) - g_autoHealTransaction18.phaseStartTick;
+    if (tickDelta < 0) {
+        env->PopLocalFrame(nullptr);
+        AbortAutoHealLegacyTransaction(false);
+        return;
+    }
+
+    int currentSlot = env->GetIntField(inventory, g_autoRodCurrentItemField18);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        currentSlot = autorod::kInvalidSlot;
+    }
+    if (!IsAutoHealLegacyEligible(cfg, state) ||
+        (g_autoHealTransaction18.phase == AutoHealLegacySelected &&
+         currentSlot != g_autoHealTransaction18.targetSlot)) {
+        g_autoHealTransaction18.cancelled = true;
+    }
+
+    if (g_autoHealTransaction18.phase == AutoHealLegacySelected) {
+        const bool selectDelayElapsed = throwpot::HasElapsedTicks(
+            currentTick, g_autoHealTransaction18.phaseStartTick, autorod::kSelectToUseTicks);
+        if (!selectDelayElapsed && !timedOut) {
+            env->PopLocalFrame(nullptr);
+            return;
+        }
+
+        if (g_autoHealTransaction18.cancelled || timedOut) {
+            env->SetIntField(inventory, g_autoRodCurrentItemField18,
+                g_autoHealTransaction18.originalSlot);
+            const bool restored = !env->ExceptionCheck();
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            if (restored) {
+                g_autoHealTransaction18.phase = AutoHealLegacyRestoring;
+                g_autoHealTransaction18.phaseStartTick = currentTick;
+            } else if (timedOut) {
+                ResetAutoHealLegacyTransaction();
+            }
+            env->PopLocalFrame(nullptr);
+            return;
+        }
+
+        // The synthetic right-click is handled by Minecraft's normal input loop.
+        g_autoHealTransaction18.phase = AutoHealLegacyUsed;
+        g_autoHealTransaction18.phaseStartTick = currentTick;
+        if (!SendThrowPotUseInputLegacy())
+            Log("AutoHeal: right-click input failed; delayed restore armed");
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    if (g_autoHealTransaction18.phase == AutoHealLegacyUsed) {
+        const bool restoreDelayElapsed = throwpot::HasElapsedTicks(
+            currentTick, g_autoHealTransaction18.phaseStartTick, throwpot::kUseToRestoreTicks);
+        if (!restoreDelayElapsed && !timedOut) {
+            env->PopLocalFrame(nullptr);
+            return;
+        }
+
+        env->SetIntField(inventory, g_autoRodCurrentItemField18, g_autoHealTransaction18.originalSlot);
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            if (timedOut) ResetAutoHealLegacyTransaction();
+            env->PopLocalFrame(nullptr);
+            return;
+        }
+        g_autoHealTransaction18.phase = AutoHealLegacyRestoring;
+        g_autoHealTransaction18.phaseStartTick = currentTick;
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    const bool settleElapsed = throwpot::HasElapsedTicks(
+        currentTick, g_autoHealTransaction18.phaseStartTick, autorod::kRestoreSettleTicks);
+    env->PopLocalFrame(nullptr);
+    if (settleElapsed || timedOut)
+        ResetAutoHealLegacyTransaction();
+}
+
+static void ExecuteAutoHealLegacy(JNIEnv* env, const Config& cfg, const GameState& state) {
+    if (HasPendingAutoHealLegacyTransaction()) {
+        ProcessPendingAutoHealLegacy(env, cfg, state);
+        return;
+    }
+    // One hotbar owner at a time: yield to Auto Rod / Throwpot transactions.
+    if (HasPendingAutoRodLegacyTransaction() || HasPendingThrowPotLegacyTransaction()) return;
+    if (!IsAutoHealLegacyEligible(cfg, state)) return;
+
+    const DWORD nowMs = GetTickCount();
+    if (nowMs - g_autoHealLastHealMs < static_cast<DWORD>(cfg.autoHealDelayMs)) return;
+
+    // Only heal while already looking steeply down so the splash lands at the
+    // player's feet, never toward an opponent. No silent rotation is applied.
+    if (!throwpot::IsLookingSteeplyDown(state.pitch)) return;
+
+    if (env->PushLocalFrame(48) < 0) return;
+
+    jobject player = env->GetObjectField(g_mcInstance, g_thePlayerField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); player = nullptr; }
+    if (!player) { env->PopLocalFrame(nullptr); return; }
+
+    if (!EnsureAutoHealMappingsLegacy(env, player)) {
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    const float health = env->CallFloatMethod(player, g_autoHealGetHealthMethod18);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); env->PopLocalFrame(nullptr); return; }
+    if (!(health > 0.0f) || health > static_cast<float>(cfg.autoHealHealth)) {
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    jobject inventory = env->GetObjectField(player, g_autoRodInventoryField18);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); inventory = nullptr; }
+    int selectTick = 0;
+    if (!inventory || !ReadAutoRodLegacyTick(env, player, &selectTick)) {
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    const int originalSlot = env->GetIntField(inventory, g_autoRodCurrentItemField18);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); env->PopLocalFrame(nullptr); return; }
+
+    bool potSlots[autorod::kHotbarSlots] = {};
+    for (int slot = 0; slot < autorod::kHotbarSlots; ++slot) {
+        jobject stack = env->CallObjectMethod(inventory, g_autoRodGetStackInSlot18, slot);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); stack = nullptr; }
+        if (!stack) continue;
+        jobject item = env->CallObjectMethod(stack, g_autoRodItemStackGetItem18);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); item = nullptr; }
+        potSlots[slot] = IsHealingSplashPotionLegacy(env, item, stack);
+        if (item) env->DeleteLocalRef(item);
+        env->DeleteLocalRef(stack);
+    }
+
+    const int targetSlot = throwpot::SelectPotSlot(potSlots);
+    if (targetSlot == autorod::kInvalidSlot) {
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    env->SetIntField(inventory, g_autoRodCurrentItemField18, targetSlot);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
+    g_autoHealLastHealMs = nowMs;
+    g_autoHealTransaction18.phase = AutoHealLegacySelected;
+    g_autoHealTransaction18.originalSlot = originalSlot;
+    g_autoHealTransaction18.targetSlot = targetSlot;
+    g_autoHealTransaction18.phaseStartTick = selectTick;
+    g_autoHealTransaction18.startedAtMs = nowMs;
+    g_autoHealTransaction18.cancelled = false;
+    env->PopLocalFrame(nullptr);
+}
+
 GameState ReadGameState(JNIEnv* env) {
     GameState s = {};
     static DWORD nextRefreshAt = 0;
@@ -8497,11 +9447,13 @@ GameState ReadGameState(JNIEnv* env) {
     bool shouldCheckHoldingBlock = false;
     bool chestStealerEnabled = false;
     bool chestStealerMenuCheck = true;
+    bool refillEnabled = false;
     {
         LockGuard lk(g_configMutex);
         gtbHelperEnabled = g_config.gtbHelper;
         chestStealerEnabled = g_config.chestStealer;
         chestStealerMenuCheck = g_config.chestStealerMenuCheck;
+        refillEnabled = g_config.refill;
         shouldCheckHoldingBlock =
             (g_config.rightClick && g_config.rightBlockOnly) ||
             (g_config.speedBridge && g_config.speedBridgeBlockOnly);
@@ -8626,10 +9578,59 @@ GameState ReadGameState(JNIEnv* env) {
     s.lookingAtEntity = false;
     s.lookingAtEntityLatched = false;
     s.breakingBlock = false;
+
+    if (g_mcClass) {
+        if (!g_playerControllerField) {
+            const char* pcNames[] = { "playerController", "field_71442_b", "b", nullptr };
+            for (int i = 0; pcNames[i] && !g_playerControllerField; ++i) {
+                g_playerControllerField = env->GetFieldID(g_mcClass, pcNames[i], "Lnet/minecraft/client/multiplayer/PlayerControllerMP;");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_playerControllerField = nullptr; }
+            }
+        }
+        if (g_playerControllerField) {
+            jobject controller = env->GetObjectField(g_mcInstance, g_playerControllerField);
+            if (controller && !env->ExceptionCheck()) {
+                jclass ctrlCls = env->GetObjectClass(controller);
+                if (ctrlCls) {
+                    static jfieldID s_isHittingBlockFld = nullptr;
+                    static jfieldID s_curBlockDamageFld = nullptr;
+                    if (!s_isHittingBlockFld) {
+                        const char* hNames[] = { "isHittingBlock", "field_78778_j", "i", nullptr };
+                        for (int i = 0; hNames[i] && !s_isHittingBlockFld; ++i) {
+                            s_isHittingBlockFld = env->GetFieldID(ctrlCls, hNames[i], "Z");
+                            if (env->ExceptionCheck()) { env->ExceptionClear(); s_isHittingBlockFld = nullptr; }
+                        }
+                    }
+                    if (!s_curBlockDamageFld) {
+                        const char* dNames[] = { "curBlockDamageMP", "field_78770_f", "e", nullptr };
+                        for (int i = 0; dNames[i] && !s_curBlockDamageFld; ++i) {
+                            s_curBlockDamageFld = env->GetFieldID(ctrlCls, dNames[i], "F");
+                            if (env->ExceptionCheck()) { env->ExceptionClear(); s_curBlockDamageFld = nullptr; }
+                        }
+                    }
+                    if (s_isHittingBlockFld) {
+                        s.breakingBlock = (env->GetBooleanField(controller, s_isHittingBlockFld) == JNI_TRUE);
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); s.breakingBlock = false; }
+                    }
+                    if (!s.breakingBlock && s_curBlockDamageFld) {
+                        float dmg = env->GetFloatField(controller, s_curBlockDamageFld);
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); dmg = 0.0f; }
+                        if (dmg > 0.0f) s.breakingBlock = true;
+                    }
+                    env->DeleteLocalRef(ctrlCls);
+                }
+                env->DeleteLocalRef(controller);
+            } else if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+            }
+        }
+    }
+
     s.attackCooldown = 1.0f;
     s.attackCooldownPerTick = 0.08f;
     s.stateMs = (unsigned long long)GetTickCount64();
     s.chestStealerStateJson = BuildChestStealerStateJson(env, chestStealerEnabled, chestStealerMenuCheck);
+    s.refillStateJson = BuildRefillStateJson(env, refillEnabled);
     { LockGuard lk(g_killAuraUnavailableMutex);
         s.killAuraUnavailableReason = g_killAuraUnavailableReason;
         s.killAuraHasTarget = g_killAuraHasTarget;
@@ -8647,8 +9648,6 @@ GameState ReadGameState(JNIEnv* env) {
                     if (nameChars) {
                         if (strcmp(nameChars, "BLOCK") == 0) {
                             s.lookingAtBlock = true;
-                            bool lmbDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
-                            s.breakingBlock = lmbDown;
                         } else if (strcmp(nameChars, "ENTITY") == 0) {
                             s.lookingAtEntity = true;
                             s.lookingAtEntityLatched = true;
@@ -10549,10 +11548,13 @@ void RenderHUD(
     if (cfg.killAura)          pushMod("Kill Aura");
     if (cfg.speedBridge)       pushMod("SpeedBridge");
     if (cfg.autoRodEnabled)    pushMod("Auto Rod");
+    if (cfg.throwpotEnabled)   pushMod("Throwpot");
+    if (cfg.autoHealEnabled)   pushMod("AutoHeal");
     if (cfg.autoToolEnabled)   pushMod("AutoTool");
     if (cfg.chestEsp)          pushMod("Chest ESP");
     if (cfg.blockEsp)          pushMod("Block ESP");
     if (cfg.chestStealer)      pushMod("Chest Stealer");
+    if (cfg.refill)            pushMod("Refill");
     if (cfg.nametags)          pushMod("Nametags");
     if (cfg.nickHiderEnabled)  pushMod("Nick Hider");
     if (cfg.gtbHelper)         pushMod("GTB Helper");
@@ -13419,6 +14421,10 @@ void ParseConfig(const std::string& line) {
             } else {
                 CancelAutoRodRequests();
             }
+        } else if (reader.GetString("action") == "throwPot") {
+            // One-shot press; no hold/release semantics.
+            if (reader.GetBool("enabled", true))
+                InterlockedExchange(&g_throwPotRequested, 1);
         }
         return;
     }
@@ -13541,6 +14547,8 @@ void ParseConfig(const std::string& line) {
         g_config.nametagHideVanilla = reader.GetBool("nametagHideVanilla");
         g_config.chestEsp = reader.GetBool("chestEsp");
         g_config.chestStealer = reader.GetBool("chestStealerEnabled");
+        g_config.refill = reader.GetBool("refillEnabled");
+        g_config.refillDelayMs = lc::ClampInt(reader.GetInt("refillDelayMs", g_config.refillDelayMs), 50, 500);
         g_config.blockEsp = reader.GetBool("blockEspEnabled");
         g_config.blockEspBoxes = reader.GetBool("blockEspBoxes", true);
         g_config.blockEspTracers = reader.GetBool("blockEspTracers");
@@ -13586,6 +14594,12 @@ void ParseConfig(const std::string& line) {
             reader.GetInt("autoRodExtensionTicks", g_config.autoRodExtensionTicks),
             autorod::kMinExtensionTicks, autorod::kMaxExtensionTicks);
         g_config.autoRodHoldToExtend = reader.GetBool("autoRodHoldToExtend", false);
+        g_config.throwpotEnabled = reader.GetBool("throwpotEnabled");
+        if (!g_config.throwpotEnabled) InterlockedExchange(&g_throwPotRequested, 0);
+        g_config.autoHealEnabled = reader.GetBool("autoHealEnabled");
+        if (!g_config.autoHealEnabled) ResetAutoHealLegacyTransaction();
+        g_config.autoHealHealth = lc::ClampInt(reader.GetInt("autoHealHealth", g_config.autoHealHealth), 1, 20);
+        g_config.autoHealDelayMs = lc::ClampInt(reader.GetInt("autoHealDelayMs", g_config.autoHealDelayMs), 50, 2000);
         g_config.autoToolEnabled = reader.GetBool("autoToolEnabled");
         g_config.autoToolSwapWeapon = reader.GetBool("autoToolSwapWeapon", true);
         g_config.autoToolInstantSwap = reader.GetBool("autoToolInstantSwap", true);
@@ -13691,9 +14705,11 @@ void ParseConfig(const std::string& line) {
         { int v = reader.GetInt("keybindFightStatus", -1);   if (v >= 0) g_config.keybindFightStatus   = v; }
         { int v = reader.GetInt("keybindChestEsp", -1);      if (v >= 0) g_config.keybindChestEsp      = v; }
         { int v = reader.GetInt("keybindChestStealer", -1);  if (v >= 0) g_config.keybindChestStealer  = v; }
+        { int v = reader.GetInt("keybindRefill", -1);        if (v >= 0) g_config.keybindRefill        = v; }
         { int v = reader.GetInt("keybindBlockEsp", -1);      if (v >= 0) g_config.keybindBlockEsp      = v; }
         { int v = reader.GetInt("keybindBedPlates", -1);     if (v >= 0) g_config.keybindBedPlates     = v; }
         { int v = reader.GetInt("keybindAutoRod", -1);       if (v >= 0) g_config.keybindAutoRod = lc::ClampInt(v, 0, 255); }
+        { int v = reader.GetInt("keybindThrowpot", -1);      if (v >= 0) g_config.keybindThrowpot = lc::ClampInt(v, 0, 255); }
         { int v = reader.GetInt("keybindAutoTool", -1);      if (v >= 0) g_config.keybindAutoTool = lc::ClampInt(v, 0, 255); }
 
         g_config.pixelPartyAssist = reader.GetBool("pixelPartyAssist");
@@ -13807,6 +14823,7 @@ void ServerLoop() {
     anti_debuff_jvmti::Install(g_jvm, Log);
     ka_premotion::Install(g_jvm, Log);
     ka_premotion::SetAttackHandler(KillAuraPremotionAttackHandler);
+    ka_premotion::SetAttackGate(KillAuraPremotionTickGate);
 
     Log("Discovering classes...");
     bool mapped = DiscoverMappings(env);
@@ -13831,6 +14848,8 @@ void ServerLoop() {
         DWORD lastSpeedBridgeMs = 0;
         DWORD lastKillAuraMs = 0;
         DWORD lastAutoRodMs = 0;
+        DWORD lastThrowPotMs = 0;
+        DWORD lastAutoHealMs = 0;
         DWORD lastAutoToolMs = 0;
         DWORD lastHitDelayMs = 0;
         DWORD lastReachMs = 0;
@@ -13884,6 +14903,14 @@ void ServerLoop() {
                 cfgSnapshot.autoRodEnabled || HasPendingAutoRodLegacyTransaction();
             const bool autoRodDue = autoRodEnabled &&
                 lc::IsTelemetryIntervalDue(nowMs, lastAutoRodMs, lc::kAutoRodIntervalMs);
+            const bool throwPotEnabled =
+                cfgSnapshot.throwpotEnabled || HasPendingThrowPotLegacyTransaction();
+            const bool throwPotDue = throwPotEnabled &&
+                lc::IsTelemetryIntervalDue(nowMs, lastThrowPotMs, lc::kThrowPotIntervalMs);
+            const bool autoHealEnabled =
+                cfgSnapshot.autoHealEnabled || HasPendingAutoHealLegacyTransaction();
+            const bool autoHealDue = autoHealEnabled &&
+                lc::IsTelemetryIntervalDue(nowMs, lastAutoHealMs, lc::kAutoHealIntervalMs);
             const bool autoToolDue = cfgSnapshot.autoToolEnabled &&
                 lc::IsTelemetryIntervalDue(nowMs, lastAutoToolMs, lc::kAutoToolIntervalMs);
             const bool hitDelayDue = cfgSnapshot.hitDelayFixEnabled &&
@@ -13908,7 +14935,7 @@ void ServerLoop() {
                 GetNativePerfDiagnostics().Enabled() ? NativePerfTimestamp() : 0;
             GameState state;
             const bool jniDue =
-                stateDue || speedBridgeDue || autoRodDue || autoToolDue || hitDelayDue ||
+                stateDue || speedBridgeDue || autoRodDue || throwPotDue || autoHealDue || autoToolDue || hitDelayDue ||
                 reachDue || velocityDue || killAuraDue || pixelPartyDue || antiDebuffDue;
             if (jniDue) {
                 LockGuard jniLk(g_stateJniMutex);
@@ -13935,6 +14962,14 @@ void ServerLoop() {
                     TrackAutoRodLegacyWorld(env);
                     ExecuteAutoRodLegacy(env, cfgSnapshot, state);
                     lastAutoRodMs = nowMs;
+                }
+                if (throwPotDue) {
+                    ExecuteThrowPotLegacy(env, cfgSnapshot, state);
+                    lastThrowPotMs = nowMs;
+                }
+                if (autoHealDue) {
+                    ExecuteAutoHealLegacy(env, cfgSnapshot, state);
+                    lastAutoHealMs = nowMs;
                 }
                 if (pixelPartyDue) {
                     UpdatePixelPartyAssistLegacy(env, cfgSnapshot, state);
@@ -14016,6 +15051,8 @@ void ServerLoop() {
                 jsonToSend += "\"stateMs\":" + std::to_string(state.stateMs) + ",";
                 jsonToSend += "\"chestStealerState\":";
                 jsonToSend += state.chestStealerStateJson.empty() ? "null" : state.chestStealerStateJson;
+                jsonToSend += ",\"refillState\":";
+                jsonToSend += state.refillStateJson.empty() ? "null" : state.refillStateJson;
 
                 PixelPartySnap ppSnap;
                 { LockGuard lk(g_pixelPartyMutex); ppSnap = g_pixelPartySnap; }
@@ -14110,6 +15147,10 @@ void ServerLoop() {
                 &sleepMs, sleepNow, lastSpeedBridgeMs, lc::kSpeedBridgeIntervalMs, speedBridgeEnabled);
             lc::ConsiderJobSleep(
                 &sleepMs, sleepNow, lastAutoRodMs, lc::kAutoRodIntervalMs, autoRodEnabled);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastThrowPotMs, lc::kThrowPotIntervalMs, throwPotEnabled);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastAutoHealMs, lc::kAutoHealIntervalMs, autoHealEnabled);
             lc::ConsiderJobSleep(
                 &sleepMs, sleepNow, lastAutoToolMs, lc::kAutoToolIntervalMs, cfgSnapshot.autoToolEnabled);
             lc::ConsiderJobSleep(

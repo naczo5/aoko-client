@@ -7,7 +7,14 @@ using System.Threading.Tasks;
 
 namespace Aoko.Core;
 
-internal sealed class ChestStealerController
+/// <summary>
+/// Moves healing items (pots, golden apples) from the backpack into empty
+/// hotbar slots while the survival inventory screen is open. The bridge
+/// reports candidate slot coordinates via <see cref="GameState.RefillState"/>;
+/// this controller performs the shift-clicks with the physical mouse so the
+/// game's own input path emits the window clicks.
+/// </summary>
+internal sealed class RefillController
 {
     [DllImport("user32.dll")]
     private static extern bool SetCursorPos(int x, int y);
@@ -76,7 +83,7 @@ internal sealed class ChestStealerController
     private const int VK_LSHIFT = 0xA0;
     private const ushort SC_LSHIFT = 0x2A;
     private const int FreshStateMs = 300;
-    private const int SlotRetryCooldownMs = 85;
+    private const int SlotRetryCooldownMs = 150;
 
     private readonly object _lock = new();
     private readonly Random _random = new();
@@ -88,7 +95,7 @@ internal sealed class ChestStealerController
     private Task? _task;
     private bool _syntheticShiftHeld;
 
-    public ChestStealerController()
+    public RefillController()
     {
         _leftDown = new INPUT[1];
         _leftDown[0].Type = INPUT_MOUSE;
@@ -141,7 +148,6 @@ internal sealed class ChestStealerController
     {
         int activeWindowId = -1;
         Dictionary<int, long> slotRetryBlockedUntil = new();
-        int clickCountThisWindow = 0;
 
         try
         {
@@ -152,55 +158,74 @@ internal sealed class ChestStealerController
                     Clicker clicker = Clicker.Instance;
                     GameStateClient client = GameStateClient.Instance;
                     GameState state = client.CurrentState;
-                    ChestStealerState? chest = state.ChestStealerState;
+                    RefillState? refill = state.RefillState;
 
                     bool guiActive = state.GuiOpen || WindowDetection.IsCursorVisible();
-                    if (!clicker.ChestStealerEnabled ||
+                    if (!clicker.RefillEnabled ||
                         !client.IsConnected ||
                         !WindowDetection.IsMinecraftForeground() ||
                         !guiActive ||
                         state.LastUpdate == DateTime.MinValue ||
                         (DateTime.Now - state.LastUpdate).TotalMilliseconds > FreshStateMs ||
-                        chest is not { Ready: true } ||
-                        (clicker.ChestStealerMenuCheck && !chest.Physical) ||
-                        chest.Slots.Count == 0)
+                        refill is not { Ready: true } ||
+                        refill.Slots.Count == 0)
                     {
                         ReleaseSyntheticShift();
                         activeWindowId = -1;
                         slotRetryBlockedUntil.Clear();
-                        clickCountThisWindow = 0;
                         await Task.Delay(45, token).ConfigureAwait(false);
                         continue;
                     }
 
-                    if (chest.WindowId != activeWindowId)
+                    if (refill.WindowId != activeWindowId)
                     {
-                        ReleaseSyntheticShift();
-                        activeWindowId = chest.WindowId;
+                        activeWindowId = refill.WindowId;
                         slotRetryBlockedUntil.Clear();
-                        clickCountThisWindow = 0;
                     }
 
-                    long nowMs = Environment.TickCount64;
-                    PruneRetryBlocks(chest, slotRetryBlockedUntil);
-                    SlotSelection? selection = FindNearestLiveSlot(chest, slotRetryBlockedUntil, nowMs);
-                    if (selection == null)
+                    PruneRetryBlocks(refill, slotRetryBlockedUntil);
+
+                    WindowDetection.RECT? clientRect = WindowDetection.GetMinecraftClientRectOnScreen();
+                    if (clientRect == null)
                     {
                         await Task.Delay(20, token).ConfigureAwait(false);
                         continue;
                     }
 
-                    int clickElapsedMs = await ClickSlotAsync(chest, selection.Value.Slot, token).ConfigureAwait(false);
-                    if (clickElapsedMs >= 0)
+                    long nowMs = Environment.TickCount64;
+                    ChestStealerSlot? target = null;
+                    double bestDistance = double.MaxValue;
+                    POINT cursor = GetCursorOrClientCenter(clientRect.Value);
+                    foreach (ChestStealerSlot slot in refill.Slots)
                     {
-                        slotRetryBlockedUntil[selection.Value.Slot.SlotNumber] = Environment.TickCount64 + SlotRetryCooldownMs;
-                        clickCountThisWindow++;
+                        if (slotRetryBlockedUntil.TryGetValue(slot.SlotNumber, out long blockedUntil) && blockedUntil > nowMs)
+                            continue;
+                        if (!ChestStealerCoordinateMapper.TryMapScaledPoint(refill.ToChestStealerState(), slot, clientRect.Value, out int x, out int y))
+                            continue;
+
+                        long dx = x - cursor.X;
+                        long dy = y - cursor.Y;
+                        double distance = Math.Sqrt(dx * dx + dy * dy);
+                        if (distance < bestDistance)
+                        {
+                            bestDistance = distance;
+                            target = slot;
+                        }
                     }
 
-                    double nextDistance = DistanceToNearestLiveSlot(chest, slotRetryBlockedUntil, Environment.TickCount64);
-                    int targetInterval = NextIntervalMs(clicker.ChestStealerDelayMs, nextDistance);
-                    int delay = Math.Max(1, targetInterval - clickElapsedMs);
-                    await Task.Delay(delay, token).ConfigureAwait(false);
+                    if (target == null)
+                    {
+                        // Every reported pot was recently clicked; wait for the
+                        // bridge to re-scan the inventory before trying again.
+                        await Task.Delay(30, token).ConfigureAwait(false);
+                        continue;
+                    }
+
+                    int clickElapsedMs = await ClickSlotAsync(refill, target, clientRect.Value, token).ConfigureAwait(false);
+                    if (clickElapsedMs >= 0)
+                        slotRetryBlockedUntil[target.SlotNumber] = Environment.TickCount64 + SlotRetryCooldownMs;
+
+                    await Task.Delay(Math.Max(1, clicker.RefillDelayMs - clickElapsedMs), token).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException)
                 {
@@ -209,7 +234,7 @@ internal sealed class ChestStealerController
                 catch (Exception ex)
                 {
                     ReleaseSyntheticShift();
-                    Debug.WriteLine($"[ChestStealer] {ex.Message}");
+                    Debug.WriteLine($"[Refill] {ex.Message}");
                     await Task.Delay(150, token).ConfigureAwait(false);
                 }
             }
@@ -220,83 +245,10 @@ internal sealed class ChestStealerController
         }
     }
 
-    private readonly struct SlotSelection
-    {
-        public SlotSelection(ChestStealerSlot slot, double distance)
-        {
-            Slot = slot;
-            Distance = distance;
-        }
-
-        public ChestStealerSlot Slot { get; }
-        public double Distance { get; }
-    }
-
-    private SlotSelection? FindNearestLiveSlot(
-        ChestStealerState state,
-        Dictionary<int, long> slotRetryBlockedUntil,
-        long nowMs)
-    {
-        WindowDetection.RECT? clientRect = WindowDetection.GetMinecraftClientRectOnScreen();
-        if (clientRect == null) return null;
-
-        POINT cursor = GetCursorOrClientCenter(clientRect.Value);
-
-        ChestStealerSlot? best = null;
-        double bestDistance = double.MaxValue;
-        foreach (ChestStealerSlot slot in state.Slots)
-        {
-            if (slotRetryBlockedUntil.TryGetValue(slot.SlotNumber, out long blockedUntil) && blockedUntil > nowMs)
-                continue;
-            if (!TryGetSlotScreenPoint(state, slot, clientRect.Value, out int x, out int y))
-                continue;
-
-            long dx = x - cursor.X;
-            long dy = y - cursor.Y;
-            double distance = Math.Sqrt(dx * dx + dy * dy);
-            if (distance < bestDistance)
-            {
-                bestDistance = distance;
-                best = slot;
-            }
-        }
-
-        return best == null ? null : new SlotSelection(best, bestDistance);
-    }
-
-    private double DistanceToNearestLiveSlot(ChestStealerState state, Dictionary<int, long> slotRetryBlockedUntil, long nowMs)
-    {
-        SlotSelection? selection = FindNearestLiveSlot(state, slotRetryBlockedUntil, nowMs);
-        return selection?.Distance ?? 0.0;
-    }
-
-    private static void PruneRetryBlocks(ChestStealerState state, Dictionary<int, long> slotRetryBlockedUntil)
-    {
-        if (slotRetryBlockedUntil.Count == 0) return;
-
-        HashSet<int> liveSlotNumbers = new();
-        foreach (ChestStealerSlot slot in state.Slots)
-            liveSlotNumbers.Add(slot.SlotNumber);
-
-        List<int>? remove = null;
-        foreach (int slotNumber in slotRetryBlockedUntil.Keys)
-        {
-            if (liveSlotNumbers.Contains(slotNumber)) continue;
-            remove ??= new List<int>();
-            remove.Add(slotNumber);
-        }
-
-        if (remove == null) return;
-        foreach (int slotNumber in remove)
-            slotRetryBlockedUntil.Remove(slotNumber);
-    }
-
-    private async Task<int> ClickSlotAsync(ChestStealerState state, ChestStealerSlot slot, CancellationToken token)
+    private async Task<int> ClickSlotAsync(RefillState state, ChestStealerSlot slot, WindowDetection.RECT clientRect, CancellationToken token)
     {
         var stopwatch = Stopwatch.StartNew();
-        WindowDetection.RECT? clientRect = WindowDetection.GetMinecraftClientRectOnScreen();
-        if (clientRect == null) return -1;
-        if (!TryGetSlotScreenPoint(state, slot, clientRect.Value, out int x, out int y))
+        if (!ChestStealerCoordinateMapper.TryMapScaledPoint(state.ToChestStealerState(), slot, clientRect, out int x, out int y))
             return -1;
 
         x += _random.Next(-2, 3);
@@ -323,9 +275,6 @@ internal sealed class ChestStealerController
         stopwatch.Stop();
         return (int)stopwatch.ElapsedMilliseconds;
     }
-
-    private bool TryGetSlotScreenPoint(ChestStealerState state, ChestStealerSlot slot, WindowDetection.RECT clientRect, out int x, out int y)
-        => ChestStealerCoordinateMapper.TryMapScaledPoint(state, slot, clientRect, out x, out y);
 
     private POINT GetCursorOrClientCenter(WindowDetection.RECT clientRect)
     {
@@ -365,21 +314,25 @@ internal sealed class ChestStealerController
         _syntheticShiftHeld = false;
     }
 
-    private int NextIntervalMs(int configuredDelayMs, double nextDistancePx)
+    private static void PruneRetryBlocks(RefillState state, Dictionary<int, long> slotRetryBlockedUntil)
     {
-        int baseDelay = Math.Clamp(configuredDelayMs, 50, 500);
-        double multiplier = nextDistancePx switch
+        if (slotRetryBlockedUntil.Count == 0) return;
+
+        HashSet<int> liveSlotNumbers = new();
+        foreach (ChestStealerSlot slot in state.Slots)
+            liveSlotNumbers.Add(slot.SlotNumber);
+
+        List<int>? remove = null;
+        foreach (int slotNumber in slotRetryBlockedUntil.Keys)
         {
-            <= 0.0 => 1.0,
-            <= 24.0 => 0.78 + _random.NextDouble() * 0.14,
-            <= 70.0 => 0.90 + _random.NextDouble() * 0.16,
-            <= 140.0 => 1.00 + _random.NextDouble() * 0.18,
-            <= 240.0 => 1.10 + _random.NextDouble() * 0.22,
-            _ => 1.22 + _random.NextDouble() * 0.26
-        };
-        int jitter = Math.Max(8, baseDelay / 6);
-        int interval = (int)Math.Round(baseDelay * multiplier) + _random.Next(-jitter, jitter + 1);
-        return Math.Clamp(interval, 35, 750);
+            if (liveSlotNumbers.Contains(slotNumber)) continue;
+            remove ??= new List<int>();
+            remove.Add(slotNumber);
+        }
+
+        if (remove == null) return;
+        foreach (int slotNumber in remove)
+            slotRetryBlockedUntil.Remove(slotNumber);
     }
 
     private static async Task DisposeCtsWhenDoneAsync(CancellationTokenSource cts, Task? task)

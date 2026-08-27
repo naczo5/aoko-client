@@ -90,12 +90,15 @@ public static class InputHooks
         ["fightstatus"]      = 0,
         ["chestesp"]         = 0,
         ["cheststealer"]     = 0,
+        ["refill"]           = 0,
         ["blockesp"]         = 0,
         ["bedplates"]        = 0,
         ["reach"]            = 0,
         ["velocity"]         = 0,
         ["autototem"]        = 0,
         ["autorod"]          = 0,
+        ["throwpot"]         = 0,
+        ["autoheal"]         = 0,
         ["autotool"]         = 0,
         ["antidebuff"]       = 0,
         ["hitdelayfix"]     = 0,
@@ -105,11 +108,13 @@ public static class InputHooks
 
     public static int AutoRodActionKey { get; private set; }
 
+    public static int ThrowpotActionKey { get; private set; }
+
     public static bool SetModuleKey(string moduleId, int vk)
     {
         if (!ModuleKeys.ContainsKey(moduleId))
             return false;
-        if (vk > 0 && vk == AutoRodActionKey)
+        if (vk > 0 && (vk == AutoRodActionKey || vk == ThrowpotActionKey))
             return false;
 
         ModuleKeys[moduleId] = vk;
@@ -124,6 +129,17 @@ public static class InputHooks
 
         AutoRodActionLatch.End();
         AutoRodActionKey = vk;
+        OnStateChanged?.Invoke();
+        return true;
+    }
+
+    public static bool SetThrowpotActionKey(int vk)
+    {
+        if (vk > 0 && ModuleKeys.Values.Contains(vk))
+            return false;
+
+        ThrowpotActionLatch.End();
+        ThrowpotActionKey = vk;
         OnStateChanged?.Invoke();
         return true;
     }
@@ -160,6 +176,19 @@ public static class InputHooks
             IsAnyGameScreenOpen(state));
     }
 
+    private static bool CanConsumeThrowPotAction()
+    {
+        var client = GameStateClient.Instance;
+        GameState state = client.CurrentState;
+        return ShouldConsumeAutoRodAction(
+            Clicker.Instance.ThrowpotEnabled,
+            client.SupportsModule("throwpot"),
+            client.IsConnected,
+            WindowDetection.IsMinecraftForeground(),
+            state.InWorld,
+            IsAnyGameScreenOpen(state));
+    }
+
     internal sealed class PressLatch
     {
         private bool _isDown;
@@ -187,6 +216,7 @@ public static class InputHooks
     }
 
     private static readonly PressLatch AutoRodActionLatch = new();
+    private static readonly PressLatch ThrowpotActionLatch = new();
 
     // Key capture mode for rebinding (reserved for future use)
     public static bool IsCapturingKey { get; private set; } = false;
@@ -241,12 +271,15 @@ public static class InputHooks
             case "fightstatus":      c.FightStatusEnabled = !c.FightStatusEnabled; break;
             case "chestesp":         c.ChestEspEnabled = !c.ChestEspEnabled; break;
             case "cheststealer":     c.ChestStealerEnabled = !c.ChestStealerEnabled; break;
+            case "refill":           c.RefillEnabled = !c.RefillEnabled; break;
             case "blockesp":         c.BlockEspEnabled = !c.BlockEspEnabled; break;
             case "bedplates":        c.BedPlatesEnabled = !c.BedPlatesEnabled; break;
             case "reach":            c.ReachEnabled = !c.ReachEnabled; break;
             case "velocity":         c.VelocityEnabled = !c.VelocityEnabled; break;
             case "autototem":        c.AutoTotemEnabled = !c.AutoTotemEnabled; break;
             case "autorod":          c.AutoRodEnabled = !c.AutoRodEnabled; break;
+            case "throwpot":         c.ThrowpotEnabled = !c.ThrowpotEnabled; break;
+            case "autoheal":         c.AutoHealEnabled = !c.AutoHealEnabled; break;
             case "autotool":         c.AutoToolEnabled = !c.AutoToolEnabled; break;
             case "antidebuff":       c.AntiDebuffEnabled = !c.AntiDebuffEnabled; break;
             case "hitdelayfix":     c.HitDelayFixEnabled = !c.HitDelayFixEnabled; break;
@@ -328,6 +361,22 @@ public static class InputHooks
                 }
             }
 
+            // Throwpot is a one-shot press; no hold/release semantics.
+            if (vkCode == ThrowpotActionKey && ThrowpotActionKey > 0)
+            {
+                if (isDown)
+                {
+                    bool consume = ThrowpotActionLatch.Begin(CanConsumeThrowPotAction(), out bool trigger);
+                    if (trigger)
+                        Application.Current?.Dispatcher.BeginInvoke(() => _ = GameStateClient.Instance.SendThrowPotActionAsync());
+                    if (consume) return (IntPtr)1;
+                }
+                else
+                {
+                    ThrowpotActionLatch.End();
+                }
+            }
+
             if (isDown)
             {
                 if (ShouldBlockModuleKeybinds())
@@ -392,9 +441,12 @@ public static class InputHooks
             {
                 if (mouseDown && IsCapturingKey && _captureAllowsMouse)
                 {
-                    StopKeyCapture();
-                    Application.Current?.Dispatcher.BeginInvoke(() => OnKeyCaptured?.Invoke(mouseVk));
-                    return (IntPtr)1;
+                    if (mouseVk == VK_XBUTTON1 || mouseVk == VK_XBUTTON2 || mouseVk == VK_MBUTTON)
+                    {
+                        StopKeyCapture();
+                        Application.Current?.Dispatcher.BeginInvoke(() => OnKeyCaptured?.Invoke(mouseVk));
+                        return (IntPtr)1;
+                    }
                 }
 
                 if (mouseVk == AutoRodActionKey && AutoRodActionKey > 0)
@@ -411,6 +463,43 @@ public static class InputHooks
                         Application.Current?.Dispatcher.BeginInvoke(
                             () => _ = GameStateClient.Instance.SendAutoRodReleaseAsync());
                         return (IntPtr)1;
+                    }
+                }
+
+                // Throwpot is a one-shot press; no hold/release semantics.
+                if (mouseVk == ThrowpotActionKey && ThrowpotActionKey > 0)
+                {
+                    if (mouseDown)
+                    {
+                        bool consume = ThrowpotActionLatch.Begin(CanConsumeThrowPotAction(), out bool trigger);
+                        if (trigger)
+                            Application.Current?.Dispatcher.BeginInvoke(() => _ = GameStateClient.Instance.SendThrowPotActionAsync());
+                        if (consume) return (IntPtr)1;
+                    }
+                    else
+                    {
+                        ThrowpotActionLatch.End();
+                    }
+                }
+
+                if (mouseDown && (mouseVk == VK_XBUTTON1 || mouseVk == VK_XBUTTON2 || mouseVk == VK_MBUTTON))
+                {
+                    if (!ShouldBlockModuleKeybinds())
+                    {
+                        foreach (var kvp in ModuleKeys)
+                        {
+                            if (kvp.Value > 0 && mouseVk == kvp.Value)
+                            {
+                                string id = kvp.Key;
+                                Application.Current?.Dispatcher.BeginInvoke(() =>
+                                {
+                                    ToggleModule(id);
+                                    OnToggleRequested?.Invoke();
+                                    OnStateChanged?.Invoke();
+                                });
+                                return (IntPtr)1;
+                            }
+                        }
                     }
                 }
             }
@@ -453,10 +542,7 @@ public static class InputHooks
                              state.ScreenName.Contains("class_465", StringComparison.OrdinalIgnoreCase));
 
                         // In chest/container screens, a left click should not mark mining intent.
-                        if (chestGuiOpen && Clicker.Instance.ClickInChests)
-                            Clicker.Instance.IsMiningIntent = false;
-                        else
-                            Clicker.Instance.IsMiningIntent = state.LookingAtBlock;
+                        Clicker.Instance.IsMiningIntent = false;
                     }
                     else
                     {

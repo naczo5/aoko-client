@@ -50,6 +50,30 @@ public class GameStatePatchMergerTests
 
         Assert.Empty(merged.Entities);
         Assert.Null(merged.ChestStealerState);
+        Assert.Null(merged.RefillState);
+    }
+
+    [Fact]
+    public void PartialPatchPreservesRefillState()
+    {
+        var previous = new GameState
+        {
+            InWorld = true,
+            RefillState = new RefillState
+            {
+                Ready = true,
+                WindowId = 1,
+                Slots = new() { new ChestStealerSlot { Index = 9, SlotNumber = 9, X = 10, Y = 10 } }
+            }
+        };
+
+        var patch = JsonNode.Parse("{\"type\":\"statePatch\",\"inWorld\":true,\"attackCooldown\":1.0}")!.AsObject();
+        GameState merged = GameStatePatchMerger.Apply(previous, patch);
+
+        Assert.NotNull(merged.RefillState);
+        Assert.True(merged.RefillState.Ready);
+        Assert.Single(merged.RefillState.Slots);
+        Assert.Equal(9, merged.RefillState.Slots[0].SlotNumber);
     }
 
     [Fact]

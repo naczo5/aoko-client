@@ -459,6 +459,54 @@
                             </StackPanel>
                         </Border>
 
+                        <Border x:Name="ThrowpotCard" Style="{StaticResource ControlCardStyle}" Margin="0,12,0,0">
+                            <StackPanel>
+                                <DockPanel>
+                                    <Button x:Name="KeybindThrowpotButton" Tag="throwpot" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
+                                    <CheckBox Content="Throwpot" IsChecked="{Binding ThrowpotEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                </DockPanel>
+                                <TextBlock x:Name="ThrowpotAvailabilityText" Text="Available" Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,6,0,0"/>
+                                <TextBlock Text="Press the action bind to instantly throw the first healing splash potion (Instant Health / Regeneration) in your hotbar, then restore your original slot."
+                                           Foreground="{DynamicResource DimTextBrush}"
+                                           FontSize="11"
+                                           TextWrapping="Wrap"
+                                           Margin="0,8,0,0"/>
+                                <Button x:Name="ThrowpotActionBindButton" Content="Action: Unbound" Click="ThrowpotActionBindButton_Click" Style="{StaticResource DarkButton}" HorizontalAlignment="Left" Width="210" Margin="0,10,0,0"/>
+                                <TextBlock x:Name="ThrowpotActionBindStatusText" Text="The action fires once per press while enabled, connected, in-game, and no GUI is open." Foreground="{DynamicResource DimTextBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,6,0,0"/>
+                            </StackPanel>
+                        </Border>
+
+                        <Border x:Name="AutoHealCard" Style="{StaticResource ControlCardStyle}" Margin="0,12,0,0">
+                            <StackPanel>
+                                <DockPanel>
+                                    <Button x:Name="KeybindAutoHealButton" Tag="autoheal" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
+                                    <CheckBox Content="AutoHeal" IsChecked="{Binding AutoHealEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                </DockPanel>
+                                <TextBlock x:Name="AutoHealAvailabilityText" Text="Available" Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,6,0,0"/>
+                                <TextBlock Text="Automatically throws the first healing splash potion (Instant Health / Regeneration) in your hotbar when your health drops to or below the threshold. Only heals while you are looking steeply down, so the splash lands at your feet and not on an opponent."
+                                           Foreground="{DynamicResource DimTextBrush}"
+                                           FontSize="11"
+                                           TextWrapping="Wrap"
+                                           Margin="0,8,0,0"/>
+
+                                <DockPanel Margin="0,10,0,0">
+                                    <TextBlock Text="Health threshold (HP)" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left"/>
+                                    <TextBlock Text="{Binding AutoHealHealth, StringFormat={}{0} HP}" Foreground="{DynamicResource DimTextBrush}" FontSize="12" HorizontalAlignment="Right" DockPanel.Dock="Right"/>
+                                </DockPanel>
+                                <Slider Minimum="1" Maximum="20" TickFrequency="1" IsSnapToTickEnabled="True"
+                                        Value="{Binding AutoHealHealth, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                        Style="{StaticResource DarkSlider}"/>
+
+                                <DockPanel Margin="0,10,0,0">
+                                    <TextBlock Text="Re-throw cooldown (ms)" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left"/>
+                                    <TextBlock Text="{Binding AutoHealDelayMs}" Foreground="{DynamicResource DimTextBrush}" FontSize="12" HorizontalAlignment="Right" DockPanel.Dock="Right"/>
+                                </DockPanel>
+                                <Slider Minimum="50" Maximum="2000" TickFrequency="10" IsSnapToTickEnabled="True"
+                                        Value="{Binding AutoHealDelayMs, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                        Style="{StaticResource DarkSlider}"/>
+                            </StackPanel>
+                        </Border>
+
                         <Border x:Name="HitDelayFixCard" Style="{StaticResource ControlCardStyle}" Margin="0,12,0,0">
                             <StackPanel>
                                 <DockPanel Margin="0,0,0,10">
@@ -783,6 +831,30 @@
                                            FontSize="11"
                                            TextWrapping="Wrap"
                                            Margin="0,4,0,0"/>
+                            </StackPanel>
+                        </Border>
+
+                        <Border x:Name="RefillCard" Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
+                            <StackPanel>
+                                <DockPanel Margin="0,0,0,10">
+                                    <Button x:Name="KeybindRefillButton" Tag="refill" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
+                                    <TextBlock Text="Refill" Foreground="{DynamicResource TextBrush}" FontSize="16" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </DockPanel>
+                                <TextBlock x:Name="RefillAvailabilityText" Text="Available" Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,0,0,8"/>
+                                <CheckBox Content="Enable Refill" IsChecked="{Binding RefillEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                <TextBlock Text="Moves potions and golden apples from your backpack into empty hotbar slots while your inventory is open."
+                                           Foreground="{DynamicResource DimTextBrush}"
+                                           FontSize="12"
+                                           TextWrapping="Wrap"
+                                           Margin="0,6,0,10"/>
+
+                                <DockPanel Margin="0,10,0,0">
+                                    <TextBlock Text="Delay (ms)" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left" />
+                                    <TextBlock Text="{Binding RefillDelayMs}" Foreground="{DynamicResource DimTextBrush}" FontSize="12" HorizontalAlignment="Right" DockPanel.Dock="Right" />
+                                </DockPanel>
+                                <Slider Minimum="50" Maximum="500" TickFrequency="10" IsSnapToTickEnabled="True"
+                                        Value="{Binding RefillDelayMs, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                        Style="{StaticResource DarkSlider}"/>
                             </StackPanel>
                         </Border>
 

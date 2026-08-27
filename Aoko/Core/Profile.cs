@@ -83,6 +83,9 @@ public class Profile
     public int ChestStealerDelayMs { get; set; } = 120;
     public bool ChestStealerMenuCheck { get; set; } = true;
 
+    public bool RefillEnabled { get; set; } = false;
+    public int RefillDelayMs { get; set; } = 120;
+
     public bool BlockEspEnabled { get; set; } = false;
     public bool BlockEspBoxes { get; set; } = true;
     public bool BlockEspTracers { get; set; } = false;
@@ -113,6 +116,10 @@ public class Profile
     public int AutoTotemBehaviorMode { get; set; } = 0;
 
     public bool AutoRodEnabled { get; set; } = false;
+    public bool ThrowpotEnabled { get; set; } = false;
+    public bool AutoHealEnabled { get; set; } = false;
+    public int AutoHealHealth { get; set; } = 17;
+    public int AutoHealDelayMs { get; set; } = 500;
     private int _autoRodSlotMode;
     public int AutoRodSlotMode { get => _autoRodSlotMode; set => _autoRodSlotMode = Math.Clamp(value, 0, 9); }
     public bool AutoRodVerifyForcedSlot { get; set; } = true;
@@ -120,6 +127,7 @@ public class Profile
     public int AutoRodExtensionTicks { get => _autoRodExtensionTicks; set => _autoRodExtensionTicks = Math.Clamp(value, 1, 40); }
     public bool AutoRodHoldToExtend { get; set; } = false;
     public int AutoRodActionKey { get; set; } = 0;
+    public int ThrowpotActionKey { get; set; } = 0;
 
     public bool AutoToolEnabled { get; set; } = false;
     public bool AutoToolSwapWeapon { get; set; } = true;
@@ -154,12 +162,15 @@ public class Profile
         ["fightstatus"]      = 0,
         ["chestesp"]         = 0,
         ["cheststealer"]     = 0,
+        ["refill"]           = 0,
         ["blockesp"]         = 0,
         ["bedplates"]        = 0,
         ["reach"]            = 0,
         ["velocity"]         = 0,
         ["autototem"]        = 0,
         ["autorod"]          = 0,
+        ["throwpot"]         = 0,
+        ["autoheal"]         = 0,
         ["autotool"]         = 0,
         ["antidebuff"]       = 0,
         ["hitdelayfix"]     = 0,
@@ -530,6 +541,8 @@ public static class ProfileManager
             ChestStealerEnabled = clicker.ChestStealerEnabled,
             ChestStealerDelayMs = clicker.ChestStealerDelayMs,
             ChestStealerMenuCheck = clicker.ChestStealerMenuCheck,
+            RefillEnabled = clicker.RefillEnabled,
+            RefillDelayMs = clicker.RefillDelayMs,
 
             BlockEspEnabled = clicker.BlockEspEnabled,
             BlockEspBoxes = clicker.BlockEspBoxes,
@@ -561,11 +574,16 @@ public static class ProfileManager
             AutoTotemBehaviorMode = clicker.AutoTotemBehaviorMode,
 
             AutoRodEnabled = clicker.AutoRodEnabled,
+            ThrowpotEnabled = clicker.ThrowpotEnabled,
+            AutoHealEnabled = clicker.AutoHealEnabled,
+            AutoHealHealth = clicker.AutoHealHealth,
+            AutoHealDelayMs = clicker.AutoHealDelayMs,
             AutoRodSlotMode = clicker.AutoRodSlotMode,
             AutoRodVerifyForcedSlot = clicker.AutoRodVerifyForcedSlot,
             AutoRodExtensionTicks = clicker.AutoRodExtensionTicks,
             AutoRodHoldToExtend = clicker.AutoRodHoldToExtend,
             AutoRodActionKey = InputHooks.AutoRodActionKey,
+            ThrowpotActionKey = InputHooks.ThrowpotActionKey,
 
             AutoToolEnabled = clicker.AutoToolEnabled,
             AutoToolSwapWeapon = clicker.AutoToolSwapWeapon,
@@ -669,6 +687,8 @@ public static class ProfileManager
         clicker.ChestStealerEnabled = profile.ChestStealerEnabled;
         clicker.ChestStealerDelayMs = profile.ChestStealerDelayMs;
         clicker.ChestStealerMenuCheck = profile.ChestStealerMenuCheck;
+        clicker.RefillEnabled = profile.RefillEnabled;
+        clicker.RefillDelayMs = profile.RefillDelayMs;
 
         clicker.BlockEspEnabled = profile.BlockEspEnabled;
         clicker.BlockEspBoxes = profile.BlockEspBoxes;
@@ -700,6 +720,10 @@ public static class ProfileManager
         clicker.AutoTotemBehaviorMode = profile.AutoTotemBehaviorMode;
 
         clicker.AutoRodEnabled = profile.AutoRodEnabled;
+        clicker.ThrowpotEnabled = profile.ThrowpotEnabled;
+        clicker.AutoHealEnabled = profile.AutoHealEnabled;
+        clicker.AutoHealHealth = profile.AutoHealHealth;
+        clicker.AutoHealDelayMs = profile.AutoHealDelayMs;
         clicker.AutoRodSlotMode = profile.AutoRodSlotMode;
         clicker.AutoRodVerifyForcedSlot = profile.AutoRodVerifyForcedSlot;
         clicker.AutoRodExtensionTicks = profile.AutoRodExtensionTicks;
@@ -723,10 +747,13 @@ public static class ProfileManager
         // General module binds win over the dedicated Auto Rod action bind.
         // This keeps older/conflicting profiles deterministic and preserves the toggle bind.
         InputHooks.SetAutoRodActionKey(0);
+        InputHooks.SetThrowpotActionKey(0);
         foreach (var kvp in profile.ModuleKeys)
             InputHooks.SetModuleKey(kvp.Key, kvp.Value);
         if (!InputHooks.SetAutoRodActionKey(profile.AutoRodActionKey))
             profile.AutoRodActionKey = 0;
+        if (!InputHooks.SetThrowpotActionKey(profile.ThrowpotActionKey))
+            profile.ThrowpotActionKey = 0;
         ThemeManager.ApplyTheme(profile.Theme);
 
         // Profiles may still store unfinished-module state; keep it off unless Dev Mode is on.

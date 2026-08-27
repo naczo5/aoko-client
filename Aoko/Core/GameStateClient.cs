@@ -908,6 +908,35 @@ public class GameStateClient : INotifyPropertyChanged
         }
     }
 
+    internal static string BuildThrowPotActionMessage()
+        => JsonSerializer.Serialize(new
+        {
+            type = "moduleAction",
+            action = "throwPot",
+            phase = "press",
+            enabled = true
+        }) + "\n";
+
+    public async Task<bool> SendThrowPotActionAsync(CancellationToken token = default)
+    {
+        var clicker = Clicker.Instance;
+        if (!clicker.ThrowpotEnabled)
+            return false;
+
+        try
+        {
+            return await SendMessageAsync(
+                BuildThrowPotActionMessage(),
+                token,
+                () => Clicker.Instance.ThrowpotEnabled).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException or InvalidOperationException or ObjectDisposedException or SocketException or OperationCanceledException)
+        {
+            Debug.WriteLine($"[GameStateClient] Throwpot action send failed: {ex.Message}");
+            return false;
+        }
+    }
+
     private async Task<bool> SendMessageAsync(
         string message,
         CancellationToken token,
@@ -1154,6 +1183,8 @@ public class GameStateClient : INotifyPropertyChanged
                     chestStealerEnabled = clicker.ChestStealerEnabled,
                     chestStealerDelayMs = clicker.ChestStealerDelayMs,
                     chestStealerMenuCheck = clicker.ChestStealerMenuCheck,
+                    refillEnabled = clicker.RefillEnabled,
+                    refillDelayMs = clicker.RefillDelayMs,
                     blockEspEnabled = clicker.BlockEspEnabled,
                     blockEspBoxes = clicker.BlockEspBoxes,
                     blockEspTracers = clicker.BlockEspTracers,
@@ -1183,6 +1214,10 @@ public class GameStateClient : INotifyPropertyChanged
                     autoRodVerifyForcedSlot = clicker.AutoRodVerifyForcedSlot,
                     autoRodExtensionTicks = clicker.AutoRodExtensionTicks,
                     autoRodHoldToExtend = clicker.AutoRodHoldToExtend,
+                    throwpotEnabled = clicker.ThrowpotEnabled,
+                    autoHealEnabled = clicker.AutoHealEnabled,
+                    autoHealHealth = clicker.AutoHealHealth,
+                    autoHealDelayMs = clicker.AutoHealDelayMs,
                     autoToolEnabled = clicker.AutoToolEnabled,
                     autoToolSwapWeapon = clicker.AutoToolSwapWeapon,
                     autoToolInstantSwap = clicker.AutoToolInstantSwap,
@@ -1207,10 +1242,13 @@ public class GameStateClient : INotifyPropertyChanged
                     keybindFightStatus   = InputHooks.GetModuleKey("fightstatus"),
                     keybindChestEsp      = InputHooks.GetModuleKey("chestesp"),
                     keybindChestStealer  = InputHooks.GetModuleKey("cheststealer"),
+                    keybindRefill        = InputHooks.GetModuleKey("refill"),
                     keybindBlockEsp      = InputHooks.GetModuleKey("blockesp"),
                     keybindBedPlates     = InputHooks.GetModuleKey("bedplates"),
                     keybindPixelPartyAssist = InputHooks.GetModuleKey("pixelpartyassist"),
                     keybindAutoRod = InputHooks.GetModuleKey("autorod"),
+                    keybindThrowpot = InputHooks.GetModuleKey("throwpot"),
+                    keybindAutoheal = InputHooks.GetModuleKey("autoheal"),
                     keybindAutoTool = InputHooks.GetModuleKey("autotool"),
                     hudEditor = clicker.HudEditorActive,
                     hudLayout = clicker.HudLayout.ToJson()
@@ -1435,6 +1473,24 @@ public class GameStateClient : INotifyPropertyChanged
                     break;
                 case "setChestStealerMenuCheck":
                     clicker.ChestStealerMenuCheck = node?["value"]?.GetValue<bool>() ?? true;
+                    break;
+                case "toggleRefill":
+                    clicker.RefillEnabled = !clicker.RefillEnabled;
+                    break;
+                case "toggleThrowpot":
+                    clicker.ThrowpotEnabled = !clicker.ThrowpotEnabled;
+                    break;
+                case "toggleAutoHeal":
+                    clicker.AutoHealEnabled = !clicker.AutoHealEnabled;
+                    break;
+                case "setAutoHealHealth":
+                    clicker.AutoHealHealth = (int)(node?["value"]?.GetValue<float>() ?? 17f);
+                    break;
+                case "setAutoHealDelayMs":
+                    clicker.AutoHealDelayMs = (int)(node?["value"]?.GetValue<float>() ?? 500f);
+                    break;
+                case "setRefillDelayMs":
+                    clicker.RefillDelayMs = (int)(node?["value"]?.GetValue<float>() ?? 120f);
                     break;
                 case "setKeybind":
                     string? moduleId = node?["module"]?.GetValue<string>();

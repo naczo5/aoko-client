@@ -88,6 +88,9 @@ public class GameState
     [JsonPropertyName("chestStealerState")]
     public ChestStealerState? ChestStealerState { get; set; }
 
+    [JsonPropertyName("refillState")]
+    public RefillState? RefillState { get; set; }
+
     [JsonPropertyName("pixelPartyTargetFound")]
     public bool PixelPartyTargetFound { get; set; }
 
@@ -147,6 +150,39 @@ public class ChestStealerSlot
 
     [JsonPropertyName("y")]
     public int Y { get; set; }
+}
+
+/// <summary>
+/// Healing-item slots reported by the bridge while the survival inventory is
+/// open (Refill module). Coordinates reuse the chest-stealer slot schema.
+/// </summary>
+public class RefillState
+{
+    [JsonPropertyName("ready")]
+    public bool Ready { get; set; }
+
+    [JsonPropertyName("windowId")]
+    public int WindowId { get; set; } = -1;
+
+    [JsonPropertyName("screenWidth")]
+    public int ScreenWidth { get; set; }
+
+    [JsonPropertyName("screenHeight")]
+    public int ScreenHeight { get; set; }
+
+    [JsonPropertyName("slots")]
+    public List<ChestStealerSlot> Slots { get; set; } = new();
+
+    /// <summary>Allows the shared GUI coordinate mapper to scale these slots.</summary>
+    public ChestStealerState ToChestStealerState() => new()
+    {
+        Ready = Ready,
+        Physical = true,
+        WindowId = WindowId,
+        ScreenWidth = ScreenWidth,
+        ScreenHeight = ScreenHeight,
+        Slots = Slots
+    };
 }
 
 public class EntityInfo

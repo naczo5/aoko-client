@@ -121,10 +121,12 @@ static void TestAutoBlock()
     killaura::AutoBlockState state;
     killaura::AutoBlockInput in = { killaura::BLOCK_HYPIXEL, true, true, false, false, false, true, true, 0 };
     killaura::AutoBlockResult first = killaura::StepAutoBlock(state, in);
-    Check((first.actions & killaura::ACTION_START_BLOCK) != 0 && state.blockTick == 1, "Hypixel tick zero starts block");
+    Check((first.actions & killaura::ACTION_START_BLOCK) != 0 && first.allowAttack,
+          "Hypixel (Rise WD1.8) starts block and allows same-tick attack");
     in.playerBlocking = true;
     killaura::AutoBlockResult second = killaura::StepAutoBlock(state, in);
-    Check(!second.allowAttack && (second.actions & killaura::ACTION_STOP_BLOCK) != 0, "Hypixel tick one releases and cancels");
+    Check((second.actions & killaura::ACTION_START_BLOCK) != 0 && second.allowAttack,
+          "Hypixel re-sends use-item every tick while engaged");
 
     state = killaura::AutoBlockState(); in.mode = killaura::BLOCK_MORDEN; in.playerBlocking = true;
     Check(!killaura::StepAutoBlock(state, in).allowAttack && state.mordenTick == 1, "Morden first hold tick");

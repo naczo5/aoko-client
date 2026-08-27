@@ -154,6 +154,14 @@ echo [NativeTests] Running aim_assist_projection_tests.exe...
 tests\aim_assist_projection_tests.exe
 if %errorlevel% neq 0 exit /b %errorlevel%
 
+echo [NativeTests] Building throwpot_core_tests.exe...
+"%GPP%" -m64 -std=c++11 -O2 -static-libgcc -static-libstdc++ -o tests\throwpot_core_tests.exe tests\throwpot_core_tests.cpp
+if %errorlevel% neq 0 exit /b %errorlevel%
+
+echo [NativeTests] Running throwpot_core_tests.exe...
+tests\throwpot_core_tests.exe
+if %errorlevel% neq 0 exit /b %errorlevel%
+
 echo [NativeTests] Building fight_status_core_tests.exe...
 "%GPP%" -m64 -std=c++11 -O2 -static-libgcc -static-libstdc++ -o tests\fight_status_core_tests.exe tests\fight_status_core_tests.cpp
 if %errorlevel% neq 0 exit /b %errorlevel%
