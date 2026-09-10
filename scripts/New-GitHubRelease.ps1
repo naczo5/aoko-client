@@ -1,7 +1,7 @@
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [Parameter(Mandatory)]
-    [ValidatePattern('^\d+(\.\d+){2,3}$')]
+    [ValidatePattern('^\d+(\.\d+){1,3}$')]
     [string]$Version,
 
     [switch]$Draft
