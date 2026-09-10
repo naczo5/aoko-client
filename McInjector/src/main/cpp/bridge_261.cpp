@@ -226,6 +226,9 @@ struct Config {
     bool  chestStealer   = false;
     int   chestStealerDelayMs = 120;
     bool  chestStealerMenuCheck = true;
+    bool  chestStealerTitleCheck = true;
+    bool  chestStealerCustomItemsCheck = true;
+    bool  chestStealerPhysicalCheck = true;
     bool  refill         = false;
     int   refillDelayMs  = 120;
     bool  blockEsp       = false;
@@ -269,6 +272,10 @@ struct Config {
     float reachMin       = 3.0f;
     float reachMax       = 6.0f;
     int   reachChance    = 100;
+    int   reachChanceMode = 0;
+    bool  reachOnlyWhileSprinting = false;
+    bool  reachDisableInWater = false;
+    bool  reachVerticalCheck = false;
     bool  velocityEnabled = false;
     int   velocityHorizontal = 100;
     int   velocityVertical = 100;
@@ -507,7 +514,11 @@ static void ParseConfig(const std::string& line) {
     }
     g_config.chestEsp      = reader.GetBool("chestEsp");
     g_config.chestStealer  = reader.GetBool("chestStealerEnabled");
-    g_config.chestStealerMenuCheck = reader.GetBool("chestStealerMenuCheck", true);
+    bool legacyMenuCheck = reader.GetBool("chestStealerMenuCheck", true);
+    g_config.chestStealerTitleCheck = reader.GetBool("chestStealerTitleCheck", legacyMenuCheck);
+    g_config.chestStealerCustomItemsCheck = reader.GetBool("chestStealerCustomItemsCheck", legacyMenuCheck);
+    g_config.chestStealerPhysicalCheck = reader.GetBool("chestStealerPhysicalCheck", legacyMenuCheck);
+    g_config.chestStealerMenuCheck = g_config.chestStealerTitleCheck || g_config.chestStealerCustomItemsCheck || g_config.chestStealerPhysicalCheck;
     std::string showModuleListRaw = reader.GetString("showModuleList");
     g_config.showModuleList = showModuleListRaw.empty() ? true : (showModuleListRaw == "true");
     g_config.closestPlayer = reader.GetBool("closestPlayerInfo");
@@ -576,6 +587,10 @@ static void ParseConfig(const std::string& line) {
     g_config.reachMax      = lc::ClampFloat(reader.GetFloat("reachMax", g_config.reachMax), 3.0f, 6.0f);
     if (g_config.reachMax < g_config.reachMin) g_config.reachMax = g_config.reachMin;
     g_config.reachChance   = reader.GetInt("reachChance", 100);
+    g_config.reachChanceMode = lc::ClampInt(reader.GetInt("reachChanceMode", 0), 0, 1);
+    g_config.reachOnlyWhileSprinting = reader.GetBool("reachOnlyWhileSprinting");
+    g_config.reachDisableInWater = reader.GetBool("reachDisableInWater");
+    g_config.reachVerticalCheck = reader.GetBool("reachVerticalCheck");
     g_config.velocityEnabled = reader.GetBool("velocityEnabled");
     g_config.velocityHorizontal = lc::ClampInt(reader.GetInt("velocityHorizontal", 100), 1, 100);
     g_config.velocityVertical = lc::ClampInt(reader.GetInt("velocityVertical", 100), 1, 100);
@@ -702,8 +717,11 @@ static int SendJsonLine121(SOCKET sock, const std::string& line) {
         fd_set writable;
         FD_ZERO(&writable);
         FD_SET(sock, &writable);
-        timeval wait = { 0, 5000 };
-        if (select(0, nullptr, &writable, nullptr, &wait) <= 0) return -1;
+        timeval wait = { 0, 500000 };
+        if (select(0, nullptr, &writable, nullptr, &wait) <= 0) {
+            if (offset == 0) return 0;
+            return -1;
+        }
     }
     return 1;
 }
@@ -1098,6 +1116,7 @@ static bool        g_jniLookingAtEntity = false;
 static bool        g_jniLookingAtEntityLatched = false;
 static bool        g_jniBreakingBlock  = false;
 static bool        g_jniHoldingBlock   = false;
+static float       g_jniHealth         = 20.0f;
 static float       g_jniAttackCooldown = 1.0f;
 static float       g_jniAttackCooldownPerTick = 0.08f;
 static std::string g_jniKillAuraUnavailableReason;
@@ -3154,6 +3173,7 @@ static bool IsChestBlockEntity(JNIEnv* env, jobject be) {
 // Global cached player and its Reach attribute instance
 static jobject g_cachedLocalPlayer = nullptr;
 static jobject g_cachedReachAttrInst = nullptr;
+static jobject g_cachedBlockReachAttrInst = nullptr;
 
 static bool g_reachMethodsResolved = false;
 static jmethodID g_dynGetAttributes = nullptr;   // class_1309 -> class_5131
@@ -3162,10 +3182,10 @@ static jmethodID g_dynGetAttributeInstance = nullptr; // class_5131 (class_6880)
 static jmethodID g_dynRegistryEntryToString = nullptr; // class_6880 () -> String
 static jmethodID g_dynRegistryEntryMatchesIdentifier = nullptr; // class_6880 (class_2960) -> boolean
 static jmethodID g_dynSetBaseValue = nullptr;    // class_1324 (D)V
-static jclass    g_identifierClass_121 = nullptr; // net.minecraft.class_2960
+static jclass    g_identifierClass_121 = nullptr; // net.minecraft.class_2960 or net.minecraft.resources.ResourceLocation
 static jmethodID g_identifierFromString_121 = nullptr; // Identifier.parse-like static method
-static jobject   g_entityReachIdentifier_121 = nullptr; // minecraft:player.entity_interaction_range
-static jobject   g_blockReachIdentifier_121 = nullptr; // minecraft:player.block_interaction_range
+static jobject   g_entityReachIdentifier_121 = nullptr; // minecraft:entity_interaction_range
+static jobject   g_blockReachIdentifier_121 = nullptr; // minecraft:block_interaction_range
 
 static jmethodID FindMethodBySignature(JNIEnv* env, jclass tgtCls, const std::string& retTypeStr, int paramCount, const std::string& p1TypeStr = "") {
     jclass cClass = env->FindClass("java/lang/Class");
@@ -3174,10 +3194,17 @@ static jmethodID FindMethodBySignature(JNIEnv* env, jclass tgtCls, const std::st
     jmethodID mGetName = env->GetMethodID(cMethod, "getName", "()Ljava/lang/String;");
     jmethodID mGetRetType = env->GetMethodID(cMethod, "getReturnType", "()Ljava/lang/Class;");
     jmethodID mGetParamTypes = env->GetMethodID(cMethod, "getParameterTypes", "()[Ljava/lang/Class;");
+    jmethodID mGetModifiers = env->GetMethodID(cMethod, "getModifiers", "()I");
+    jmethodID mIsSynthetic = env->GetMethodID(cMethod, "isSynthetic", "()Z");
+    if (env->ExceptionCheck()) env->ExceptionClear();
 
     jobjectArray methods = (jobjectArray)env->CallObjectMethod(tgtCls, mGetMethods);
     if (env->ExceptionCheck()) { env->ExceptionClear(); methods = nullptr; }
-    if (!methods) return nullptr;
+    if (!methods) {
+        if (cMethod) env->DeleteLocalRef(cMethod);
+        if (cClass) env->DeleteLocalRef(cClass);
+        return nullptr;
+    }
     
     jsize count = env->GetArrayLength(methods);
     jmethodID found = nullptr;
@@ -3185,6 +3212,45 @@ static jmethodID FindMethodBySignature(JNIEnv* env, jclass tgtCls, const std::st
     for (int i=0; i<count; ++i) {
         jobject m = env->GetObjectArrayElement(methods, i);
         if (!m) continue;
+
+        if (mIsSynthetic) {
+            jboolean isSynth = env->CallBooleanMethod(m, mIsSynthetic);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); isSynth = JNI_FALSE; }
+            if (isSynth) {
+                env->DeleteLocalRef(m);
+                continue;
+            }
+        }
+
+        if (mGetModifiers) {
+            jint mods = env->CallIntMethod(m, mGetModifiers);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); mods = 0; }
+            // 0x00000008 is Modifier.STATIC in Java; instance methods only
+            if (mods & 0x00000008) {
+                env->DeleteLocalRef(m);
+                continue;
+            }
+        }
+
+        jstring nameStr = (jstring)env->CallObjectMethod(m, mGetName);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); nameStr = nullptr; }
+        if (!nameStr) {
+            env->DeleteLocalRef(m);
+            continue;
+        }
+        const char* nameC = env->GetStringUTFChars(nameStr, nullptr);
+        std::string methodName = nameC ? nameC : "";
+        if (nameC) env->ReleaseStringUTFChars(nameStr, nameC);
+        env->DeleteLocalRef(nameStr);
+
+        // Filter synthetic, lambda, and compiler bridge methods ($ / lambda$ / access$)
+        if (methodName.find('$') != std::string::npos ||
+            methodName.rfind("lambda", 0) == 0 ||
+            methodName.rfind("access$", 0) == 0) {
+            env->DeleteLocalRef(m);
+            continue;
+        }
+
         jclass rType = (jclass)env->CallObjectMethod(m, mGetRetType);
         if (env->ExceptionCheck()) { env->ExceptionClear(); rType = nullptr; }
         jobjectArray pTypes = (jobjectArray)env->CallObjectMethod(m, mGetParamTypes);
@@ -3205,37 +3271,28 @@ static jmethodID FindMethodBySignature(JNIEnv* env, jclass tgtCls, const std::st
                     if (p1Cls) env->DeleteLocalRef(p1Cls);
                 }
                 if (pMatch) {
-                    jstring nameStr = (jstring)env->CallObjectMethod(m, mGetName);
-                    if (env->ExceptionCheck()) { env->ExceptionClear(); nameStr = nullptr; }
-                    if (nameStr) {
-                        const char* nameC = env->GetStringUTFChars(nameStr, nullptr);
-                        
-                        std::string sig = "(";
-                        if (paramCount == 1 && p1TypeStr == "D") sig += "D";
-                        else if (paramCount == 1) {
-                            std::string fixedP = p1TypeStr;
-                            for(size_t pos=0; pos<fixedP.length(); pos++) { if (fixedP[pos] == '.') fixedP[pos] = '/'; }
-                            sig += "L" + fixedP + ";";
-                        }
-                        sig += ")";
-                        
-                        if (retTypeStr == "V") sig += "V";
-                        else if (retTypeStr == "D") sig += "D";
-                        else if (retTypeStr == "Z") sig += "Z";
-                        else {
-                            std::string fixedR = retTypeStr;
-                            for(size_t pos=0; pos<fixedR.length(); pos++) { if (fixedR[pos] == '.') fixedR[pos] = '/'; }
-                            sig += "L" + fixedR + ";";
-                        }
-                        
-                        found = env->GetMethodID(tgtCls, nameC, sig.c_str());
-                        if (env->ExceptionCheck()) { env->ExceptionClear(); found = nullptr; }
-                        
-                        if (found) Log("FindMethodBySignature: Found " + std::string(nameC) + sig);
-                        
-                        env->ReleaseStringUTFChars(nameStr, nameC);
-                        env->DeleteLocalRef(nameStr);
+                    std::string sig = "(";
+                    if (paramCount == 1 && p1TypeStr == "D") sig += "D";
+                    else if (paramCount == 1) {
+                        std::string fixedP = p1TypeStr;
+                        for(size_t pos=0; pos<fixedP.length(); pos++) { if (fixedP[pos] == '.') fixedP[pos] = '/'; }
+                        sig += "L" + fixedP + ";";
                     }
+                    sig += ")";
+                    
+                    if (retTypeStr == "V") sig += "V";
+                    else if (retTypeStr == "D") sig += "D";
+                    else if (retTypeStr == "Z") sig += "Z";
+                    else {
+                        std::string fixedR = retTypeStr;
+                        for(size_t pos=0; pos<fixedR.length(); pos++) { if (fixedR[pos] == '.') fixedR[pos] = '/'; }
+                        sig += "L" + fixedR + ";";
+                    }
+                    
+                    found = env->GetMethodID(tgtCls, methodName.c_str(), sig.c_str());
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); found = nullptr; }
+                    
+                    if (found) Log("FindMethodBySignature: Found " + methodName + sig);
                 }
             }
         }
@@ -3298,6 +3355,13 @@ static int ScoreEntityReachKey(const std::string& raw) {
     return -1;
 }
 
+static int ScoreBlockReachKey(const std::string& raw) {
+    std::string normalized = NormalizeReachKey(raw);
+    if (normalized.find("blockinteractionrange") != std::string::npos) return 220;
+    if (normalized.find("playerblockinteractionrange") != std::string::npos) return 220;
+    return -1;
+}
+
 static std::string SafeObjectToString(JNIEnv* env, jobject obj) {
     if (!env || !obj) return "";
     jclass objCls = env->FindClass("java/lang/Object");
@@ -3328,43 +3392,61 @@ static void EnsureReachIdentifiers(JNIEnv* env) {
     if (!env || !g_gameClassLoader) return;
 
     if (!g_identifierClass_121) {
-        jclass idCls = LoadClassWithLoader(env, g_gameClassLoader, "net.minecraft.class_2960");
-        if (!idCls) {
-            idCls = env->FindClass("net/minecraft/class_2960");
-            if (env->ExceptionCheck()) { env->ExceptionClear(); idCls = nullptr; }
-        }
-        if (idCls) {
-            g_identifierClass_121 = (jclass)env->NewGlobalRef(idCls);
-            env->DeleteLocalRef(idCls);
+        const char* idClassNames[] = {
+            "net.minecraft.resources.ResourceLocation",
+            "net.minecraft.class_2960",
+            nullptr
+        };
+        for (int i = 0; idClassNames[i] && !g_identifierClass_121; i++) {
+            jclass idCls = LoadClassWithLoader(env, g_gameClassLoader, idClassNames[i]);
+            if (!idCls) {
+                std::string slashName = idClassNames[i];
+                for (char& c : slashName) if (c == '.') c = '/';
+                idCls = env->FindClass(slashName.c_str());
+                if (env->ExceptionCheck()) { env->ExceptionClear(); idCls = nullptr; }
+            }
+            if (idCls) {
+                g_identifierClass_121 = (jclass)env->NewGlobalRef(idCls);
+                env->DeleteLocalRef(idCls);
+            }
         }
     }
     if (!g_identifierClass_121) return;
 
     if (!g_identifierFromString_121) {
         const char* names[] = {
+            "parse", "tryParse", "fromNamespaceAndPath",
             "method_60656", "method_12829", "method_60654",
             "method_45136", "method_45138", "method_48331",
             "a", "b", "c", "e", "f", "g",
             nullptr
         };
 
-        for (int i = 0; names[i]; ++i) {
-            jmethodID mid = env->GetStaticMethodID(g_identifierClass_121, names[i], "(Ljava/lang/String;)Lnet/minecraft/class_2960;");
-            if (env->ExceptionCheck()) { env->ExceptionClear(); mid = nullptr; }
-            if (!mid) continue;
+        const char* sigs[] = {
+            "(Ljava/lang/String;)Lnet/minecraft/resources/ResourceLocation;",
+            "(Ljava/lang/String;)Lnet/minecraft/class_2960;",
+            nullptr
+        };
 
-            jstring js = env->NewStringUTF("minecraft:player.entity_interaction_range");
-            jobject testId = env->CallStaticObjectMethod(g_identifierClass_121, mid, js);
-            if (env->ExceptionCheck()) { env->ExceptionClear(); testId = nullptr; }
-            env->DeleteLocalRef(js);
-            if (!testId) continue;
+        for (int i = 0; names[i] && !g_identifierFromString_121; ++i) {
+            for (int s = 0; sigs[s] && !g_identifierFromString_121; ++s) {
+                jmethodID mid = env->GetStaticMethodID(g_identifierClass_121, names[i], sigs[s]);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); mid = nullptr; }
+                if (!mid) continue;
 
-            std::string parsed = SafeObjectToString(env, testId);
-            env->DeleteLocalRef(testId);
-            if (ScoreEntityReachKey(parsed) >= 0) {
-                g_identifierFromString_121 = mid;
-                Log("EnsureReachIdentifiers: selected parser " + std::string(names[i]) + " -> " + parsed);
-                break;
+                jstring js = env->NewStringUTF("minecraft:entity_interaction_range");
+                jobject testId = env->CallStaticObjectMethod(g_identifierClass_121, mid, js);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); testId = nullptr; }
+                env->DeleteLocalRef(js);
+                if (!testId) continue;
+
+                std::string parsed = SafeObjectToString(env, testId);
+                env->DeleteLocalRef(testId);
+                if (ScoreEntityReachKey(parsed) >= 0) {
+                    g_identifierFromString_121 = mid;
+                    Log("EnsureReachIdentifiers: selected parser " + std::string(names[i]) + " -> " + parsed);
+                    break;
+                }
             }
         }
 
@@ -3381,7 +3463,9 @@ static void EnsureReachIdentifiers(JNIEnv* env) {
     };
 
     if (!g_entityReachIdentifier_121) {
-        jobject id = makeId("minecraft:player.entity_interaction_range");
+        jobject id = makeId("minecraft:entity_interaction_range");
+        if (!id) id = makeId("minecraft:player.entity_interaction_range");
+        if (!id) id = makeId("entity_interaction_range");
         if (!id) id = makeId("player.entity_interaction_range");
         if (id) {
             Log("EnsureReachIdentifiers: entity identifier = " + SafeObjectToString(env, id));
@@ -3393,7 +3477,9 @@ static void EnsureReachIdentifiers(JNIEnv* env) {
     }
 
     if (!g_blockReachIdentifier_121) {
-        jobject id = makeId("minecraft:player.block_interaction_range");
+        jobject id = makeId("minecraft:block_interaction_range");
+        if (!id) id = makeId("minecraft:player.block_interaction_range");
+        if (!id) id = makeId("block_interaction_range");
         if (!id) id = makeId("player.block_interaction_range");
         if (id) {
             Log("EnsureReachIdentifiers: block identifier = " + SafeObjectToString(env, id));
@@ -3422,8 +3508,10 @@ static jobject CallReachAttributeLookup(JNIEnv* env, jobject attrCont, jobject r
     return inst;
 }
 
-static jobject TryResolveReachAttributeFromRegistry(JNIEnv* env, jobject attrCont) {
-    if (!env || !attrCont || !g_gameClassLoader || (!g_dynGetCustomInstance && !g_dynGetAttributeInstance)) return nullptr;
+static void TryResolveReachAttributesFromRegistry(JNIEnv* env, jobject attrCont, jobject* outEntityInst, jobject* outBlockInst) {
+    if (outEntityInst) *outEntityInst = nullptr;
+    if (outBlockInst) *outBlockInst = nullptr;
+    if (!env || !attrCont || !g_gameClassLoader || (!g_dynGetCustomInstance && !g_dynGetAttributeInstance)) return;
     EnsureReachIdentifiers(env);
 
     jclass attrsCls = nullptr;
@@ -3432,13 +3520,13 @@ static jobject TryResolveReachAttributeFromRegistry(JNIEnv* env, jobject attrCon
         attrsCls = LoadClassWithLoader(env, g_gameClassLoader, attrsNames[i]);
         if (env->ExceptionCheck()) { env->ExceptionClear(); attrsCls = nullptr; }
     }
-    if (!attrsCls) return nullptr;
+    if (!attrsCls) return;
 
     jclass objCls = env->FindClass("java/lang/Object");
     if (env->ExceptionCheck()) { env->ExceptionClear(); objCls = nullptr; }
     if (!objCls) {
         env->DeleteLocalRef(attrsCls);
-        return nullptr;
+        return;
     }
 
     jmethodID mToStr = env->GetMethodID(objCls, "toString", "()Ljava/lang/String;");
@@ -3446,12 +3534,17 @@ static jobject TryResolveReachAttributeFromRegistry(JNIEnv* env, jobject attrCon
     if (!mToStr) {
         env->DeleteLocalRef(objCls);
         env->DeleteLocalRef(attrsCls);
-        return nullptr;
+        return;
     }
 
-    jobject bestInst = nullptr;
-    int bestScore = -1;
-    std::string bestLabel;
+    jobject bestEntityInst = nullptr;
+    int bestEntityScore = -1;
+    std::string bestEntityLabel;
+
+    jobject bestBlockInst = nullptr;
+    int bestBlockScore = -1;
+    std::string bestBlockLabel;
+
     std::vector<std::string> sampledLabels;
 
     jclass cClass = env->FindClass("java/lang/Class");
@@ -3516,19 +3609,26 @@ static jobject TryResolveReachAttributeFromRegistry(JNIEnv* env, jobject attrCon
                     }
                 }
 
-                if (isBlockReachEntry) {
+                if (isEntityReachEntry) {
+                    jobject inst = CallReachAttributeLookup(env, attrCont, registryEntry);
+                    if (inst) {
+                        if (bestEntityInst) env->DeleteLocalRef(bestEntityInst);
+                        bestEntityInst = inst;
+                        bestEntityScore = 1000;
+                        bestEntityLabel = "identifier:entity_interaction_range";
+                    }
                     env->DeleteLocalRef(registryEntry);
                     env->DeleteLocalRef(fld);
                     continue;
                 }
 
-                if (isEntityReachEntry) {
+                if (isBlockReachEntry) {
                     jobject inst = CallReachAttributeLookup(env, attrCont, registryEntry);
                     if (inst) {
-                        if (bestInst) env->DeleteLocalRef(bestInst);
-                        bestInst = inst;
-                        bestScore = 1000;
-                        bestLabel = "identifier:player.entity_interaction_range";
+                        if (bestBlockInst) env->DeleteLocalRef(bestBlockInst);
+                        bestBlockInst = inst;
+                        bestBlockScore = 1000;
+                        bestBlockLabel = "identifier:block_interaction_range";
                     }
                     env->DeleteLocalRef(registryEntry);
                     env->DeleteLocalRef(fld);
@@ -3570,52 +3670,73 @@ static jobject TryResolveReachAttributeFromRegistry(JNIEnv* env, jobject attrCon
 
                 if (!lookupLabel.empty() && sampledLabels.size() < 16) sampledLabels.push_back(lookupLabel);
                 if (!instanceLabel.empty() && sampledLabels.size() < 16) sampledLabels.push_back("inst:" + instanceLabel);
-                if (IsBlockReachKey(lookupLabel)) {
-                    if (instCandidate) env->DeleteLocalRef(instCandidate);
-                    env->DeleteLocalRef(registryEntry);
-                    env->DeleteLocalRef(fld);
-                    continue;
-                }
 
-                int score = ScoreEntityReachKey(lookupLabel);
-                if (score < 0 && !instanceLabel.empty()) score = ScoreEntityReachKey(instanceLabel);
-                if (score >= 0) {
+                int eScore = ScoreEntityReachKey(lookupLabel);
+                if (eScore < 0 && !instanceLabel.empty()) eScore = ScoreEntityReachKey(instanceLabel);
+
+                int bScore = ScoreBlockReachKey(lookupLabel);
+                if (bScore < 0 && !instanceLabel.empty()) bScore = ScoreBlockReachKey(instanceLabel);
+
+                if (eScore >= 0) {
                     jobject inst = instCandidate;
                     if (!inst) {
                         inst = CallReachAttributeLookup(env, attrCont, registryEntry);
                     }
-                    if (inst && score > bestScore) {
-                        if (bestInst) env->DeleteLocalRef(bestInst);
-                        bestInst = inst;
-                        bestScore = score;
-                        bestLabel = !lookupLabel.empty() ? lookupLabel : instanceLabel;
+                    if (inst && eScore > bestEntityScore) {
+                        if (bestEntityInst) env->DeleteLocalRef(bestEntityInst);
+                        bestEntityInst = inst;
+                        bestEntityScore = eScore;
+                        bestEntityLabel = !lookupLabel.empty() ? lookupLabel : instanceLabel;
                     } else if (inst) {
                         env->DeleteLocalRef(inst);
                     }
-                } else if (instCandidate) {
-                    env->DeleteLocalRef(instCandidate);
+                    instCandidate = nullptr;
+                } else if (bScore >= 0) {
+                    jobject inst = instCandidate;
+                    if (!inst) {
+                        inst = CallReachAttributeLookup(env, attrCont, registryEntry);
+                    }
+                    if (inst && bScore > bestBlockScore) {
+                        if (bestBlockInst) env->DeleteLocalRef(bestBlockInst);
+                        bestBlockInst = inst;
+                        bestBlockScore = bScore;
+                        bestBlockLabel = !lookupLabel.empty() ? lookupLabel : instanceLabel;
+                    } else if (inst) {
+                        env->DeleteLocalRef(inst);
+                    }
+                    instCandidate = nullptr;
                 }
 
+                if (instCandidate) env->DeleteLocalRef(instCandidate);
                 env->DeleteLocalRef(registryEntry);
                 env->DeleteLocalRef(fld);
             }
         }
     }
 
-    if (bestInst && bestScore >= 0) {
-        Log("UpdateReach: Registry-selected entity reach attribute (" + std::to_string(bestScore) + "): " + bestLabel);
-    } else if (bestInst) {
-        env->DeleteLocalRef(bestInst);
-        bestInst = nullptr;
-    } else if (!sampledLabels.empty()) {
+    if (bestEntityInst && bestEntityScore >= 0) {
+        Log("UpdateReach: Registry-selected entity reach attribute (" + std::to_string(bestEntityScore) + "): " + bestEntityLabel);
+        if (outEntityInst) *outEntityInst = bestEntityInst;
+        else env->DeleteLocalRef(bestEntityInst);
+    } else if (bestEntityInst) {
+        env->DeleteLocalRef(bestEntityInst);
+    }
+
+    if (bestBlockInst && bestBlockScore >= 0) {
+        Log("UpdateReach: Registry-selected block reach attribute (" + std::to_string(bestBlockScore) + "): " + bestBlockLabel);
+        if (outBlockInst) *outBlockInst = bestBlockInst;
+        else env->DeleteLocalRef(bestBlockInst);
+    } else if (bestBlockInst) {
+        env->DeleteLocalRef(bestBlockInst);
+    }
+
+    if (!bestEntityInst && !sampledLabels.empty()) {
         std::string joined = sampledLabels[0];
         for (size_t i = 1; i < sampledLabels.size(); ++i) joined += " | " + sampledLabels[i];
         Log("UpdateReach: Registry entries scanned (entity reach not found): " + joined);
-    } else {
-        Log("UpdateReach: Registry scan produced no usable labels.");
     }
 
-    if (!bestInst) {
+    if (!bestEntityInst) {
         Log("UpdateReach: scanned " + std::to_string(scannedFields) + " fields, " + std::to_string(scannedEntries) + " registry entries.");
     }
 
@@ -3626,7 +3747,6 @@ static jobject TryResolveReachAttributeFromRegistry(JNIEnv* env, jobject attrCon
     if (cClass) env->DeleteLocalRef(cClass);
     env->DeleteLocalRef(objCls);
     env->DeleteLocalRef(attrsCls);
-    return bestInst;
 }
 
 static void EnsureReachJni(JNIEnv* env) {
@@ -3644,13 +3764,25 @@ static void EnsureReachJni(JNIEnv* env) {
         if (env->ExceptionCheck()) { env->ExceptionClear(); livingEntCls = nullptr; }
     }
     if (livingEntCls) {
-        g_dynGetAttributes = FindMethodBySignature(env, livingEntCls, "net.minecraft.world.entity.ai.attributes.AttributeMap", 0);
+        const char* gaNames[] = { "getAttributes", "method_26827", nullptr };
+        const char* gaSigs[] = {
+            "()Lnet/minecraft/world/entity/ai/attributes/AttributeMap;",
+            "()Lnet/minecraft/class_5131;",
+            nullptr
+        };
+        for (int ni = 0; gaNames[ni] && !g_dynGetAttributes; ni++) {
+            for (int si = 0; gaSigs[si] && !g_dynGetAttributes; si++) {
+                g_dynGetAttributes = env->GetMethodID(livingEntCls, gaNames[ni], gaSigs[si]);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_dynGetAttributes = nullptr; }
+            }
+        }
+        if (!g_dynGetAttributes) g_dynGetAttributes = FindMethodBySignature(env, livingEntCls, "net.minecraft.world.entity.ai.attributes.AttributeMap", 0);
         if (!g_dynGetAttributes) g_dynGetAttributes = FindMethodBySignature(env, livingEntCls, "net.minecraft.class_5131", 0);
         env->DeleteLocalRef(livingEntCls);
         if (!g_dynGetAttributes) Log("EnsureReachJni: FAILED to find getAttributes");
     }
 
-    // 2. AttributeContainer -> getCustomInstance(RegistryEntry<EntityAttribute>)
+    // 2. AttributeMap -> getInstance(Holder) / getCustomInstance(RegistryEntry)
     const char* attrContNames[] = { "net.minecraft.world.entity.ai.attributes.AttributeMap", "net.minecraft.class_5131", nullptr };
     jclass attrContCls = nullptr;
     for (int i = 0; attrContNames[i] && !attrContCls; i++) {
@@ -3658,21 +3790,29 @@ static void EnsureReachJni(JNIEnv* env) {
         if (env->ExceptionCheck()) { env->ExceptionClear(); attrContCls = nullptr; }
     }
     if (attrContCls) {
-        g_dynGetCustomInstance = FindMethodBySignature(env, attrContCls, "net.minecraft.world.entity.ai.attributes.AttributeInstance", 1, "net.minecraft.core.Holder");
-        if (!g_dynGetCustomInstance) g_dynGetCustomInstance = FindMethodBySignature(env, attrContCls, "net.minecraft.class_1324", 1, "net.minecraft.class_6880");
-
-        const char* getterNames[] = { "method_55698", "getAttributeInstance", "getInstance", "getValue", nullptr };
-        const char* getterSigs[] = { "(Lnet/minecraft/core/Holder;)Lnet/minecraft/world/entity/ai/attributes/AttributeInstance;", "(Lnet/minecraft/class_6880;)Lnet/minecraft/class_1324;", nullptr };
-        for (int ni = 0; getterNames[ni] && !g_dynGetAttributeInstance; ni++) {
-            for (int si = 0; getterSigs[si] && !g_dynGetAttributeInstance; si++) {
-                g_dynGetAttributeInstance = env->GetMethodID(attrContCls, getterNames[ni], getterSigs[si]);
-                if (env->ExceptionCheck()) { env->ExceptionClear(); g_dynGetAttributeInstance = nullptr; }
+        const char* getterNames[] = { "getInstance", "getCustomInstance", "method_55698", "method_26841", "getAttributeInstance", "getValue", nullptr };
+        const char* getterSigs[] = {
+            "(Lnet/minecraft/core/Holder;)Lnet/minecraft/world/entity/ai/attributes/AttributeInstance;",
+            "(Lnet/minecraft/class_6880;)Lnet/minecraft/class_1324;",
+            nullptr
+        };
+        for (int ni = 0; getterNames[ni] && !g_dynGetCustomInstance; ni++) {
+            for (int si = 0; getterSigs[si] && !g_dynGetCustomInstance; si++) {
+                g_dynGetCustomInstance = env->GetMethodID(attrContCls, getterNames[ni], getterSigs[si]);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_dynGetCustomInstance = nullptr; }
+                if (g_dynGetCustomInstance) {
+                    Log(std::string("EnsureReachJni: Resolved attribute getter: ") + getterNames[ni] + getterSigs[si]);
+                    break;
+                }
             }
         }
+        if (!g_dynGetCustomInstance) g_dynGetCustomInstance = FindMethodBySignature(env, attrContCls, "net.minecraft.world.entity.ai.attributes.AttributeInstance", 1, "net.minecraft.core.Holder");
+        if (!g_dynGetCustomInstance) g_dynGetCustomInstance = FindMethodBySignature(env, attrContCls, "net.minecraft.class_1324", 1, "net.minecraft.class_6880");
+        g_dynGetAttributeInstance = g_dynGetCustomInstance;
         env->DeleteLocalRef(attrContCls);
     }
 
-    // 3. AttributeInstance -> setBaseValue
+    // 3. AttributeInstance -> setBaseValue(D)V
     const char* attrInstNames[] = { "net.minecraft.world.entity.ai.attributes.AttributeInstance", "net.minecraft.class_1324", nullptr };
     jclass attrInstCls = nullptr;
     for (int i = 0; attrInstNames[i] && !attrInstCls; i++) {
@@ -3680,8 +3820,11 @@ static void EnsureReachJni(JNIEnv* env) {
         if (env->ExceptionCheck()) { env->ExceptionClear(); attrInstCls = nullptr; }
     }
     if (attrInstCls) {
-        g_dynSetBaseValue = env->GetMethodID(attrInstCls, "setBaseValue", "(D)V");
-        if (env->ExceptionCheck()) { env->ExceptionClear(); g_dynSetBaseValue = nullptr; }
+        const char* sbvNames[] = { "setBaseValue", "method_6192", nullptr };
+        for (int ni = 0; sbvNames[ni] && !g_dynSetBaseValue; ni++) {
+            g_dynSetBaseValue = env->GetMethodID(attrInstCls, sbvNames[ni], "(D)V");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_dynSetBaseValue = nullptr; }
+        }
         if (!g_dynSetBaseValue) g_dynSetBaseValue = FindMethodBySignature(env, attrInstCls, "V", 1, "D");
         env->DeleteLocalRef(attrInstCls);
     }
@@ -3693,12 +3836,23 @@ static void EnsureReachJni(JNIEnv* env) {
         if (env->ExceptionCheck()) { env->ExceptionClear(); regEntryCls = nullptr; }
     }
     if (regEntryCls) {
-        g_dynRegistryEntryToString = env->GetMethodID(regEntryCls, "toString", "()Ljava/lang/String;");
-        if (env->ExceptionCheck()) { env->ExceptionClear(); g_dynRegistryEntryToString = nullptr; }
+        const char* toStrNames[] = { "toString", nullptr };
+        for (int ni = 0; toStrNames[ni] && !g_dynRegistryEntryToString; ni++) {
+            g_dynRegistryEntryToString = env->GetMethodID(regEntryCls, toStrNames[ni], "()Ljava/lang/String;");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_dynRegistryEntryToString = nullptr; }
+        }
         if (!g_dynRegistryEntryToString) g_dynRegistryEntryToString = FindMethodBySignature(env, regEntryCls, "java.lang.String", 0);
 
         g_dynRegistryEntryMatchesIdentifier = env->GetMethodID(regEntryCls, "is", "(Lnet/minecraft/resources/ResourceLocation;)Z");
         if (env->ExceptionCheck()) { env->ExceptionClear(); g_dynRegistryEntryMatchesIdentifier = nullptr; }
+        if (!g_dynRegistryEntryMatchesIdentifier) {
+            g_dynRegistryEntryMatchesIdentifier = env->GetMethodID(regEntryCls, "is", "(Lnet/minecraft/class_2960;)Z");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_dynRegistryEntryMatchesIdentifier = nullptr; }
+        }
+        if (!g_dynRegistryEntryMatchesIdentifier) {
+            g_dynRegistryEntryMatchesIdentifier = env->GetMethodID(regEntryCls, "method_40228", "(Lnet/minecraft/class_2960;)Z");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_dynRegistryEntryMatchesIdentifier = nullptr; }
+        }
         if (!g_dynRegistryEntryMatchesIdentifier) g_dynRegistryEntryMatchesIdentifier = FindMethodBySignature(env, regEntryCls, "Z", 1, "net.minecraft.resources.ResourceLocation");
         if (!g_dynRegistryEntryMatchesIdentifier) g_dynRegistryEntryMatchesIdentifier = FindMethodBySignature(env, regEntryCls, "Z", 1, "net.minecraft.class_2960");
         env->DeleteLocalRef(regEntryCls);
@@ -3727,6 +3881,10 @@ static void UpdateReach(JNIEnv* env, const Config& cfg) {
             env->DeleteGlobalRef(g_cachedReachAttrInst);
             g_cachedReachAttrInst = nullptr;
         }
+        if (g_cachedBlockReachAttrInst) {
+            env->DeleteGlobalRef(g_cachedBlockReachAttrInst);
+            g_cachedBlockReachAttrInst = nullptr;
+        }
         if (g_cachedLocalPlayer) {
             env->DeleteGlobalRef(g_cachedLocalPlayer);
             g_cachedLocalPlayer = nullptr;
@@ -3737,16 +3895,24 @@ static void UpdateReach(JNIEnv* env, const Config& cfg) {
     if (!g_cachedLocalPlayer || !env->IsSameObject(selfObj, g_cachedLocalPlayer)) {
         if (g_cachedLocalPlayer) env->DeleteGlobalRef(g_cachedLocalPlayer);
         if (g_cachedReachAttrInst) env->DeleteGlobalRef(g_cachedReachAttrInst);
+        if (g_cachedBlockReachAttrInst) env->DeleteGlobalRef(g_cachedBlockReachAttrInst);
         g_cachedLocalPlayer = env->NewGlobalRef(selfObj);
         g_cachedReachAttrInst = nullptr;
+        g_cachedBlockReachAttrInst = nullptr;
 
         jobject attrCont = env->CallObjectMethod(selfObj, g_dynGetAttributes);
         if (env->ExceptionCheck()) { env->ExceptionClear(); attrCont = nullptr; }
         if (attrCont) {
-            jobject directInst = TryResolveReachAttributeFromRegistry(env, attrCont);
-            if (directInst) {
-                g_cachedReachAttrInst = env->NewGlobalRef(directInst);
-                env->DeleteLocalRef(directInst);
+            jobject entityInst = nullptr;
+            jobject blockInst = nullptr;
+            TryResolveReachAttributesFromRegistry(env, attrCont, &entityInst, &blockInst);
+            if (entityInst) {
+                g_cachedReachAttrInst = env->NewGlobalRef(entityInst);
+                env->DeleteLocalRef(entityInst);
+            }
+            if (blockInst) {
+                g_cachedBlockReachAttrInst = env->NewGlobalRef(blockInst);
+                env->DeleteLocalRef(blockInst);
             }
 
             if (!g_cachedReachAttrInst) {
@@ -3756,6 +3922,13 @@ static void UpdateReach(JNIEnv* env, const Config& cfg) {
                     Log("UpdateReach: Failed to resolve entity interaction range attribute.");
                 }
             }
+            if (!g_cachedBlockReachAttrInst) {
+                static bool loggedMissingBlockAttr = false;
+                if (!loggedMissingBlockAttr) {
+                    loggedMissingBlockAttr = true;
+                    Log("UpdateReach: Failed to resolve block interaction range attribute.");
+                }
+            }
             env->DeleteLocalRef(attrCont);
         }
     }
@@ -3763,18 +3936,25 @@ static void UpdateReach(JNIEnv* env, const Config& cfg) {
     env->DeleteLocalRef(selfObj);
 
     if (g_cachedReachAttrInst) {
-        double currentRange = 3.0; // Default Vanilla range
+        double currentEntityRange = 3.0; // Default Vanilla entity range
+        double currentBlockRange = 4.5;  // Default Vanilla block range
         if (cfg.reachEnabled) {
             int rval = rand() % 100;
             if (rval < cfg.reachChance) {
                 float rangeSpan = cfg.reachMax - cfg.reachMin;
                 if (rangeSpan < 0) rangeSpan = 0;
                 float rfrac = (float)rand() / (float)RAND_MAX;
-                currentRange = (double)(cfg.reachMin + (rfrac * rangeSpan));
+                currentEntityRange = (double)(cfg.reachMin + (rfrac * rangeSpan));
+                currentBlockRange = std::max(4.5, currentEntityRange);
             }
         }
-        env->CallVoidMethod(g_cachedReachAttrInst, g_dynSetBaseValue, currentRange);
+        env->CallVoidMethod(g_cachedReachAttrInst, g_dynSetBaseValue, currentEntityRange);
         if (env->ExceptionCheck()) env->ExceptionClear();
+
+        if (g_cachedBlockReachAttrInst) {
+            env->CallVoidMethod(g_cachedBlockReachAttrInst, g_dynSetBaseValue, currentBlockRange);
+            if (env->ExceptionCheck()) env->ExceptionClear();
+        }
     }
 }
 
@@ -3843,7 +4023,16 @@ static void EnsureVelocityJni(JNIEnv* env, jobject selfObj) {
         (g_hurtTimeField_121 != nullptr) &&
         (g_vec3dX_121 != nullptr && g_vec3dY_121 != nullptr && g_vec3dZ_121 != nullptr);
 
-    if (!g_velocityMethodsResolved && !g_loggedVelocityResolveFail_121) {
+    if (g_velocityMethodsResolved) {
+        static bool s_loggedVelocitySuccess = false;
+        if (!s_loggedVelocitySuccess) {
+            s_loggedVelocitySuccess = true;
+            Log(std::string("EnsureVelocityJni: SUCCESS - getVel=") + (g_getVelocity_121 ? "1" : "0") +
+                " setVelXYZ=" + (g_setVelocityXYZ_121 ? "1" : "0") +
+                " setVelVec=" + (g_setVelocityVec_121 ? "1" : "0") +
+                " hurtTime=" + (g_hurtTimeField_121 ? "1" : "0"));
+        }
+    } else if (!g_loggedVelocityResolveFail_121) {
         g_loggedVelocityResolveFail_121 = true;
         Log(std::string("Velocity JNI unresolved: getVel=") + (g_getVelocity_121 ? "1" : "0") +
             " setVelXYZ=" + (g_setVelocityXYZ_121 ? "1" : "0") +
@@ -3855,12 +4044,19 @@ static void EnsureVelocityJni(JNIEnv* env, jobject selfObj) {
     env->DeleteLocalRef(playerCls);
 }
 
+static int s_velocityPendingSamples = 0;
+static double s_velocityPendingHScale = 1.0;
+static double s_velocityPendingVScale = 1.0;
+
 static void UpdateVelocity(JNIEnv* env, const Config& cfg) {
     if (!env || !g_mcInstance || !g_playerField_121) return;
 
     jobject selfObj = env->GetObjectField(g_mcInstance, g_playerField_121);
     if (env->ExceptionCheck()) { env->ExceptionClear(); selfObj = nullptr; }
-    if (!selfObj) return;
+    if (!selfObj) {
+        s_velocityPendingSamples = 0;
+        return;
+    }
 
     EnsureVelocityJni(env, selfObj);
     if (!g_velocityMethodsResolved) {
@@ -3879,43 +4075,64 @@ static void UpdateVelocity(JNIEnv* env, const Config& cfg) {
     if (cfg.velocityEnabled && newHit) {
         int rv = rand() % 100;
         bool applyThisHit = (rv < cfg.velocityChance);
-        if (applyThisHit) {
-            jobject velObj = env->CallObjectMethod(selfObj, g_getVelocity_121);
-            if (env->ExceptionCheck()) { env->ExceptionClear(); velObj = nullptr; }
-            if (velObj) {
-                double vx = env->GetDoubleField(velObj, g_vec3dX_121);
-                double vy = env->GetDoubleField(velObj, g_vec3dY_121);
-                double vz = env->GetDoubleField(velObj, g_vec3dZ_121);
-                if (!env->ExceptionCheck()) {
-                    double horizMag = std::sqrt(vx * vx + vz * vz);
-                    bool looksLikeKnockback = (horizMag > 0.26 || std::fabs(vy) > 0.20);
-                    if (looksLikeKnockback && (cfg.velocityHorizontal != 100 || cfg.velocityVertical != 100)) {
-                        double hScale = (double)cfg.velocityHorizontal / 100.0;
-                        double vScale = (double)cfg.velocityVertical / 100.0;
-                        double outX = vx * hScale;
-                        double outY = vy * vScale;
-                        double outZ = vz * hScale;
-
-                        if (g_setVelocityXYZ_121) {
-                            env->CallVoidMethod(selfObj, g_setVelocityXYZ_121, outX, outY, outZ);
-                        } else if (g_setVelocityVec_121 && g_vec3dCtor_121 && g_vec3dClass_121) {
-                            jobject vec = env->NewObject(g_vec3dClass_121, g_vec3dCtor_121, outX, outY, outZ);
-                            if (!env->ExceptionCheck() && vec) {
-                                env->CallVoidMethod(selfObj, g_setVelocityVec_121, vec);
-                                if (env->ExceptionCheck()) env->ExceptionClear();
-                                env->DeleteLocalRef(vec);
-                            } else {
-                                env->ExceptionClear();
-                            }
-                        }
-                        if (env->ExceptionCheck()) env->ExceptionClear();
-                    }
-                } else {
-                    env->ExceptionClear();
-                }
-                env->DeleteLocalRef(velObj);
-            }
+        if (applyThisHit && (cfg.velocityHorizontal != 100 || cfg.velocityVertical != 100)) {
+            s_velocityPendingSamples = 10; // ~50ms window at 5ms cadence (1 Minecraft game tick)
+            s_velocityPendingHScale = (double)cfg.velocityHorizontal / 100.0;
+            s_velocityPendingVScale = (double)cfg.velocityVertical / 100.0;
+        } else {
+            s_velocityPendingSamples = 0;
         }
+    }
+
+    if (s_velocityPendingSamples > 0 && cfg.velocityEnabled) {
+        jobject velObj = env->CallObjectMethod(selfObj, g_getVelocity_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); velObj = nullptr; }
+        if (velObj) {
+            double vx = env->GetDoubleField(velObj, g_vec3dX_121);
+            double vy = env->GetDoubleField(velObj, g_vec3dY_121);
+            double vz = env->GetDoubleField(velObj, g_vec3dZ_121);
+            if (!env->ExceptionCheck()) {
+                double horizMag = std::sqrt(vx * vx + vz * vz);
+                // Lower threshold to accommodate Netherite armor resistance and glancing hits
+                bool looksLikeKnockback = (horizMag > 0.08 || std::fabs(vy) > 0.10);
+                if (looksLikeKnockback) {
+                    double outX = vx * s_velocityPendingHScale;
+                    double outY = vy * s_velocityPendingVScale;
+                    double outZ = vz * s_velocityPendingHScale;
+
+                    if (g_setVelocityXYZ_121) {
+                        env->CallVoidMethod(selfObj, g_setVelocityXYZ_121, outX, outY, outZ);
+                    } else if (g_setVelocityVec_121 && g_vec3dCtor_121 && g_vec3dClass_121) {
+                        jobject vec = env->NewObject(g_vec3dClass_121, g_vec3dCtor_121, outX, outY, outZ);
+                        if (!env->ExceptionCheck() && vec) {
+                            env->CallVoidMethod(selfObj, g_setVelocityVec_121, vec);
+                            if (env->ExceptionCheck()) env->ExceptionClear();
+                            env->DeleteLocalRef(vec);
+                        } else {
+                            env->ExceptionClear();
+                        }
+                    }
+                    if (env->ExceptionCheck()) env->ExceptionClear();
+
+                    Log("UpdateVelocity: Applied knockback reduction: H=" + std::to_string(s_velocityPendingHScale) +
+                        " V=" + std::to_string(s_velocityPendingVScale) +
+                        " (horiz=" + std::to_string(horizMag) + ", vy=" + std::to_string(vy) + ")");
+                    s_velocityPendingSamples = 0; // Successfully consumed
+                } else {
+                    --s_velocityPendingSamples;
+                }
+            } else {
+                env->ExceptionClear();
+                --s_velocityPendingSamples;
+            }
+            env->DeleteLocalRef(velObj);
+        } else {
+            --s_velocityPendingSamples;
+        }
+    }
+
+    if (hurtTime == 0) {
+        s_velocityPendingSamples = 0;
     }
 
     g_lastHurtTime_121 = hurtTime;
@@ -7179,7 +7396,7 @@ static bool IsModernContainerScreenName(const std::string& screenName) {
         ScreenChainContainsClass121(screenName, "class_476");
 }
 
-static std::string BuildModernChestStealerStateJson(JNIEnv* env, jobject screenObj, const std::string& screenName, bool enabled, bool menuCheck) {
+static std::string BuildModernChestStealerStateJson(JNIEnv* env, jobject screenObj, const std::string& screenName, bool enabled, bool titleCheck, bool customItemsCheck, bool physicalCheck) {
     if (!enabled || !env || !screenObj || !IsModernContainerScreenName(screenName)) return "null";
     if (!ResolveModernChestStealerMappings(env, screenObj)) {
         LogChestStealerMappingMissing121(MissingChestStealerMappingDetail121());
@@ -7205,7 +7422,7 @@ static std::string BuildModernChestStealerStateJson(JNIEnv* env, jobject screenO
     std::string titleLower = screenTitle;
     for (char& ch : titleLower) ch = (char)std::tolower((unsigned char)ch);
     bool titleIsMenu = false;
-    if (!titleLower.empty()) {
+    if (titleCheck && !titleLower.empty()) {
         if (titleLower.find("shop") != std::string::npos ||
             titleLower.find("selector") != std::string::npos ||
             titleLower.find("upgrade") != std::string::npos ||
@@ -7295,14 +7512,16 @@ static std::string BuildModernChestStealerStateJson(JNIEnv* env, jobject screenO
     env->DeleteLocalRef(listAccessCls);
     env->DeleteLocalRef(slotsObj);
 
-    bool itemsAreMenu = (count > 0) && (((float)customItemCount / (float)count) > 0.5f);
-    bool isMenu = titleIsMenu || itemsAreMenu;
+    bool itemsAreMenu = customItemsCheck && (count > 0) && (((float)customItemCount / (float)count) > 0.5f);
     bool physicalNearby = IsModernChestStealerPhysicalContainer();
-    bool physical = !isMenu && physicalNearby;
+    bool physicalCheckFailed = physicalCheck && !physicalNearby;
 
-    if (menuCheck && (!physical || isMenu)) {
+    bool blocked = titleIsMenu || itemsAreMenu || physicalCheckFailed;
+    bool physical = !blocked;
+
+    if (blocked) {
         std::string label = screenTitle.empty() ? screenName : screenTitle;
-        LogChestStealerSkippedMenu121(label + (isMenu ? (titleIsMenu ? " [menu-title]" : " [custom-items]") : " [no-chest-nearby]"));
+        LogChestStealerSkippedMenu121(label + (titleIsMenu ? " [menu-title]" : (itemsAreMenu ? " [custom-items]" : " [no-chest-nearby]")));
         std::ostringstream skipped;
         skipped << "{\"ready\":false,\"physical\":false,\"windowId\":" << windowId
                 << ",\"screenWidth\":" << screenWidth
@@ -7333,12 +7552,12 @@ static jfieldID g_refillPotionField_121 = nullptr;
 static jfieldID g_refillGoldenAppleField_121 = nullptr;
 static jfieldID g_refillEnchantedGoldenAppleField_121 = nullptr;
 static jmethodID g_itemGetDescriptionIdWithStack_121 = nullptr;
-static jmethodID g_itemStackGetTranslationKey_121 = nullptr;
 static jclass g_dataComponentsClass_121 = nullptr;
 static jfieldID g_dataComponentsPotionContentsField_121 = nullptr;
 static jmethodID g_itemStackGetComponent_121 = nullptr;
 static jmethodID g_itemStackGetHoverName_121 = nullptr;
 static jmethodID g_componentGetString_121 = nullptr;
+static jmethodID g_itemStackGetTranslationKey_121 = nullptr;
 static DWORD g_lastRefillFilterLogMs121 = 0;
 
 static jfieldID ResolveRefillItemsStaticField121(
@@ -7396,7 +7615,7 @@ static bool EnsureRefillItemMappings121(JNIEnv* env) {
                 nullptr
             };
             for (int ni = 0; names[ni] && !g_itemStackGetItem_121; ni++) {
-                for (int si = 0; sigs[si] && !g_itemStackGetItem_121; si++) {
+                for (int si = 0; si < 3 && sigs[si] && !g_itemStackGetItem_121; si++) {
                     g_itemStackGetItem_121 = env->GetMethodID(stackCls, names[ni], sigs[si]);
                     if (env->ExceptionCheck()) { env->ExceptionClear(); g_itemStackGetItem_121 = nullptr; }
                 }
@@ -12330,6 +12549,7 @@ static void CleanupJniGlobals(JNIEnv* env) {
 
     DeleteGlobalRefSafe(env, g_cachedLocalPlayer);
     DeleteGlobalRefSafe(env, g_cachedReachAttrInst);
+    DeleteGlobalRefSafe(env, g_cachedBlockReachAttrInst);
     HelperBridge::Unload(env);
 }
 
@@ -13938,6 +14158,8 @@ static void EnsureHudTextFields(JNIEnv* env, jclass mcCls, jobject hudObj) {
     env->DeleteLocalRef(hudCls);
 }
 
+static bool EnsureAutoRodModernMappings(JNIEnv* env, jobject player, bool needRodClass);
+
 static void UpdateJniState() {
     TRACE261_PATH("enter");
     bool prerequisites = TRACE261_IF("prerequisitesMet", (g_stateJniReady && g_jvm && g_mcInstance && HasScreenAccess()));
@@ -13992,10 +14214,19 @@ static void UpdateJniState() {
     }
 
     bool chestStealerEnabled = false;
-    bool chestStealerMenuCheck = true;
+    bool chestStealerTitleCheck = true;
+    bool chestStealerCustomItemsCheck = true;
+    bool chestStealerPhysicalCheck = true;
     bool refillEnabled = false;
-    { LockGuard lk(g_configMutex); chestStealerEnabled = g_config.chestStealer; chestStealerMenuCheck = g_config.chestStealerMenuCheck; refillEnabled = g_config.refill; }
-    std::string chestStealerStateJson = BuildModernChestStealerStateJson(env, scr, screenName, chestStealerEnabled, chestStealerMenuCheck);
+    {
+        LockGuard lk(g_configMutex);
+        chestStealerEnabled = g_config.chestStealer;
+        chestStealerTitleCheck = g_config.chestStealerTitleCheck;
+        chestStealerCustomItemsCheck = g_config.chestStealerCustomItemsCheck;
+        chestStealerPhysicalCheck = g_config.chestStealerPhysicalCheck;
+        refillEnabled = g_config.refill;
+    }
+    std::string chestStealerStateJson = BuildModernChestStealerStateJson(env, scr, screenName, chestStealerEnabled, chestStealerTitleCheck, chestStealerCustomItemsCheck, chestStealerPhysicalCheck);
     std::string refillStateJson = BuildModernRefillStateJson(env, scr, screenName, refillEnabled);
     if (scr) env->DeleteLocalRef(scr);
 
@@ -14130,18 +14361,32 @@ static void UpdateJniState() {
             return nullptr;
         };
 
-        // ===== holdingBlock (main hand item is BlockItem) =====
+        // ===== holdingBlock & health =====
         bool holdingBlock = false;
+        float healthVal = 20.0f;
         jfieldID plFld = ResolvePlayerField();
         if (plFld) {
             jobject plObj = env->GetObjectField(g_mcInstance, plFld);
             if (plObj && !env->ExceptionCheck()) {
                 jclass plCls = env->GetObjectClass(plObj);
                 if (plCls) {
+                    static jmethodID s_getHealthMethod = nullptr;
+                    if (!s_getHealthMethod) {
+                        const char* hNames[] = { "getHealth", "method_6032", "m_21223_", nullptr };
+                        for (int ni = 0; hNames[ni] && !s_getHealthMethod; ni++) {
+                            s_getHealthMethod = env->GetMethodID(plCls, hNames[ni], "()F");
+                            if (env->ExceptionCheck()) { env->ExceptionClear(); s_getHealthMethod = nullptr; }
+                        }
+                    }
+                    if (s_getHealthMethod) {
+                        healthVal = env->CallFloatMethod(plObj, s_getHealthMethod);
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); healthVal = 20.0f; }
+                    }
+
                     // Resolve getMainHandStack() lazily.
                     static jmethodID s_getMainHand = nullptr;
                     if (!s_getMainHand) {
-                        const char* names[] = { "getMainHandItem", "getMainHandStack", "method_6047", nullptr };
+                        const char* names[] = { "getMainHandItem", "getMainHandStack", "method_6047", "m_21205_", nullptr };
                         const char* sigs[] = { "()Lnet/minecraft/world/item/ItemStack;", "()Lnet/minecraft/class_1799;", nullptr };
                         for (int ni = 0; names[ni] && !s_getMainHand; ni++) {
                             for (int si = 0; sigs[si] && !s_getMainHand; si++) {
@@ -14153,12 +14398,30 @@ static void UpdateJniState() {
 
                     jobject stackObj = (s_getMainHand) ? env->CallObjectMethod(plObj, s_getMainHand) : nullptr;
                     if (env->ExceptionCheck()) { env->ExceptionClear(); stackObj = nullptr; }
+
+                    // Fallback to inventory selected slot if getMainHandItem returned null
+                    if (!stackObj && EnsureAutoRodModernMappings(env, plObj, false)) {
+                        if (g_autoRodGetInventory121 && g_autoRodSelectedSlotField121 && g_autoRodInventoryGetItem121) {
+                            jobject inv = env->CallObjectMethod(plObj, g_autoRodGetInventory121);
+                            if (env->ExceptionCheck()) { env->ExceptionClear(); inv = nullptr; }
+                            if (inv) {
+                                int selSlot = env->GetIntField(inv, g_autoRodSelectedSlotField121);
+                                if (env->ExceptionCheck()) { env->ExceptionClear(); selSlot = -1; }
+                                if (selSlot >= 0 && selSlot < 9) {
+                                    stackObj = env->CallObjectMethod(inv, g_autoRodInventoryGetItem121, selSlot);
+                                    if (env->ExceptionCheck()) { env->ExceptionClear(); stackObj = nullptr; }
+                                }
+                                env->DeleteLocalRef(inv);
+                            }
+                        }
+                    }
+
                     if (stackObj) {
                         jclass stCls = env->GetObjectClass(stackObj);
                         static jmethodID s_getItem = nullptr;
                         if (stCls) {
                             if (!s_getItem) {
-                                const char* names[] = { "getItem", "method_7909", nullptr };
+                                const char* names[] = { "getItem", "method_7909", "m_41720_", nullptr };
                                 const char* sigs[] = {
                                     "()Lnet/minecraft/world/item/Item;",
                                     "()Lnet/minecraft/item/Item;",
@@ -14205,11 +14468,45 @@ static void UpdateJniState() {
                                     }
                                 }
 
-                                if (itemObj && s_blockItemCls) {
-                                    holdingBlock = (env->IsInstanceOf(itemObj, s_blockItemCls) == JNI_TRUE);
+                                if (itemObj) {
+                                    if (s_blockItemCls && env->IsInstanceOf(itemObj, s_blockItemCls) == JNI_TRUE) {
+                                        holdingBlock = true;
+                                    } else {
+                                        // Fallback: check item descriptionId / translationKey
+                                        jclass itCls = env->GetObjectClass(itemObj);
+                                        if (itCls) {
+                                            const char* descNames[] = { "getDescriptionId", "getTranslationKey", "method_7876", "m_5671_", nullptr };
+                                            for (int di = 0; descNames[di] && !holdingBlock; di++) {
+                                                jmethodID dMid = env->GetMethodID(itCls, descNames[di], "(Lnet/minecraft/class_1799;)Ljava/lang/String;");
+                                                if (env->ExceptionCheck()) { env->ExceptionClear(); dMid = nullptr; }
+                                                if (!dMid) {
+                                                    dMid = env->GetMethodID(itCls, descNames[di], "(Lnet/minecraft/world/item/ItemStack;)Ljava/lang/String;");
+                                                    if (env->ExceptionCheck()) { env->ExceptionClear(); dMid = nullptr; }
+                                                }
+                                                if (!dMid) {
+                                                    dMid = env->GetMethodID(itCls, descNames[di], "()Ljava/lang/String;");
+                                                    if (env->ExceptionCheck()) { env->ExceptionClear(); dMid = nullptr; }
+                                                }
+                                                if (dMid) {
+                                                    jstring sObj = (jstring)env->CallObjectMethod(itemObj, dMid, stackObj);
+                                                    if (env->ExceptionCheck()) { env->ExceptionClear(); sObj = nullptr; }
+                                                    if (sObj) {
+                                                        const char* c = env->GetStringUTFChars(sObj, nullptr);
+                                                        std::string s = c ? c : "";
+                                                        if (c) env->ReleaseStringUTFChars(sObj, c);
+                                                        env->DeleteLocalRef(sObj);
+                                                        for (char& ch : s) ch = (char)std::tolower((unsigned char)ch);
+                                                        if (s.find("block.") == 0 || s.find("block.minecraft.") != std::string::npos) {
+                                                            holdingBlock = true;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            env->DeleteLocalRef(itCls);
+                                        }
+                                    }
+                                    env->DeleteLocalRef(itemObj);
                                 }
-
-                                if (itemObj) env->DeleteLocalRef(itemObj);
                             }
                             env->DeleteLocalRef(stCls);
                         }
@@ -14360,6 +14657,7 @@ static void UpdateJniState() {
             g_jniLookingAtEntityLatched = lookingAtEntityLatched;
             g_jniBreakingBlock = breakingBlock;
             g_jniHoldingBlock = holdingBlock;
+            g_jniHealth = healthVal;
             g_jniAttackCooldown = attackCooldown;
             g_jniAttackCooldownPerTick = attackCooldownPerTick;
             g_jniChestStealerStateJson = chestStealerStateJson;
@@ -14379,6 +14677,7 @@ static void UpdateJniState() {
         g_jniLookingAtEntityLatched = false;
         g_jniBreakingBlock = false;
         g_jniHoldingBlock = false;
+        g_jniHealth = 20.0f;
         g_jniAttackCooldown = 1.0f;
         g_jniAttackCooldownPerTick = 0.08f;
         g_jniStateMs = nowMs;
@@ -16414,6 +16713,8 @@ static DWORD WINAPI FastPollThreadProc(LPVOID) {
                     if (cfg.autoToolEnabled) {
                         UpdateAutoToolModern(env, cfg);
                     }
+                    UpdateReach(env, cfg);
+                    UpdateVelocity(env, cfg);
                 }
                 // Camera validity is part of the transition readiness handshake;
                 // continue sampling it while modules remain gated so recovery is
@@ -16604,27 +16905,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                             }
                         }
 
-                        static bool s_reachWasEnabled = false;
-                    if (cfg.reachEnabled || s_reachWasEnabled) {
-                        if (!cfg.reachEnabled ||
-                            lc::IsTelemetryIntervalDue(nowMs, lastReachMs, lc::kReachIntervalMs)) {
-                            UpdateReach(env, cfg);
-                            lastReachMs = nowMs;
-                            s_reachWasEnabled = cfg.reachEnabled;
-                        }
-                    }
-
-                    static bool s_velocityWasEnabled = false;
-                    if (cfg.velocityEnabled || s_velocityWasEnabled) {
-                        if (!cfg.velocityEnabled ||
-                            lc::IsTelemetryIntervalDue(nowMs, lastVelocityMs, lc::kVelocityIntervalMs)) {
-                            UpdateVelocity(env, cfg);
-                            lastVelocityMs = nowMs;
-                            s_velocityWasEnabled = cfg.velocityEnabled;
-                        }
-                    }
-
-                    static bool s_autoTotemWasEnabled = false;
+                        static bool s_autoTotemWasEnabled = false;
                     if (cfg.autoTotemEnabled || s_autoTotemWasEnabled) {
                         if (!cfg.autoTotemEnabled ||
                             lc::IsTelemetryIntervalDue(nowMs, lastAutoTotemMs, lc::kAutoTotemIntervalMs)) {
@@ -18867,6 +19148,7 @@ glfw_done:;
                 bool holdBlock;
                 float attackCooldown;
                 float attackCooldownPerTick;
+                float healthVal = 20.0f;
                 std::string killAuraUnavailableReason;
                 bool killAuraHasTarget = false;
                 bool killAuraBlocking = false;
@@ -18883,10 +19165,13 @@ glfw_done:;
                     lookEntityLatched = g_jniLookingAtEntityLatched;
                     breakBlock = g_jniBreakingBlock;
                     holdBlock = g_jniHoldingBlock;
+                    healthVal = g_jniHealth;
                     attackCooldown = g_jniAttackCooldown;
                     attackCooldownPerTick = g_jniAttackCooldownPerTick;
                     if (sendFullState) {
                         killAuraUnavailableReason = g_jniKillAuraUnavailableReason;
+                    }
+                    if (sendFullState || jniGui) {
                         chestStealerStateJson = g_jniChestStealerStateJson;
                         refillStateJson = g_jniRefillStateJson;
                     }
@@ -18951,7 +19236,14 @@ glfw_done:;
                     state += snEsc;
                     state += "\",\"actionBar\":\"";
                     state += actionEsc;
-                    state += "\",\"health\":20,\"posX\":0,\"posY\":0,\"posZ\":0";
+                    state += "\",\"health\":";
+                    char healthBuf[32];
+                    snprintf(healthBuf, sizeof(healthBuf), "%.1f", healthVal);
+                    state += healthBuf;
+                    char posBuf[96];
+                    snprintf(posBuf, sizeof(posBuf), ",\"posX\":%.3f,\"posY\":%.3f,\"posZ\":%.3f,\"pitch\":%.2f",
+                             camState.camX, camState.camY, camState.camZ, camState.pitch);
+                    state += posBuf;
                     char fovBuf[32];
                     snprintf(fovBuf, sizeof(fovBuf), "%.2f", camState.fov);
                     state += ",\"fov\":";
@@ -18992,9 +19284,11 @@ glfw_done:;
                 state += killAuraHasTarget ? "true" : "false";
                 state += ",\"killAuraBlocking\":";
                 state += killAuraBlocking ? "true" : "false";
-                if (sendFullState) {
+                if (sendFullState || (!chestStealerStateJson.empty() && chestStealerStateJson != "null")) {
                     state += ",\"chestStealerState\":";
                     state += chestStealerStateJson.empty() ? "null" : chestStealerStateJson;
+                }
+                if (sendFullState || (!refillStateJson.empty() && refillStateJson != "null")) {
                     state += ",\"refillState\":";
                     state += refillStateJson.empty() ? "null" : refillStateJson;
                 }

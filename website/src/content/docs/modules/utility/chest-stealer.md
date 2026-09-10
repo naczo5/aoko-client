@@ -14,12 +14,17 @@ description: Quickly transfers items out of an open chest using the external cur
 | Setting | Description | Range / Default |
 | ------- | ----------- | --------------- |
 | Delay | Delay between slot interactions (milliseconds). | `50`–`500` / `120` |
-| Menu check | Prevents stealing from menus that use the chest interface (such as compass selectors or shop villagers). Disable this if it fails to steal from chests on custom servers. | Toggle / `On` |
+| Title check | Prevents stealing if the container title matches known menu keywords (e.g. shop, selector, lobby). | Toggle / `On` |
+| Custom item check | Prevents stealing if over 50% of container items have custom display names (common in server GUI menus). | Toggle / `On` |
+| Physical chest check | Requires an actual physical chest block near the player (within 6.5 blocks), preventing interaction with virtual or remote server GUIs. | Toggle / `On` |
 
 ## Usage notes
 
 - The bridge reports the open container's slot layout and screen geometry; the loader drives the physical cursor over those slots.
-- **Menu check** verifies that the opened container corresponds to an actual physical chest near the player, preventing accidental interactions with server HUDs or NPC shops.
+- The three safety checks can be toggled independently:
+  - **Title check** filters out GUIs whose title contains common shop or lobby keywords.
+  - **Custom item check** detects GUIs using renamed items as clickable icons or buttons.
+  - **Physical chest check** verifies that an actual chest block exists within 6.5 blocks. Disable this if playing on servers that open virtual storage via commands.
 - A higher **Delay** is slower but looks more human and is more reliable on laggy servers; a lower delay is faster but more obvious.
 - Because it uses the real cursor, keep the Minecraft window focused and the chest GUI open while it runs.
 

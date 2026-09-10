@@ -26,7 +26,32 @@ public class Profile
     public bool RightClickOnlyBlock { get; set; } = false;
     public bool BreakBlocksEnabled { get; set; } = false;
     
-    public bool JitterEnabled { get; set; } = true;
+    private ClickRandomizationMode _randomizationMode = ClickRandomizationMode.Medium;
+    private bool _hasExplicitRandomizationMode;
+
+    public ClickRandomizationMode RandomizationMode
+    {
+        get => _randomizationMode;
+        set
+        {
+            _randomizationMode = value;
+            _hasExplicitRandomizationMode = true;
+        }
+    }
+
+    private bool _jitterEnabled = true;
+    public bool JitterEnabled
+    {
+        get => _jitterEnabled;
+        set
+        {
+            _jitterEnabled = value;
+            if (!_hasExplicitRandomizationMode)
+            {
+                _randomizationMode = value ? ClickRandomizationMode.Medium : ClickRandomizationMode.Basic;
+            }
+        }
+    }
     public bool ClickInChests { get; set; } = false;
     public bool AimAssistEnabled { get; set; } = false;
     public float AimAssistFov { get; set; } = 30.0f;
@@ -81,7 +106,44 @@ public class Profile
     public int ChestEspRange { get; set; } = 4;
     public bool ChestStealerEnabled { get; set; } = false;
     public int ChestStealerDelayMs { get; set; } = 120;
-    public bool ChestStealerMenuCheck { get; set; } = true;
+    private bool _hasExplicitSubChecks = false;
+    private bool _chestStealerMenuCheck = true;
+    private bool _chestStealerTitleCheck = true;
+    private bool _chestStealerCustomItemsCheck = true;
+    private bool _chestStealerPhysicalCheck = true;
+
+    public bool ChestStealerMenuCheck
+    {
+        get => _chestStealerMenuCheck;
+        set
+        {
+            _chestStealerMenuCheck = value;
+            if (!_hasExplicitSubChecks)
+            {
+                _chestStealerTitleCheck = value;
+                _chestStealerCustomItemsCheck = value;
+                _chestStealerPhysicalCheck = value;
+            }
+        }
+    }
+
+    public bool ChestStealerTitleCheck
+    {
+        get => _chestStealerTitleCheck;
+        set { _chestStealerTitleCheck = value; _hasExplicitSubChecks = true; }
+    }
+
+    public bool ChestStealerCustomItemsCheck
+    {
+        get => _chestStealerCustomItemsCheck;
+        set { _chestStealerCustomItemsCheck = value; _hasExplicitSubChecks = true; }
+    }
+
+    public bool ChestStealerPhysicalCheck
+    {
+        get => _chestStealerPhysicalCheck;
+        set { _chestStealerPhysicalCheck = value; _hasExplicitSubChecks = true; }
+    }
 
     public bool RefillEnabled { get; set; } = false;
     public int RefillDelayMs { get; set; } = 120;
@@ -102,6 +164,10 @@ public class Profile
     public float ReachMin { get; set; } = 3.0f;
     public float ReachMax { get; set; } = 3.0f;
     public int ReachChance { get; set; } = 100;
+    public int ReachChanceMode { get; set; } = 0;
+    public bool ReachOnlyWhileSprinting { get; set; } = false;
+    public bool ReachDisableInWater { get; set; } = false;
+    public bool ReachVerticalCheck { get; set; } = false;
 
     public bool VelocityEnabled { get; set; } = false;
     public int VelocityHorizontal { get; set; } = 100;
@@ -487,6 +553,7 @@ public static class ProfileManager
             RightClickOnlyBlock = clicker.RightClickOnlyBlock,
             BreakBlocksEnabled = clicker.BreakBlocksEnabled,
             
+            RandomizationMode = clicker.RandomizationMode,
             JitterEnabled = clicker.JitterEnabled,
             ClickInChests = clicker.ClickInChests,
             AimAssistEnabled = clicker.AimAssistEnabled,
@@ -541,6 +608,9 @@ public static class ProfileManager
             ChestStealerEnabled = clicker.ChestStealerEnabled,
             ChestStealerDelayMs = clicker.ChestStealerDelayMs,
             ChestStealerMenuCheck = clicker.ChestStealerMenuCheck,
+            ChestStealerTitleCheck = clicker.ChestStealerTitleCheck,
+            ChestStealerCustomItemsCheck = clicker.ChestStealerCustomItemsCheck,
+            ChestStealerPhysicalCheck = clicker.ChestStealerPhysicalCheck,
             RefillEnabled = clicker.RefillEnabled,
             RefillDelayMs = clicker.RefillDelayMs,
 
@@ -560,6 +630,10 @@ public static class ProfileManager
             ReachMin = clicker.ReachMin,
             ReachMax = clicker.ReachMax,
             ReachChance = clicker.ReachChance,
+            ReachChanceMode = clicker.ReachChanceMode,
+            ReachOnlyWhileSprinting = clicker.ReachOnlyWhileSprinting,
+            ReachDisableInWater = clicker.ReachDisableInWater,
+            ReachVerticalCheck = clicker.ReachVerticalCheck,
 
             VelocityEnabled = clicker.VelocityEnabled,
             VelocityHorizontal = clicker.VelocityHorizontal,
@@ -633,7 +707,7 @@ public static class ProfileManager
         clicker.RightClickOnlyBlock = profile.RightClickOnlyBlock;
         clicker.BreakBlocksEnabled = profile.BreakBlocksEnabled;
         
-        clicker.JitterEnabled = profile.JitterEnabled;
+        clicker.RandomizationMode = profile.RandomizationMode;
         clicker.ClickInChests = profile.ClickInChests;
         clicker.AimAssistEnabled = profile.AimAssistEnabled;
         clicker.AimAssistFov = profile.AimAssistFov;
@@ -686,6 +760,9 @@ public static class ProfileManager
         clicker.ChestEspRange = profile.ChestEspRange;
         clicker.ChestStealerEnabled = profile.ChestStealerEnabled;
         clicker.ChestStealerDelayMs = profile.ChestStealerDelayMs;
+        clicker.ChestStealerTitleCheck = profile.ChestStealerTitleCheck;
+        clicker.ChestStealerCustomItemsCheck = profile.ChestStealerCustomItemsCheck;
+        clicker.ChestStealerPhysicalCheck = profile.ChestStealerPhysicalCheck;
         clicker.ChestStealerMenuCheck = profile.ChestStealerMenuCheck;
         clicker.RefillEnabled = profile.RefillEnabled;
         clicker.RefillDelayMs = profile.RefillDelayMs;
@@ -706,6 +783,10 @@ public static class ProfileManager
         clicker.ReachMin = profile.ReachMin;
         clicker.ReachMax = profile.ReachMax;
         clicker.ReachChance = profile.ReachChance;
+        clicker.ReachChanceMode = profile.ReachChanceMode;
+        clicker.ReachOnlyWhileSprinting = profile.ReachOnlyWhileSprinting;
+        clicker.ReachDisableInWater = profile.ReachDisableInWater;
+        clicker.ReachVerticalCheck = profile.ReachVerticalCheck;
 
         clicker.VelocityEnabled = profile.VelocityEnabled;
         clicker.VelocityHorizontal = profile.VelocityHorizontal;

@@ -174,6 +174,9 @@ public class GameStateAndProfileTests
         Assert.False(profile.ChestStealerEnabled);
         Assert.Equal(120, profile.ChestStealerDelayMs);
         Assert.True(profile.ChestStealerMenuCheck);
+        Assert.True(profile.ChestStealerTitleCheck);
+        Assert.True(profile.ChestStealerCustomItemsCheck);
+        Assert.True(profile.ChestStealerPhysicalCheck);
         Assert.Equal(100, profile.ReachChance);
         Assert.True(profile.ModuleKeys.ContainsKey("autoclicker"));
         Assert.True(profile.ModuleKeys.ContainsKey("cheststealer"));
@@ -195,6 +198,54 @@ public class GameStateAndProfileTests
         Assert.False(node!["chestStealerMenuCheck"]!.GetValue<bool>());
         Assert.NotNull(roundTripped);
         Assert.False(roundTripped!.ChestStealerMenuCheck);
+    }
+
+    [Fact]
+    public void Profile_ChestStealerSubChecks_DefaultsTrueAndRoundTrips()
+    {
+        var defaults = new Profile();
+        Assert.True(defaults.ChestStealerTitleCheck);
+        Assert.True(defaults.ChestStealerCustomItemsCheck);
+        Assert.True(defaults.ChestStealerPhysicalCheck);
+
+        var profile = new Profile
+        {
+            ChestStealerTitleCheck = false,
+            ChestStealerCustomItemsCheck = true,
+            ChestStealerPhysicalCheck = false
+        };
+        var options = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+
+        string json = JsonSerializer.Serialize(profile, options);
+        JsonNode? node = JsonNode.Parse(json);
+        Profile? roundTripped = JsonSerializer.Deserialize<Profile>(json, options);
+
+        Assert.False(node!["chestStealerTitleCheck"]!.GetValue<bool>());
+        Assert.True(node!["chestStealerCustomItemsCheck"]!.GetValue<bool>());
+        Assert.False(node!["chestStealerPhysicalCheck"]!.GetValue<bool>());
+        Assert.NotNull(roundTripped);
+        Assert.False(roundTripped!.ChestStealerTitleCheck);
+        Assert.True(roundTripped!.ChestStealerCustomItemsCheck);
+        Assert.False(roundTripped!.ChestStealerPhysicalCheck);
+    }
+
+    [Fact]
+    public void Profile_LegacyMenuCheck_SetsSubChecksWhenOmitted()
+    {
+        string legacyJson = """
+        {
+            "name": "Legacy",
+            "chestStealerMenuCheck": false
+        }
+        """;
+        var options = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+        Profile? profile = JsonSerializer.Deserialize<Profile>(legacyJson, options);
+
+        Assert.NotNull(profile);
+        Assert.False(profile!.ChestStealerMenuCheck);
+        Assert.False(profile.ChestStealerTitleCheck);
+        Assert.False(profile.ChestStealerCustomItemsCheck);
+        Assert.False(profile.ChestStealerPhysicalCheck);
     }
 
     [Fact]

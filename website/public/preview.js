@@ -6,9 +6,8 @@
   'use strict';
 
   var DATA = window.AOKO_PREVIEW_DATA;
-  var launchBtn = document.getElementById('preview-open');
   var desktop = document.getElementById('aoko-desktop');
-  if (!DATA || !launchBtn || !desktop) return;
+  if (!DATA || !desktop) return;
 
   var reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   var mobileQuery = window.matchMedia('(max-width: 760px)');
@@ -314,7 +313,7 @@
       type: 'range', min: c.min, max: c.max, step: c.step,
       value: c.value, 'aria-label': c.label,
     });
-    function fmt(v) { return Number(v).toFixed(c.decimals || 0); }
+    function fmt(v) { return c.labels ? (c.labels[Number(v)] || v) : Number(v).toFixed(c.decimals || 0); }
     function paint() {
       var pct = ((input.value - c.min) / (c.max - c.min)) * 100;
       input.style.setProperty('--fill', pct + '%');
@@ -619,5 +618,16 @@
     else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
   }
 
-  launchBtn.addEventListener('click', open);
+  window.AokoPreview = { open: open, close: close };
+
+  var launchBtns = document.querySelectorAll('.js-open-web-preview, #preview-open');
+  launchBtns.forEach(function (btn) {
+    btn.addEventListener('click', function (e) {
+      e.preventDefault();
+      if (typeof window.closeVideoModal === 'function') {
+        window.closeVideoModal();
+      }
+      open();
+    });
+  });
 })();

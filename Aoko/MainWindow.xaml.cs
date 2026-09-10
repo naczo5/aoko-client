@@ -1192,6 +1192,14 @@ public partial class MainWindow : Window
         SetBrushColor("AccentBrush", palette.Accent);
         SetBrushColor("TextBrush", palette.Text);
         SetBrushColor("DimTextBrush", palette.DimText);
+
+        SetBrushColor("BgBrush", palette.Background, this.Resources);
+        SetBrushColor("PanelBrush", palette.Panel, this.Resources);
+        SetBrushColor("SliderBgBrush", palette.SliderBackground, this.Resources);
+        SetBrushColor("SliderFgBrush", palette.SliderForeground, this.Resources);
+        SetBrushColor("AccentBrush", palette.Accent, this.Resources);
+        SetBrushColor("TextBrush", palette.Text, this.Resources);
+        SetBrushColor("DimTextBrush", palette.DimText, this.Resources);
         SetBrushColor("ControlCenterTabSelectedBrush", palette.TabSelected, this.Resources);
         SetBrushColor("ControlCenterTabHoverBrush", palette.TabHover, this.Resources);
 

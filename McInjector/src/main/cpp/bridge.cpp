@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cctype>
 #include <unordered_map>
+#include <unordered_set>
 #include <deque>
 #include "gl_loader.h"
 #include "MinHook.h"
@@ -46,6 +47,8 @@
 #include "jni_core/local_frame.h"
 #include "jni_core/matrix_reader.h"
 #include "jni_core/helper_bridge.h"
+#include "reach_core.h"
+#include "reach_bytecode_injector.h"
 
 // Forward declare ImGui Win32 WndProc handler (declaration is in #if 0 block in header)
 extern LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -242,6 +245,9 @@ struct Config {
     bool chestStealer = false;
     int chestStealerDelayMs = 120;
     bool chestStealerMenuCheck = true;
+    bool chestStealerTitleCheck = true;
+    bool chestStealerCustomItemsCheck = true;
+    bool chestStealerPhysicalCheck = true;
     bool refill = false;
     int refillDelayMs = 120;
     bool blockEsp = false;
@@ -260,6 +266,10 @@ struct Config {
     float reachMin = 3.0f;
     float reachMax = 3.0f;
     int reachChance = 100;
+    int reachChanceMode = 0; // 0 = Normal, 1 = Advanced
+    bool reachOnlyWhileSprinting = false;
+    bool reachDisableInWater = false;
+    bool reachVerticalCheck = false;
     bool velocityEnabled = false;
     int velocityHorizontal = 100;
     int velocityVertical = 100;
@@ -708,10 +718,13 @@ static jmethodID g_scoreboardGetPlayersTeamMethodLegacy = nullptr;
 static jmethodID g_scoreboardRemovePlayerFromTeamsMethodLegacy = nullptr;
 static jmethodID g_scorePlayerTeamGetRegisteredNameMethodLegacy = nullptr;
 static jmethodID g_scorePlayerTeamSetNameTagVisibilityMethodLegacy = nullptr;
+static jmethodID g_scorePlayerTeamGetNameTagVisibilityMethodLegacy = nullptr;
 static jobject g_teamEnumVisibleNeverLegacy = nullptr;
+static jobject g_teamEnumVisibleAlwaysLegacy = nullptr;
 static bool g_legacyNametagSuppressionActive = false;
 static bool g_loggedLegacyNametagSuppressionUnavailable = false;
-static std::unordered_map<std::string, std::string> g_hiddenNametagOriginalTeamByPlayerLegacy;
+static std::unordered_map<std::string, jobject> g_modifiedTeamVisibilityLegacy;
+static std::unordered_set<std::string> g_lcHideTagsMembersLegacy;
 static jobject g_lastLegacyNametagSuppressionWorld = nullptr;
 static jmethodID g_objectHashCodeMethod = nullptr;
 static jfieldID g_rotationYawField = nullptr;
@@ -907,15 +920,7 @@ static jobject   g_blindnessPotion = nullptr;      // global ref to static Potio
 static bool g_blindDetectResolved = false;
 static bool g_loggedBlindDetectFail = false;
 static bool g_blindRenderHookArmed = false;
-static bool g_reachClickPrevDown = false;
-static bool g_reachClickPrevSynthetic = false;
 static bool g_reachRawInputPrevDown = false;
-static bool g_reachAllowCurrentClick = false;
-static double g_reachCurrentClickRange = 3.0;
-static DWORD g_reachClickWindowUntilMs = 0;
-static DWORD g_reachLastRollMs = 0;
-static DWORD g_lastReachDebugLogMs = 0;
-static jobject g_reachCurrentTarget = nullptr;
 static bool g_speedBridgeManagingSneak = false;
 static bool g_speedBridgeHaveLastPos = false;
 static double g_speedBridgeLastPosX = 0.0;
@@ -1030,6 +1035,7 @@ struct ClosestPlayerDrawSnapshot18 {
 };
 
 struct OverlayPlayer18 {
+    std::string rawName;
     std::string displayName;
     std::string heldText;
     double iX = 0, iY = 0, iZ = 0;
@@ -3489,7 +3495,13 @@ static void ResetLegacyNametagSuppressionState(JNIEnv* env, const char* reason) 
         env->DeleteGlobalRef(g_lastLegacyNametagSuppressionWorld);
         g_lastLegacyNametagSuppressionWorld = nullptr;
     }
-    g_hiddenNametagOriginalTeamByPlayerLegacy.clear();
+    if (env) {
+        for (auto& entry : g_modifiedTeamVisibilityLegacy) {
+            if (entry.second) env->DeleteGlobalRef(entry.second);
+        }
+    }
+    g_modifiedTeamVisibilityLegacy.clear();
+    g_lcHideTagsMembersLegacy.clear();
     g_legacyNametagSuppressionActive = false;
     g_loggedLegacyNametagSuppressionUnavailable = false;
     if (reason && *reason) {
@@ -3516,10 +3528,8 @@ static void TrackLegacySuppressionWorldContext(JNIEnv* env, jobject worldObj) {
         }
         g_lastLegacyNametagSuppressionWorld = env->NewGlobalRef(worldObj);
         ResetFightStatusState18();
-        if (g_legacyNametagSuppressionActive || !g_hiddenNametagOriginalTeamByPlayerLegacy.empty()) {
-            g_hiddenNametagOriginalTeamByPlayerLegacy.clear();
-            g_legacyNametagSuppressionActive = false;
-            g_loggedLegacyNametagSuppressionUnavailable = false;
+        if (g_legacyNametagSuppressionActive || !g_modifiedTeamVisibilityLegacy.empty() || !g_lcHideTagsMembersLegacy.empty()) {
+            ResetLegacyNametagSuppressionState(env, "world-changed");
             Log("NametagHideVanilla: legacy world context changed; dropped suppression cache to avoid cross-world scoreboard mutations.");
         }
     }
@@ -3528,12 +3538,18 @@ static void TrackLegacySuppressionWorldContext(JNIEnv* env, jobject worldObj) {
 static bool EnsureLegacyNametagTeamMappings(JNIEnv* env, jobject worldObj) {
     if (!env || !worldObj) return false;
 
+    jobject gcl = EnsureGameClassLoader(env);
+
     if (!g_scoreboardClassLegacy) {
         jclass c = nullptr;
-        jobject gcl = EnsureGameClassLoader(env);
         if (gcl) c = LoadClassWithLoader(env, gcl, "net.minecraft.scoreboard.Scoreboard");
+        if (!c && gcl) c = LoadClassWithLoader(env, gcl, "auo");
         if (!c) {
             c = env->FindClass("net/minecraft/scoreboard/Scoreboard");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); c = nullptr; }
+        }
+        if (!c) {
+            c = env->FindClass("auo");
             if (env->ExceptionCheck()) { env->ExceptionClear(); c = nullptr; }
         }
         if (c) {
@@ -3543,10 +3559,14 @@ static bool EnsureLegacyNametagTeamMappings(JNIEnv* env, jobject worldObj) {
     }
     if (!g_scorePlayerTeamClassLegacy) {
         jclass c = nullptr;
-        jobject gcl = EnsureGameClassLoader(env);
         if (gcl) c = LoadClassWithLoader(env, gcl, "net.minecraft.scoreboard.ScorePlayerTeam");
+        if (!c && gcl) c = LoadClassWithLoader(env, gcl, "aul");
         if (!c) {
             c = env->FindClass("net/minecraft/scoreboard/ScorePlayerTeam");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); c = nullptr; }
+        }
+        if (!c) {
+            c = env->FindClass("aul");
             if (env->ExceptionCheck()) { env->ExceptionClear(); c = nullptr; }
         }
         if (c) {
@@ -3556,10 +3576,14 @@ static bool EnsureLegacyNametagTeamMappings(JNIEnv* env, jobject worldObj) {
     }
     if (!g_teamEnumVisibleClassLegacy) {
         jclass c = nullptr;
-        jobject gcl = EnsureGameClassLoader(env);
         if (gcl) c = LoadClassWithLoader(env, gcl, "net.minecraft.scoreboard.Team$EnumVisible");
+        if (!c && gcl) c = LoadClassWithLoader(env, gcl, "auq$a");
         if (!c) {
             c = env->FindClass("net/minecraft/scoreboard/Team$EnumVisible");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); c = nullptr; }
+        }
+        if (!c) {
+            c = env->FindClass("auq$a");
             if (env->ExceptionCheck()) { env->ExceptionClear(); c = nullptr; }
         }
         if (c) {
@@ -3571,8 +3595,8 @@ static bool EnsureLegacyNametagTeamMappings(JNIEnv* env, jobject worldObj) {
     if (!g_worldGetScoreboardMethod) {
         jclass worldCls = env->GetObjectClass(worldObj);
         if (worldCls && !env->ExceptionCheck()) {
-            const char* names[] = { "getScoreboard", "func_96441_U", nullptr };
-            const char* sigs[] = { "()Lnet/minecraft/scoreboard/Scoreboard;", nullptr };
+            const char* names[] = { "getScoreboard", "func_96441_U", "getWorldScoreboard", "func_175653_ac", "Z", "cp", nullptr };
+            const char* sigs[] = { "()Lnet/minecraft/scoreboard/Scoreboard;", "()Lauo;", nullptr };
             for (int ni = 0; names[ni] && !g_worldGetScoreboardMethod; ni++) {
                 for (int si = 0; sigs[si] && !g_worldGetScoreboardMethod; si++) {
                     g_worldGetScoreboardMethod = env->GetMethodID(worldCls, names[ni], sigs[si]);
@@ -3587,42 +3611,70 @@ static bool EnsureLegacyNametagTeamMappings(JNIEnv* env, jobject worldObj) {
 
     if (g_scoreboardClassLegacy) {
         if (!g_scoreboardGetTeamMethodLegacy) {
-            const char* names[] = { "getTeam", "func_96508_e", nullptr };
+            const char* names[] = { "getTeam", "func_96508_e", "d", nullptr };
+            const char* sigs[] = {
+                "(Ljava/lang/String;)Lnet/minecraft/scoreboard/ScorePlayerTeam;",
+                "(Ljava/lang/String;)Laul;",
+                nullptr
+            };
             for (int i = 0; names[i] && !g_scoreboardGetTeamMethodLegacy; i++) {
-                g_scoreboardGetTeamMethodLegacy = env->GetMethodID(g_scoreboardClassLegacy, names[i], "(Ljava/lang/String;)Lnet/minecraft/scoreboard/ScorePlayerTeam;");
-                if (env->ExceptionCheck()) { env->ExceptionClear(); g_scoreboardGetTeamMethodLegacy = nullptr; }
+                for (int s = 0; sigs[s] && !g_scoreboardGetTeamMethodLegacy; s++) {
+                    g_scoreboardGetTeamMethodLegacy = env->GetMethodID(g_scoreboardClassLegacy, names[i], sigs[s]);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_scoreboardGetTeamMethodLegacy = nullptr; }
+                }
             }
         }
         if (!g_scoreboardCreateTeamMethodLegacy) {
-            const char* names[] = { "createTeam", "func_96527_f", nullptr };
+            const char* names[] = { "createTeam", "func_96527_f", "e", nullptr };
+            const char* sigs[] = {
+                "(Ljava/lang/String;)Lnet/minecraft/scoreboard/ScorePlayerTeam;",
+                "(Ljava/lang/String;)Laul;",
+                nullptr
+            };
             for (int i = 0; names[i] && !g_scoreboardCreateTeamMethodLegacy; i++) {
-                g_scoreboardCreateTeamMethodLegacy = env->GetMethodID(g_scoreboardClassLegacy, names[i], "(Ljava/lang/String;)Lnet/minecraft/scoreboard/ScorePlayerTeam;");
-                if (env->ExceptionCheck()) { env->ExceptionClear(); g_scoreboardCreateTeamMethodLegacy = nullptr; }
+                for (int s = 0; sigs[s] && !g_scoreboardCreateTeamMethodLegacy; s++) {
+                    g_scoreboardCreateTeamMethodLegacy = env->GetMethodID(g_scoreboardClassLegacy, names[i], sigs[s]);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_scoreboardCreateTeamMethodLegacy = nullptr; }
+                }
             }
         }
         if (!g_scoreboardRemoveTeamMethodLegacy) {
-            const char* names[] = { "removeTeam", "func_96511_d", nullptr };
+            const char* names[] = { "removeTeam", "func_96511_d", "d", nullptr };
+            const char* sigs[] = {
+                "(Lnet/minecraft/scoreboard/ScorePlayerTeam;)V",
+                "(Laul;)V",
+                nullptr
+            };
             for (int i = 0; names[i] && !g_scoreboardRemoveTeamMethodLegacy; i++) {
-                g_scoreboardRemoveTeamMethodLegacy = env->GetMethodID(g_scoreboardClassLegacy, names[i], "(Lnet/minecraft/scoreboard/ScorePlayerTeam;)V");
-                if (env->ExceptionCheck()) { env->ExceptionClear(); g_scoreboardRemoveTeamMethodLegacy = nullptr; }
+                for (int s = 0; sigs[s] && !g_scoreboardRemoveTeamMethodLegacy; s++) {
+                    g_scoreboardRemoveTeamMethodLegacy = env->GetMethodID(g_scoreboardClassLegacy, names[i], sigs[s]);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_scoreboardRemoveTeamMethodLegacy = nullptr; }
+                }
             }
         }
         if (!g_scoreboardAddPlayerToTeamMethodLegacy) {
-            const char* names[] = { "addPlayerToTeam", "func_151392_a", nullptr };
+            const char* names[] = { "addPlayerToTeam", "func_151392_a", "a", nullptr };
             for (int i = 0; names[i] && !g_scoreboardAddPlayerToTeamMethodLegacy; i++) {
                 g_scoreboardAddPlayerToTeamMethodLegacy = env->GetMethodID(g_scoreboardClassLegacy, names[i], "(Ljava/lang/String;Ljava/lang/String;)Z");
                 if (env->ExceptionCheck()) { env->ExceptionClear(); g_scoreboardAddPlayerToTeamMethodLegacy = nullptr; }
             }
         }
         if (!g_scoreboardGetPlayersTeamMethodLegacy) {
-            const char* names[] = { "getPlayersTeam", "func_96509_i", nullptr };
+            const char* names[] = { "getPlayersTeam", "func_96509_i", "h", nullptr };
+            const char* sigs[] = {
+                "(Ljava/lang/String;)Lnet/minecraft/scoreboard/ScorePlayerTeam;",
+                "(Ljava/lang/String;)Laul;",
+                nullptr
+            };
             for (int i = 0; names[i] && !g_scoreboardGetPlayersTeamMethodLegacy; i++) {
-                g_scoreboardGetPlayersTeamMethodLegacy = env->GetMethodID(g_scoreboardClassLegacy, names[i], "(Ljava/lang/String;)Lnet/minecraft/scoreboard/ScorePlayerTeam;");
-                if (env->ExceptionCheck()) { env->ExceptionClear(); g_scoreboardGetPlayersTeamMethodLegacy = nullptr; }
+                for (int s = 0; sigs[s] && !g_scoreboardGetPlayersTeamMethodLegacy; s++) {
+                    g_scoreboardGetPlayersTeamMethodLegacy = env->GetMethodID(g_scoreboardClassLegacy, names[i], sigs[s]);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_scoreboardGetPlayersTeamMethodLegacy = nullptr; }
+                }
             }
         }
         if (!g_scoreboardRemovePlayerFromTeamsMethodLegacy) {
-            const char* names[] = { "removePlayerFromTeams", "func_96524_g", nullptr };
+            const char* names[] = { "removePlayerFromTeams", "func_96524_g", "f", nullptr };
             for (int i = 0; names[i] && !g_scoreboardRemovePlayerFromTeamsMethodLegacy; i++) {
                 g_scoreboardRemovePlayerFromTeamsMethodLegacy = env->GetMethodID(g_scoreboardClassLegacy, names[i], "(Ljava/lang/String;)Z");
                 if (env->ExceptionCheck()) { env->ExceptionClear(); g_scoreboardRemovePlayerFromTeamsMethodLegacy = nullptr; }
@@ -3632,54 +3684,115 @@ static bool EnsureLegacyNametagTeamMappings(JNIEnv* env, jobject worldObj) {
 
     if (g_scorePlayerTeamClassLegacy) {
         if (!g_scorePlayerTeamGetRegisteredNameMethodLegacy) {
-            const char* names[] = { "getRegisteredName", "func_96661_b", nullptr };
+            const char* names[] = { "getRegisteredName", "func_96661_b", "b", "d", nullptr };
             for (int i = 0; names[i] && !g_scorePlayerTeamGetRegisteredNameMethodLegacy; i++) {
                 g_scorePlayerTeamGetRegisteredNameMethodLegacy = env->GetMethodID(g_scorePlayerTeamClassLegacy, names[i], "()Ljava/lang/String;");
                 if (env->ExceptionCheck()) { env->ExceptionClear(); g_scorePlayerTeamGetRegisteredNameMethodLegacy = nullptr; }
             }
         }
         if (!g_scorePlayerTeamSetNameTagVisibilityMethodLegacy) {
-            const char* names[] = { "setNameTagVisibility", "func_178772_a", nullptr };
+            const char* names[] = { "setNameTagVisibility", "func_178772_a", "a", nullptr };
+            const char* sigs[] = {
+                "(Lnet/minecraft/scoreboard/Team$EnumVisible;)V",
+                "(Lauq$a;)V",
+                nullptr
+            };
             for (int i = 0; names[i] && !g_scorePlayerTeamSetNameTagVisibilityMethodLegacy; i++) {
-                g_scorePlayerTeamSetNameTagVisibilityMethodLegacy = env->GetMethodID(g_scorePlayerTeamClassLegacy, names[i], "(Lnet/minecraft/scoreboard/Team$EnumVisible;)V");
-                if (env->ExceptionCheck()) { env->ExceptionClear(); g_scorePlayerTeamSetNameTagVisibilityMethodLegacy = nullptr; }
+                for (int s = 0; sigs[s] && !g_scorePlayerTeamSetNameTagVisibilityMethodLegacy; s++) {
+                    g_scorePlayerTeamSetNameTagVisibilityMethodLegacy = env->GetMethodID(g_scorePlayerTeamClassLegacy, names[i], sigs[s]);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_scorePlayerTeamSetNameTagVisibilityMethodLegacy = nullptr; }
+                }
             }
         }
-    }
-
-    if (g_teamEnumVisibleClassLegacy && !g_teamEnumVisibleNeverLegacy) {
-        jfieldID neverField = env->GetStaticFieldID(g_teamEnumVisibleClassLegacy, "NEVER", "Lnet/minecraft/scoreboard/Team$EnumVisible;");
-        if (env->ExceptionCheck()) { env->ExceptionClear(); neverField = nullptr; }
-        if (neverField) {
-            jobject neverObj = env->GetStaticObjectField(g_teamEnumVisibleClassLegacy, neverField);
-            if (env->ExceptionCheck()) { env->ExceptionClear(); neverObj = nullptr; }
-            if (neverObj) {
-                g_teamEnumVisibleNeverLegacy = env->NewGlobalRef(neverObj);
-                env->DeleteLocalRef(neverObj);
-            }
-        }
-        if (!g_teamEnumVisibleNeverLegacy) {
-            jmethodID valuesMid = env->GetStaticMethodID(g_teamEnumVisibleClassLegacy, "values", "()[Lnet/minecraft/scoreboard/Team$EnumVisible;");
-            if (env->ExceptionCheck()) { env->ExceptionClear(); valuesMid = nullptr; }
-            if (valuesMid) {
-                jobjectArray vals = (jobjectArray)env->CallStaticObjectMethod(g_teamEnumVisibleClassLegacy, valuesMid);
-                if (env->ExceptionCheck()) { env->ExceptionClear(); vals = nullptr; }
-                if (vals) {
-                    jsize len = env->GetArrayLength(vals);
-                    if (len > 1) {
-                        jobject neverObj = env->GetObjectArrayElement(vals, 1);
-                        if (neverObj) {
-                            g_teamEnumVisibleNeverLegacy = env->NewGlobalRef(neverObj);
-                            env->DeleteLocalRef(neverObj);
-                        }
-                    }
-                    env->DeleteLocalRef(vals);
+        if (!g_scorePlayerTeamGetNameTagVisibilityMethodLegacy) {
+            const char* names[] = { "getNameTagVisibility", "func_178770_i", "i", nullptr };
+            const char* sigs[] = {
+                "()Lnet/minecraft/scoreboard/Team$EnumVisible;",
+                "()Lauq$a;",
+                nullptr
+            };
+            for (int i = 0; names[i] && !g_scorePlayerTeamGetNameTagVisibilityMethodLegacy; i++) {
+                for (int s = 0; sigs[s] && !g_scorePlayerTeamGetNameTagVisibilityMethodLegacy; s++) {
+                    g_scorePlayerTeamGetNameTagVisibilityMethodLegacy = env->GetMethodID(g_scorePlayerTeamClassLegacy, names[i], sigs[s]);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_scorePlayerTeamGetNameTagVisibilityMethodLegacy = nullptr; }
                 }
             }
         }
     }
 
-    return g_worldGetScoreboardMethod
+    if (g_teamEnumVisibleClassLegacy && (!g_teamEnumVisibleNeverLegacy || !g_teamEnumVisibleAlwaysLegacy)) {
+        if (!g_teamEnumVisibleAlwaysLegacy) {
+            const char* fields[] = { "ALWAYS", "a", nullptr };
+            const char* sigs[] = { "Lnet/minecraft/scoreboard/Team$EnumVisible;", "Lauq$a;", nullptr };
+            for (int f = 0; fields[f] && !g_teamEnumVisibleAlwaysLegacy; f++) {
+                for (int s = 0; sigs[s] && !g_teamEnumVisibleAlwaysLegacy; s++) {
+                    jfieldID fid = env->GetStaticFieldID(g_teamEnumVisibleClassLegacy, fields[f], sigs[s]);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); fid = nullptr; }
+                    if (fid) {
+                        jobject alwaysObj = env->GetStaticObjectField(g_teamEnumVisibleClassLegacy, fid);
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); alwaysObj = nullptr; }
+                        if (alwaysObj) {
+                            g_teamEnumVisibleAlwaysLegacy = env->NewGlobalRef(alwaysObj);
+                            env->DeleteLocalRef(alwaysObj);
+                        }
+                    }
+                }
+            }
+        }
+        if (!g_teamEnumVisibleNeverLegacy) {
+            const char* fields[] = { "NEVER", "b", nullptr };
+            const char* sigs[] = { "Lnet/minecraft/scoreboard/Team$EnumVisible;", "Lauq$a;", nullptr };
+            for (int f = 0; fields[f] && !g_teamEnumVisibleNeverLegacy; f++) {
+                for (int s = 0; sigs[s] && !g_teamEnumVisibleNeverLegacy; s++) {
+                    jfieldID fid = env->GetStaticFieldID(g_teamEnumVisibleClassLegacy, fields[f], sigs[s]);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); fid = nullptr; }
+                    if (fid) {
+                        jobject neverObj = env->GetStaticObjectField(g_teamEnumVisibleClassLegacy, fid);
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); neverObj = nullptr; }
+                        if (neverObj) {
+                            g_teamEnumVisibleNeverLegacy = env->NewGlobalRef(neverObj);
+                            env->DeleteLocalRef(neverObj);
+                        }
+                    }
+                }
+            }
+        }
+        if (!g_teamEnumVisibleNeverLegacy || !g_teamEnumVisibleAlwaysLegacy) {
+            const char* sigs[] = {
+                "()[Lnet/minecraft/scoreboard/Team$EnumVisible;",
+                "()[Lauq$a;",
+                nullptr
+            };
+            for (int s = 0; sigs[s] && (!g_teamEnumVisibleNeverLegacy || !g_teamEnumVisibleAlwaysLegacy); s++) {
+                jmethodID valuesMid = env->GetStaticMethodID(g_teamEnumVisibleClassLegacy, "values", sigs[s]);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); valuesMid = nullptr; }
+                if (valuesMid) {
+                    jobjectArray vals = (jobjectArray)env->CallStaticObjectMethod(g_teamEnumVisibleClassLegacy, valuesMid);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); vals = nullptr; }
+                    if (vals) {
+                        jsize len = env->GetArrayLength(vals);
+                        if (len > 0 && !g_teamEnumVisibleAlwaysLegacy) {
+                            jobject alwaysObj = env->GetObjectArrayElement(vals, 0);
+                            if (alwaysObj) {
+                                g_teamEnumVisibleAlwaysLegacy = env->NewGlobalRef(alwaysObj);
+                                env->DeleteLocalRef(alwaysObj);
+                            }
+                        }
+                        if (len > 1 && !g_teamEnumVisibleNeverLegacy) {
+                            jobject neverObj = env->GetObjectArrayElement(vals, 1);
+                            if (neverObj) {
+                                g_teamEnumVisibleNeverLegacy = env->NewGlobalRef(neverObj);
+                                env->DeleteLocalRef(neverObj);
+                            }
+                        }
+                        env->DeleteLocalRef(vals);
+                    }
+                }
+            }
+        }
+    }
+
+    bool ok = g_worldGetScoreboardMethod
         && g_scoreboardGetTeamMethodLegacy
         && g_scoreboardCreateTeamMethodLegacy
         && g_scoreboardRemoveTeamMethodLegacy
@@ -3689,6 +3802,30 @@ static bool EnsureLegacyNametagTeamMappings(JNIEnv* env, jobject worldObj) {
         && g_scorePlayerTeamGetRegisteredNameMethodLegacy
         && g_scorePlayerTeamSetNameTagVisibilityMethodLegacy
         && g_teamEnumVisibleNeverLegacy;
+
+    if (!ok && !g_loggedLegacyNametagSuppressionUnavailable) {
+        g_loggedLegacyNametagSuppressionUnavailable = true;
+        std::string missing;
+        if (!g_worldGetScoreboardMethod) missing += " worldGetScoreboard";
+        if (!g_scoreboardGetTeamMethodLegacy) missing += " scoreboardGetTeam";
+        if (!g_scoreboardCreateTeamMethodLegacy) missing += " scoreboardCreateTeam";
+        if (!g_scoreboardRemoveTeamMethodLegacy) missing += " scoreboardRemoveTeam";
+        if (!g_scoreboardAddPlayerToTeamMethodLegacy) missing += " scoreboardAddPlayerToTeam";
+        if (!g_scoreboardGetPlayersTeamMethodLegacy) missing += " scoreboardGetPlayersTeam";
+        if (!g_scoreboardRemovePlayerFromTeamsMethodLegacy) missing += " scoreboardRemovePlayerFromTeams";
+        if (!g_scorePlayerTeamGetRegisteredNameMethodLegacy) missing += " scorePlayerTeamGetRegisteredName";
+        if (!g_scorePlayerTeamSetNameTagVisibilityMethodLegacy) missing += " scorePlayerTeamSetNameTagVisibility";
+        if (!g_teamEnumVisibleNeverLegacy) missing += " teamEnumVisibleNever";
+        Log("NametagHideVanilla: legacy team-visibility mappings unresolved: missing" + missing);
+    } else if (ok) {
+        static bool s_loggedSuccess = false;
+        if (!s_loggedSuccess) {
+            s_loggedSuccess = true;
+            Log("NametagHideVanilla: legacy team-visibility mappings resolved successfully.");
+        }
+    }
+
+    return ok;
 }
 
 static jobject GetLegacyScoreboard(JNIEnv* env, jobject worldObj) {
@@ -3722,81 +3859,154 @@ static jobject EnsureLegacyHideTeam(JNIEnv* env, jobject scoreboardObj) {
 }
 
 static bool ApplyLegacyVanillaNametagSuppression(JNIEnv* env, jobject scoreboardObj, jobject hideTeamObj, const std::string& playerName) {
-    if (!env || !scoreboardObj || !hideTeamObj || playerName.empty()) return false;
-    static const char* kHideTeamName = "lc_hide_tags";
+    if (!env || !scoreboardObj || playerName.empty()) return false;
+    if (LooksLikeFakePlayerLine(playerName)) return false;
 
     jstring jPlayerName = env->NewStringUTF(playerName.c_str());
     if (!jPlayerName) return false;
 
-    if (g_hiddenNametagOriginalTeamByPlayerLegacy.find(playerName) == g_hiddenNametagOriginalTeamByPlayerLegacy.end()) {
-        std::string originalTeamName;
-        if (g_scoreboardGetPlayersTeamMethodLegacy && g_scorePlayerTeamGetRegisteredNameMethodLegacy) {
-            jobject oldTeam = env->CallObjectMethod(scoreboardObj, g_scoreboardGetPlayersTeamMethodLegacy, jPlayerName);
-            if (env->ExceptionCheck()) { env->ExceptionClear(); oldTeam = nullptr; }
-            if (oldTeam) {
-                jstring jOldTeamName = (jstring)env->CallObjectMethod(oldTeam, g_scorePlayerTeamGetRegisteredNameMethodLegacy);
-                if (env->ExceptionCheck()) { env->ExceptionClear(); jOldTeamName = nullptr; }
-                if (jOldTeamName) {
-                    originalTeamName = Utf8FromJStringLegacy(env, jOldTeamName);
-                    env->DeleteLocalRef(jOldTeamName);
+    // Check if the player is already on a scoreboard team.
+    jobject currentTeamObj = nullptr;
+    if (g_scoreboardGetPlayersTeamMethodLegacy) {
+        currentTeamObj = env->CallObjectMethod(scoreboardObj, g_scoreboardGetPlayersTeamMethodLegacy, jPlayerName);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); currentTeamObj = nullptr; }
+    }
+
+    if (currentTeamObj) {
+        // Player is on a server-managed team. Modify the team's NameTagVisibility to NEVER
+        // instead of removing them, preserving team colors, prefixes, and tab list ordering.
+        env->DeleteLocalRef(jPlayerName);
+
+        if (!g_scorePlayerTeamSetNameTagVisibilityMethodLegacy || !g_teamEnumVisibleNeverLegacy) {
+            env->DeleteLocalRef(currentTeamObj);
+            return false;
+        }
+
+        // Cache the original visibility on first encounter (for restore).
+        if (g_scorePlayerTeamGetRegisteredNameMethodLegacy) {
+            std::string teamName;
+            jstring jTeamName = (jstring)env->CallObjectMethod(currentTeamObj, g_scorePlayerTeamGetRegisteredNameMethodLegacy);
+            if (!env->ExceptionCheck() && jTeamName) {
+                teamName = Utf8FromJStringLegacy(env, jTeamName);
+                env->DeleteLocalRef(jTeamName);
+            } else {
+                env->ExceptionClear();
+            }
+
+            if (!teamName.empty() && g_modifiedTeamVisibilityLegacy.find(teamName) == g_modifiedTeamVisibilityLegacy.end()) {
+                jobject originalVis = nullptr;
+                if (g_scorePlayerTeamGetNameTagVisibilityMethodLegacy) {
+                    originalVis = env->CallObjectMethod(currentTeamObj, g_scorePlayerTeamGetNameTagVisibilityMethodLegacy);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); originalVis = nullptr; }
                 }
-                env->DeleteLocalRef(oldTeam);
+                g_modifiedTeamVisibilityLegacy[teamName] = originalVis ? env->NewGlobalRef(originalVis) : nullptr;
+                if (originalVis) env->DeleteLocalRef(originalVis);
             }
         }
-        g_hiddenNametagOriginalTeamByPlayerLegacy[playerName] = originalTeamName;
-    }
 
-    jstring jHideTeamName = env->NewStringUTF(kHideTeamName);
-    if (!jHideTeamName) {
+        // Apply NEVER
+        env->CallVoidMethod(currentTeamObj, g_scorePlayerTeamSetNameTagVisibilityMethodLegacy, g_teamEnumVisibleNeverLegacy);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+
+        env->DeleteLocalRef(currentTeamObj);
+        return true;
+    } else {
+        // Player is not on any team. Add them to client-only hide team.
+        if (!hideTeamObj || !g_scoreboardAddPlayerToTeamMethodLegacy) {
+            env->DeleteLocalRef(jPlayerName);
+            return false;
+        }
+
+        // Avoid redundant JNI calls if already tracked in lc_hide_tags
+        if (g_lcHideTagsMembersLegacy.find(playerName) != g_lcHideTagsMembersLegacy.end()) {
+            env->DeleteLocalRef(jPlayerName);
+            return true;
+        }
+
+        static const char* kHideTeamName = "lc_hide_tags";
+        jstring jHideTeamName = env->NewStringUTF(kHideTeamName);
+        if (!jHideTeamName) {
+            env->DeleteLocalRef(jPlayerName);
+            return false;
+        }
+
+        jboolean added = env->CallBooleanMethod(scoreboardObj, g_scoreboardAddPlayerToTeamMethodLegacy, jPlayerName, jHideTeamName);
+        bool ok = !env->ExceptionCheck();
+        if (!ok) env->ExceptionClear();
+
+        if (ok) {
+            g_lcHideTagsMembersLegacy.insert(playerName);
+        }
+
+        env->DeleteLocalRef(jHideTeamName);
         env->DeleteLocalRef(jPlayerName);
-        return false;
+        return ok && (added == JNI_TRUE || added == JNI_FALSE);
     }
-    jboolean applied = env->CallBooleanMethod(scoreboardObj, g_scoreboardAddPlayerToTeamMethodLegacy, jPlayerName, jHideTeamName);
-    bool ok = !env->ExceptionCheck();
-    if (!ok) env->ExceptionClear();
-
-    env->DeleteLocalRef(jHideTeamName);
-    env->DeleteLocalRef(jPlayerName);
-    return ok && (applied == JNI_TRUE || applied == JNI_FALSE);
 }
 
 static void RestoreLegacyVanillaNametagSuppression(JNIEnv* env, jobject scoreboardObj) {
-    if (!env || !scoreboardObj || !g_scoreboardRemovePlayerFromTeamsMethodLegacy) {
-        g_hiddenNametagOriginalTeamByPlayerLegacy.clear();
+    if (!env || !scoreboardObj) {
+        for (auto& entry : g_modifiedTeamVisibilityLegacy) {
+            if (entry.second && env) env->DeleteGlobalRef(entry.second);
+        }
+        g_modifiedTeamVisibilityLegacy.clear();
+        g_lcHideTagsMembersLegacy.clear();
         return;
     }
-    for (const auto& entry : g_hiddenNametagOriginalTeamByPlayerLegacy) {
-        const std::string& playerName = entry.first;
-        const std::string& originalTeamName = entry.second;
-        if (playerName.empty()) continue;
 
-        jstring jPlayerName = env->NewStringUTF(playerName.c_str());
-        if (!jPlayerName) continue;
-
-        env->CallBooleanMethod(scoreboardObj, g_scoreboardRemovePlayerFromTeamsMethodLegacy, jPlayerName);
-        if (env->ExceptionCheck()) env->ExceptionClear();
-
-        if (!originalTeamName.empty() && g_scoreboardAddPlayerToTeamMethodLegacy) {
-            jstring jOriginalTeamName = env->NewStringUTF(originalTeamName.c_str());
-            if (jOriginalTeamName) {
-                env->CallBooleanMethod(scoreboardObj, g_scoreboardAddPlayerToTeamMethodLegacy, jPlayerName, jOriginalTeamName);
-                if (env->ExceptionCheck()) env->ExceptionClear();
-                env->DeleteLocalRef(jOriginalTeamName);
+    // 1. Restore NameTagVisibility on every team we modified
+    if (g_scoreboardGetTeamMethodLegacy && g_scorePlayerTeamSetNameTagVisibilityMethodLegacy) {
+        for (auto it = g_modifiedTeamVisibilityLegacy.begin(); it != g_modifiedTeamVisibilityLegacy.end(); ++it) {
+            jstring jTeamName = env->NewStringUTF(it->first.c_str());
+            if (jTeamName) {
+                jobject teamObj = env->CallObjectMethod(scoreboardObj, g_scoreboardGetTeamMethodLegacy, jTeamName);
+                if (!env->ExceptionCheck() && teamObj) {
+                    jobject targetVis = it->second ? it->second : g_teamEnumVisibleAlwaysLegacy;
+                    if (targetVis) {
+                        env->CallVoidMethod(teamObj, g_scorePlayerTeamSetNameTagVisibilityMethodLegacy, targetVis);
+                        if (env->ExceptionCheck()) env->ExceptionClear();
+                    }
+                    env->DeleteLocalRef(teamObj);
+                } else {
+                    env->ExceptionClear();
+                }
+                env->DeleteLocalRef(jTeamName);
+            }
+            if (it->second) {
+                env->DeleteGlobalRef(it->second);
             }
         }
-        env->DeleteLocalRef(jPlayerName);
+    } else {
+        for (auto& entry : g_modifiedTeamVisibilityLegacy) {
+            if (entry.second) env->DeleteGlobalRef(entry.second);
+        }
     }
-    g_hiddenNametagOriginalTeamByPlayerLegacy.clear();
+    g_modifiedTeamVisibilityLegacy.clear();
 
+    // 2. Remove team-less players from lc_hide_tags
+    if (g_scoreboardRemovePlayerFromTeamsMethodLegacy) {
+        for (const auto& playerName : g_lcHideTagsMembersLegacy) {
+            jstring jPlayerName = env->NewStringUTF(playerName.c_str());
+            if (jPlayerName) {
+                env->CallBooleanMethod(scoreboardObj, g_scoreboardRemovePlayerFromTeamsMethodLegacy, jPlayerName);
+                if (env->ExceptionCheck()) env->ExceptionClear();
+                env->DeleteLocalRef(jPlayerName);
+            }
+        }
+    }
+    g_lcHideTagsMembersLegacy.clear();
+
+    // 3. Remove lc_hide_tags team
     if (g_scoreboardGetTeamMethodLegacy && g_scoreboardRemoveTeamMethodLegacy) {
         jstring jHideTeamName = env->NewStringUTF("lc_hide_tags");
         if (jHideTeamName) {
             jobject hideTeam = env->CallObjectMethod(scoreboardObj, g_scoreboardGetTeamMethodLegacy, jHideTeamName);
-            if (env->ExceptionCheck()) { env->ExceptionClear(); hideTeam = nullptr; }
-            if (hideTeam) {
+            if (!env->ExceptionCheck() && hideTeam) {
                 env->CallVoidMethod(scoreboardObj, g_scoreboardRemoveTeamMethodLegacy, hideTeam);
                 if (env->ExceptionCheck()) env->ExceptionClear();
                 env->DeleteLocalRef(hideTeam);
+            } else {
+                env->ExceptionClear();
             }
             env->DeleteLocalRef(jHideTeamName);
         }
@@ -5781,41 +5991,118 @@ static void UpdateAntiDebuffLegacy(JNIEnv* env, const Config& cfg) {
     env->DeleteLocalRef(selfObj);
 }
 
+static reach::ReachEngine g_reachEngine;
+static volatile LONG g_reachJvmtiArmed = 0;
+static volatile LONG g_reachRetransformArmed = 0;
+static volatile LONG g_reachClassHookToken = 0;
+static jclass g_reachHelperClass = nullptr;
+static std::string g_erGetMouseOverResolvedName;
+static std::string g_mcClickMouseResolvedName;
+static jmethodID g_reachHookedGetMouseOver = nullptr;
+static jlocation g_reachReturnSites[16];
+static int g_reachReturnSiteCount = 0;
+static volatile LONG g_reachInExecution = 0;
+
+static jfieldID g_entityRendererField = nullptr;
+static jclass g_entityRendererClass = nullptr;
+static jfieldID g_entityRendererPointedEntityField = nullptr;
+static jmethodID g_entityRendererGetMouseOverMethod = nullptr;
+
+static jclass g_playerControllerClass = nullptr;
+static jmethodID g_getBlockReachDistanceMethod = nullptr;
+static std::string g_pcExtendedReachResolvedName;
+
+static jfieldID g_renderViewEntityField = nullptr;
+static jmethodID g_getRenderViewEntityMethod = nullptr;
+
+static jmethodID g_entityRayTraceMethod = nullptr;
+static jmethodID g_getPositionEyesMethod = nullptr;
+static jmethodID g_getLookMethod = nullptr;
+static jmethodID g_getEntityBoundingBoxMethod = nullptr;
+static jmethodID g_canBeCollidedWithMethod = nullptr;
+static jmethodID g_getCollisionBorderSizeMethod = nullptr;
+static jfieldID g_ridingEntityField = nullptr;
+static jmethodID g_canRiderInteractMethod = nullptr;
+static jmethodID g_isSprintingMethod = nullptr;
+static jmethodID g_isInWaterMethod = nullptr;
+static jmethodID g_handleLavaMovementMethod = nullptr;
+static jmethodID g_getEntityIdMethod = nullptr;
+
+static jmethodID g_getEntitiesWithinAABBExcludingEntityMethod = nullptr;
+
+static jclass g_axisAlignedBBClass = nullptr;
+static jfieldID g_aabbMinX = nullptr;
+static jfieldID g_aabbMinY = nullptr;
+static jfieldID g_aabbMinZ = nullptr;
+static jfieldID g_aabbMaxX = nullptr;
+static jfieldID g_aabbMaxY = nullptr;
+static jfieldID g_aabbMaxZ = nullptr;
+static jmethodID g_aabbCtor = nullptr;
+
+static jfieldID g_vec3X = nullptr;
+static jfieldID g_vec3Y = nullptr;
+static jfieldID g_vec3Z = nullptr;
+
+static jmethodID g_mopEntityVecCtor = nullptr;
+static jfieldID g_mopHitVecField = nullptr;
+static jmethodID g_isInCreativeModeMethod = nullptr;
+
+static void ExecuteReach(JNIEnv* env);
+static bool InstallReachReturnSiteBreakpoints(jvmtiEnv* jvmti, jmethodID method);
+static bool ArmReachJvmtiHook(JNIEnv* env);
+static bool ArmReachRetransformHook(JNIEnv* env);
+static bool ArmReachHook(JNIEnv* env);
+static void JNICALL OnReachBreakpoint(jvmtiEnv* jvmti, JNIEnv* env, jthread thread,
+                                      jmethodID method, jlocation location);
+static void JNICALL OnReachFramePop(jvmtiEnv* jvmti, JNIEnv* env, jthread thread,
+                                    jmethodID method, jboolean wasPoppedByException);
+
 static bool EnsureReachMappings(JNIEnv* env) {
-    if (!env || !g_mcClass || !g_movingObjectPositionClass) return false;
+    if (!env || !g_mcClass) return false;
+    if (g_movingObjectPositionClass && g_axisAlignedBBClass && g_playerControllerClass &&
+        (InterlockedCompareExchange(&g_reachRetransformArmed, 0, 0) != 0 ||
+         InterlockedCompareExchange(&g_reachJvmtiArmed, 0, 0) != 0)) {
+        return true;
+    }
+
+    jobject gcl = EnsureGameClassLoader(env);
+
+    // 1. MovingObjectPosition
+    if (!g_movingObjectPositionClass) {
+        jclass mopLocal = env->FindClass("net/minecraft/util/MovingObjectPosition");
+        if (!mopLocal && gcl) {
+            env->ExceptionClear();
+            mopLocal = LoadClassWithLoader(env, gcl, "net.minecraft.util.MovingObjectPosition");
+        }
+        if (mopLocal && !env->ExceptionCheck()) {
+            g_movingObjectPositionClass = (jclass)env->NewGlobalRef(mopLocal);
+            env->DeleteLocalRef(mopLocal);
+        } else if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        }
+    }
+    if (!g_movingObjectPositionClass) return false;
 
     if (!g_mopEntityCtor) {
         g_mopEntityCtor = env->GetMethodID(g_movingObjectPositionClass, "<init>", "(Lnet/minecraft/entity/Entity;)V");
-        g_mopCtorNeedsVec3 = false;
         if (!g_mopEntityCtor) {
             env->ExceptionClear();
-            g_mopEntityCtor = env->GetMethodID(g_movingObjectPositionClass, "<init>", "(Lnet/minecraft/entity/Entity;Lnet/minecraft/util/Vec3;)V");
-            g_mopCtorNeedsVec3 = (g_mopEntityCtor != nullptr);
-        }
-        if (!g_mopEntityCtor) env->ExceptionClear();
-    }
-
-    if (g_mopCtorNeedsVec3) {
-        if (!g_vec3Class) {
-            jclass vec3Local = env->FindClass("net/minecraft/util/Vec3");
-            if (!vec3Local) {
-                env->ExceptionClear();
-                jobject gcl = EnsureGameClassLoader(env);
-                if (gcl) vec3Local = LoadClassWithLoader(env, gcl, "net.minecraft.util.Vec3");
-            }
-            if (vec3Local && !env->ExceptionCheck()) {
-                g_vec3Class = (jclass)env->NewGlobalRef(vec3Local);
-                env->DeleteLocalRef(vec3Local);
-            } else if (env->ExceptionCheck()) {
-                env->ExceptionClear();
-            }
-        }
-        if (g_vec3Class && !g_vec3Ctor) {
-            g_vec3Ctor = env->GetMethodID(g_vec3Class, "<init>", "(DDD)V");
-            if (!g_vec3Ctor) env->ExceptionClear();
         }
     }
-
+    if (!g_mopEntityVecCtor) {
+        g_mopEntityVecCtor = env->GetMethodID(g_movingObjectPositionClass, "<init>", "(Lnet/minecraft/entity/Entity;Lnet/minecraft/util/Vec3;)V");
+        if (!g_mopEntityVecCtor) {
+            env->ExceptionClear();
+        }
+    }
+    if (!g_mopHitVecField) {
+        g_mopHitVecField = env->GetFieldID(g_movingObjectPositionClass, "hitVec", "Lnet/minecraft/util/Vec3;");
+        if (!g_mopHitVecField) {
+            env->ExceptionClear();
+            g_mopHitVecField = env->GetFieldID(g_movingObjectPositionClass, "field_72307_f", "Lnet/minecraft/util/Vec3;");
+        }
+        if (!g_mopHitVecField) env->ExceptionClear();
+    }
     if (!g_entityHitField) {
         g_entityHitField = env->GetFieldID(g_movingObjectPositionClass, "entityHit", "Lnet/minecraft/entity/Entity;");
         if (!g_entityHitField) {
@@ -5824,13 +6111,19 @@ static bool EnsureReachMappings(JNIEnv* env) {
         }
         if (!g_entityHitField) env->ExceptionClear();
     }
-
+    if (!g_typeOfHitField) {
+        g_typeOfHitField = env->GetFieldID(g_movingObjectPositionClass, "typeOfHit", "Lnet/minecraft/util/MovingObjectPosition$MovingObjectType;");
+        if (!g_typeOfHitField) {
+            env->ExceptionClear();
+            g_typeOfHitField = env->GetFieldID(g_movingObjectPositionClass, "field_72313_a", "Lnet/minecraft/util/MovingObjectPosition$MovingObjectType;");
+        }
+        if (!g_typeOfHitField) env->ExceptionClear();
+    }
     if (!g_mopEntityTypeConst) {
         jclass mopTypeLocal = env->FindClass("net/minecraft/util/MovingObjectPosition$MovingObjectType");
-        if (!mopTypeLocal) {
+        if (!mopTypeLocal && gcl) {
             env->ExceptionClear();
-            jobject gcl = EnsureGameClassLoader(env);
-            if (gcl) mopTypeLocal = LoadClassWithLoader(env, gcl, "net.minecraft.util.MovingObjectPosition$MovingObjectType");
+            mopTypeLocal = LoadClassWithLoader(env, gcl, "net.minecraft.util.MovingObjectPosition$MovingObjectType");
         }
         if (mopTypeLocal && !env->ExceptionCheck()) {
             jfieldID entityConstField = env->GetStaticFieldID(mopTypeLocal, "ENTITY", "Lnet/minecraft/util/MovingObjectPosition$MovingObjectType;");
@@ -5855,354 +6148,1274 @@ static bool EnsureReachMappings(JNIEnv* env) {
         }
     }
 
-    return g_objectMouseOverField != nullptr;
+    // 2. Vec3
+    if (!g_vec3Class) {
+        jclass vec3Local = env->FindClass("net/minecraft/util/Vec3");
+        if (!vec3Local && gcl) {
+            env->ExceptionClear();
+            vec3Local = LoadClassWithLoader(env, gcl, "net.minecraft.util.Vec3");
+        }
+        if (vec3Local && !env->ExceptionCheck()) {
+            g_vec3Class = (jclass)env->NewGlobalRef(vec3Local);
+            env->DeleteLocalRef(vec3Local);
+        } else if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        }
+    }
+    if (g_vec3Class) {
+        if (!g_vec3Ctor) {
+            g_vec3Ctor = env->GetMethodID(g_vec3Class, "<init>", "(DDD)V");
+            if (!g_vec3Ctor) env->ExceptionClear();
+        }
+        if (!g_vec3X) {
+            g_vec3X = env->GetFieldID(g_vec3Class, "xCoord", "D");
+            if (!g_vec3X) { env->ExceptionClear(); g_vec3X = env->GetFieldID(g_vec3Class, "field_72450_a", "D"); }
+            if (!g_vec3X) env->ExceptionClear();
+        }
+        if (!g_vec3Y) {
+            g_vec3Y = env->GetFieldID(g_vec3Class, "yCoord", "D");
+            if (!g_vec3Y) { env->ExceptionClear(); g_vec3Y = env->GetFieldID(g_vec3Class, "field_72448_b", "D"); }
+            if (!g_vec3Y) env->ExceptionClear();
+        }
+        if (!g_vec3Z) {
+            g_vec3Z = env->GetFieldID(g_vec3Class, "zCoord", "D");
+            if (!g_vec3Z) { env->ExceptionClear(); g_vec3Z = env->GetFieldID(g_vec3Class, "field_72449_c", "D"); }
+            if (!g_vec3Z) env->ExceptionClear();
+        }
+    }
+
+    // 3. AxisAlignedBB
+    if (!g_axisAlignedBBClass) {
+        jclass aabbLocal = env->FindClass("net/minecraft/util/AxisAlignedBB");
+        if (!aabbLocal && gcl) {
+            env->ExceptionClear();
+            aabbLocal = LoadClassWithLoader(env, gcl, "net.minecraft.util.AxisAlignedBB");
+        }
+        if (aabbLocal && !env->ExceptionCheck()) {
+            g_axisAlignedBBClass = (jclass)env->NewGlobalRef(aabbLocal);
+            env->DeleteLocalRef(aabbLocal);
+        } else if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        }
+    }
+    if (g_axisAlignedBBClass) {
+        if (!g_aabbCtor) {
+            g_aabbCtor = env->GetMethodID(g_axisAlignedBBClass, "<init>", "(DDDDDD)V");
+            if (!g_aabbCtor) env->ExceptionClear();
+        }
+        if (!g_aabbMinX) {
+            g_aabbMinX = env->GetFieldID(g_axisAlignedBBClass, "minX", "D");
+            if (!g_aabbMinX) { env->ExceptionClear(); g_aabbMinX = env->GetFieldID(g_axisAlignedBBClass, "field_72340_a", "D"); }
+            if (!g_aabbMinX) env->ExceptionClear();
+        }
+        if (!g_aabbMinY) {
+            g_aabbMinY = env->GetFieldID(g_axisAlignedBBClass, "minY", "D");
+            if (!g_aabbMinY) { env->ExceptionClear(); g_aabbMinY = env->GetFieldID(g_axisAlignedBBClass, "field_72338_b", "D"); }
+            if (!g_aabbMinY) env->ExceptionClear();
+        }
+        if (!g_aabbMinZ) {
+            g_aabbMinZ = env->GetFieldID(g_axisAlignedBBClass, "minZ", "D");
+            if (!g_aabbMinZ) { env->ExceptionClear(); g_aabbMinZ = env->GetFieldID(g_axisAlignedBBClass, "field_72339_c", "D"); }
+            if (!g_aabbMinZ) env->ExceptionClear();
+        }
+        if (!g_aabbMaxX) {
+            g_aabbMaxX = env->GetFieldID(g_axisAlignedBBClass, "maxX", "D");
+            if (!g_aabbMaxX) { env->ExceptionClear(); g_aabbMaxX = env->GetFieldID(g_axisAlignedBBClass, "field_72336_d", "D"); }
+            if (!g_aabbMaxX) env->ExceptionClear();
+        }
+        if (!g_aabbMaxY) {
+            g_aabbMaxY = env->GetFieldID(g_axisAlignedBBClass, "maxY", "D");
+            if (!g_aabbMaxY) { env->ExceptionClear(); g_aabbMaxY = env->GetFieldID(g_axisAlignedBBClass, "field_72337_e", "D"); }
+            if (!g_aabbMaxY) env->ExceptionClear();
+        }
+        if (!g_aabbMaxZ) {
+            g_aabbMaxZ = env->GetFieldID(g_axisAlignedBBClass, "maxZ", "D");
+            if (!g_aabbMaxZ) { env->ExceptionClear(); g_aabbMaxZ = env->GetFieldID(g_axisAlignedBBClass, "field_72334_f", "D"); }
+            if (!g_aabbMaxZ) env->ExceptionClear();
+        }
+    }
+
+    // 4. Minecraft fields
+    if (g_mcClass) {
+        if (!g_objectMouseOverField) {
+            g_objectMouseOverField = env->GetFieldID(g_mcClass, "objectMouseOver", "Lnet/minecraft/util/MovingObjectPosition;");
+            if (!g_objectMouseOverField) { env->ExceptionClear(); g_objectMouseOverField = env->GetFieldID(g_mcClass, "field_71476_x", "Lnet/minecraft/util/MovingObjectPosition;"); }
+            if (!g_objectMouseOverField) env->ExceptionClear();
+        }
+        if (!g_pointedEntityField) {
+            g_pointedEntityField = env->GetFieldID(g_mcClass, "pointedEntity", "Lnet/minecraft/entity/Entity;");
+            if (!g_pointedEntityField) { env->ExceptionClear(); g_pointedEntityField = env->GetFieldID(g_mcClass, "field_147125_j", "Lnet/minecraft/entity/Entity;"); }
+            if (!g_pointedEntityField) env->ExceptionClear();
+        }
+        if (!g_entityRendererField) {
+            g_entityRendererField = env->GetFieldID(g_mcClass, "entityRenderer", "Lnet/minecraft/client/renderer/EntityRenderer;");
+            if (!g_entityRendererField) { env->ExceptionClear(); g_entityRendererField = env->GetFieldID(g_mcClass, "field_71460_t", "Lnet/minecraft/client/renderer/EntityRenderer;"); }
+            if (!g_entityRendererField) env->ExceptionClear();
+        }
+        if (!g_playerControllerField) {
+            const char* pcFieldNames[] = { "playerController", "field_71442_b", "c", nullptr };
+            for (int i = 0; pcFieldNames[i] && !g_playerControllerField; ++i) {
+                g_playerControllerField = env->GetFieldID(g_mcClass, pcFieldNames[i], "Lnet/minecraft/client/multiplayer/PlayerControllerMP;");
+                if (env->ExceptionCheck() || !g_playerControllerField) {
+                    env->ExceptionClear();
+                    g_playerControllerField = env->GetFieldID(g_mcClass, pcFieldNames[i], "Lbda;");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_playerControllerField = nullptr; }
+                }
+            }
+        }
+        if (!g_renderViewEntityField) {
+            g_renderViewEntityField = env->GetFieldID(g_mcClass, "renderViewEntity", "Lnet/minecraft/entity/Entity;");
+            if (!g_renderViewEntityField) { env->ExceptionClear(); g_renderViewEntityField = env->GetFieldID(g_mcClass, "field_175622_Z", "Lnet/minecraft/entity/Entity;"); }
+            if (!g_renderViewEntityField) env->ExceptionClear();
+        }
+        if (!g_getRenderViewEntityMethod) {
+            g_getRenderViewEntityMethod = env->GetMethodID(g_mcClass, "getRenderViewEntity", "()Lnet/minecraft/entity/Entity;");
+            if (!g_getRenderViewEntityMethod) { env->ExceptionClear(); g_getRenderViewEntityMethod = env->GetMethodID(g_mcClass, "func_175606_aa", "()Lnet/minecraft/entity/Entity;"); }
+            if (!g_getRenderViewEntityMethod) env->ExceptionClear();
+        }
+    }
+
+    // 5. EntityRenderer class & methods
+    if (!g_entityRendererClass) {
+        jclass erLocal = nullptr;
+        if (gcl) {
+            erLocal = LoadClassWithLoader(env, gcl, "net.minecraft.client.renderer.EntityRenderer");
+            if (!erLocal) erLocal = LoadClassWithLoader(env, gcl, "bfk");
+        }
+        if (!erLocal) {
+            erLocal = env->FindClass("net/minecraft/client/renderer/EntityRenderer");
+            if (env->ExceptionCheck()) env->ExceptionClear();
+        }
+        if (!erLocal) {
+            erLocal = env->FindClass("bfk");
+            if (env->ExceptionCheck()) env->ExceptionClear();
+        }
+        if (erLocal && !env->ExceptionCheck()) {
+            g_entityRendererClass = (jclass)env->NewGlobalRef(erLocal);
+            env->DeleteLocalRef(erLocal);
+            Log(std::string("Reach: resolved EntityRenderer class: ") + GetClassNameFromClass(env, g_entityRendererClass));
+        } else if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        }
+    }
+    if (g_entityRendererClass) {
+        if (!g_entityRendererPointedEntityField) {
+            g_entityRendererPointedEntityField = env->GetFieldID(g_entityRendererClass, "pointedEntity", "Lnet/minecraft/entity/Entity;");
+            if (!g_entityRendererPointedEntityField) { env->ExceptionClear(); g_entityRendererPointedEntityField = env->GetFieldID(g_entityRendererClass, "field_78528_u", "Lnet/minecraft/entity/Entity;"); }
+            if (!g_entityRendererPointedEntityField) env->ExceptionClear();
+        }
+        if (!g_entityRendererGetMouseOverMethod) {
+            const char* moNames[] = { "getMouseOver", "func_78473_a", "a", nullptr };
+            for (int i = 0; moNames[i] && !g_entityRendererGetMouseOverMethod; ++i) {
+                g_entityRendererGetMouseOverMethod = env->GetMethodID(g_entityRendererClass, moNames[i], "(F)V");
+                if (g_entityRendererGetMouseOverMethod) {
+                    g_erGetMouseOverResolvedName = moNames[i];
+                    Log(std::string("Reach: resolved EntityRenderer getMouseOver method name: ") + moNames[i]);
+                    break;
+                }
+                if (env->ExceptionCheck()) env->ExceptionClear();
+            }
+        }
+    }
+
+    // 6. PlayerControllerMP
+    if (!g_playerControllerClass) {
+        jclass pcCanonical = nullptr;
+        if (gcl) {
+            pcCanonical = LoadClassWithLoader(env, gcl, "net.minecraft.client.multiplayer.PlayerControllerMP");
+            if (!pcCanonical) pcCanonical = LoadClassWithLoader(env, gcl, "bda");
+        }
+        if (!pcCanonical) {
+            pcCanonical = env->FindClass("net/minecraft/client/multiplayer/PlayerControllerMP");
+            if (env->ExceptionCheck()) env->ExceptionClear();
+        }
+        if (!pcCanonical) {
+            pcCanonical = env->FindClass("bda");
+            if (env->ExceptionCheck()) env->ExceptionClear();
+        }
+        if (pcCanonical) {
+            g_playerControllerClass = (jclass)env->NewGlobalRef(pcCanonical);
+            env->DeleteLocalRef(pcCanonical);
+            Log(std::string("Reach: resolved PlayerController class by canonical lookup: ") + GetClassNameFromClass(env, g_playerControllerClass));
+        }
+    }
+    if (!g_playerControllerClass && g_mcInstance && g_playerControllerField) {
+        jobject controller = env->GetObjectField(g_mcInstance, g_playerControllerField);
+        if (controller && !env->ExceptionCheck()) {
+            jclass cur = env->GetObjectClass(controller);
+            while (cur) {
+                std::string cname = GetClassNameFromClass(env, cur);
+                if (cname == "net.minecraft.client.multiplayer.PlayerControllerMP" || cname == "bda") {
+                    g_playerControllerClass = (jclass)env->NewGlobalRef(cur);
+                    break;
+                }
+                const char* cand[] = { "extendedReach", "func_78749_i", "i", nullptr };
+                for (int i = 0; cand[i]; ++i) {
+                    jmethodID m = env->GetMethodID(cur, cand[i], "()Z");
+                    if (m) {
+                        g_playerControllerClass = (jclass)env->NewGlobalRef(cur);
+                        break;
+                    }
+                    if (env->ExceptionCheck()) env->ExceptionClear();
+                }
+                if (g_playerControllerClass) break;
+                jclass parent = env->GetSuperclass(cur);
+                env->DeleteLocalRef(cur);
+                cur = parent;
+            }
+            if (cur) env->DeleteLocalRef(cur);
+            env->DeleteLocalRef(controller);
+            if (g_playerControllerClass) {
+                Log(std::string("Reach: resolved PlayerController class by hierarchy walk: ") + GetClassNameFromClass(env, g_playerControllerClass));
+            }
+        } else if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        }
+    }
+    if (g_playerControllerClass) {
+        if (!g_getBlockReachDistanceMethod) {
+            g_getBlockReachDistanceMethod = env->GetMethodID(g_playerControllerClass, "getBlockReachDistance", "()F");
+            if (!g_getBlockReachDistanceMethod) { env->ExceptionClear(); g_getBlockReachDistanceMethod = env->GetMethodID(g_playerControllerClass, "func_78757_d", "()F"); }
+            if (!g_getBlockReachDistanceMethod) { env->ExceptionClear(); g_getBlockReachDistanceMethod = env->GetMethodID(g_playerControllerClass, "d", "()F"); }
+            if (!g_getBlockReachDistanceMethod) env->ExceptionClear();
+        }
+        if (!g_isInCreativeModeMethod) {
+            const char* cmNames[] = { "isInCreativeMode", "func_78762_g", "h", nullptr };
+            for (int i = 0; cmNames[i] && !g_isInCreativeModeMethod; ++i) {
+                g_isInCreativeModeMethod = env->GetMethodID(g_playerControllerClass, cmNames[i], "()Z");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_isInCreativeModeMethod = nullptr; }
+            }
+        }
+        if (g_pcExtendedReachResolvedName.empty()) {
+            const char* erNames[] = { "extendedReach", "func_78749_i", "i", nullptr };
+            for (int i = 0; erNames[i]; ++i) {
+                jmethodID mid = env->GetMethodID(g_playerControllerClass, erNames[i], "()Z");
+                if (mid) {
+                    g_pcExtendedReachResolvedName = erNames[i];
+                    Log(std::string("Reach: resolved PlayerController extendedReach method name: ") + erNames[i]);
+                    break;
+                }
+                if (env->ExceptionCheck()) env->ExceptionClear();
+            }
+        }
+    }
+
+    // 7. Entity / EntityLivingBase methods
+    jclass entityLocal = env->FindClass("net/minecraft/entity/Entity");
+    if (!entityLocal && gcl) {
+        env->ExceptionClear();
+        entityLocal = LoadClassWithLoader(env, gcl, "net.minecraft.entity.Entity");
+    }
+    if (entityLocal && !env->ExceptionCheck()) {
+        if (!g_entityRayTraceMethod) {
+            g_entityRayTraceMethod = env->GetMethodID(entityLocal, "rayTrace", "(DF)Lnet/minecraft/util/MovingObjectPosition;");
+            if (!g_entityRayTraceMethod) { env->ExceptionClear(); g_entityRayTraceMethod = env->GetMethodID(entityLocal, "func_174822_a", "(DF)Lnet/minecraft/util/MovingObjectPosition;"); }
+            if (!g_entityRayTraceMethod) env->ExceptionClear();
+        }
+        if (!g_getPositionEyesMethod) {
+            g_getPositionEyesMethod = env->GetMethodID(entityLocal, "getPositionEyes", "(F)Lnet/minecraft/util/Vec3;");
+            if (!g_getPositionEyesMethod) { env->ExceptionClear(); g_getPositionEyesMethod = env->GetMethodID(entityLocal, "func_174824_e", "(F)Lnet/minecraft/util/Vec3;"); }
+            if (!g_getPositionEyesMethod) env->ExceptionClear();
+        }
+        if (!g_getEntityBoundingBoxMethod) {
+            g_getEntityBoundingBoxMethod = env->GetMethodID(entityLocal, "getEntityBoundingBox", "()Lnet/minecraft/util/AxisAlignedBB;");
+            if (!g_getEntityBoundingBoxMethod) { env->ExceptionClear(); g_getEntityBoundingBoxMethod = env->GetMethodID(entityLocal, "func_174813_aQ", "()Lnet/minecraft/util/AxisAlignedBB;"); }
+            if (!g_getEntityBoundingBoxMethod) env->ExceptionClear();
+        }
+        if (!g_canBeCollidedWithMethod) {
+            g_canBeCollidedWithMethod = env->GetMethodID(entityLocal, "canBeCollidedWith", "()Z");
+            if (!g_canBeCollidedWithMethod) { env->ExceptionClear(); g_canBeCollidedWithMethod = env->GetMethodID(entityLocal, "func_70067_L", "()Z"); }
+            if (!g_canBeCollidedWithMethod) env->ExceptionClear();
+        }
+        if (!g_getCollisionBorderSizeMethod) {
+            g_getCollisionBorderSizeMethod = env->GetMethodID(entityLocal, "getCollisionBorderSize", "()F");
+            if (!g_getCollisionBorderSizeMethod) { env->ExceptionClear(); g_getCollisionBorderSizeMethod = env->GetMethodID(entityLocal, "func_70111_Y", "()F"); }
+            if (!g_getCollisionBorderSizeMethod) env->ExceptionClear();
+        }
+        if (!g_ridingEntityField) {
+            g_ridingEntityField = env->GetFieldID(entityLocal, "ridingEntity", "Lnet/minecraft/entity/Entity;");
+            if (!g_ridingEntityField) { env->ExceptionClear(); g_ridingEntityField = env->GetFieldID(entityLocal, "field_70154_o", "Lnet/minecraft/entity/Entity;"); }
+            if (!g_ridingEntityField) env->ExceptionClear();
+        }
+        if (!g_canRiderInteractMethod) {
+            g_canRiderInteractMethod = env->GetMethodID(entityLocal, "canRiderInteract", "()Z");
+            if (!g_canRiderInteractMethod) { env->ExceptionClear(); g_canRiderInteractMethod = env->GetMethodID(entityLocal, "func_130002_c", "()Z"); }
+            if (!g_canRiderInteractMethod) env->ExceptionClear();
+        }
+        if (!g_isSprintingMethod) {
+            g_isSprintingMethod = env->GetMethodID(entityLocal, "isSprinting", "()Z");
+            if (!g_isSprintingMethod) { env->ExceptionClear(); g_isSprintingMethod = env->GetMethodID(entityLocal, "func_70051_ag", "()Z"); }
+            if (!g_isSprintingMethod) env->ExceptionClear();
+        }
+        if (!g_isInWaterMethod) {
+            g_isInWaterMethod = env->GetMethodID(entityLocal, "isInWater", "()Z");
+            if (!g_isInWaterMethod) { env->ExceptionClear(); g_isInWaterMethod = env->GetMethodID(entityLocal, "func_70090_H", "()Z"); }
+            if (!g_isInWaterMethod) env->ExceptionClear();
+        }
+        if (!g_handleLavaMovementMethod) {
+            g_handleLavaMovementMethod = env->GetMethodID(entityLocal, "handleLavaMovement", "()Z");
+            if (!g_handleLavaMovementMethod) { env->ExceptionClear(); g_handleLavaMovementMethod = env->GetMethodID(entityLocal, "func_71061_d_", "()Z"); }
+            if (!g_handleLavaMovementMethod) { env->ExceptionClear(); g_handleLavaMovementMethod = env->GetMethodID(entityLocal, "func_180799_ab", "()Z"); }
+            if (!g_handleLavaMovementMethod) env->ExceptionClear();
+        }
+        if (!g_getEntityIdMethod) {
+            g_getEntityIdMethod = env->GetMethodID(entityLocal, "getEntityId", "()I");
+            if (!g_getEntityIdMethod) { env->ExceptionClear(); g_getEntityIdMethod = env->GetMethodID(entityLocal, "func_145782_y", "()I"); }
+            if (!g_getEntityIdMethod) env->ExceptionClear();
+        }
+        env->DeleteLocalRef(entityLocal);
+    } else if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+    }
+
+    // EntityLivingBase getLook
+    jclass livingLocal = env->FindClass("net/minecraft/entity/EntityLivingBase");
+    if (!livingLocal && gcl) {
+        env->ExceptionClear();
+        livingLocal = LoadClassWithLoader(env, gcl, "net.minecraft.entity.EntityLivingBase");
+    }
+    if (livingLocal && !env->ExceptionCheck()) {
+        if (!g_getLookMethod) {
+            g_getLookMethod = env->GetMethodID(livingLocal, "getLook", "(F)Lnet/minecraft/util/Vec3;");
+            if (!g_getLookMethod) { env->ExceptionClear(); g_getLookMethod = env->GetMethodID(livingLocal, "func_70676_i", "(F)Lnet/minecraft/util/Vec3;"); }
+            if (!g_getLookMethod) env->ExceptionClear();
+        }
+        if (!g_getPositionEyesMethod) {
+            g_getPositionEyesMethod = env->GetMethodID(livingLocal, "getPositionEyes", "(F)Lnet/minecraft/util/Vec3;");
+            if (!g_getPositionEyesMethod) { env->ExceptionClear(); g_getPositionEyesMethod = env->GetMethodID(livingLocal, "func_174824_e", "(F)Lnet/minecraft/util/Vec3;"); }
+            if (!g_getPositionEyesMethod) env->ExceptionClear();
+        }
+        env->DeleteLocalRef(livingLocal);
+    } else if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+    }
+
+    // 8. World getEntitiesWithinAABBExcludingEntity
+    jclass worldLocal = env->FindClass("net/minecraft/world/World");
+    if (!worldLocal && gcl) {
+        env->ExceptionClear();
+        worldLocal = LoadClassWithLoader(env, gcl, "net.minecraft.world.World");
+    }
+    if (worldLocal && !env->ExceptionCheck()) {
+        if (!g_getEntitiesWithinAABBExcludingEntityMethod) {
+            g_getEntitiesWithinAABBExcludingEntityMethod = env->GetMethodID(worldLocal, "getEntitiesWithinAABBExcludingEntity", "(Lnet/minecraft/entity/Entity;Lnet/minecraft/util/AxisAlignedBB;)Ljava/util/List;");
+            if (!g_getEntitiesWithinAABBExcludingEntityMethod) {
+                env->ExceptionClear();
+                g_getEntitiesWithinAABBExcludingEntityMethod = env->GetMethodID(worldLocal, "func_72839_b", "(Lnet/minecraft/entity/Entity;Lnet/minecraft/util/AxisAlignedBB;)Ljava/util/List;");
+            }
+            if (!g_getEntitiesWithinAABBExcludingEntityMethod) env->ExceptionClear();
+        }
+        env->DeleteLocalRef(worldLocal);
+    } else if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+    }
+
+    if (!g_listSizeMethod || !g_listGetMethod) {
+        TryResolveWorldMappings(env);
+    }
+
+    ArmReachHook(env);
+
+    return (g_objectMouseOverField != nullptr && g_axisAlignedBBClass != nullptr && g_aabbCtor != nullptr);
 }
 
-static void UpdateReach(JNIEnv* env, const Config& cfg, const GameState& state, bool forceClick = false) {
+static bool InstallReachReturnSiteBreakpoints(jvmtiEnv* jvmti, jmethodID method) {
+    if (!jvmti || !method) return false;
+    if (!lc::HasJvmtiGetBytecodes()) return false;
+
+    jint bytecodeCount = 0;
+    unsigned char* bytecodes = nullptr;
+    if (jvmti->GetBytecodes(method, &bytecodeCount, &bytecodes) != JVMTI_ERROR_NONE || !bytecodes)
+        return false;
+
+    int installed = 0;
+    for (jint i = 0; i < bytecodeCount && installed < 16; ) {
+        const unsigned char op = bytecodes[i];
+        if (op == 0xb1) { // RETURN
+            if (lc::SharedJvmtiSetBreakpoint(method, (jlocation)i)) {
+                g_reachReturnSites[installed++] = (jlocation)i;
+            }
+            ++i;
+            continue;
+        }
+        static const unsigned char kSizes[256] = {
+            /* 0x00-0x0f */ 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+            /* 0x10-0x1f */ 2,3,2,1,1,1,1,1,1,1,1,1,1,1,1,1,
+            /* 0x20-0x2f */ 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+            /* 0x30-0x3f */ 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+            /* 0x40-0x4f */ 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+            /* 0x50-0x5f */ 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+            /* 0x60-0x6f */ 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+            /* 0x70-0x7f */ 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+            /* 0x80-0x8f */ 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+            /* 0x90-0x9f */ 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+            /* 0xa0-0xaf */ 3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,
+            /* 0xb0-0xbf */ 1,1,1,1,1,1,1,1,1,3,2,1,1,1,1,1,
+            /* 0xc0-0xcf */ 2,2,3,1,1,1,1,1,1,1,1,1,1,1,1,1,
+            /* 0xd0-0xdf */ 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+            /* 0xe0-0xef */ 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+            /* 0xf0-0xff */ 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+        };
+        unsigned char step = kSizes[op];
+        if (op == 0xc4) {
+            if (i + 1 >= bytecodeCount) break;
+            const unsigned char wop = bytecodes[i + 1];
+            step = (wop == 0x84) ? 6 : 4;
+        } else if (op == 0xaa || op == 0xab) {
+            break;
+        }
+        if (step < 1) step = 1;
+        i += step;
+    }
+
+    jvmti->Deallocate(bytecodes);
+    g_reachReturnSiteCount = installed;
+    return installed > 0;
+}
+
+static bool ArmReachJvmtiHook(JNIEnv* /*env*/) {
+    if (!lc::IsNickHiderJvmtiInstalled() || !lc::HasJvmtiBreakpoints()) return false;
+    if (!g_entityRendererGetMouseOverMethod) return false;
+    if (InterlockedCompareExchange(&g_reachJvmtiArmed, 1, 0) == 0) {
+        lc::RegisterJvmtiBreakpointHandler(OnReachBreakpoint);
+        lc::RegisterJvmtiFramePopHandler(OnReachFramePop);
+
+        if (!lc::SharedJvmtiSetBreakpoint(g_entityRendererGetMouseOverMethod, 0)) {
+            InterlockedExchange(&g_reachJvmtiArmed, 0);
+            return false;
+        }
+        g_reachHookedGetMouseOver = g_entityRendererGetMouseOverMethod;
+
+        if (!lc::HasJvmtiFramePop()) {
+            InstallReachReturnSiteBreakpoints(lc::SharedJvmtiEnv(), g_entityRendererGetMouseOverMethod);
+        }
+        Log("Reach: hooked EntityRenderer.getMouseOver via JVMTI");
+    }
+    return true;
+}
+
+static void JNICALL OnReachBreakpoint(jvmtiEnv* /*jvmti*/, JNIEnv* env, jthread thread,
+                                      jmethodID method, jlocation location) {
+    if (!g_reachHookedGetMouseOver || method != g_reachHookedGetMouseOver) return;
+    if (location == 0) {
+        if (lc::HasJvmtiFramePop()) {
+            lc::SharedJvmtiNotifyFramePop(thread, 0);
+        }
+    } else {
+        for (int i = 0; i < g_reachReturnSiteCount; ++i) {
+            if (g_reachReturnSites[i] == location) {
+                ExecuteReach(env);
+                break;
+            }
+        }
+    }
+}
+
+static void JNICALL OnReachFramePop(jvmtiEnv* /*jvmti*/, JNIEnv* env, jthread /*thread*/,
+                                    jmethodID method, jboolean wasPoppedByException) {
+    if (wasPoppedByException) return;
+    if (!g_reachHookedGetMouseOver || method != g_reachHookedGetMouseOver) return;
+    ExecuteReach(env);
+}
+
+
+static void JNICALL NativeOnReachCallback(JNIEnv* env, jclass) {
     if (!env) return;
+    static volatile LONG s_loggedMouseOver = 0;
+    if (InterlockedCompareExchange(&s_loggedMouseOver, 1, 0) == 0) {
+        Log("Reach: onMouseOver callback entered (getMouseOver return hook live)");
+    }
+    ExecuteReach(env);
+}
 
-    DWORD nowMs = GetTickCount();
-    bool lmbPhysicalDown = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
-    bool syntheticClicking = cfg.clicking && cfg.leftClick;
-    bool clickEdge = forceClick
-        || (lmbPhysicalDown && !g_reachClickPrevDown)
-        || (syntheticClicking && !g_reachClickPrevSynthetic);
-    g_reachClickPrevDown = lmbPhysicalDown;
-    g_reachClickPrevSynthetic = syntheticClicking;
-
-    if (!cfg.reachEnabled) {
-        g_reachAllowCurrentClick = false;
-        g_reachCurrentClickRange = 3.0;
-        g_reachClickWindowUntilMs = 0;
-        g_reachLastRollMs = 0;
-        g_reachClickPrevSynthetic = false;
-        if (g_reachCurrentTarget) {
-            env->DeleteGlobalRef(g_reachCurrentTarget);
-            g_reachCurrentTarget = nullptr;
+static jboolean JNICALL NativeExtendedReachCallback(JNIEnv* env, jclass) {
+    // Vanilla PlayerControllerMP.extendedReach() is creative-only. Forcing true
+    // skips the survival 3.0 entity clamp in getMouseOver and traces 6.0 blocks
+    // on every swing, which is what Grim Hitboxes flags as air hits.
+    if (!env) return JNI_FALSE;
+    if (g_mcInstance && g_playerControllerField && g_isInCreativeModeMethod) {
+        jobject pc = env->GetObjectField(g_mcInstance, g_playerControllerField);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); pc = nullptr; }
+        if (pc) {
+            jboolean creative = env->CallBooleanMethod(pc, g_isInCreativeModeMethod);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); creative = JNI_FALSE; }
+            env->DeleteLocalRef(pc);
+            return creative;
         }
+    }
+    return JNI_FALSE;
+}
+
+static bool IsReachTargetClass(const char* name, jclass classBeingRedefined, JNIEnv* env) {
+    if (classBeingRedefined && env && g_entityRendererClass) {
+        if (env->IsSameObject(classBeingRedefined, g_entityRendererClass)) return true;
+    }
+    if (!name) return false;
+    return std::strcmp(name, "net/minecraft/client/renderer/EntityRenderer") == 0 ||
+           std::strcmp(name, "net.minecraft.client.renderer.EntityRenderer") == 0 ||
+           std::strcmp(name, "bfk") == 0;
+}
+
+static void OnReachClassFileLoadHook(jvmtiEnv* /*jvmti*/, JNIEnv* env, jclass classBeingRedefined,
+                                     jobject /*loader*/, const char* name, jobject /*protectionDomain*/,
+                                     jint classDataLen, const unsigned char* classData,
+                                     jint* newClassDataLen, unsigned char** newClassData) {
+    if (!classData || classDataLen <= 0 || !newClassDataLen || !newClassData) return;
+    if (!IsReachTargetClass(name, classBeingRedefined, env)) return;
+
+    std::vector<std::string> moMethods;
+    if (!g_erGetMouseOverResolvedName.empty()) {
+        moMethods.push_back(g_erGetMouseOverResolvedName);
+    } else {
+        moMethods.push_back("getMouseOver");
+        moMethods.push_back("func_78473_a");
+        moMethods.push_back("a");
+    }
+    reachinject::InjectResult res = reachinject::InjectReachHookBeforeReturns(
+        classData, (size_t)classDataLen, moMethods, "(F)V", "lc/aoko/NativeReachHook", "onMouseOver");
+    if (!res.ok) {
+        Log(std::string("Reach: EntityRenderer getMouseOver-hook injection failed: ") + res.error);
+        return;
+    }
+    if (res.changed) {
+        unsigned char* mem = nullptr;
+        if (!lc::SharedJvmtiAllocate((jlong)res.bytes.size(), &mem) || !mem) {
+            Log("Reach: JVMTI Allocate failed for EntityRenderer");
+            return;
+        }
+        std::memcpy(mem, res.bytes.data(), res.bytes.size());
+        *newClassData = mem;
+        *newClassDataLen = (jint)res.bytes.size();
+        Log(std::string("Reach: rewrote EntityRenderer.getMouseOver via JVMTI Retransform"));
+    }
+}
+
+static bool ArmReachRetransformHook(JNIEnv* env) {
+    if (!env) return false;
+    if (InterlockedCompareExchange(&g_reachRetransformArmed, 0, 0) != 0) return true;
+    if (!lc::IsNickHiderJvmtiInstalled() || !lc::HasJvmtiRetransform()) return false;
+
+    if (InterlockedCompareExchange(&g_reachClassHookToken, 1, 0) == 0) {
+        int token = lc::RegisterClassFileLoadHook(OnReachClassFileLoadHook);
+        if (!token) {
+            Log("Reach: class-file broker registration failed");
+            return false;
+        }
+        InterlockedExchange(&g_reachClassHookToken, (LONG)token);
+    }
+
+    if (!g_reachHelperClass) {
+        jobject loader = EnsureGameClassLoader(env);
+        const std::vector<unsigned char> helperBytes =
+            reachinject::BuildNativeReachCallbackClass("lc/aoko/NativeReachHook");
+
+        jclass defined = env->DefineClass(
+            "lc/aoko/NativeReachHook", loader,
+            reinterpret_cast<const jbyte*>(helperBytes.data()),
+            (jsize)helperBytes.size());
+        if (env->ExceptionCheck() || !defined) {
+            env->ExceptionClear();
+            defined = env->DefineClass(
+                "lc/aoko/NativeReachHook", nullptr,
+                reinterpret_cast<const jbyte*>(helperBytes.data()),
+                (jsize)helperBytes.size());
+            if (env->ExceptionCheck() || !defined) {
+                env->ExceptionClear();
+                Log("Reach: DefineClass(NativeReachHook) failed");
+                return false;
+            }
+        }
+
+        g_reachHelperClass = (jclass)env->NewGlobalRef(defined);
+        env->DeleteLocalRef(defined);
+
+        JNINativeMethod nms[2] = {};
+        nms[0].name = const_cast<char*>("onMouseOver");
+        nms[0].signature = const_cast<char*>("()V");
+        nms[0].fnPtr = (void*)&NativeOnReachCallback;
+
+        nms[1].name = const_cast<char*>("extendedReach");
+        nms[1].signature = const_cast<char*>("()Z");
+        nms[1].fnPtr = (void*)&NativeExtendedReachCallback;
+
+        if (env->RegisterNatives(g_reachHelperClass, nms, 2) != 0 || env->ExceptionCheck()) {
+            env->ExceptionClear();
+            Log("Reach: RegisterNatives(NativeReachHook) failed");
+            return false;
+        }
+        Log("Reach: defined and registered lc/aoko/NativeReachHook (onMouseOver, extendedReach)");
+    }
+
+    std::vector<jclass> targets;
+    if (g_entityRendererClass) targets.push_back(g_entityRendererClass);
+
+    if (!targets.empty()) {
+        bool ok = lc::SharedJvmtiRetransformClasses(targets.data(), (jint)targets.size());
+        if (!ok) {
+            Log("Reach: RetransformClasses failed for EntityRenderer");
+            return false;
+        }
+        InterlockedExchange(&g_reachRetransformArmed, 1);
+        Log("Reach: successfully armed JVMTI Retransform hook for EntityRenderer.getMouseOver");
+        return true;
+    }
+    return false;
+}
+
+static bool ArmReachHook(JNIEnv* env) {
+    if (InterlockedCompareExchange(&g_reachRetransformArmed, 0, 0) != 0 ||
+        InterlockedCompareExchange(&g_reachJvmtiArmed, 0, 0) != 0) {
+        return true;
+    }
+    bool retransformArmed = ArmReachRetransformHook(env);
+    if (retransformArmed) return true;
+    bool breakpointArmed = ArmReachJvmtiHook(env);
+    return breakpointArmed;
+}
+
+static void ExecuteReach(JNIEnv* env) {
+    if (!env || !g_mcInstance || !g_thePlayerField || !g_theWorldField) return;
+    if (InterlockedCompareExchange(&g_reachInExecution, 1, 0) != 0) return;
+
+    reach::ReachSettings settings;
+    {
+        LockGuard lk(g_configMutex);
+        settings.enabled = g_config.reachEnabled;
+        settings.minRange = g_config.reachMin;
+        settings.maxRange = g_config.reachMax;
+        settings.chance = g_config.reachChance;
+        settings.chanceMode = g_config.reachChanceMode;
+        settings.onlyWhileSprinting = g_config.reachOnlyWhileSprinting;
+        settings.disableInWater = g_config.reachDisableInWater;
+        settings.verticalCheck = g_config.reachVerticalCheck;
+    }
+
+    if (!settings.enabled) {
+        InterlockedExchange(&g_reachInExecution, 0);
         return;
     }
 
-    if (clickEdge || ((lmbPhysicalDown || syntheticClicking) && (nowMs - g_reachLastRollMs) >= 120)) {
-        g_reachAllowCurrentClick = ((rand() % 100) < cfg.reachChance);
-        float reachSpan = cfg.reachMax - cfg.reachMin;
-        if (reachSpan < 0.0f) reachSpan = 0.0f;
-        float rfrac = (float)rand() / (float)RAND_MAX;
-        g_reachCurrentClickRange = (double)(cfg.reachMin + (rfrac * reachSpan));
-        if (g_reachCurrentClickRange < 3.0) g_reachCurrentClickRange = 3.0;
-        g_reachLastRollMs = nowMs;
-        g_reachClickWindowUntilMs = nowMs + 120;
-    }
-
-    bool clickWindowActive = forceClick || lmbPhysicalDown || syntheticClicking || nowMs <= g_reachClickWindowUntilMs;
-    if (!clickWindowActive) {
-        g_reachAllowCurrentClick = false;
-        if (g_reachCurrentTarget) {
-            env->DeleteGlobalRef(g_reachCurrentTarget);
-            g_reachCurrentTarget = nullptr;
-        }
+    if (env->PushLocalFrame(128) < 0) {
+        InterlockedExchange(&g_reachInExecution, 0);
         return;
     }
 
-    auto maybeLogReach = [&](const std::string& msg) {
-        DWORD t = GetTickCount();
-        if (t - g_lastReachDebugLogMs >= 1000) {
-            g_lastReachDebugLogMs = t;
-            Log(std::string("Reach: ") + msg);
-        }
-    };
-
-    if (!g_reachAllowCurrentClick) {
-        maybeLogReach("roll denied this click");
+    if (!EnsureReachMappings(env)) {
+        env->PopLocalFrame(nullptr);
+        InterlockedExchange(&g_reachInExecution, 0);
         return;
     }
-    if (!g_mcInstance || !g_thePlayerField || (!g_objectMouseOverField && !g_pointedEntityField)) return;
-    if (!EnsureReachMappings(env)) return;
-    if (!state.mapped || state.guiOpen) return;
+
+    if (g_currentScreenField) {
+        jobject curScreen = env->GetObjectField(g_mcInstance, g_currentScreenField);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); curScreen = nullptr; }
+        if (curScreen) {
+            env->DeleteLocalRef(curScreen);
+            env->PopLocalFrame(nullptr);
+            InterlockedExchange(&g_reachInExecution, 0);
+            return;
+        }
+    }
 
     jobject player = env->GetObjectField(g_mcInstance, g_thePlayerField);
-    if (env->ExceptionCheck()) {
-        env->ExceptionClear();
-        player = nullptr;
+    if (env->ExceptionCheck() || !player) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        env->PopLocalFrame(nullptr);
+        InterlockedExchange(&g_reachInExecution, 0);
+        return;
     }
-    if (!player) {
-        maybeLogReach("no local player");
+
+    bool isSprinting = false;
+    if (g_isSprintingMethod) {
+        isSprinting = (env->CallBooleanMethod(player, g_isSprintingMethod) == JNI_TRUE);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); isSprinting = false; }
+    }
+    bool inWater = false;
+    if (g_isInWaterMethod) {
+        inWater = (env->CallBooleanMethod(player, g_isInWaterMethod) == JNI_TRUE);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); inWater = false; }
+    }
+    bool inLava = false;
+    if (g_handleLavaMovementMethod) {
+        inLava = (env->CallBooleanMethod(player, g_handleLavaMovementMethod) == JNI_TRUE);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); inLava = false; }
+    }
+
+    bool isAllowed = reach::IsReachAllowed(settings, isSprinting, inWater || inLava);
+
+    jobject viewEntity = nullptr;
+    if (g_getRenderViewEntityMethod) {
+        viewEntity = env->CallObjectMethod(g_mcInstance, g_getRenderViewEntityMethod);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); viewEntity = nullptr; }
+    }
+    if (!viewEntity && g_renderViewEntityField) {
+        viewEntity = env->GetObjectField(g_mcInstance, g_renderViewEntityField);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); viewEntity = nullptr; }
+    }
+    if (!viewEntity) {
+        viewEntity = player;
+    }
+
+    jobject playerController = nullptr;
+    if (g_playerControllerField) {
+        playerController = env->GetObjectField(g_mcInstance, g_playerControllerField);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); playerController = nullptr; }
+    }
+
+    double blockReach = 4.5;
+    if (playerController && g_getBlockReachDistanceMethod) {
+        blockReach = (double)env->CallFloatMethod(playerController, g_getBlockReachDistanceMethod);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); blockReach = 4.5; }
+    }
+
+    float partialTicks = 1.0f;
+    if (g_timerField && g_renderPartialTicksField) {
+        jobject timer = env->GetObjectField(g_mcInstance, g_timerField);
+        if (timer) {
+            partialTicks = env->GetFloatField(timer, g_renderPartialTicksField);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); partialTicks = 1.0f; }
+            env->DeleteLocalRef(timer);
+        } else if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        }
+    }
+
+    reach::Vec3 eyePos;
+    bool haveEyes = false;
+    if (g_getPositionEyesMethod && g_vec3X && g_vec3Y && g_vec3Z) {
+        jobject eyeVecObj = env->CallObjectMethod(viewEntity, g_getPositionEyesMethod, (jfloat)partialTicks);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); eyeVecObj = nullptr; }
+        if (eyeVecObj) {
+            eyePos.x = env->GetDoubleField(eyeVecObj, g_vec3X);
+            eyePos.y = env->GetDoubleField(eyeVecObj, g_vec3Y);
+            eyePos.z = env->GetDoubleField(eyeVecObj, g_vec3Z);
+            if (!env->ExceptionCheck()) haveEyes = true;
+            else env->ExceptionClear();
+            env->DeleteLocalRef(eyeVecObj);
+        }
+    }
+    if (!haveEyes) {
+        eyePos.x = env->GetDoubleField(viewEntity, g_posXField);
+        eyePos.y = env->GetDoubleField(viewEntity, g_posYField) + 1.62;
+        eyePos.z = env->GetDoubleField(viewEntity, g_posZField);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+
+    double playerY = env->GetDoubleField(viewEntity, g_posYField);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+
+    // Check if mc.objectMouseOver is ALREADY pointing to an entity
+    // (e.g. from vanilla EntityRenderer.getMouseOver when extendedReach() returned true)
+    jobject currentMop = nullptr;
+    if (g_objectMouseOverField) {
+        currentMop = env->GetObjectField(g_mcInstance, g_objectMouseOverField);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); currentMop = nullptr; }
+    }
+
+    jobject existingEntityHit = nullptr;
+    if (currentMop && g_entityHitField) {
+        existingEntityHit = env->GetObjectField(currentMop, g_entityHitField);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); existingEntityHit = nullptr; }
+    }
+
+    if (existingEntityHit) {
+        reach::Vec3 existingHitPos;
+        bool hasExistingHitPos = false;
+        if (g_mopHitVecField && g_vec3X && g_vec3Y && g_vec3Z) {
+            jobject hitVecObj = env->GetObjectField(currentMop, g_mopHitVecField);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); hitVecObj = nullptr; }
+            if (hitVecObj) {
+                existingHitPos.x = env->GetDoubleField(hitVecObj, g_vec3X);
+                existingHitPos.y = env->GetDoubleField(hitVecObj, g_vec3Y);
+                existingHitPos.z = env->GetDoubleField(hitVecObj, g_vec3Z);
+                if (!env->ExceptionCheck()) hasExistingHitPos = true;
+                else env->ExceptionClear();
+                env->DeleteLocalRef(hitVecObj);
+            }
+        }
+        if (!hasExistingHitPos) {
+            existingHitPos.x = env->GetDoubleField(existingEntityHit, g_posXField);
+            existingHitPos.y = env->GetDoubleField(existingEntityHit, g_posYField);
+            existingHitPos.z = env->GetDoubleField(existingEntityHit, g_posZField);
+            if (env->ExceptionCheck()) env->ExceptionClear();
+        }
+
+        double existingDist = eyePos.distanceTo(existingHitPos);
+
+        // Vanilla survival never reports entity hits past 3.0 (the flag clamp).
+        // A hit past 3.0 means creative 6.0 reach or a leftover expanded mop;
+        // keep it only if it still falls inside the configured roll.
+        if (existingDist > 3.0) {
+            double reachDist = g_reachEngine.GetReachDistance(settings, isAllowed);
+            bool verticalOk = true;
+            if (settings.verticalCheck) {
+                double entityY = env->GetDoubleField(existingEntityHit, g_posYField);
+                if (env->ExceptionCheck()) env->ExceptionClear();
+                if (std::abs(entityY - playerY) > 0.2) verticalOk = false;
+            }
+
+            if (isAllowed && existingDist <= reachDist && verticalOk) {
+                env->DeleteLocalRef(existingEntityHit);
+                if (currentMop) env->DeleteLocalRef(currentMop);
+                if (playerController) env->DeleteLocalRef(playerController);
+                if (viewEntity && !env->IsSameObject(viewEntity, player)) env->DeleteLocalRef(viewEntity);
+                env->DeleteLocalRef(player);
+                env->PopLocalFrame(nullptr);
+                InterlockedExchange(&g_reachInExecution, 0);
+                return;
+            }
+
+            // Hit outside configured reach or roll failed: disarm hit
+            jobject blockMop = nullptr;
+            if (g_entityRayTraceMethod) {
+                blockMop = env->CallObjectMethod(viewEntity, g_entityRayTraceMethod, (jdouble)blockReach, (jfloat)partialTicks);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); blockMop = nullptr; }
+            }
+            if (g_objectMouseOverField) {
+                env->SetObjectField(g_mcInstance, g_objectMouseOverField, blockMop);
+                if (env->ExceptionCheck()) env->ExceptionClear();
+            }
+            if (g_pointedEntityField) {
+                env->SetObjectField(g_mcInstance, g_pointedEntityField, nullptr);
+                if (env->ExceptionCheck()) env->ExceptionClear();
+            }
+            if (g_entityRendererField && g_entityRendererPointedEntityField) {
+                jobject er = env->GetObjectField(g_mcInstance, g_entityRendererField);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); er = nullptr; }
+                if (er) {
+                    env->SetObjectField(er, g_entityRendererPointedEntityField, nullptr);
+                    if (env->ExceptionCheck()) env->ExceptionClear();
+                    env->DeleteLocalRef(er);
+                }
+            }
+            if (blockMop) env->DeleteLocalRef(blockMop);
+            env->DeleteLocalRef(existingEntityHit);
+            if (currentMop) env->DeleteLocalRef(currentMop);
+            if (playerController) env->DeleteLocalRef(playerController);
+            if (viewEntity && !env->IsSameObject(viewEntity, player)) env->DeleteLocalRef(viewEntity);
+            env->DeleteLocalRef(player);
+            env->PopLocalFrame(nullptr);
+            InterlockedExchange(&g_reachInExecution, 0);
+            return;
+        }
+
+        // existingDist <= 3.0: vanilla reach, keep vanilla hit!
+        env->DeleteLocalRef(existingEntityHit);
+        if (currentMop) env->DeleteLocalRef(currentMop);
+        if (playerController) env->DeleteLocalRef(playerController);
+        if (viewEntity && !env->IsSameObject(viewEntity, player)) env->DeleteLocalRef(viewEntity);
+        env->DeleteLocalRef(player);
+        env->PopLocalFrame(nullptr);
+        InterlockedExchange(&g_reachInExecution, 0);
+        return;
+    }
+    if (currentMop) env->DeleteLocalRef(currentMop);
+
+    // Fallback: mc.objectMouseOver had no entity. Raytrace manually up to reachDist.
+    if (!isAllowed) {
+        if (playerController) env->DeleteLocalRef(playerController);
+        if (viewEntity && !env->IsSameObject(viewEntity, player)) env->DeleteLocalRef(viewEntity);
+        env->DeleteLocalRef(player);
+        env->PopLocalFrame(nullptr);
+        InterlockedExchange(&g_reachInExecution, 0);
+        return;
+    }
+
+    double reachDist = g_reachEngine.GetReachDistance(settings, isAllowed);
+    if (reachDist <= 3.0) {
+        if (playerController) env->DeleteLocalRef(playerController);
+        if (viewEntity && !env->IsSameObject(viewEntity, player)) env->DeleteLocalRef(viewEntity);
+        env->DeleteLocalRef(player);
+        env->PopLocalFrame(nullptr);
+        InterlockedExchange(&g_reachInExecution, 0);
         return;
     }
 
     jobject world = env->GetObjectField(g_mcInstance, g_theWorldField);
-    if (env->ExceptionCheck()) {
-        env->ExceptionClear();
-        world = nullptr;
-    }
-    if (!world) {
-        maybeLogReach("no world");
+    if (env->ExceptionCheck() || !world) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        if (playerController) env->DeleteLocalRef(playerController);
+        if (viewEntity && !env->IsSameObject(viewEntity, player)) env->DeleteLocalRef(viewEntity);
         env->DeleteLocalRef(player);
+        env->PopLocalFrame(nullptr);
+        InterlockedExchange(&g_reachInExecution, 0);
         return;
     }
 
-    if (!g_playerEntitiesField || !g_listSizeMethod || !g_listGetMethod) {
-        TryResolveWorldMappings(env);
-    }
-    if (!g_playerEntitiesField || !g_listSizeMethod || !g_listGetMethod || !g_posXField || !g_posYField || !g_posZField) {
-        maybeLogReach("missing mappings: players/list/pos");
-        env->DeleteLocalRef(world);
-        env->DeleteLocalRef(player);
-        return;
+    jobject entityRenderer = nullptr;
+    if (g_entityRendererField) {
+        entityRenderer = env->GetObjectField(g_mcInstance, g_entityRendererField);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); entityRenderer = nullptr; }
     }
 
-    jobject list = env->GetObjectField(world, g_playerEntitiesField);
-    if (env->ExceptionCheck()) {
-        env->ExceptionClear();
-        list = nullptr;
-    }
-    if (!list) {
-        maybeLogReach("player list unavailable");
-        env->DeleteLocalRef(world);
-        env->DeleteLocalRef(player);
-        return;
+    jobject rayTraceResult = nullptr;
+    if (g_entityRayTraceMethod) {
+        rayTraceResult = env->CallObjectMethod(viewEntity, g_entityRayTraceMethod, (jdouble)reachDist, (jfloat)partialTicks);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); rayTraceResult = nullptr; }
     }
 
-    int size = env->CallIntMethod(list, g_listSizeMethod);
-    if (env->ExceptionCheck()) {
-        env->ExceptionClear();
-        size = 0;
-    }
-
-    double px = env->GetDoubleField(player, g_posXField);
-    double py = env->GetDoubleField(player, g_posYField);
-    double pz = env->GetDoubleField(player, g_posZField);
-    if (env->ExceptionCheck()) {
-        env->ExceptionClear();
-        size = 0;
-    }
-
-    float localYaw = 0.0f;
-    float localPitch = 0.0f;
-    bool haveViewAngles = false;
-    if (g_rotationYawField && g_rotationPitchField) {
-        localYaw = env->GetFloatField(player, g_rotationYawField);
-        localPitch = env->GetFloatField(player, g_rotationPitchField);
-        if (!env->ExceptionCheck()) {
-            haveViewAngles = true;
-        } else {
-            env->ExceptionClear();
+    double d3 = reachDist;
+    if (rayTraceResult && g_mopHitVecField && g_vec3X && g_vec3Y && g_vec3Z) {
+        jobject hitVecObj = env->GetObjectField(rayTraceResult, g_mopHitVecField);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); hitVecObj = nullptr; }
+        if (hitVecObj) {
+            reach::Vec3 hitPos;
+            hitPos.x = env->GetDoubleField(hitVecObj, g_vec3X);
+            hitPos.y = env->GetDoubleField(hitVecObj, g_vec3Y);
+            hitPos.z = env->GetDoubleField(hitVecObj, g_vec3Z);
+            if (!env->ExceptionCheck()) {
+                d3 = eyePos.distanceTo(hitPos);
+            } else {
+                env->ExceptionClear();
+            }
+            env->DeleteLocalRef(hitVecObj);
         }
     }
+    if (d3 > 6.0) d3 = 6.0;
 
-    const double kPi = 3.14159265358979323846;
-    double yawRad = localYaw * (kPi / 180.0);
-    double pitchRad = localPitch * (kPi / 180.0);
-    double lookX = -std::sin(yawRad) * std::cos(pitchRad);
-    double lookY = -std::sin(pitchRad);
-    double lookZ = std::cos(yawRad) * std::cos(pitchRad);
-    double lookLenSq = lookX * lookX + lookY * lookY + lookZ * lookZ;
-    if (lookLenSq > 1e-9) {
-        double invLen = 1.0 / std::sqrt(lookLenSq);
-        lookX *= invLen;
-        lookY *= invLen;
-        lookZ *= invLen;
-    } else {
-        haveViewAngles = false;
+    reach::Vec3 lookVec;
+    bool haveLook = false;
+    if (g_getLookMethod && g_vec3X && g_vec3Y && g_vec3Z) {
+        jobject lookVecObj = env->CallObjectMethod(viewEntity, g_getLookMethod, (jfloat)partialTicks);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); lookVecObj = nullptr; }
+        if (lookVecObj) {
+            lookVec.x = env->GetDoubleField(lookVecObj, g_vec3X);
+            lookVec.y = env->GetDoubleField(lookVecObj, g_vec3Y);
+            lookVec.z = env->GetDoubleField(lookVecObj, g_vec3Z);
+            if (!env->ExceptionCheck()) haveLook = true;
+            else env->ExceptionClear();
+            env->DeleteLocalRef(lookVecObj);
+        }
+    }
+    if (!haveLook && g_rotationYawField && g_rotationPitchField) {
+        float yaw = env->GetFloatField(viewEntity, g_rotationYawField);
+        float pitch = env->GetFloatField(viewEntity, g_rotationPitchField);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        const double kPi = 3.14159265358979323846;
+        double yRad = yaw * (kPi / 180.0);
+        double pRad = pitch * (kPi / 180.0);
+        lookVec.x = -std::sin(yRad) * std::cos(pRad);
+        lookVec.y = -std::sin(pRad);
+        lookVec.z = std::cos(yRad) * std::cos(pRad);
+    }
+    reach::Vec3 reachEnd = eyePos.addVector(lookVec.x * reachDist, lookVec.y * reachDist, lookVec.z * reachDist);
+
+    reach::AxisAlignedBB searchBox;
+    bool haveBox = false;
+    if (g_getEntityBoundingBoxMethod && g_aabbMinX && g_aabbMinY && g_aabbMinZ && g_aabbMaxX && g_aabbMaxY && g_aabbMaxZ) {
+        jobject bbObj = env->CallObjectMethod(viewEntity, g_getEntityBoundingBoxMethod);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); bbObj = nullptr; }
+        if (bbObj) {
+            searchBox.minX = env->GetDoubleField(bbObj, g_aabbMinX);
+            searchBox.minY = env->GetDoubleField(bbObj, g_aabbMinY);
+            searchBox.minZ = env->GetDoubleField(bbObj, g_aabbMinZ);
+            searchBox.maxX = env->GetDoubleField(bbObj, g_aabbMaxX);
+            searchBox.maxY = env->GetDoubleField(bbObj, g_aabbMaxY);
+            searchBox.maxZ = env->GetDoubleField(bbObj, g_aabbMaxZ);
+            if (!env->ExceptionCheck()) haveBox = true;
+            else env->ExceptionClear();
+            env->DeleteLocalRef(bbObj);
+        }
+    }
+    if (!haveBox) {
+        double px = env->GetDoubleField(viewEntity, g_posXField);
+        double py = env->GetDoubleField(viewEntity, g_posYField);
+        double pz = env->GetDoubleField(viewEntity, g_posZField);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        searchBox = reach::AxisAlignedBB(px - 0.3, py, pz - 0.3, px + 0.3, py + 1.8, pz + 0.3);
+    }
+    searchBox = searchBox.addCoord(lookVec.x * reachDist, lookVec.y * reachDist, lookVec.z * reachDist).expand(1.0, 1.0, 1.0);
+
+    jobject searchBoxObj = nullptr;
+    if (g_axisAlignedBBClass && g_aabbCtor) {
+        searchBoxObj = env->NewObject(g_axisAlignedBBClass, g_aabbCtor,
+            searchBox.minX, searchBox.minY, searchBox.minZ,
+            searchBox.maxX, searchBox.maxY, searchBox.maxZ);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); searchBoxObj = nullptr; }
     }
 
-    double eyeX = px;
-    double eyeY = py + 1.62;
-    double eyeZ = pz;
-
-    double sampleReach = g_reachCurrentClickRange;
+    jobject entityList = nullptr;
+    if (searchBoxObj && g_getEntitiesWithinAABBExcludingEntityMethod) {
+        entityList = env->CallObjectMethod(world, g_getEntitiesWithinAABBExcludingEntityMethod, viewEntity, searchBoxObj);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); entityList = nullptr; }
+        env->DeleteLocalRef(searchBoxObj);
+    }
 
     jobject bestEntity = nullptr;
-    double bestDistSq = sampleReach * sampleReach;
-    double bestPerpSq = 1e18;
-    double bestForward = 1e18;
+    reach::Vec3 bestHitVec;
+    bool hasBestHitVec = false;
+    double d4 = d3;
 
-    for (int i = 0; i < size; i++) {
-        jobject entity = env->CallObjectMethod(list, g_listGetMethod, i);
-        if (env->ExceptionCheck()) {
-            env->ExceptionClear();
-            break;
-        }
+    jobject ridingEntity = nullptr;
+    if (g_ridingEntityField) {
+        ridingEntity = env->GetObjectField(viewEntity, g_ridingEntityField);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); ridingEntity = nullptr; }
+    }
+
+    int listSize = (entityList && g_listSizeMethod) ? env->CallIntMethod(entityList, g_listSizeMethod) : 0;
+    if (env->ExceptionCheck()) { env->ExceptionClear(); listSize = 0; }
+
+    playerY = env->GetDoubleField(viewEntity, g_posYField);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+
+    for (int i = 0; i < listSize && g_listGetMethod; ++i) {
+        jobject entity = env->CallObjectMethod(entityList, g_listGetMethod, i);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); break; }
         if (!entity) continue;
-        if (env->IsSameObject(entity, player)) {
+
+        if (env->IsSameObject(entity, viewEntity)) {
             env->DeleteLocalRef(entity);
             continue;
         }
 
-        std::string stableName = GetStablePlayerName(env, entity);
-        if (stableName.empty()) {
-            env->DeleteLocalRef(entity);
-            continue;
-        }
-
-        double ex = env->GetDoubleField(entity, g_posXField);
-        double ey = env->GetDoubleField(entity, g_posYField);
-        double ez = env->GetDoubleField(entity, g_posZField);
-        if (env->ExceptionCheck()) {
-            env->ExceptionClear();
-            env->DeleteLocalRef(entity);
-            continue;
-        }
-
-        double targetX = ex;
-        double targetY = ey + 1.62;
-        double targetZ = ez;
-
-        double dx = targetX - eyeX;
-        double dy = targetY - eyeY;
-        double dz = targetZ - eyeZ;
-        double distSq = dx * dx + dy * dy + dz * dz;
-
-        bool candidate = false;
-        double candidatePerpSq = 0.0;
-        double candidateForward = 0.0;
-
-        if (haveViewAngles) {
-            candidateForward = dx * lookX + dy * lookY + dz * lookZ;
-            if (candidateForward > 0.0 && candidateForward <= sampleReach) {
-                candidatePerpSq = distSq - (candidateForward * candidateForward);
-                if (candidatePerpSq < 0.0) candidatePerpSq = 0.0;
-
-                // Approximates a permissive hit cylinder around the crosshair ray.
-                // This keeps targeting intuitive while still requiring aim direction.
-                double maxPerp = 0.95;
-                if (candidatePerpSq <= (maxPerp * maxPerp)) {
-                    candidate = true;
-                }
-            }
-        } else {
-            if (distSq <= (sampleReach * sampleReach)) {
-                candidate = true;
-            }
-        }
-
-        if (candidate) {
-            bool better = false;
-            if (haveViewAngles) {
-                if (candidatePerpSq + 1e-6 < bestPerpSq) {
-                    better = true;
-                } else if (std::abs(candidatePerpSq - bestPerpSq) <= 1e-6 && candidateForward < bestForward) {
-                    better = true;
-                }
-            } else if (distSq <= bestDistSq) {
-                better = true;
-            }
-
-            if (better) {
-                if (bestEntity) env->DeleteLocalRef(bestEntity);
-                bestEntity = entity;
-                bestDistSq = distSq;
-                bestPerpSq = candidatePerpSq;
-                bestForward = candidateForward;
+        if (g_canBeCollidedWithMethod) {
+            jboolean canCollide = env->CallBooleanMethod(entity, g_canBeCollidedWithMethod);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); canCollide = JNI_FALSE; }
+            if (!canCollide) {
+                env->DeleteLocalRef(entity);
                 continue;
             }
         }
 
-        if (!haveViewAngles && distSq <= bestDistSq) {
-            if (bestEntity) env->DeleteLocalRef(bestEntity);
-            bestEntity = entity;
-            bestDistSq = distSq;
+        if (settings.verticalCheck) {
+            double entityY = env->GetDoubleField(entity, g_posYField);
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            if (std::abs(entityY - playerY) > 0.2) {
+                env->DeleteLocalRef(entity);
+                continue;
+            }
+        }
+
+        float borderSize = 0.0f;
+        if (g_getCollisionBorderSizeMethod) {
+            borderSize = env->CallFloatMethod(entity, g_getCollisionBorderSizeMethod);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); borderSize = 0.0f; }
+        }
+
+        reach::AxisAlignedBB entityAABB;
+        bool haveEntityAABB = false;
+        if (g_getEntityBoundingBoxMethod && g_aabbMinX && g_aabbMinY && g_aabbMinZ && g_aabbMaxX && g_aabbMaxY && g_aabbMaxZ) {
+            jobject bb = env->CallObjectMethod(entity, g_getEntityBoundingBoxMethod);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); bb = nullptr; }
+            if (bb) {
+                entityAABB.minX = env->GetDoubleField(bb, g_aabbMinX);
+                entityAABB.minY = env->GetDoubleField(bb, g_aabbMinY);
+                entityAABB.minZ = env->GetDoubleField(bb, g_aabbMinZ);
+                entityAABB.maxX = env->GetDoubleField(bb, g_aabbMaxX);
+                entityAABB.maxY = env->GetDoubleField(bb, g_aabbMaxY);
+                entityAABB.maxZ = env->GetDoubleField(bb, g_aabbMaxZ);
+                if (!env->ExceptionCheck()) haveEntityAABB = true;
+                else env->ExceptionClear();
+                env->DeleteLocalRef(bb);
+            }
+        }
+        if (!haveEntityAABB) {
+            double ex = env->GetDoubleField(entity, g_posXField);
+            double ey = env->GetDoubleField(entity, g_posYField);
+            double ez = env->GetDoubleField(entity, g_posZField);
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            entityAABB = reach::AxisAlignedBB(ex - 0.3, ey, ez - 0.3, ex + 0.3, ey + 1.8, ez + 0.3);
+        }
+        entityAABB = entityAABB.expand((double)borderSize, (double)borderSize, (double)borderSize);
+
+        reach::Vec3 intercept;
+        bool hasIntercept = entityAABB.calculateIntercept(eyePos, reachEnd, intercept);
+
+        if (entityAABB.isVecInside(eyePos)) {
+            if (0.0 < d4 || d4 == 0.0) {
+                if (bestEntity) env->DeleteLocalRef(bestEntity);
+                bestEntity = entity;
+                bestHitVec = hasIntercept ? intercept : eyePos;
+                hasBestHitVec = true;
+                d4 = 0.0;
+                continue;
+            }
+            env->DeleteLocalRef(entity);
             continue;
+        }
+
+        if (hasIntercept) {
+            double d5 = eyePos.distanceTo(intercept);
+            if (d5 < d4 || d4 == 0.0) {
+                bool isRiding = ridingEntity && env->IsSameObject(entity, ridingEntity);
+                bool canInteract = false;
+                if (isRiding && g_canRiderInteractMethod) {
+                    canInteract = (env->CallBooleanMethod(entity, g_canRiderInteractMethod) == JNI_TRUE);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); canInteract = false; }
+                }
+                if (isRiding && !canInteract) {
+                    if (d4 == 0.0) {
+                        if (bestEntity) env->DeleteLocalRef(bestEntity);
+                        bestEntity = entity;
+                        bestHitVec = intercept;
+                        hasBestHitVec = true;
+                        continue;
+                    }
+                } else {
+                    if (bestEntity) env->DeleteLocalRef(bestEntity);
+                    bestEntity = entity;
+                    bestHitVec = intercept;
+                    hasBestHitVec = true;
+                    d4 = d5;
+                    continue;
+                }
+            }
         }
 
         env->DeleteLocalRef(entity);
     }
 
-    if (bestEntity) {
-        if (g_reachCurrentTarget) {
-            env->DeleteGlobalRef(g_reachCurrentTarget);
-            g_reachCurrentTarget = nullptr;
-        }
-        g_reachCurrentTarget = env->NewGlobalRef(bestEntity);
-
+    if (bestEntity && (d4 < d3 || !rayTraceResult)) {
         jobject mop = nullptr;
-        if (g_mopCtorNeedsVec3) {
-            if (g_vec3Class && g_vec3Ctor) {
-                double ex = env->GetDoubleField(bestEntity, g_posXField);
-                double ey = env->GetDoubleField(bestEntity, g_posYField);
-                double ez = env->GetDoubleField(bestEntity, g_posZField);
-                if (!env->ExceptionCheck()) {
-                    jobject vec = env->NewObject(g_vec3Class, g_vec3Ctor, ex, ey + 1.62, ez);
-                    if (!env->ExceptionCheck() && vec) {
-                        mop = env->NewObject(g_movingObjectPositionClass, g_mopEntityCtor, bestEntity, vec);
-                        env->DeleteLocalRef(vec);
-                    } else if (env->ExceptionCheck()) {
-                        env->ExceptionClear();
-                    }
-                } else {
-                    env->ExceptionClear();
-                }
-            }
-            if (!mop && !env->ExceptionCheck()) {
-                // Fallback: entity-only ctor may still exist on some forks.
-                jobject fallback = env->NewObject(g_movingObjectPositionClass, g_mopEntityCtor, bestEntity);
-                if (!env->ExceptionCheck() && fallback) {
-                    mop = fallback;
-                } else if (env->ExceptionCheck()) {
-                    env->ExceptionClear();
-                }
-            }
-        } else {
+        jobject vecObj = nullptr;
+        if (g_vec3Class && g_vec3Ctor && hasBestHitVec) {
+            vecObj = env->NewObject(g_vec3Class, g_vec3Ctor, bestHitVec.x, bestHitVec.y, bestHitVec.z);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); vecObj = nullptr; }
+        }
+        if (g_mopEntityVecCtor && vecObj) {
+            mop = env->NewObject(g_movingObjectPositionClass, g_mopEntityVecCtor, bestEntity, vecObj);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); mop = nullptr; }
+        }
+        if (!mop && g_mopEntityCtor) {
             mop = env->NewObject(g_movingObjectPositionClass, g_mopEntityCtor, bestEntity);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); mop = nullptr; }
         }
 
-        bool pointedPatched = false;
+        if (mop) {
+            if (vecObj && g_mopHitVecField) {
+                env->SetObjectField(mop, g_mopHitVecField, vecObj);
+                if (env->ExceptionCheck()) env->ExceptionClear();
+            }
+            if (g_typeOfHitField && g_mopEntityTypeConst) {
+                env->SetObjectField(mop, g_typeOfHitField, g_mopEntityTypeConst);
+                if (env->ExceptionCheck()) env->ExceptionClear();
+            }
+            if (g_entityHitField) {
+                env->SetObjectField(mop, g_entityHitField, bestEntity);
+                if (env->ExceptionCheck()) env->ExceptionClear();
+            }
+            if (g_objectMouseOverField) {
+                env->SetObjectField(g_mcInstance, g_objectMouseOverField, mop);
+                if (env->ExceptionCheck()) env->ExceptionClear();
+            }
+            env->DeleteLocalRef(mop);
+        }
+        if (vecObj) env->DeleteLocalRef(vecObj);
+
+        if (entityRenderer && g_entityRendererPointedEntityField) {
+            env->SetObjectField(entityRenderer, g_entityRendererPointedEntityField, bestEntity);
+            if (env->ExceptionCheck()) env->ExceptionClear();
+        }
         if (g_pointedEntityField) {
             env->SetObjectField(g_mcInstance, g_pointedEntityField, bestEntity);
-            if (!env->ExceptionCheck()) {
-                pointedPatched = true;
-            } else {
-                env->ExceptionClear();
-            }
-        }
-
-        if (!mop && !env->ExceptionCheck() && g_objectMouseOverField) {
-            jobject curMop = env->GetObjectField(g_mcInstance, g_objectMouseOverField);
-            if (!env->ExceptionCheck() && curMop) {
-                if (g_entityHitField) {
-                    env->SetObjectField(curMop, g_entityHitField, bestEntity);
-                    if (!env->ExceptionCheck()) {
-                        if (g_typeOfHitField && g_mopEntityTypeConst) {
-                            env->SetObjectField(curMop, g_typeOfHitField, g_mopEntityTypeConst);
-                            if (env->ExceptionCheck()) env->ExceptionClear();
-                        }
-                        env->SetObjectField(g_mcInstance, g_objectMouseOverField, curMop);
-                        maybeLogReach(std::string("applied (entityHit patch") + (pointedPatched ? "+pointedEntity" : "") + ") range=" + std::to_string(sampleReach) + " dist=" + std::to_string(std::sqrt(bestDistSq)));
-                    } else {
-                        env->ExceptionClear();
-                    }
-                } else {
-                    maybeLogReach("entityHit field unresolved");
-                }
-                env->DeleteLocalRef(curMop);
-            } else if (env->ExceptionCheck()) {
-                env->ExceptionClear();
-            }
-        }
-
-        if (!env->ExceptionCheck() && mop) {
-            env->SetObjectField(g_mcInstance, g_objectMouseOverField, mop);
             if (env->ExceptionCheck()) env->ExceptionClear();
-            env->DeleteLocalRef(mop);
-            maybeLogReach(std::string("applied (mop") + (pointedPatched ? "+pointedEntity" : "") + ") range=" + std::to_string(sampleReach) + " dist=" + std::to_string(std::sqrt(bestDistSq)));
-        } else if (env->ExceptionCheck()) {
-            env->ExceptionClear();
-            maybeLogReach("failed to build/apply MOP");
-        } else if (pointedPatched) {
-            maybeLogReach(std::string("applied (pointedEntity only) range=") + std::to_string(sampleReach) + " dist=" + std::to_string(std::sqrt(bestDistSq)));
         }
-        env->DeleteLocalRef(bestEntity);
-    } else {
-        if (g_reachCurrentTarget) {
-            env->DeleteGlobalRef(g_reachCurrentTarget);
-            g_reachCurrentTarget = nullptr;
-        }
-        maybeLogReach(std::string("no target in range=") + std::to_string(sampleReach));
     }
 
-    env->DeleteLocalRef(list);
-    env->DeleteLocalRef(world);
+    if (bestEntity) env->DeleteLocalRef(bestEntity);
+    if (ridingEntity) env->DeleteLocalRef(ridingEntity);
+    if (entityList) env->DeleteLocalRef(entityList);
+    if (entityRenderer) env->DeleteLocalRef(entityRenderer);
+    if (rayTraceResult) env->DeleteLocalRef(rayTraceResult);
+    if (playerController) env->DeleteLocalRef(playerController);
+    if (world) env->DeleteLocalRef(world);
+    if (viewEntity && !env->IsSameObject(viewEntity, player)) env->DeleteLocalRef(viewEntity);
     env->DeleteLocalRef(player);
+
+    env->PopLocalFrame(nullptr);
+    InterlockedExchange(&g_reachInExecution, 0);
+}
+
+static void TickReach(JNIEnv* env, const Config& cfg, const GameState& state) {
+    if (!env || !cfg.reachEnabled) {
+        g_reachEngine.Reset();
+        return;
+    }
+    if (!EnsureReachMappings(env)) return;
+    if (!state.mapped || state.guiOpen) return;
+
+    int targetId = 0;
+    if (g_pointedEntityField) {
+        jobject pe = env->GetObjectField(g_mcInstance, g_pointedEntityField);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); pe = nullptr; }
+        if (pe) {
+            if (g_getEntityIdMethod) {
+                targetId = env->CallIntMethod(pe, g_getEntityIdMethod);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); targetId = 0; }
+            }
+            env->DeleteLocalRef(pe);
+        }
+    }
+    if (targetId == 0 && g_objectMouseOverField && g_entityHitField) {
+        jobject mop = env->GetObjectField(g_mcInstance, g_objectMouseOverField);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); mop = nullptr; }
+        if (mop) {
+            jobject hitEnt = env->GetObjectField(mop, g_entityHitField);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); hitEnt = nullptr; }
+            if (hitEnt) {
+                if (g_getEntityIdMethod) {
+                    targetId = env->CallIntMethod(hitEnt, g_getEntityIdMethod);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); targetId = 0; }
+                }
+                env->DeleteLocalRef(hitEnt);
+            }
+            env->DeleteLocalRef(mop);
+        }
+    }
+
+    bool isSprinting = false;
+    bool inWater = false;
+    bool inLava = false;
+    if (g_thePlayerField) {
+        jobject player = env->GetObjectField(g_mcInstance, g_thePlayerField);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); player = nullptr; }
+        if (player) {
+            if (g_isSprintingMethod) isSprinting = (env->CallBooleanMethod(player, g_isSprintingMethod) == JNI_TRUE);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); isSprinting = false; }
+            if (g_isInWaterMethod) inWater = (env->CallBooleanMethod(player, g_isInWaterMethod) == JNI_TRUE);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); inWater = false; }
+            if (g_handleLavaMovementMethod) inLava = (env->CallBooleanMethod(player, g_handleLavaMovementMethod) == JNI_TRUE);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); inLava = false; }
+            env->DeleteLocalRef(player);
+        }
+    }
+
+    reach::ReachSettings settings;
+    settings.enabled = cfg.reachEnabled;
+    settings.minRange = cfg.reachMin;
+    settings.maxRange = cfg.reachMax;
+    settings.chance = cfg.reachChance;
+    settings.chanceMode = cfg.reachChanceMode;
+    settings.onlyWhileSprinting = cfg.reachOnlyWhileSprinting;
+    settings.disableInWater = cfg.reachDisableInWater;
+    settings.verticalCheck = cfg.reachVerticalCheck;
+
+    bool isAllowed = reach::IsReachAllowed(settings, isSprinting, inWater || inLava);
+    g_reachEngine.OnTick(isAllowed, settings.chance, targetId);
+}
+
+static void ShutdownReach(JNIEnv* env) {
+    LONG token = InterlockedExchange(&g_reachClassHookToken, 0);
+    if (token > 0) {
+        lc::UnregisterClassFileLoadHook((int)token);
+    }
+    InterlockedExchange(&g_reachRetransformArmed, 0);
+    if (g_reachHookedGetMouseOver) {
+        lc::SharedJvmtiClearBreakpoint(g_reachHookedGetMouseOver, 0);
+        for (int i = 0; i < g_reachReturnSiteCount; ++i) {
+            lc::SharedJvmtiClearBreakpoint(g_reachHookedGetMouseOver, g_reachReturnSites[i]);
+        }
+        g_reachHookedGetMouseOver = nullptr;
+        g_reachReturnSiteCount = 0;
+    }
+    InterlockedExchange(&g_reachJvmtiArmed, 0);
+    g_reachEngine.Reset();
+    if (env) {
+        if (g_reachHelperClass) { env->DeleteGlobalRef(g_reachHelperClass); g_reachHelperClass = nullptr; }
+        if (g_entityRendererClass) { env->DeleteGlobalRef(g_entityRendererClass); g_entityRendererClass = nullptr; }
+        if (g_playerControllerClass) { env->DeleteGlobalRef(g_playerControllerClass); g_playerControllerClass = nullptr; }
+        if (g_axisAlignedBBClass) { env->DeleteGlobalRef(g_axisAlignedBBClass); g_axisAlignedBBClass = nullptr; }
+    }
 }
 
 static jobject GetSneakKeyBinding(JNIEnv* env) {
@@ -7918,7 +9131,7 @@ static bool HasPhysicalChestNearPlayer(JNIEnv* env, jobject player) {
     return found;
 }
 
-static std::string BuildChestStealerStateJson(JNIEnv* env, bool enabled, bool menuCheck) {
+static std::string BuildChestStealerStateJson(JNIEnv* env, bool enabled, bool titleCheck, bool customItemsCheck, bool physicalCheck) {
     if (!enabled || !env || !g_mcInstance || !g_currentScreenField || !g_thePlayerField) return "null";
 
     if (env->PushLocalFrame(128) < 0) {
@@ -7961,7 +9174,7 @@ static std::string BuildChestStealerStateJson(JNIEnv* env, bool enabled, bool me
     std::string title = GetLegacyChestScreenTitle(env, currentScreen);
     std::string titleLower = ChestStealerLower(title);
     bool titleIsMenu = false;
-    if (!titleLower.empty()) {
+    if (titleCheck && !titleLower.empty()) {
         if (titleLower.find("shop") != std::string::npos ||
             titleLower.find("selector") != std::string::npos ||
             titleLower.find("upgrade") != std::string::npos ||
@@ -8038,14 +9251,16 @@ static std::string BuildChestStealerStateJson(JNIEnv* env, bool enabled, bool me
         env->DeleteLocalRef(slot);
     }
 
-    bool itemsAreMenu = (count > 0) && (((float)customItemCount / (float)count) > 0.5f);
-    bool isMenu = titleIsMenu || itemsAreMenu;
+    bool itemsAreMenu = customItemsCheck && (count > 0) && (((float)customItemCount / (float)count) > 0.5f);
     bool physicalNearby = HasPhysicalChestNearPlayer(env, player);
-    bool physical = !isMenu && physicalNearby;
+    bool physicalCheckFailed = physicalCheck && !physicalNearby;
 
-    if (menuCheck && (!physical || isMenu)) {
+    bool blocked = titleIsMenu || itemsAreMenu || physicalCheckFailed;
+    bool physical = !blocked;
+
+    if (blocked) {
         if (title.empty()) title = "unknown";
-        LogChestStealerSkippedMenu(title + (isMenu ? (titleIsMenu ? " [menu-title]" : " [custom-items]") : " [no-chest-nearby]"));
+        LogChestStealerSkippedMenu(title + (titleIsMenu ? " [menu-title]" : (itemsAreMenu ? " [custom-items]" : " [no-chest-nearby]")));
         std::ostringstream skipped;
         skipped << "{\"ready\":false,\"physical\":false,\"windowId\":" << windowId
                 << ",\"screenWidth\":" << screenWidth
@@ -8387,7 +9602,7 @@ static void UpdateChestStealer(JNIEnv* env, const Config& cfg) {
     std::string title = GetLegacyChestScreenTitle(env, currentScreen);
     std::string titleLower = ChestStealerLower(title);
     bool titleIsMenu = false;
-    if (!titleLower.empty()) {
+    if (cfg.chestStealerTitleCheck && !titleLower.empty()) {
         if (titleLower.find("shop") != std::string::npos ||
             titleLower.find("selector") != std::string::npos ||
             titleLower.find("upgrade") != std::string::npos ||
@@ -8404,7 +9619,8 @@ static void UpdateChestStealer(JNIEnv* env, const Config& cfg) {
         }
     }
 
-    if (cfg.chestStealerMenuCheck && (titleIsMenu || !HasPhysicalChestNearPlayer(env, player))) {
+    bool physicalCheckFailed = cfg.chestStealerPhysicalCheck && !HasPhysicalChestNearPlayer(env, player);
+    if (titleIsMenu || physicalCheckFailed) {
         if (title.empty()) title = "unknown";
         LogChestStealerSkippedMenu(title + (titleIsMenu ? " [menu-title]" : " [no-chest-nearby]"));
         g_chestStealerWindowId = windowId;
@@ -8486,7 +9702,7 @@ static void UpdateChestStealer(JNIEnv* env, const Config& cfg) {
             env->DeleteLocalRef(slot);
         }
 
-        if (cfg.chestStealerMenuCheck && totalItemCount > 0 && (((float)customItemCount / (float)totalItemCount) > 0.5f)) {
+        if (cfg.chestStealerCustomItemsCheck && totalItemCount > 0 && (((float)customItemCount / (float)totalItemCount) > 0.5f)) {
             if (title.empty()) title = "unknown";
             LogChestStealerSkippedMenu(title + " [custom-items]");
             g_chestStealerWindowCompleted = true;
@@ -9446,13 +10662,17 @@ GameState ReadGameState(JNIEnv* env) {
     bool gtbHelperEnabled = false;
     bool shouldCheckHoldingBlock = false;
     bool chestStealerEnabled = false;
-    bool chestStealerMenuCheck = true;
+    bool chestStealerTitleCheck = true;
+    bool chestStealerCustomItemsCheck = true;
+    bool chestStealerPhysicalCheck = true;
     bool refillEnabled = false;
     {
         LockGuard lk(g_configMutex);
         gtbHelperEnabled = g_config.gtbHelper;
         chestStealerEnabled = g_config.chestStealer;
-        chestStealerMenuCheck = g_config.chestStealerMenuCheck;
+        chestStealerTitleCheck = g_config.chestStealerTitleCheck;
+        chestStealerCustomItemsCheck = g_config.chestStealerCustomItemsCheck;
+        chestStealerPhysicalCheck = g_config.chestStealerPhysicalCheck;
         refillEnabled = g_config.refill;
         shouldCheckHoldingBlock =
             (g_config.rightClick && g_config.rightBlockOnly) ||
@@ -9629,7 +10849,7 @@ GameState ReadGameState(JNIEnv* env) {
     s.attackCooldown = 1.0f;
     s.attackCooldownPerTick = 0.08f;
     s.stateMs = (unsigned long long)GetTickCount64();
-    s.chestStealerStateJson = BuildChestStealerStateJson(env, chestStealerEnabled, chestStealerMenuCheck);
+    s.chestStealerStateJson = BuildChestStealerStateJson(env, chestStealerEnabled, chestStealerTitleCheck, chestStealerCustomItemsCheck, chestStealerPhysicalCheck);
     s.refillStateJson = BuildRefillStateJson(env, refillEnabled);
     { LockGuard lk(g_killAuraUnavailableMutex);
         s.killAuraUnavailableReason = g_killAuraUnavailableReason;
@@ -9921,6 +11141,8 @@ extern "C" __declspec(dllexport) void Detach() {
         }
         lc::ShutdownNickHiderJvmti(env);
         ka_premotion::Shutdown(env);
+        ShutdownReach(env);
+        ResetLegacyNametagSuppressionState(env, "detach");
         if (attached && g_jvm) g_jvm->DetachCurrentThread();
         if (!CleanupImGuiAndHooks()) {
             InterlockedExchange(&g_legacyDetachRequested, 0);
@@ -12251,7 +13473,7 @@ static void UpdatePlayerListOverlayLegacy(JNIEnv* env, const Config& config) {
     jobject world = env->GetObjectField(g_mcInstance, g_theWorldField);
     if (!world) {
         if (fightStatusEnabled) ResetFightStatusState18();
-        if (g_legacyNametagSuppressionActive || !g_hiddenNametagOriginalTeamByPlayerLegacy.empty() || g_lastLegacyNametagSuppressionWorld) {
+        if (g_legacyNametagSuppressionActive || !g_modifiedTeamVisibilityLegacy.empty() || !g_lcHideTagsMembersLegacy.empty() || g_lastLegacyNametagSuppressionWorld) {
             ResetLegacyNametagSuppressionState(env, "world-null");
         }
         ClearLegacyOverlayPlayers();
@@ -12468,6 +13690,7 @@ static void UpdatePlayerListOverlayLegacy(JNIEnv* env, const Config& config) {
         }
 
         OverlayPlayer18 rec;
+        rec.rawName = stableName;
         rec.displayName = displayName;
         rec.heldText = heldText;
         rec.iX = iX; rec.iY = iY; rec.iZ = iZ;
@@ -13876,28 +15099,7 @@ LRESULT CALLBACK HookedWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam
     }
 
     if (msg == WM_LBUTTONDOWN || rawInputClickEdge) {
-        Config cfgSnapshot;
-        {
-            LockGuard hudLock(g_hudEditorMutex);
-            LockGuard lk(g_configMutex);
-            cfgSnapshot = g_config;
-        }
-
-        if (cfgSnapshot.reachEnabled) {
-            GameState stateSnapshot;
-            {
-                LockGuard lk(g_stateMutex);
-                stateSnapshot = g_gameState;
-            }
-
-            JNIEnv* env = JniEnv::Get(g_jvm);
-            if (env) {
-                TryLockGuard jniTry(g_stateJniMutex);
-                if (jniTry.owns_lock()) {
-                    UpdateReach(env, cfgSnapshot, stateSnapshot, true);
-                }
-            }
-        }
+        g_reachEngine.OnAttack();
     }
 
     return CallWindowProcA(g_origWndProc, hwnd, msg, wParam, lParam);
@@ -13999,13 +15201,21 @@ static void ApplyLegacyNametagSuppressionOnClientThread(JNIEnv* env, const Confi
                 RestoreLegacyVanillaNametagSuppression(env, restoreScoreboard);
                 env->DeleteLocalRef(restoreScoreboard);
             } else {
-                g_hiddenNametagOriginalTeamByPlayerLegacy.clear();
+                ResetLegacyNametagSuppressionState(env, "restore-scoreboard-null");
             }
             g_legacyNametagSuppressionActive = false;
         }
         env->DeleteLocalRef(world);
         return;
     }
+
+    static DWORD lastSuppressionMs = 0;
+    DWORD now = GetTickCount();
+    if (g_legacyNametagSuppressionActive && (now - lastSuppressionMs < 50)) {
+        env->DeleteLocalRef(world);
+        return;
+    }
+    lastSuppressionMs = now;
 
     if (!EnsureLegacyNametagTeamMappings(env, world)) {
         env->DeleteLocalRef(world);
@@ -14019,9 +15229,10 @@ static void ApplyLegacyNametagSuppressionOnClientThread(JNIEnv* env, const Confi
         players = g_overlayPlayers18;
     }
     bool applied = false;
-    if (scoreboard && hideTeam) {
+    if (scoreboard) {
         for (size_t i = 0; i < players.size(); ++i) {
-            if (ApplyLegacyVanillaNametagSuppression(env, scoreboard, hideTeam, players[i].displayName))
+            const std::string& targetName = players[i].rawName.empty() ? players[i].displayName : players[i].rawName;
+            if (ApplyLegacyVanillaNametagSuppression(env, scoreboard, hideTeam, targetName))
                 applied = true;
         }
     }
@@ -14035,6 +15246,11 @@ static void ApplyLegacyClientThreadOnlyJni(JNIEnv* env, const Config& cfg) {
     if (!env) return;
     ApplyLegacyNickHiderFallback(env, cfg);
     ApplyLegacyNametagSuppressionOnClientThread(env, cfg);
+    if (cfg.reachEnabled &&
+        InterlockedCompareExchange(&g_reachRetransformArmed, 0, 0) == 0 &&
+        InterlockedCompareExchange(&g_reachJvmtiArmed, 0, 0) == 0) {
+        ExecuteReach(env);
+    }
 }
 
 // ===================== SWAPBUFFERS HOOK =====================
@@ -14668,7 +15884,11 @@ void ParseConfig(const std::string& line) {
         if (chestStealerDelayMs < 50) chestStealerDelayMs = g_config.chestStealerDelayMs;
         if (chestStealerDelayMs > 500) chestStealerDelayMs = 500;
         g_config.chestStealerDelayMs = chestStealerDelayMs;
-        g_config.chestStealerMenuCheck = reader.GetBool("chestStealerMenuCheck", true);
+        bool legacyMenuCheck = reader.GetBool("chestStealerMenuCheck", true);
+        g_config.chestStealerTitleCheck = reader.GetBool("chestStealerTitleCheck", legacyMenuCheck);
+        g_config.chestStealerCustomItemsCheck = reader.GetBool("chestStealerCustomItemsCheck", legacyMenuCheck);
+        g_config.chestStealerPhysicalCheck = reader.GetBool("chestStealerPhysicalCheck", legacyMenuCheck);
+        g_config.chestStealerMenuCheck = g_config.chestStealerTitleCheck || g_config.chestStealerCustomItemsCheck || g_config.chestStealerPhysicalCheck;
 
         std::string gtbHint = reader.GetString("gtbHint");
         int gtbCount = reader.GetInt("gtbCount", g_config.gtbCount);
@@ -14684,11 +15904,21 @@ void ParseConfig(const std::string& line) {
         if (reachMax < reachMin) reachMax = reachMin;
         g_config.reachMin = reachMin;
         g_config.reachMax = reachMax;
+        g_config.reachChanceMode = reader.GetInt("reachChanceMode", g_config.reachChanceMode);
+        g_config.reachOnlyWhileSprinting = reader.GetBool("reachOnlyWhileSprinting", g_config.reachOnlyWhileSprinting);
+        g_config.reachDisableInWater = reader.GetBool("reachDisableInWater", g_config.reachDisableInWater);
+        g_config.reachVerticalCheck = reader.GetBool("reachVerticalCheck", g_config.reachVerticalCheck);
 
         static bool lastNametagsLogged = false;
         if (g_config.nametags != lastNametagsLogged) {
             lastNametagsLogged = g_config.nametags;
             Log(std::string("Config: nametags=") + (g_config.nametags ? "true" : "false"));
+        }
+
+        static bool lastHideVanillaLogged = false;
+        if (g_config.nametagHideVanilla != lastHideVanillaLogged) {
+            lastHideVanillaLogged = g_config.nametagHideVanilla;
+            Log(std::string("Config: nametagHideVanilla=") + (g_config.nametagHideVanilla ? "true" : "false"));
         }
 
         static bool loggedExtendedFields = false;
@@ -14797,8 +16027,11 @@ static int SendJsonLine(SOCKET sock, const std::string& line) {
         fd_set writable;
         FD_ZERO(&writable);
         FD_SET(sock, &writable);
-        timeval wait = { 0, 5000 };
-        if (select(0, nullptr, &writable, nullptr, &wait) <= 0) return -1;
+        timeval wait = { 0, 500000 };
+        if (select(0, nullptr, &writable, nullptr, &wait) <= 0) {
+            if (offset == 0) return 0;
+            return -1;
+        }
     }
     return 1;
 }
@@ -14915,8 +16148,7 @@ void ServerLoop() {
                 lc::IsTelemetryIntervalDue(nowMs, lastAutoToolMs, lc::kAutoToolIntervalMs);
             const bool hitDelayDue = cfgSnapshot.hitDelayFixEnabled &&
                 lc::IsTelemetryIntervalDue(nowMs, lastHitDelayMs, lc::kHitDelayFixIntervalMs);
-            const bool reachEnabled =
-                cfgSnapshot.reachEnabled || g_reachAllowCurrentClick || g_reachClickPrevDown;
+            const bool reachEnabled = cfgSnapshot.reachEnabled;
             const bool reachDue = reachEnabled &&
                 lc::IsTelemetryIntervalDue(nowMs, lastReachMs, lc::kReachIntervalMs);
             const bool velocityEnabled = cfgSnapshot.velocityEnabled || g_lastHurtTime > 0;
@@ -14980,7 +16212,7 @@ void ServerLoop() {
                     lastSpeedBridgeMs = nowMs;
                 }
                 if (reachDue) {
-                    UpdateReach(env, cfgSnapshot, state);
+                    TickReach(env, cfgSnapshot, state);
                     lastReachMs = nowMs;
                 }
                 if (velocityDue) {
@@ -15011,13 +16243,7 @@ void ServerLoop() {
             }
             RecordNativePerfSince(lc::PERF_SCAN_LOOP, stateScanPerfStarted);
             if (!cfgSnapshot.reachEnabled) {
-                g_reachAllowCurrentClick = false;
-                g_reachCurrentClickRange = 3.0;
-                if (g_reachCurrentTarget) {
-                    LockGuard jniLk(g_stateJniMutex);
-                    env->DeleteGlobalRef(g_reachCurrentTarget);
-                    g_reachCurrentTarget = nullptr;
-                }
+                g_reachEngine.Reset();
             }
             if (!cfgSnapshot.velocityEnabled) {
                 g_lastHurtTime = 0;
@@ -15189,6 +16415,7 @@ void ServerLoop() {
         if (antiDebuffSafeToUnload) {
             lc::ShutdownNickHiderJvmti(env);
             ka_premotion::Shutdown(env);
+            ShutdownReach(env);
         } else {
             Log("AntiDebuff teardown incomplete; shared JVMTI host remains loaded for a safe detach retry.");
         }
@@ -15209,7 +16436,7 @@ void ServerLoop() {
 
 // ===================== MAIN THREAD & DLLMAIN =====================
 DWORD WINAPI MainThread(LPVOID lpParam) {
-    Log("MainThread started | build 2026-03-29 14:40 reach-clickedge-wndproc");
+    Log("MainThread started | build 2026-09-09 13:45 reach-retransform-armguard");
     HMODULE hJvm = GetModuleHandleA("jvm.dll");
     if (!hJvm) { Log("ERROR: jvm.dll not found"); return 0; }
     typedef jint(JNICALL* FnGetVMs)(JavaVM**, jsize, jsize*);

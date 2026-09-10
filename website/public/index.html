@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="description" content="aoko client is an open-source utility client and external overlay for Lunar Client and standalone Minecraft instances (1.8.9 Forge, modern Fabric)." />
+  <meta name="description" content="aoko client is an open-source utility client and external overlay for Lunar Client and Forge/Fabric Minecraft instances (1.8.9 Forge, modern Fabric)." />
   <meta name="robots" content="index,follow" />
   <meta name="theme-color" content="#07131d" />
 
@@ -15,7 +15,7 @@
   <link rel="manifest" href="site.webmanifest">
   <meta property="og:type" content="website" />
   <meta property="og:site_name" content="aoko client" />
-  <meta property="og:title" content="aoko — open-source utility client for Minecraft" />
+  <meta property="og:title" content="aoko - open-source utility client for Minecraft" />
   <meta property="og:description" content="Supports Lunar Client and standalone Minecraft instances across 1.8.9 (Forge), 1.21.x, 26.1, and 26.2 (Fabric)." />
   <meta property="og:url" content="https://naczo5.github.io/aoko-client/" />
   <meta property="og:image" content="https://naczo5.github.io/aoko-client/screenshots/gameplay.jpg" />
@@ -24,10 +24,10 @@
   <meta name="google-site-verification" content="ZZdr1FGTu6RYIZhQh-97Liqhwfw265ZZbpxIA8KkSCk" />
   
   <meta name="twitter:card" content="summary_large_image" />
-  <meta name="twitter:title" content="aoko — open-source utility client for Minecraft" />
+  <meta name="twitter:title" content="aoko - open-source utility client for Minecraft" />
   <meta name="twitter:description" content="Supports Lunar Client and standalone Minecraft instances across 1.8.9 (Forge), 1.21.x, 26.1, and 26.2 (Fabric)." />
   <meta name="twitter:image" content="https://naczo5.github.io/aoko-client/screenshots/gameplay.jpg" />
-  <title>aoko — open-source utility client for Minecraft (Lunar & Standalone 1.8.9, 1.21.x, 26.1, 26.2)</title>
+  <title>aoko - open-source utility client for Minecraft (Lunar & Standalone 1.8.9, 1.21.x, 26.1, 26.2)</title>
   <link rel="stylesheet" href="style.css?v=6" />
   <link rel="stylesheet" href="preview.css?v=2" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -78,7 +78,7 @@
     <div class="hero-grid">
       <div class="hero-left">
         <h1 class="hero-logo"><span>aoko</span> client</h1>
-        <p class="tagline">A free, open-source utility client and external overlay supporting <b>1.8.9</b> (Forge), <b>1.21.x</b>, <b>26.1</b>, and <b>26.2</b> (Fabric) — on both <b>Lunar Client</b> and <b>standalone Minecraft instances</b>.</p>
+        <p class="tagline">A free, open-source utility client and external overlay supporting <b>1.8.9</b> (Forge), <b>1.21.x</b>, <b>26.1</b>, and <b>26.2</b> (Fabric) - on both <b>Lunar Client</b> and <b>standalone Minecraft instances</b>.</p>
         <div class="hero-btns">
           <a href="https://github.com/naczo5/aoko-client/releases" class="btn-primary">download aoko <span aria-hidden="true">↗</span></a>
           <a href="#registry" class="btn-text">explore modules <span class="arrow">↓</span></a>
@@ -118,22 +118,32 @@
         </div>
       </div>
 
-      <!-- PREVIEW LAUNCHER -->
-      <div class="launcher" id="launcher">
+      <!-- VIDEO PREVIEW LAUNCHER -->
+      <div class="launcher launcher-video" id="launcher">
         <div class="launcher-bar">
-          <span class="launcher-dot"></span>
-          <span class="launcher-title">interactive preview</span>
-        </div>
-        <div class="launcher-screen">
-          <div class="launcher-glow" aria-hidden="true"></div>
-          <div class="launcher-copy">
-            <div class="launcher-kicker">a closer look</div>
-            <p class="launcher-lead">Explore the control surface in your browser — no download needed.</p>
+          <div class="launcher-bar-left">
+            <span class="launcher-title">video preview</span>
           </div>
-          <button type="button" class="launcher-btn" id="preview-open" aria-haspopup="dialog" aria-controls="aoko-desktop">
-            <span class="launcher-btn-icon" aria-hidden="true">▶</span> preview
+          <button type="button" class="launcher-corner-btn js-open-web-preview" title="Open interactive simulated desktop">
+            <span>web preview</span>
+            <span class="ext-arrow" aria-hidden="true">↗</span>
           </button>
-          <div class="launcher-hint">opens a simulated desktop · press esc to close</div>
+        </div>
+        <div class="launcher-video-screen" id="preview-video-trigger" role="button" tabindex="0" aria-haspopup="dialog" aria-controls="video-preview-modal" aria-label="Play showcase video">
+          <div class="launcher-video-poster">
+            <img src="screenshots/121_gui.png" alt="Aoko GUI video preview" class="launcher-poster-img" />
+            <div class="launcher-video-overlay"></div>
+          </div>
+          <div class="launcher-play-badge">
+            <span class="launcher-play-pulse"></span>
+            <span class="launcher-play-core">
+              <svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+            </span>
+          </div>
+          <div class="launcher-video-foot">
+            <span class="launcher-video-pill">0:16 tour</span>
+            <span class="launcher-video-pill">30 fps</span>
+          </div>
         </div>
       </div>
     </div>
@@ -346,7 +356,7 @@
         <ul class="req">
           <li>windows 10/11 x64</li>
           <li>lunar client or standalone minecraft (1.8.9 forge, modern fabric)</li>
-          <li>release exe is self-contained — no .net install</li>
+          <li>release exe is self-contained - no .net install</li>
           <li>mingw-w64 + jdk 17 headers (build only)</li>
         </ul>
       </div>
@@ -377,7 +387,7 @@
         <div><span>license</span><span class="v">gpl-3</span></div>
       </div>
       <a href="https://github.com/naczo5/aoko-client/releases" class="btn-primary" id="github-link">open latest releases →</a>
-      <p class="dl-note"># or build from source — see <code>README.md</code></p>
+      <p class="dl-note"># or build from source - see <code>README.md</code></p>
     </div>
   </section>
 
@@ -389,6 +399,78 @@
       <p class="footer-small">not affiliated with mojang, microsoft, or lunar client. for educational purposes only.</p>
     </div>
   </footer>
+
+  <!-- VIDEO PREVIEW MODAL -->
+  <div class="video-modal" id="video-preview-modal" role="dialog" aria-modal="true" aria-label="aoko client video preview" hidden>
+    <div class="video-modal-backdrop" id="video-modal-backdrop"></div>
+    <div class="video-modal-window">
+      <div class="video-modal-bar">
+        <div class="video-modal-title">
+          <span>aoko client · showcase tour</span>
+        </div>
+        <div class="video-modal-actions">
+          <button type="button" class="video-modal-web-btn js-open-web-preview" title="Open interactive simulated desktop">
+            <span>interactive preview</span>
+            <span class="ext-arrow" aria-hidden="true">↗</span>
+          </button>
+          <button type="button" class="video-modal-close" id="video-modal-close" aria-label="Close video preview">✕</button>
+        </div>
+      </div>
+      <div class="video-modal-body" id="video-player-container">
+        <video id="modal-showcase-video" src="screenshots/gui.mp4" playsinline loop preload="auto"></video>
+        <button type="button" class="video-center-indicator" id="video-center-play-btn" aria-label="Toggle playback">
+          <span class="video-center-icon icon-play">
+            <svg viewBox="0 0 24 24" width="36" height="36" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+          </span>
+          <span class="video-center-icon icon-pause">
+            <svg viewBox="0 0 24 24" width="36" height="36" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+          </span>
+        </button>
+        <div class="video-custom-controls" id="video-custom-controls" role="region" aria-label="Video Controls">
+          <div class="video-timeline" id="video-timeline" tabindex="0" role="slider" aria-label="Seek time" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+            <div class="video-track-bg">
+              <div class="video-track-buffered" id="video-track-buffered"></div>
+              <div class="video-track-progress" id="video-track-progress"></div>
+            </div>
+            <div class="video-track-thumb" id="video-track-thumb"></div>
+            <div class="video-time-tooltip" id="video-time-tooltip">0:00</div>
+          </div>
+          <div class="video-controls-bottom">
+            <div class="video-controls-left">
+              <button type="button" class="video-btn" id="video-ctrl-play" aria-label="Play" title="Play (Space / K)">
+                <svg class="svg-play" viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                <svg class="svg-pause" viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+              </button>
+              <div class="video-volume-group">
+                <button type="button" class="video-btn" id="video-ctrl-mute" aria-label="Mute" title="Mute (M)">
+                  <svg class="svg-vol-high" viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>
+                  <svg class="svg-vol-muted" viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/></svg>
+                </button>
+                <div class="video-volume-slider-wrap">
+                  <input type="range" class="video-volume-slider" id="video-volume-slider" min="0" max="1" step="0.05" value="1" aria-label="Volume">
+                </div>
+              </div>
+              <div class="video-time-display">
+                <span id="video-time-current">0:00</span>
+                <span class="video-time-sep">/</span>
+                <span id="video-time-duration">0:16</span>
+              </div>
+            </div>
+            <div class="video-controls-right">
+              <button type="button" class="video-btn video-btn-pill is-active" id="video-ctrl-loop" title="Toggle Loop" aria-label="Loop enabled">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z"/></svg>
+                <span>loop</span>
+              </button>
+              <button type="button" class="video-btn" id="video-ctrl-fullscreen" aria-label="Toggle Fullscreen" title="Fullscreen (F)">
+                <svg class="svg-fs-enter" viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M7 14H5v5h5v-2H7v-3zm-2-4h2V7h3V5H5v5zm12 7h-3v2h5v-5h-2v3zM14 5v2h3v3h2V5h-5z"/></svg>
+                <svg class="svg-fs-exit" viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M5 16h3v3h2v-5H5v2zm3-8H5v2h5V5H8v3zm6 11h2v-3h3v-2h-5v5zm2-11V5h-2v5h5V8h-3z"/></svg>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <!-- FAUX WINDOWS DESKTOP OVERLAY (populated by preview.js) -->
   <div class="aoko-desktop" id="aoko-desktop" role="dialog" aria-modal="true" aria-label="aoko client live preview" hidden></div>

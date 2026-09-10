@@ -112,7 +112,9 @@ public class Clicker : INotifyPropertyChanged
     private float _maxCPS = 12.0f;
     private bool _leftClickEnabled = false;
     private bool _rightClickEnabled = false;
-    private bool _jitterEnabled = false;
+    private ClickRandomizationMode _randomizationMode = ClickRandomizationMode.Medium;
+    private readonly AdvancedClickTimingState _leftTimingState = new();
+    private readonly AdvancedClickTimingState _rightTimingState = new();
 
     
     // Right Click Settings
@@ -259,6 +261,11 @@ public class Clicker : INotifyPropertyChanged
             {
                 _minCPS = value;
                 OnPropertyChanged(nameof(MinCPS));
+                if (_minCPS > _maxCPS)
+                {
+                    _maxCPS = _minCPS;
+                    OnPropertyChanged(nameof(MaxCPS));
+                }
                 StateChanged?.Invoke();
             }
         }
@@ -273,6 +280,11 @@ public class Clicker : INotifyPropertyChanged
             {
                 _maxCPS = value;
                 OnPropertyChanged(nameof(MaxCPS));
+                if (_maxCPS < _minCPS)
+                {
+                    _minCPS = _maxCPS;
+                    OnPropertyChanged(nameof(MinCPS));
+                }
                 StateChanged?.Invoke();
             }
         }
@@ -300,14 +312,46 @@ public class Clicker : INotifyPropertyChanged
         }
     }
     
-    public bool JitterEnabled
+    public ClickRandomizationMode RandomizationMode
     {
-        get => _jitterEnabled;
+        get => _randomizationMode;
         set
         {
-            _jitterEnabled = value;
-            OnPropertyChanged(nameof(JitterEnabled));
-            StateChanged?.Invoke();
+            if (_randomizationMode != value)
+            {
+                _randomizationMode = value;
+                OnPropertyChanged(nameof(RandomizationMode));
+                OnPropertyChanged(nameof(RandomizationModeIndex));
+                OnPropertyChanged(nameof(RandomizationModeText));
+                OnPropertyChanged(nameof(JitterEnabled));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    public int RandomizationModeIndex
+    {
+        get => (int)_randomizationMode;
+        set => RandomizationMode = (ClickRandomizationMode)Math.Clamp(value, 0, 2);
+    }
+
+    public string RandomizationModeText => _randomizationMode switch
+    {
+        ClickRandomizationMode.Basic => "Basic",
+        ClickRandomizationMode.Medium => "Medium",
+        ClickRandomizationMode.Advanced => "Advanced",
+        _ => "Medium"
+    };
+
+    public bool JitterEnabled
+    {
+        get => _randomizationMode != ClickRandomizationMode.Basic;
+        set
+        {
+            var targetMode = value
+                ? (_randomizationMode == ClickRandomizationMode.Basic ? ClickRandomizationMode.Medium : _randomizationMode)
+                : ClickRandomizationMode.Basic;
+            RandomizationMode = targetMode;
         }
     }
     
@@ -320,6 +364,11 @@ public class Clicker : INotifyPropertyChanged
             {
                 _rightMinCPS = value;
                 OnPropertyChanged(nameof(RightMinCPS));
+                if (_rightMinCPS > _rightMaxCPS)
+                {
+                    _rightMaxCPS = _rightMinCPS;
+                    OnPropertyChanged(nameof(RightMaxCPS));
+                }
                 StateChanged?.Invoke();
             }
         }
@@ -334,6 +383,11 @@ public class Clicker : INotifyPropertyChanged
             {
                 _rightMaxCPS = value;
                 OnPropertyChanged(nameof(RightMaxCPS));
+                if (_rightMaxCPS < _rightMinCPS)
+                {
+                    _rightMinCPS = _rightMaxCPS;
+                    OnPropertyChanged(nameof(RightMinCPS));
+                }
                 StateChanged?.Invoke();
             }
         }
@@ -470,6 +524,8 @@ public class Clicker : INotifyPropertyChanged
             LeftClickEnabled = true;
             RightClickEnabled = false;
             JitterEnabled = false;
+            _leftTimingState.Reset();
+            _rightTimingState.Reset();
             ClickInChests = false;
             BreakBlocksEnabled = false;
             IsMiningIntent = false;
@@ -1028,10 +1084,62 @@ public class Clicker : INotifyPropertyChanged
         {
             if (_chestStealerMenuCheck == value) return;
             _chestStealerMenuCheck = value;
+            _chestStealerTitleCheck = value;
+            _chestStealerCustomItemsCheck = value;
+            _chestStealerPhysicalCheck = value;
+            OnPropertyChanged(nameof(ChestStealerMenuCheck));
+            OnPropertyChanged(nameof(ChestStealerTitleCheck));
+            OnPropertyChanged(nameof(ChestStealerCustomItemsCheck));
+            OnPropertyChanged(nameof(ChestStealerPhysicalCheck));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _chestStealerTitleCheck = true;
+    public bool ChestStealerTitleCheck
+    {
+        get => _chestStealerTitleCheck;
+        set
+        {
+            if (_chestStealerTitleCheck == value) return;
+            _chestStealerTitleCheck = value;
+            _chestStealerMenuCheck = _chestStealerTitleCheck || _chestStealerCustomItemsCheck || _chestStealerPhysicalCheck;
+            OnPropertyChanged(nameof(ChestStealerTitleCheck));
             OnPropertyChanged(nameof(ChestStealerMenuCheck));
             StateChanged?.Invoke();
         }
     }
+
+    private bool _chestStealerCustomItemsCheck = true;
+    public bool ChestStealerCustomItemsCheck
+    {
+        get => _chestStealerCustomItemsCheck;
+        set
+        {
+            if (_chestStealerCustomItemsCheck == value) return;
+            _chestStealerCustomItemsCheck = value;
+            _chestStealerMenuCheck = _chestStealerTitleCheck || _chestStealerCustomItemsCheck || _chestStealerPhysicalCheck;
+            OnPropertyChanged(nameof(ChestStealerCustomItemsCheck));
+            OnPropertyChanged(nameof(ChestStealerMenuCheck));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _chestStealerPhysicalCheck = true;
+    public bool ChestStealerPhysicalCheck
+    {
+        get => _chestStealerPhysicalCheck;
+        set
+        {
+            if (_chestStealerPhysicalCheck == value) return;
+            _chestStealerPhysicalCheck = value;
+            _chestStealerMenuCheck = _chestStealerTitleCheck || _chestStealerCustomItemsCheck || _chestStealerPhysicalCheck;
+            OnPropertyChanged(nameof(ChestStealerPhysicalCheck));
+            OnPropertyChanged(nameof(ChestStealerMenuCheck));
+            StateChanged?.Invoke();
+        }
+    }
+
 
     private bool _refillEnabled = false;
     public bool RefillEnabled
@@ -1282,6 +1390,11 @@ public class Clicker : INotifyPropertyChanged
             {
                 _reachMin = clamped;
                 OnPropertyChanged(nameof(ReachMin));
+                if (_reachMin > _reachMax)
+                {
+                    _reachMax = _reachMin;
+                    OnPropertyChanged(nameof(ReachMax));
+                }
                 StateChanged?.Invoke();
             }
         }
@@ -1298,6 +1411,11 @@ public class Clicker : INotifyPropertyChanged
             {
                 _reachMax = clamped;
                 OnPropertyChanged(nameof(ReachMax));
+                if (_reachMax < _reachMin)
+                {
+                    _reachMin = _reachMax;
+                    OnPropertyChanged(nameof(ReachMin));
+                }
                 StateChanged?.Invoke();
             }
         }
@@ -1314,6 +1432,67 @@ public class Clicker : INotifyPropertyChanged
             {
                 _reachChance = clamped;
                 OnPropertyChanged(nameof(ReachChance));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    private int _reachChanceMode = 0;
+    public int ReachChanceMode
+    {
+        get => _reachChanceMode;
+        set
+        {
+            int clamped = Math.Clamp(value, 0, 1);
+            if (_reachChanceMode != clamped)
+            {
+                _reachChanceMode = clamped;
+                OnPropertyChanged(nameof(ReachChanceMode));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    private bool _reachOnlyWhileSprinting = false;
+    public bool ReachOnlyWhileSprinting
+    {
+        get => _reachOnlyWhileSprinting;
+        set
+        {
+            if (_reachOnlyWhileSprinting != value)
+            {
+                _reachOnlyWhileSprinting = value;
+                OnPropertyChanged(nameof(ReachOnlyWhileSprinting));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    private bool _reachDisableInWater = false;
+    public bool ReachDisableInWater
+    {
+        get => _reachDisableInWater;
+        set
+        {
+            if (_reachDisableInWater != value)
+            {
+                _reachDisableInWater = value;
+                OnPropertyChanged(nameof(ReachDisableInWater));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    private bool _reachVerticalCheck = false;
+    public bool ReachVerticalCheck
+    {
+        get => _reachVerticalCheck;
+        set
+        {
+            if (_reachVerticalCheck != value)
+            {
+                _reachVerticalCheck = value;
+                OnPropertyChanged(nameof(ReachVerticalCheck));
                 StateChanged?.Invoke();
             }
         }
@@ -2762,8 +2941,8 @@ public class Clicker : INotifyPropertyChanged
             // Right Click Logic: "Only hold block" check
             if (!_useLeftButton && RightClickOnlyBlock)
             {
-                // Fail-open when state is unavailable; only pause when connected and confirmed not holding a block.
-                if (GameStateClient.Instance.IsConnected && !GameStateClient.Instance.CurrentState.HoldingBlock)
+                // When injected, require confirmed block holding; fail-open only when not injected at all.
+                if (GameStateClient.Instance.IsInjected && (!GameStateClient.Instance.IsConnected || !GameStateClient.Instance.CurrentState.HoldingBlock))
                 {
                     await Task.Delay(100, token).ConfigureAwait(false);
                     continue;
@@ -2799,22 +2978,36 @@ public class Clicker : INotifyPropertyChanged
             float maxCps = _useLeftButton ? MaxCPS : RightMaxCPS;
             if (minCps > maxCps) minCps = maxCps;
             
-            // Calculate CPS with optional jitter (gaussian distribution)
+            // Calculate CPS and target interval according to configured RandomizationMode
             float cps;
-            if (JitterEnabled)
+            double targetInterval;
+
+            switch (RandomizationMode)
             {
-                float midCps = (minCps + maxCps) / 2.0f;
-                // Slightly widen range for Gaussian to touch edges
-                float range = (maxCps - minCps) / 4.0f; 
-                cps = GaussianRandom(midCps, range);
-                cps = Math.Clamp(cps, minCps, maxCps);
+                case ClickRandomizationMode.Basic:
+                {
+                    cps = minCps + (float)Random.Shared.NextDouble() * (maxCps - minCps);
+                    targetInterval = 1000.0 / Math.Max(0.1f, cps);
+                    break;
+                }
+                case ClickRandomizationMode.Medium:
+                {
+                    float midCps = (minCps + maxCps) / 2.0f;
+                    float range = (maxCps - minCps) / 4.0f; 
+                    cps = GaussianRandom(midCps, range);
+                    cps = Math.Clamp(cps, minCps, maxCps);
+                    targetInterval = 1000.0 / Math.Max(0.1f, cps);
+                    break;
+                }
+                case ClickRandomizationMode.Advanced:
+                default:
+                {
+                    var timingState = _useLeftButton ? _leftTimingState : _rightTimingState;
+                    targetInterval = timingState.CalculateNextDelay(minCps, maxCps);
+                    cps = (float)(1000.0 / Math.Max(1.0, targetInterval));
+                    break;
+                }
             }
-            else
-            {
-                cps = minCps + (float)Random.Shared.NextDouble() * (maxCps - minCps);
-            }
-            
-            double targetInterval = 1000.0 / cps; // in milliseconds
 
             // Perform click
             StatsTracker.Instance.RecordClick(cps, _useLeftButton);

@@ -561,6 +561,50 @@ public class GameStateClient : INotifyPropertyChanged
             _client = null;
             StatusMessage = "Disconnected from agent.";
             Capabilities = BridgeCapabilities.ForVersionFallback(InjectedVersion);
+            if (_isInjected && !token.IsCancellationRequested)
+            {
+                _ = Task.Run(() => ScheduleAutoReconnectAsync());
+            }
+        }
+    }
+
+    private int _isReconnecting = 0;
+
+    private async Task ScheduleAutoReconnectAsync()
+    {
+        if (Interlocked.CompareExchange(ref _isReconnecting, 1, 0) != 0)
+            return;
+
+        try
+        {
+            await Task.Delay(500).ConfigureAwait(false);
+
+            while (_isInjected && !IsConnected)
+            {
+                StatusMessage = "Reconnecting to agent...";
+                try
+                {
+                    await ConnectAsync(maxAttempts: 1, reportFailure: false).ConfigureAwait(false);
+                    if (IsConnected)
+                    {
+                        Log("Reconnected to bridge successfully.");
+                        return;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log($"Reconnect attempt failed: {ex.Message}");
+                }
+
+                if (!_isInjected || IsConnected)
+                    return;
+
+                await Task.Delay(1000).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _isReconnecting, 0);
         }
     }
 
@@ -1077,6 +1121,7 @@ public class GameStateClient : INotifyPropertyChanged
                     rightBlock = clicker.RightClickOnlyBlock,
                     breakBlocks = clicker.BreakBlocksEnabled,
                     jitter = clicker.JitterEnabled,
+                    randomizationMode = (int)clicker.RandomizationMode,
                     clickInChests = clicker.ClickInChests,
                     aimAssist = clicker.AimAssistEnabled,
                     aimAssistFov = clicker.AimAssistFov,
@@ -1183,6 +1228,9 @@ public class GameStateClient : INotifyPropertyChanged
                     chestStealerEnabled = clicker.ChestStealerEnabled,
                     chestStealerDelayMs = clicker.ChestStealerDelayMs,
                     chestStealerMenuCheck = clicker.ChestStealerMenuCheck,
+                    chestStealerTitleCheck = clicker.ChestStealerTitleCheck,
+                    chestStealerCustomItemsCheck = clicker.ChestStealerCustomItemsCheck,
+                    chestStealerPhysicalCheck = clicker.ChestStealerPhysicalCheck,
                     refillEnabled = clicker.RefillEnabled,
                     refillDelayMs = clicker.RefillDelayMs,
                     blockEspEnabled = clicker.BlockEspEnabled,
@@ -1199,6 +1247,10 @@ public class GameStateClient : INotifyPropertyChanged
                     reachMin = clicker.ReachMin,
                     reachMax = clicker.ReachMax,
                     reachChance = clicker.ReachChance,
+                    reachChanceMode = clicker.ReachChanceMode,
+                    reachOnlyWhileSprinting = clicker.ReachOnlyWhileSprinting,
+                    reachDisableInWater = clicker.ReachDisableInWater,
+                    reachVerticalCheck = clicker.ReachVerticalCheck,
                     velocityEnabled = clicker.VelocityEnabled,
                     velocityHorizontal = clicker.VelocityHorizontal,
                     velocityVertical = clicker.VelocityVertical,
@@ -1388,6 +1440,9 @@ public class GameStateClient : INotifyPropertyChanged
                 case "toggleJitter":
                     clicker.JitterEnabled = !clicker.JitterEnabled;
                     break;
+                case "cycleRandomization":
+                    clicker.RandomizationModeIndex = (clicker.RandomizationModeIndex + 1) % 3;
+                    break;
 
                 case "toggleClickInChests":
                     clicker.ClickInChests = !clicker.ClickInChests;
@@ -1473,6 +1528,24 @@ public class GameStateClient : INotifyPropertyChanged
                     break;
                 case "setChestStealerMenuCheck":
                     clicker.ChestStealerMenuCheck = node?["value"]?.GetValue<bool>() ?? true;
+                    break;
+                case "toggleChestStealerTitleCheck":
+                    clicker.ChestStealerTitleCheck = !clicker.ChestStealerTitleCheck;
+                    break;
+                case "setChestStealerTitleCheck":
+                    clicker.ChestStealerTitleCheck = node?["value"]?.GetValue<bool>() ?? true;
+                    break;
+                case "toggleChestStealerCustomItemsCheck":
+                    clicker.ChestStealerCustomItemsCheck = !clicker.ChestStealerCustomItemsCheck;
+                    break;
+                case "setChestStealerCustomItemsCheck":
+                    clicker.ChestStealerCustomItemsCheck = node?["value"]?.GetValue<bool>() ?? true;
+                    break;
+                case "toggleChestStealerPhysicalCheck":
+                    clicker.ChestStealerPhysicalCheck = !clicker.ChestStealerPhysicalCheck;
+                    break;
+                case "setChestStealerPhysicalCheck":
+                    clicker.ChestStealerPhysicalCheck = node?["value"]?.GetValue<bool>() ?? true;
                     break;
                 case "toggleRefill":
                     clicker.RefillEnabled = !clicker.RefillEnabled;

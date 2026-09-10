@@ -46,8 +46,9 @@ static SurfaceEntry s_surfaces[kMaxSurfaces] = {};
 static RenderMethodEntry s_methods[kMaxMethods] = {};
 static ConfigSnapshot s_config = {};
 static volatile LONG s_loggedUnsupported = 0;
-static JvmtiBreakpointHandler s_extraBreakpoint = nullptr;
-static JvmtiFramePopHandler s_extraFramePop = nullptr;
+const int kMaxExtraHandlers = 8;
+static JvmtiBreakpointHandler s_extraBreakpoints[kMaxExtraHandlers] = {};
+static JvmtiFramePopHandler s_extraFramePops[kMaxExtraHandlers] = {};
 static volatile LONG s_framePopEnabled = 0;
 static volatile LONG s_hasBreakpoints = 0;
 static volatile LONG s_hasFramePop = 0;
@@ -244,8 +245,10 @@ static void JNICALL OnBreakpoint(jvmtiEnv* jvmti, JNIEnv* env, jthread thread, j
 {
     CallbackLease lease;
     if (!lease.Active()) return;
-    if (s_extraBreakpoint)
-        s_extraBreakpoint(jvmti, env, thread, method, location);
+    for (int i = 0; i < kMaxExtraHandlers; ++i) {
+        if (s_extraBreakpoints[i])
+            s_extraBreakpoints[i](jvmti, env, thread, method, location);
+    }
 
     if (!env || !thread) return;
     LocalFrame frame(env, 64);
@@ -284,8 +287,10 @@ static void JNICALL OnFramePop(jvmtiEnv* jvmti, JNIEnv* env, jthread thread, jme
 {
     CallbackLease lease;
     if (!lease.Active()) return;
-    if (s_extraFramePop)
-        s_extraFramePop(jvmti, env, thread, method, wasPoppedByException);
+    for (int i = 0; i < kMaxExtraHandlers; ++i) {
+        if (s_extraFramePops[i])
+            s_extraFramePops[i](jvmti, env, thread, method, wasPoppedByException);
+    }
 }
 
 static void JNICALL OnClassFileLoadHook(jvmtiEnv* jvmti, JNIEnv* env,
@@ -602,19 +607,37 @@ void ShutdownNickHiderJvmti(JNIEnv* env)
     InterlockedExchange(&s_methodCount, 0);
     InterlockedExchange(&s_framePopEnabled, 0);
     InterlockedExchange(&s_installed, 0);
-    s_extraBreakpoint = nullptr;
-    s_extraFramePop = nullptr;
+    for (int i = 0; i < kMaxExtraHandlers; ++i) {
+        s_extraBreakpoints[i] = nullptr;
+        s_extraFramePops[i] = nullptr;
+    }
 }
 
 void RegisterJvmtiBreakpointHandler(JvmtiBreakpointHandler handler)
 {
-    s_extraBreakpoint = handler;
+    if (!handler) return;
+    for (int i = 0; i < kMaxExtraHandlers; ++i) {
+        if (s_extraBreakpoints[i] == handler) return;
+        if (!s_extraBreakpoints[i]) {
+            s_extraBreakpoints[i] = handler;
+            return;
+        }
+    }
 }
 
 void RegisterJvmtiFramePopHandler(JvmtiFramePopHandler handler)
 {
-    s_extraFramePop = handler;
-    if (handler && s_jvmti && InterlockedCompareExchange(&s_installed, 0, 0) &&
+    if (!handler) return;
+    bool added = false;
+    for (int i = 0; i < kMaxExtraHandlers; ++i) {
+        if (s_extraFramePops[i] == handler) { added = true; break; }
+        if (!s_extraFramePops[i]) {
+            s_extraFramePops[i] = handler;
+            added = true;
+            break;
+        }
+    }
+    if (added && s_jvmti && InterlockedCompareExchange(&s_installed, 0, 0) &&
         InterlockedCompareExchange(&s_hasFramePop, 0, 0) &&
         InterlockedCompareExchange(&s_framePopEnabled, 1, 0) == 0) {
         s_jvmti->SetEventNotificationMode(JVMTI_ENABLE, JVMTI_EVENT_FRAME_POP, nullptr);

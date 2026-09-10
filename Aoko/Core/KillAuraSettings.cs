@@ -93,8 +93,8 @@ public sealed class KillAuraSettings : INotifyPropertyChanged
     public int SwitchDelay { get => _switchDelay; set => Set(ref _switchDelay, Math.Clamp(value, 0, 1000)); }
     public string Rotations { get => _rotations; set { if (SetMode(ref _rotations, value, "none", "legit", "silent", "lockview", "liquidbounce", "hypixel", "grok")) NotifyConditions(); } }
     public float DeadZoneSize { get => _deadZoneSize; set => Set(ref _deadZoneSize, Math.Clamp(value, 0f, 2f)); }
-    public float MaxTurnSpeed { get => _maxTurnSpeed; set => Set(ref _maxTurnSpeed, Math.Clamp(value, 5f, 180f)); }
-    public float MinTurnSpeed { get => _minTurnSpeed; set => Set(ref _minTurnSpeed, Math.Clamp(value, 1f, 90f)); }
+    public float MaxTurnSpeed { get => _maxTurnSpeed; set { float v = Math.Clamp(value, 5f, 180f); if (Set(ref _maxTurnSpeed, v) && _minTurnSpeed > v) MinTurnSpeed = v; } }
+    public float MinTurnSpeed { get => _minTurnSpeed; set { float v = Math.Clamp(value, 1f, 90f); if (Set(ref _minTurnSpeed, v) && _maxTurnSpeed < v) MaxTurnSpeed = v; } }
     public float Acceleration { get => _acceleration; set => Set(ref _acceleration, Math.Clamp(value, 0.1f, 10f)); }
     public float Deceleration { get => _deceleration; set => Set(ref _deceleration, Math.Clamp(value, 0.1f, 10f)); }
     public bool UseOvershoot { get => _useOvershoot; set { if (Set(ref _useOvershoot, value)) NotifyConditions(); } }
@@ -137,8 +137,8 @@ public sealed class KillAuraSettings : INotifyPropertyChanged
     public bool LiquidBounceRandomize { get => _liquidBounceRandomize; set { if (Set(ref _liquidBounceRandomize, value)) NotifyConditions(); } }
     public float LiquidBounceRandomizeRange { get => _liquidBounceRandomizeRange; set => Set(ref _liquidBounceRandomizeRange, Math.Clamp(value, 0f, 1f)); }
     public float LiquidBounceHorizontalSearch { get => _liquidBounceHorizontalSearch; set => Set(ref _liquidBounceHorizontalSearch, Math.Clamp(value, 0f, 1f)); }
-    public float LiquidBounceBodyPointMin { get => _liquidBounceBodyPointMin; set => Set(ref _liquidBounceBodyPointMin, Math.Clamp(value, 0f, 1f)); }
-    public float LiquidBounceBodyPointMax { get => _liquidBounceBodyPointMax; set => Set(ref _liquidBounceBodyPointMax, Math.Clamp(value, 0f, 1f)); }
+    public float LiquidBounceBodyPointMin { get => _liquidBounceBodyPointMin; set { float v = Math.Clamp(value, 0f, 1f); if (Set(ref _liquidBounceBodyPointMin, v) && _liquidBounceBodyPointMax < v) LiquidBounceBodyPointMax = v; } }
+    public float LiquidBounceBodyPointMax { get => _liquidBounceBodyPointMax; set { float v = Math.Clamp(value, 0f, 1f); if (Set(ref _liquidBounceBodyPointMax, v) && _liquidBounceBodyPointMin > v) LiquidBounceBodyPointMin = v; } }
 
     public bool IsLiquidBounce => Rotations == "liquidbounce";
     public bool IsHypixelRotation => Rotations == "hypixel";

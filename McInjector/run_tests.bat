@@ -170,6 +170,22 @@ echo [NativeTests] Running fight_status_core_tests.exe...
 tests\fight_status_core_tests.exe
 if %errorlevel% neq 0 exit /b %errorlevel%
 
+echo [NativeTests] Building reach_core_tests.exe...
+"%GPP%" -m64 -std=c++11 -O2 -static-libgcc -static-libstdc++ -o tests\reach_core_tests.exe tests\reach_core_tests.cpp
+if %errorlevel% neq 0 exit /b %errorlevel%
+
+echo [NativeTests] Running reach_core_tests.exe...
+tests\reach_core_tests.exe
+if %errorlevel% neq 0 exit /b %errorlevel%
+
+echo [NativeTests] Building reach_bytecode_injector_tests.exe...
+"%GPP%" -m64 -std=c++11 -O2 -static-libgcc -static-libstdc++ -o tests\reach_bytecode_injector_tests.exe tests\reach_bytecode_injector_tests.cpp
+if %errorlevel% neq 0 exit /b %errorlevel%
+
+echo [NativeTests] Running reach_bytecode_injector_tests.exe...
+tests\reach_bytecode_injector_tests.exe
+if %errorlevel% neq 0 exit /b %errorlevel%
+
 echo [NativeTests] All native harness tests passed.
 exit /b 0
 

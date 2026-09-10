@@ -570,8 +570,8 @@ public static class InputHooks
                     // Check if right-click-only-block is enabled
                     if (Clicker.Instance.RightClickOnlyBlock)
                     {
-                        // Fail-open when state is unavailable; only block if connected and confirmed not holding a block.
-                        if (GameStateClient.Instance.IsConnected && !GameStateClient.Instance.CurrentState.HoldingBlock)
+                        // When injected, require confirmed block holding; fail-open only when not injected at all.
+                        if (GameStateClient.Instance.IsInjected && (!GameStateClient.Instance.IsConnected || !GameStateClient.Instance.CurrentState.HoldingBlock))
                         {
                             // Don't start clicking - player isn't holding a block
                             return;

@@ -5,7 +5,7 @@
 [![Stars](https://img.shields.io/github/stars/naczo5/aoko-client?style=flat-square&color=475569&labelColor=1e293b&logo=github)](https://github.com/naczo5/aoko-client/stargazers)
 [![License](https://img.shields.io/github/license/naczo5/aoko-client?style=flat-square&color=475569&labelColor=1e293b)](https://github.com/naczo5/aoko-client/blob/main/LICENSE)
 
-aoko client is an open-source Windows utility client and external overlay for Lunar Client and standalone Minecraft instances.
+aoko client is an open-source Windows utility client and external overlay for Lunar Client and Forge/Fabric Minecraft instances.
 
 # Showcase
 [![Watch the showcase video](website/public/screenshots/thumbnail.png)](https://www.youtube.com/watch?v=eR7QKAWw8D4)
@@ -47,7 +47,6 @@ aoko client is an open-source Windows utility client and external overlay for Lu
 ## Screenshots
 
 ![GUI Showcase GIF](website/public/screenshots/gui.gif)
-
 ![Gameplay HUD](website/public/screenshots/gameplay.jpg)
 
 ## Requirements

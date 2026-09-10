@@ -313,8 +313,16 @@
                                 </DockPanel>
                                 <Slider Minimum="1" Maximum="25" Value="{Binding MaxCPS, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Style="{StaticResource DarkSlider}"/>
 
+                                <DockPanel Margin="0,8,0,0">
+                                    <TextBlock Text="Randomization" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left" />
+                                    <TextBlock Text="{Binding RandomizationModeText}" Foreground="{DynamicResource DimTextBrush}" FontSize="12" HorizontalAlignment="Right" DockPanel.Dock="Right" />
+                                </DockPanel>
+                                <Slider Minimum="0" Maximum="2" TickFrequency="1" IsSnapToTickEnabled="True"
+                                        Value="{Binding RandomizationModeIndex, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                        Style="{StaticResource DarkSlider}"
+                                        ToolTip="Basic: uniform distribution | Medium: Gaussian jitter | Advanced: human-like drift, butterfly doublets, and drop-off"/>
+
                                 <WrapPanel Margin="0,10,0,0">
-                                    <CheckBox Content="Jitter" IsChecked="{Binding JitterEnabled, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,0,14,0"/>
                                     <CheckBox Content="Click in Chests" IsChecked="{Binding ClickInChests, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,0,14,0"/>
                                     <CheckBox Content="Pause when breaking" IsChecked="{Binding BreakBlocksEnabled, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}"/>
                                 </WrapPanel>
@@ -825,8 +833,22 @@
                                         Value="{Binding ChestStealerDelayMs, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                         Style="{StaticResource DarkSlider}"/>
 
-                                <CheckBox Content="Menu check" IsChecked="{Binding ChestStealerMenuCheck, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,10,0,0"/>
-                                <TextBlock Text="Prevents stealing from menus that use the chest interface (such as compass selectors or shop villagers). Disable this if it fails to steal from chests on custom servers."
+                                <CheckBox Content="Title check" IsChecked="{Binding ChestStealerTitleCheck, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,10,0,0"/>
+                                <TextBlock Text="Prevents stealing if the container title matches known menu keywords (e.g. shop, selector, lobby)."
+                                           Foreground="{DynamicResource DimTextBrush}"
+                                           FontSize="11"
+                                           TextWrapping="Wrap"
+                                           Margin="0,4,0,0"/>
+
+                                <CheckBox Content="Custom item check" IsChecked="{Binding ChestStealerCustomItemsCheck, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,8,0,0"/>
+                                <TextBlock Text="Prevents stealing if over 50% of items have custom display names (common in server GUI menus)."
+                                           Foreground="{DynamicResource DimTextBrush}"
+                                           FontSize="11"
+                                           TextWrapping="Wrap"
+                                           Margin="0,4,0,0"/>
+
+                                <CheckBox Content="Physical chest check" IsChecked="{Binding ChestStealerPhysicalCheck, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,8,0,0"/>
+                                <TextBlock Text="Requires an actual physical chest block in the world near the player (within 6.5 blocks). Prevents interaction with remote or virtual GUIs."
                                            Foreground="{DynamicResource DimTextBrush}"
                                            FontSize="11"
                                            TextWrapping="Wrap"
@@ -1042,6 +1064,31 @@
                                 <Slider Minimum="0" Maximum="100" TickFrequency="1" IsSnapToTickEnabled="True"
                                         Value="{Binding ReachChance, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                         Style="{StaticResource DarkSlider}"/>
+
+                                <DockPanel Margin="0,8,0,0">
+                                    <TextBlock Text="Chance Mode" Foreground="{DynamicResource TextBrush}" FontSize="12" DockPanel.Dock="Left" />
+                                </DockPanel>
+                                <ComboBox SelectedIndex="{Binding ReachChanceMode, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                          Style="{StaticResource DarkComboBox}"
+                                          Height="28" Margin="0,2,0,0">
+                                    <ComboBoxItem Content="Normal"/>
+                                    <ComboBoxItem Content="Advanced"/>
+                                </ComboBox>
+
+                                <CheckBox Content="Only While Sprinting"
+                                          IsChecked="{Binding ReachOnlyWhileSprinting, Mode=TwoWay}"
+                                          Style="{StaticResource DarkCheckBox}"
+                                          Margin="0,10,0,0"/>
+
+                                <CheckBox Content="Disable in Water"
+                                          IsChecked="{Binding ReachDisableInWater, Mode=TwoWay}"
+                                          Style="{StaticResource DarkCheckBox}"
+                                          Margin="0,8,0,0"/>
+
+                                <CheckBox Content="Vertical Check"
+                                          IsChecked="{Binding ReachVerticalCheck, Mode=TwoWay}"
+                                          Style="{StaticResource DarkCheckBox}"
+                                          Margin="0,8,0,0"/>
                             </StackPanel>
                         </Border>
 

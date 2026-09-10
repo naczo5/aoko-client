@@ -42,8 +42,8 @@ window.AOKO_PREVIEW_DATA = {
           controls: [
             { type: 'slider', label: 'Min CPS', min: 1, max: 25, value: 12, step: 1, decimals: 0 },
             { type: 'slider', label: 'Max CPS', min: 1, max: 25, value: 16, step: 1, decimals: 0 },
+            { type: 'slider', label: 'Randomization', min: 0, max: 2, value: 1, step: 1, labels: ['Basic', 'Medium', 'Advanced'] },
             { type: 'checks', items: [
-              { label: 'Jitter', checked: true },
               { label: 'Click in Chests', checked: true },
               { label: 'Pause when breaking', checked: true },
             ] },
@@ -274,8 +274,12 @@ window.AOKO_PREVIEW_DATA = {
           controls: [
             { type: 'switch', label: 'Enable Chest Stealer', on: false, main: true },
             { type: 'slider', label: 'Delay (ms)', min: 50, max: 500, value: 120, step: 10, decimals: 0 },
-            { type: 'check', label: 'Menu check', checked: true },
-            { type: 'note', text: 'Prevents stealing from menus (compass selectors, NPC shops) using chest GUI. Disable if it fails to steal from chests on custom servers.' },
+            { type: 'check', label: 'Title check', checked: true },
+            { type: 'note', text: 'Prevents stealing if the container title matches known menu keywords.' },
+            { type: 'check', label: 'Custom item check', checked: true },
+            { type: 'note', text: 'Prevents stealing if over 50% of items have custom display names.' },
+            { type: 'check', label: 'Physical chest check', checked: true },
+            { type: 'note', text: 'Requires an actual physical chest block near the player (within 6.5 blocks).' },
           ],
         },
         {
