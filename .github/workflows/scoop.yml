@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Published stable release tag to synchronize (for example, v0.10.2)
+        description: Published stable release tag to synchronize (for example, v11.5)
         required: true
         type: string
 
@@ -70,8 +70,8 @@ jobs:
 
           tag_name="$(jq -r '.tag_name' "$RELEASE_PATH")"
           version="${tag_name#v}"
-          if [[ ! "$version" =~ ^[0-9]+(\.[0-9]+){2,3}$ ]]; then
-            echo "::error title=Invalid release tag::Stable Scoop releases must use a numeric tag such as v0.10.1; found '$tag_name'."
+          if [[ ! "$version" =~ ^[0-9]+(\.[0-9]+){1,3}$ ]]; then
+            echo "::error title=Invalid release tag::Stable Scoop releases must use a numeric tag such as v11.5; found '$tag_name'."
             exit 1
           fi
 
