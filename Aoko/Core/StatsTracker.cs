@@ -89,6 +89,7 @@ public sealed class StatsTracker : INotifyPropertyChanged
     private readonly int[] _cpsCounts = new int[(int)((MaxCpsBucket - MinCpsBucket) / CpsBucketSize) + 1];
     private Timer? _timer;
     private int _timerRunning;
+    private int _flushPending;
     private int _totalClicks;
     private int _leftClicks;
     private int _rightClicks;
@@ -146,10 +147,35 @@ public sealed class StatsTracker : INotifyPropertyChanged
 
             int bucket = Math.Clamp((int)Math.Floor((cps - MinCpsBucket) / CpsBucketSize), 0, _cpsCounts.Length - 1);
             _cpsCounts[bucket]++;
+            // Keep bucket data up to date synchronously (cheap: bounded 49-element scan,
+            // setters no-op on unchanged values) so reads and tests stay consistent.
             RefreshCpsBuckets();
         }
 
-        RaiseClickProperties();
+        // The expensive part is the PropertyChanged storm marshaled to the UI thread on
+        // every click. Coalesce notifications so a high-CPS stream flushes at most once
+        // per scheduled UI pass instead of once per click.
+        ScheduleFlush();
+    }
+
+    private void ScheduleFlush()
+    {
+        if (Interlocked.Exchange(ref _flushPending, 1) != 0) return;
+
+        var dispatcher = Application.Current?.Dispatcher;
+        if (dispatcher == null || dispatcher.HasShutdownStarted || dispatcher.HasShutdownFinished)
+        {
+            // No UI dispatcher (tests, headless): notify inline.
+            Interlocked.Exchange(ref _flushPending, 0);
+            RaiseClickProperties();
+            return;
+        }
+
+        dispatcher.BeginInvoke(new Action(() =>
+        {
+            Interlocked.Exchange(ref _flushPending, 0);
+            RaiseClickProperties();
+        }), System.Windows.Threading.DispatcherPriority.Background);
     }
 
     public void RecordPlaytimeSample(bool minecraftActive, bool bridgeConnected, GameState state, bool cursorVisible)

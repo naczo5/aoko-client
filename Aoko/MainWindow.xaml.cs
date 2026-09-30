@@ -100,6 +100,7 @@ public partial class MainWindow : Window
         ["autotool"] = "AutoTool",
         ["antidebuff"] = "AntiDebuff",
         ["hitdelayfix"] = "Hit Delay Fix",
+        ["fireballwarning"] = "Fireball Warning",
         ["panic"] = "Panic"
     };
 
@@ -1365,7 +1366,9 @@ public partial class MainWindow : Window
         InjectButton.IsEnabled = enabled;
     }
 
-    private void UpdateGameStateUI()
+    private void UpdateGameStateUI() => UpdateGameStateUI(refreshAvailability: false);
+
+    private void UpdateGameStateUI(bool refreshAvailability)
     {
         if (Dispatcher.HasShutdownStarted || Dispatcher.HasShutdownFinished) return;
         if (Interlocked.Exchange(ref _uiUpdateQueued, 1) != 0) return;
@@ -1388,12 +1391,11 @@ public partial class MainWindow : Window
                         SetInjectionButtonsEnabled(false);
 
                         EnsureControlModeIfNeeded(gs);
-                        UpdateVersionAvailabilityUi();
                     }
                     else
                     {
                         InjectionStatusText.Text = $"Status: {gs.StatusMessage}";
-                        InjectionStatusText.Foreground = new SolidColorBrush(Color.FromRgb(200, 200, 200));
+                        InjectionStatusText.Foreground = _disconnectedStatusBrush;
                         InjectionProgressBar.Visibility = gs.IsInjectionInProgress ? Visibility.Visible : Visibility.Collapsed;
                         InjectionProgressBar.Value = gs.IsInjectionInProgress ? gs.InjectionProgress : 0;
 
@@ -1404,7 +1406,10 @@ public partial class MainWindow : Window
                         }
                     }
 
-                    if (!gs.IsConnected)
+                    // Rebuilding the module-availability panel is expensive (17 cards + text).
+                    // Only do it when capabilities/connection/dev-mode actually changed, not on
+                    // every ~40Hz game-state tick.
+                    if (refreshAvailability)
                     {
                         UpdateVersionAvailabilityUi();
                     }
@@ -1422,6 +1427,17 @@ public partial class MainWindow : Window
         }
     }
 
+    private static readonly Brush _disconnectedStatusBrush = CreateDisconnectedStatusBrush();
+
+    private static Brush CreateDisconnectedStatusBrush()
+    {
+        // Frozen so the shared instance has no thread affinity (static init runs
+        // on first-touch thread, use happens on the UI dispatcher).
+        var brush = new SolidColorBrush(Color.FromRgb(200, 200, 200));
+        brush.Freeze();
+        return brush;
+    }
+
     private void OnGameStateUpdated()
     {
         UpdateGameStateUI();
@@ -1436,14 +1452,19 @@ public partial class MainWindow : Window
     private void OnGameStateClientPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (e.PropertyName == nameof(GameStateClient.IsConnected) ||
-            e.PropertyName == nameof(GameStateClient.StatusMessage) ||
-            e.PropertyName == nameof(GameStateClient.IsInjectionInProgress) ||
-            e.PropertyName == nameof(GameStateClient.InjectionProgress) ||
             e.PropertyName == nameof(GameStateClient.IsInjected) ||
             e.PropertyName == nameof(GameStateClient.InjectedVersion) ||
             e.PropertyName == nameof(GameStateClient.Capabilities))
         {
-            UpdateGameStateUI();
+            // Connection / capability state changed: availability may have flipped.
+            UpdateGameStateUI(refreshAvailability: true);
+        }
+        else if (e.PropertyName == nameof(GameStateClient.StatusMessage) ||
+                 e.PropertyName == nameof(GameStateClient.IsInjectionInProgress) ||
+                 e.PropertyName == nameof(GameStateClient.InjectionProgress))
+        {
+            // Progress/status text only: cheap status refresh, no availability rebuild.
+            UpdateGameStateUI(refreshAvailability: false);
         }
     }
 
@@ -1694,6 +1715,7 @@ public partial class MainWindow : Window
         SetKeybindButtonContent(KeybindAutoToolButton, "autotool");
         SetKeybindButtonContent(KeybindAntiDebuffButton, "antidebuff");
         SetKeybindButtonContent(KeybindHitDelayFixButton, "hitdelayfix");
+        SetKeybindButtonContent(KeybindFireballWarningButton, "fireballwarning");
         SetKeybindButtonContent(KeybindPanicButton, "panic");
         AutoRodActionBindButton.Content = _pendingAutoRodActionBind
             ? "Action: [Press key or mouse...]"

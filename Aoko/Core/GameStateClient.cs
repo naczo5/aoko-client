@@ -1281,6 +1281,10 @@ public class GameStateClient : INotifyPropertyChanged
                     autoToolBedwarsMode = clicker.AutoToolBedwarsMode,
                     antiDebuffEnabled = clicker.AntiDebuffEnabled,
                     hitDelayFixEnabled = clicker.HitDelayFixEnabled,
+                    fireballWarning = clicker.FireballWarningEnabled,
+                    fireballWarningBox = clicker.FireballWarningBox,
+                    fireballWarningArrow = clicker.FireballWarningArrow,
+                    fireballWarningSound = clicker.FireballWarningSound,
                     // Per-module keybinds
                     keybindAutoclicker   = InputHooks.GetModuleKey("autoclicker"),
                     keybindRightClick    = InputHooks.GetModuleKey("rightclick"),
@@ -1302,6 +1306,7 @@ public class GameStateClient : INotifyPropertyChanged
                     keybindThrowpot = InputHooks.GetModuleKey("throwpot"),
                     keybindAutoheal = InputHooks.GetModuleKey("autoheal"),
                     keybindAutoTool = InputHooks.GetModuleKey("autotool"),
+                    keybindFireballWarning = InputHooks.GetModuleKey("fireballwarning"),
                     hudEditor = clicker.HudEditorActive,
                     hudLayout = clicker.HudLayout.ToJson()
                     };
@@ -1649,6 +1654,18 @@ public class GameStateClient : INotifyPropertyChanged
                     break;
                 case "setVelocityChance":
                     clicker.VelocityChance = (int)(node?["value"]?.GetValue<float>() ?? 100f);
+                    break;
+                case "toggleFireballWarning":
+                    clicker.FireballWarningEnabled = !clicker.FireballWarningEnabled;
+                    break;
+                case "toggleFireballWarningBox":
+                    clicker.FireballWarningBox = !clicker.FireballWarningBox;
+                    break;
+                case "toggleFireballWarningArrow":
+                    clicker.FireballWarningArrow = !clicker.FireballWarningArrow;
+                    break;
+                case "toggleFireballWarningSound":
+                    clicker.FireballWarningSound = !clicker.FireballWarningSound;
                     break;
             }
 

@@ -48,6 +48,7 @@
 #include "bedplates_common.h"
 #include "bedplates_icons.h"
 #include "fight_status_core.h"
+#include "fireball_warning_common.h"
 #include "aim_assist_projection.h"
 #include "screen_projection.h"
 #include "telemetry_schedule.h"
@@ -240,6 +241,11 @@ struct Config {
     bool  bedPlates = false;
     bool  bedPlatesShowDistance = true;
     int   bedPlatesRange = 4; // chunks, clamp 1..8
+    bool  fireballWarning = false;
+    bool  fireballWarningBox = true;
+    bool  fireballWarningArrow = true;
+    bool  fireballWarningSound = true;
+    int   keybindFireballWarning = 0;
     bool  showModuleList = true;
     bool  closestPlayer  = false;
     bool  fightStatus    = false;
@@ -562,6 +568,11 @@ static void ParseConfig(const std::string& line) {
     g_config.bedPlates = reader.GetBool("bedPlatesEnabled");
     g_config.bedPlatesShowDistance = reader.GetBool("bedPlatesShowDistance", true);
     g_config.bedPlatesRange = lc::ClampInt(reader.GetInt("bedPlatesRange", g_config.bedPlatesRange), 1, 8);
+    g_config.fireballWarning = reader.GetBool("fireballWarning");
+    g_config.fireballWarningBox = reader.GetBool("fireballWarningBox", true);
+    g_config.fireballWarningArrow = reader.GetBool("fireballWarningArrow", true);
+    g_config.fireballWarningSound = reader.GetBool("fireballWarningSound", true);
+    g_config.keybindFireballWarning = lc::ClampInt(reader.GetInt("keybindFireballWarning", g_config.keybindFireballWarning), 0, 255);
     g_config.rightClick    = reader.GetBool("right");
     g_config.rightMinCPS   = lc::ClampFloat(reader.GetFloat("rightMinCPS", g_config.rightMinCPS), 1.0f, 25.0f);
     g_config.rightMaxCPS   = lc::ClampFloat(reader.GetFloat("rightMaxCPS", g_config.rightMaxCPS), 1.0f, 25.0f);
@@ -1186,6 +1197,9 @@ static double g_speedBridgeLastPosX_121 = 0.0;
 static double g_speedBridgeLastPosZ_121 = 0.0;
 static int g_speedBridgeDirX_121 = 0;
 static int g_speedBridgeDirZ_121 = 0;
+// Hysteresis state to prevent sneak flicker / void falls.
+static bool g_speedBridgeWasEdge_121 = false;
+static DWORD g_speedBridgeLastEdgeMs_121 = 0;
 static bool g_loggedSpeedBridgeResolveFail_121 = false;
 
 // ===================== CHEST STEALER JNI GLOBALS =====================
@@ -1914,6 +1928,7 @@ static jmethodID g_getYaw_121 = nullptr;
 static jmethodID g_getPitch_121 = nullptr;
 static jmethodID g_getHealth_121 = nullptr;
 static jmethodID g_getAbsorptionAmount_121 = nullptr;
+static jmethodID g_isOnGround_121 = nullptr;
 static jmethodID g_getName_121 = nullptr;      // Entity.getName() -> Text
 static jmethodID g_setCustomNameVisible_121 = nullptr; // Entity.setCustomNameVisible(bool)
 static jmethodID g_isCustomNameVisible_121 = nullptr;  // Entity.isCustomNameVisible()
@@ -2009,6 +2024,267 @@ static std::string GetHeldItemInfo(JNIEnv* env, jobject entity) {
 
     env->DeleteLocalRef(stack);
     return result;
+}
+
+// ── Fireball Warning in-game sound (client-side UI cue, no packets) ──
+// Plays a note-block pling through the client SoundManager on the background
+// JNI thread. All mappings resolve lazily with Yarn-first/Mojmap-fallback and
+// fail silent (visuals keep working) when the runtime does not match.
+static jmethodID g_fireballGetSoundManager_121 = nullptr;
+static jmethodID g_fireballSoundPlay_121 = nullptr;
+static bool g_fireballPlayReturnsResult_121 = false;
+static jclass g_fireballSoundInstanceClass_121 = nullptr;
+static jmethodID g_fireballMasterSound_121 = nullptr;
+static const char* g_fireballMasterSig_121 = nullptr;
+static jclass g_fireballSoundEventsClass_121 = nullptr;
+static jfieldID g_fireballPlingField_121 = nullptr;
+static jobject g_fireballPlingEvent_121 = nullptr;
+static bool g_fireballSoundReady_121 = false;
+static bool g_fireballSoundLogged_121 = false;
+static bool g_fireballPlayWarned_121 = false;
+static DWORD g_fireballSoundResolveMs_121 = 0;
+static DWORD g_lastFireballSoundMs_121 = 0;
+
+static void EnsureFireballSoundMappings121(JNIEnv* env) {
+    if (!env || g_fireballSoundReady_121) return;
+    DWORD nowMs = GetTickCount();
+    if (g_fireballSoundResolveMs_121 != 0 && nowMs - g_fireballSoundResolveMs_121 < 10000) return;
+    g_fireballSoundResolveMs_121 = nowMs;
+    if (!g_mcInstance || !g_gameClassLoader) return;
+
+    jclass mcCls = env->GetObjectClass(g_mcInstance);
+    if (env->ExceptionCheck() || !mcCls) { env->ExceptionClear(); return; }
+    const char* smSigs[] = {
+        "()Lnet/minecraft/client/sound/SoundManager;",
+        "()Lnet/minecraft/client/sounds/SoundManager;",
+        nullptr
+    };
+    for (int i = 0; smSigs[i] && !g_fireballGetSoundManager_121; i++) {
+        jmethodID m = env->GetMethodID(mcCls, "getSoundManager", smSigs[i]);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); m = nullptr; }
+        if (m) g_fireballGetSoundManager_121 = m;
+    }
+    env->DeleteLocalRef(mcCls);
+    if (!g_fireballGetSoundManager_121) return;
+
+    const char* seNames[] = {
+        "net.minecraft.sound.SoundEvents",
+        "net.minecraft.sounds.SoundEvents",
+        nullptr
+    };
+    for (int i = 0; seNames[i] && !g_fireballSoundEventsClass_121; i++) {
+        jclass c = LoadClassWithLoader(env, g_gameClassLoader, seNames[i]);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); c = nullptr; }
+        if (c) {
+            g_fireballSoundEventsClass_121 = (jclass)env->NewGlobalRef(c);
+            env->DeleteLocalRef(c);
+        }
+    }
+    if (!g_fireballSoundEventsClass_121) return;
+
+    const char* plingNames[] = { "BLOCK_NOTE_BLOCK_PLING", "NOTE_BLOCK_PLING", nullptr };
+    const char* plingSigs[] = {
+        "Lnet/minecraft/sound/SoundEvent;",
+        "Lnet/minecraft/sounds/SoundEvent;",
+        nullptr
+    };
+    for (int ni = 0; plingNames[ni] && !g_fireballPlingField_121; ni++) {
+        for (int si = 0; plingSigs[si] && !g_fireballPlingField_121; si++) {
+            jfieldID f = env->GetStaticFieldID(g_fireballSoundEventsClass_121, plingNames[ni], plingSigs[si]);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); f = nullptr; }
+            if (f) g_fireballPlingField_121 = f;
+        }
+    }
+    if (!g_fireballPlingField_121) {
+        // Newer Yarn: note-block sounds are RegistryEntry.Reference holders.
+        const char* refSigs[] = {
+            "Lnet/minecraft/registry/entry/RegistryEntry$Reference;",
+            "Lnet/minecraft/core/Holder$Reference;",
+            nullptr
+        };
+        for (int ni = 0; plingNames[ni] && !g_fireballPlingField_121; ni++) {
+            for (int si = 0; refSigs[si] && !g_fireballPlingField_121; si++) {
+                jfieldID f = env->GetStaticFieldID(g_fireballSoundEventsClass_121, plingNames[ni], refSigs[si]);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); f = nullptr; }
+                if (f) g_fireballPlingField_121 = f;
+            }
+        }
+    }
+    if (!g_fireballPlingField_121) return;
+
+    jobject plingObj = env->GetStaticObjectField(g_fireballSoundEventsClass_121, g_fireballPlingField_121);
+    if (env->ExceptionCheck() || !plingObj) { env->ExceptionClear(); return; }
+
+    // Unwrap RegistryEntry.Reference / Holder to the raw SoundEvent when needed.
+    jclass soundEventYarn = LoadClassWithLoader(env, g_gameClassLoader, "net.minecraft.sound.SoundEvent");
+    if (env->ExceptionCheck()) { env->ExceptionClear(); soundEventYarn = nullptr; }
+    jclass soundEventMoj = nullptr;
+    if (!soundEventYarn) {
+        soundEventMoj = LoadClassWithLoader(env, g_gameClassLoader, "net.minecraft.sounds.SoundEvent");
+        if (env->ExceptionCheck()) { env->ExceptionClear(); soundEventMoj = nullptr; }
+    }
+    jclass soundEventCls = soundEventYarn ? soundEventYarn : soundEventMoj;
+    jobject soundEventObj = nullptr;
+    if (soundEventCls && !env->IsInstanceOf(plingObj, soundEventCls)) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        // Holder/Reference unwrap: value() returns the held SoundEvent.
+        jclass holderCls = env->GetObjectClass(plingObj);
+        jmethodID mValue = nullptr;
+        if (holderCls && !env->ExceptionCheck()) {
+            mValue = env->GetMethodID(holderCls, "value", "()Ljava/lang/Object;");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); mValue = nullptr; }
+        }
+        if (mValue) {
+            jobject unwrapped = env->CallObjectMethod(plingObj, mValue);
+            if (env->ExceptionCheck() || !unwrapped) { env->ExceptionClear(); unwrapped = nullptr; }
+            if (unwrapped && soundEventCls && env->IsInstanceOf(unwrapped, soundEventCls)) {
+                if (env->ExceptionCheck()) env->ExceptionClear();
+                else soundEventObj = unwrapped;
+            } else if (unwrapped) {
+                env->DeleteLocalRef(unwrapped);
+            }
+        }
+        if (holderCls) env->DeleteLocalRef(holderCls);
+        env->DeleteLocalRef(plingObj);
+        if (!soundEventObj) {
+            if (soundEventYarn) env->DeleteLocalRef(soundEventYarn);
+            if (soundEventMoj) env->DeleteLocalRef(soundEventMoj);
+            return;
+        }
+    } else {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        else soundEventObj = plingObj;
+        if (soundEventObj != plingObj) env->DeleteLocalRef(plingObj);
+    }
+    g_fireballPlingEvent_121 = env->NewGlobalRef(soundEventObj);
+    env->DeleteLocalRef(soundEventObj);
+    if (soundEventYarn) env->DeleteLocalRef(soundEventYarn);
+    if (soundEventMoj) env->DeleteLocalRef(soundEventMoj);
+    if (!g_fireballPlingEvent_121) return;
+
+    const char* instNames[] = {
+        "net.minecraft.client.sound.PositionedSoundInstance",
+        "net.minecraft.client.resources.sounds.SimpleSoundInstance",
+        nullptr
+    };
+    for (int i = 0; instNames[i] && !g_fireballSoundInstanceClass_121; i++) {
+        jclass c = LoadClassWithLoader(env, g_gameClassLoader, instNames[i]);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); c = nullptr; }
+        if (c) {
+            g_fireballSoundInstanceClass_121 = (jclass)env->NewGlobalRef(c);
+            env->DeleteLocalRef(c);
+        }
+    }
+    if (!g_fireballSoundInstanceClass_121) return;
+
+    struct MasterCand { const char* name; const char* sig; };
+    const MasterCand masterCands[] = {
+        { "master", "(Lnet/minecraft/sound/SoundEvent;F)Lnet/minecraft/client/sound/PositionedSoundInstance;" },
+        { "master", "(Lnet/minecraft/registry/entry/RegistryEntry;F)Lnet/minecraft/client/sound/PositionedSoundInstance;" },
+        { "forUI", "(Lnet/minecraft/sounds/SoundEvent;F)Lnet/minecraft/client/resources/sounds/SimpleSoundInstance;" },
+        { "forUI", "(Lnet/minecraft/core/Holder;F)Lnet/minecraft/client/resources/sounds/SimpleSoundInstance;" },
+        { nullptr, nullptr }
+    };
+    for (int i = 0; masterCands[i].name && !g_fireballMasterSound_121; i++) {
+        jmethodID m = env->GetStaticMethodID(g_fireballSoundInstanceClass_121,
+            masterCands[i].name, masterCands[i].sig);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); m = nullptr; }
+        if (m) {
+            g_fireballMasterSound_121 = m;
+            g_fireballMasterSig_121 = masterCands[i].sig;
+        }
+    }
+    if (!g_fireballMasterSound_121) return;
+
+    g_fireballSoundReady_121 = true;
+    if (!g_fireballSoundLogged_121) {
+        g_fireballSoundLogged_121 = true;
+        Log("FireballWarning: in-game pling sound resolved.");
+    }
+}
+
+static bool PlayFireballWarningSound121(JNIEnv* env) {
+    EnsureFireballSoundMappings121(env);
+    if (!env || !g_fireballSoundReady_121 || !g_mcInstance) return false;
+    if (!g_fireballGetSoundManager_121 || !g_fireballPlingEvent_121 ||
+        !g_fireballSoundInstanceClass_121 || !g_fireballMasterSound_121) return false;
+
+    jobject soundManager = env->CallObjectMethod(g_mcInstance, g_fireballGetSoundManager_121);
+    if (env->ExceptionCheck() || !soundManager) { env->ExceptionClear(); return false; }
+    jclass smCls = env->GetObjectClass(soundManager);
+    if (env->ExceptionCheck() || !smCls) { env->ExceptionClear(); env->DeleteLocalRef(soundManager); return false; }
+    if (!g_fireballSoundPlay_121) {
+        // 26.x returns SoundSystem/SoundEngine PlayResult; older builds return void.
+        struct PlayCand { const char* sig; bool returnsResult; };
+        const PlayCand playCands[] = {
+            { "(Lnet/minecraft/client/sound/SoundInstance;)V", false },
+            { "(Lnet/minecraft/client/resources/sounds/SoundInstance;)V", false },
+            { "(Lnet/minecraft/client/sound/SoundInstance;)Lnet/minecraft/client/sound/SoundSystem$PlayResult;", true },
+            { "(Lnet/minecraft/client/resources/sounds/SoundInstance;)Lnet/minecraft/client/sounds/SoundEngine$PlayResult;", true },
+            { nullptr, false }
+        };
+        for (int i = 0; playCands[i].sig && !g_fireballSoundPlay_121; i++) {
+            jmethodID m = env->GetMethodID(smCls, "play", playCands[i].sig);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); m = nullptr; }
+            if (m) {
+                g_fireballSoundPlay_121 = m;
+                g_fireballPlayReturnsResult_121 = playCands[i].returnsResult;
+            }
+        }
+    }
+    bool played = false;
+    if (!g_fireballSoundPlay_121) {
+        if (!g_fireballPlayWarned_121) {
+            g_fireballPlayWarned_121 = true;
+            Log("FireballWarning: SoundManager.play lookup failed; visuals only.");
+        }
+    } else {
+        jobject inst = env->CallStaticObjectMethod(g_fireballSoundInstanceClass_121,
+            g_fireballMasterSound_121, g_fireballPlingEvent_121, 2.0f);
+        if (env->ExceptionCheck() || !inst) {
+            env->ExceptionClear();
+        } else {
+            if (g_fireballPlayReturnsResult_121) {
+                jobject playRes = env->CallObjectMethod(soundManager, g_fireballSoundPlay_121, inst);
+                if (env->ExceptionCheck()) {
+                    env->ExceptionClear();
+                    if (!g_fireballPlayWarned_121) {
+                        g_fireballPlayWarned_121 = true;
+                        Log("FireballWarning: SoundManager.play call threw; visuals only.");
+                    }
+                } else {
+                    played = true;
+                    if (playRes) env->DeleteLocalRef(playRes);
+                }
+            } else {
+                env->CallVoidMethod(soundManager, g_fireballSoundPlay_121, inst);
+                if (env->ExceptionCheck()) {
+                    env->ExceptionClear();
+                    if (!g_fireballPlayWarned_121) {
+                        g_fireballPlayWarned_121 = true;
+                        Log("FireballWarning: SoundManager.play call threw; visuals only.");
+                    }
+                } else {
+                    played = true;
+                }
+            }
+            env->DeleteLocalRef(inst);
+        }
+    }
+    (void)g_fireballMasterSig_121;
+    env->DeleteLocalRef(smCls);
+    env->DeleteLocalRef(soundManager);
+    return played;
+}
+
+static void MaybePlayFireballWarningSound121(JNIEnv* env, bool holderPresent, bool soundEnabled, DWORD nowMs) {
+    if (!lc::FireballWarningSoundDue(nowMs, g_lastFireballSoundMs_121, holderPresent, soundEnabled))
+        return;
+    g_lastFireballSoundMs_121 = nowMs;
+    if (!PlayFireballWarningSound121(env) && !g_fireballSoundLogged_121) {
+        g_fireballSoundLogged_121 = true;
+        Log("FireballWarning: in-game sound unavailable on this runtime; visuals only.");
+    }
 }
 
 static std::string ReadModernNickHiderJavaString(JNIEnv* env, jstring value) {
@@ -4309,6 +4585,8 @@ static void ResetSpeedBridgeMovementTracking121() {
     g_speedBridgeHaveLastPos_121 = false;
     g_speedBridgeDirX_121 = 0;
     g_speedBridgeDirZ_121 = 0;
+    g_speedBridgeWasEdge_121 = false;
+    g_speedBridgeLastEdgeMs_121 = 0;
 }
 
 static void UpdateSpeedBridgeDirection121(double posX, double posZ) {
@@ -4826,12 +5104,33 @@ static void UpdatePixelPartyAssist(JNIEnv* env, const Config& cfg) {
 }
 
 static bool IsSpeedBridgeEdgeUnsupported121(JNIEnv* env, const Config& cfg, double posX, double posY, double posZ) {
-    if (g_speedBridgeDirX_121 == 0 && g_speedBridgeDirZ_121 == 0) return false;
+    if (g_speedBridgeDirX_121 == 0 && g_speedBridgeDirZ_121 == 0) {
+        g_speedBridgeWasEdge_121 = false;
+        return false;
+    }
+
     double probe = SpeedBridgeSupportProbeDistance121(cfg);
     double sx = posX + (double)g_speedBridgeDirX_121 * probe;
     double sz = posZ + (double)g_speedBridgeDirZ_121 * probe;
     double sy = posY - 0.05;
-    return !IsSolidBlockAt121(env, sx, sy, sz);
+    bool atEdge = !IsSolidBlockAt121(env, sx, sy, sz);
+
+    // Hysteresis: once at the edge, hold sneak for a short grace period so a
+    // single noisy probe cannot unshift the player into the void. Kept well
+    // below the ~130-210ms solid-probe windows of a normal bridge cycle so the
+    // hold can never latch sneak on for the whole run.
+    DWORD nowMs = GetTickCount();
+    const DWORD edgeHoldMs = 40;
+    if (atEdge) {
+        g_speedBridgeWasEdge_121 = true;
+        g_speedBridgeLastEdgeMs_121 = nowMs;
+        return true;
+    }
+    if (g_speedBridgeWasEdge_121 && (nowMs - g_speedBridgeLastEdgeMs_121) < edgeHoldMs) {
+        return true;
+    }
+    g_speedBridgeWasEdge_121 = false;
+    return false;
 }
 
 static void UpdateSpeedBridge(JNIEnv* env, const Config& cfg, bool inWorldNow) {
@@ -4882,6 +5181,13 @@ static void UpdateSpeedBridge(JNIEnv* env, const Config& cfg, bool inWorldNow) {
     double posY = CallDoubleNoArgs(env, selfObj, g_getY_121);
     double posZ = CallDoubleNoArgs(env, selfObj, g_getZ_121);
     float pitch = CallFloatNoArgs(env, selfObj, g_getPitch_121);
+    // Fail open: g_isOnGround_121 is optional; an unavailable mapping assumes
+    // grounded instead of disabling the module.
+    jboolean onGround = JNI_TRUE;
+    if (g_isOnGround_121) {
+        onGround = env->CallBooleanMethod(selfObj, g_isOnGround_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); onGround = JNI_TRUE; }
+    }
     env->DeleteLocalRef(selfObj);
 
     if (!std::isfinite(posX) || !std::isfinite(posY) || !std::isfinite(posZ) || !std::isfinite(pitch)) {
@@ -4896,9 +5202,25 @@ static void UpdateSpeedBridge(JNIEnv* env, const Config& cfg, bool inWorldNow) {
         return;
     }
 
+    // While airborne the edge probe is unreliable: keep tracking direction but
+    // leave the sneak key untouched; the probe resumes on landing. Releasing
+    // here would risk landing unsneaked past an edge.
+    if (onGround != JNI_TRUE) {
+        UpdateSpeedBridgeDirection121(posX, posZ);
+        return;
+    }
+
     UpdateSpeedBridgeDirection121(posX, posZ);
     bool shouldSneak = IsSpeedBridgeEdgeUnsupported121(env, cfg, posX, posY, posZ);
     SetSpeedBridgeSneak121(env, shouldSneak);
+
+    static bool s_loggedSpeedBridgeSneak121 = false;
+    static bool s_haveLoggedSpeedBridgeState121 = false;
+    if (!s_haveLoggedSpeedBridgeState121 || shouldSneak != s_loggedSpeedBridgeSneak121) {
+        s_haveLoggedSpeedBridgeState121 = true;
+        s_loggedSpeedBridgeSneak121 = shouldSneak;
+        Log(std::string("SpeedBridge: sneak=") + (shouldSneak ? "1" : "0"));
+    }
 }
 
 // ===================== AUTOTOTEM JNI RESOLUTION =====================
@@ -6192,7 +6514,7 @@ static void UpdatePlayerListOverlay(JNIEnv* env) {
     // Fast path: use HelperBridge to pack all entity data in one JNI call.
     int processedCount = 0;
     bool usedHelper = false;
-    const bool needHeldItem = cfg.nametagShowHeldItem && (cfg.nametags || cfg.closestPlayer);
+    const bool needHeldItem = (cfg.nametagShowHeldItem && (cfg.nametags || cfg.closestPlayer)) || cfg.fireballWarning;
     // The renderer projector is only callable on this background JNI thread.
     // Its screen coordinates are stale by the next swap frame during fast turns,
     // so render-time angle projection owns Fabric visual placement instead.
@@ -6275,7 +6597,9 @@ static void UpdatePlayerListOverlay(JNIEnv* env) {
         localList.emplace_back(std::move(data));
     };
 
-    if (HelperBridge::IsLoaded() && !hideVanillaTags && !fightStatusActive) {
+    // Fireball Warning needs per-entity held-item strings the helper does not pack,
+    // so it takes the slow per-entity JNI loop below instead of this batched path.
+    if (HelperBridge::IsLoaded() && !hideVanillaTags && !fightStatusActive && !cfg.fireballWarning) {
         // Build a java.util.List view from lwList objects for the helper.
         // We pass listObj directly (already the world players list) and let the
         // helper iterate it; selfObj is passed so the helper skips the local player.
@@ -6407,9 +6731,11 @@ static void UpdatePlayerListOverlay(JNIEnv* env) {
                 }
 
                 int armor = GetEntityArmor(env, lw.obj);
-                std::string held = lc::NametagShouldFetchHeldItem(needHeldItem, lw.dist)
-                    ? GetHeldItemInfo(env, lw.obj)
-                    : std::string();
+                std::string held;
+                if (cfg.fireballWarning && lw.dist <= lc::kClosestPlayerMaxDist)
+                    held = GetHeldItemInfo(env, lw.obj);
+                else if (lc::NametagShouldFetchHeldItem(needHeldItem, lw.dist))
+                    held = GetHeldItemInfo(env, lw.obj);
                 appendPlayer(name, lw, hp, healthAvailable, absorption, armor,
                     g_getArmor_121 != nullptr, hurtTime, hurtTimeAvailable, held);
                 processedCount++;
@@ -6438,6 +6764,17 @@ static void UpdatePlayerListOverlay(JNIEnv* env) {
     if (cfg.fightStatus) {
         if (!fightStatusActive || IsWorldTransitionActive()) ResetFightStatusState121();
         else UpdateFightStatusState121(now, localFightSample, localList);
+    }
+
+    if (cfg.fireballWarning && cfg.fireballWarningSound) {
+        bool holderPresent = false;
+        for (const auto& pd : localList) {
+            if (!pd.stableName.empty() && lc::IsFireballHolderText(pd.heldItem)) {
+                holderPresent = true;
+                break;
+            }
+        }
+        MaybePlayFireballWarningSound121(env, holderPresent, true, now);
     }
 
     if (gameRendererForProjection) env->DeleteLocalRef(gameRendererForProjection);
@@ -11385,6 +11722,13 @@ static void EnsureEntityMethods(JNIEnv* env, jobject entObj) {
             for (int i = 0; names[i] && !g_getHealth_121; i++) {
                 g_getHealth_121 = env->GetMethodID(entCls, names[i], "()F");
                 if (env->ExceptionCheck()) { env->ExceptionClear(); g_getHealth_121 = nullptr; }
+            }
+        }
+        if (!g_isOnGround_121) {
+            const char* names[] = { "onGround", "isOnGround", "method_24828", nullptr };
+            for (int i = 0; names[i] && !g_isOnGround_121; i++) {
+                g_isOnGround_121 = env->GetMethodID(entCls, names[i], "()Z");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_isOnGround_121 = nullptr; }
             }
         }
         if (!g_getAbsorptionAmount_121) {
@@ -16968,6 +17312,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                     const bool entityProducerEnabled =
                         cfg.nametags || cfg.nickHiderEnabled || cfg.closestPlayer ||
                         cfg.fightStatus || cfg.aimAssist || cfg.triggerbot ||
+                        cfg.fireballWarning ||
                         cfg.nametagHideVanilla || g_nametagSuppressionActive_121;
                     const unsigned int playerInterval = lc::PlayerOverlayIntervalMs(
                         cfg.aimAssist || cfg.triggerbot);
@@ -17082,6 +17427,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                 &sleepMs, sleepNow, lastPlayerScanMs,
                 lc::PlayerOverlayIntervalMs(cfg.aimAssist || cfg.triggerbot),
                 cfg.nametags || cfg.nickHiderEnabled || cfg.closestPlayer ||
+                cfg.fireballWarning ||
                 cfg.fightStatus || cfg.aimAssist || cfg.triggerbot || cfg.nametagHideVanilla);
             lc::ConsiderJobSleep(
                 &sleepMs, sleepNow, lastChestEspScanMs, lc::kChestEspScanIntervalMs,
@@ -17525,7 +17871,7 @@ static void RenderOverlayPanels(
             Matrix4x4 sharedProj = {}, sharedView = {};
             bool sharedMatsOk = false;
 
-            if (cfg.nametags || cfg.chestEsp || cfg.blockEsp || cfg.fightStatus || cfg.bedPlates) {
+            if (cfg.nametags || cfg.chestEsp || cfg.blockEsp || cfg.fightStatus || cfg.bedPlates || cfg.fireballWarning) {
                 BgCamState cs;
                 { LockGuard lk(g_bgCamMutex); cs = g_bgCamState; }
                 sharedCam      = { cs.camX, cs.camY, cs.camZ };
@@ -18176,6 +18522,79 @@ static void RenderOverlayPanels(
                 }
             } // cfg.bedPlates
 
+            // ── Fireball Warning: box + arrow + sound for holders ──
+            bool renderFireball = TRACE261_IF("renderFireballWarning", (!g_realGuiOpen && cfg.fireballWarning && sharedCamFound));
+            if (renderFireball) {
+                const int winW = (int)io.DisplaySize.x;
+                const int winH = (int)io.DisplaySize.y;
+                const ImU32 warnBox = IM_COL32(255, 80, 60, 255);
+                const ImU32 warnFill = IM_COL32(255, 80, 60, 28);
+                const ImU32 warnText = IM_COL32(255, 120, 90, 255);
+                const float cx = (float)winW * 0.5f;
+                const float cy = (float)winH * 0.5f;
+                const float edgeRadius = (std::min)(winW, winH) * 0.38f;
+                const float radToDeg = 57.29577951308232f;
+                for (const auto& p : playerSnap) {
+                    if (p.stableName.empty() || LooksLikeFakePlayerLine(p.stableName)) continue;
+                    if (!lc::IsFireballHolderText(p.heldItem)) continue;
+
+                    LegoVec3 feet = { p.ex, p.ey, p.ez };
+                    LegoVec3 head = { p.ex, p.ey + 1.8, p.ez };
+                    float feetX = 0, feetY = 0, headX = 0, headY = 0;
+                    bool projected = sharedMatsOk
+                        ? (WorldToScreen(feet, sharedCam, sharedView, sharedProj, winW, winH, &feetX, &feetY) &&
+                           WorldToScreen(head, sharedCam, sharedView, sharedProj, winW, winH, &headX, &headY))
+                        : (WorldToScreen_Angles(feet, sharedCam, sharedYaw, sharedPitch, cpCamState.fov, winW, winH, &feetX, &feetY) &&
+                           WorldToScreen_Angles(head, sharedCam, sharedYaw, sharedPitch, cpCamState.fov, winW, winH, &headX, &headY));
+                    const bool onScreen = projected && feetX >= -50.0f && feetX <= (float)winW + 50.0f &&
+                        feetY >= -50.0f && feetY <= (float)winH + 50.0f;
+
+                    if (cfg.fireballWarningBox && onScreen) {
+                        float rawH = std::fabs(feetY - headY);
+                        float boxH = (std::max)(48.0f, (std::min)(160.0f, rawH));
+                        float boxW = (std::max)(22.0f, boxH * 0.45f);
+                        float bodyX = (feetX + headX) * 0.5f;
+                        float centerY = (feetY + headY) * 0.5f;
+                        ImVec2 bMin(bodyX - boxW * 0.5f, centerY - boxH * 0.5f);
+                        ImVec2 bMax(bodyX + boxW * 0.5f, centerY + boxH * 0.5f);
+                        fg->AddRectFilled(bMin, bMax, warnFill, 0.0f);
+                        fg->AddRect(bMin, bMax, warnBox, 0.0f, 0, 2.0f);
+                        char label[96];
+                        snprintf(label, sizeof(label), "%s  %.0fm FIREBALL!", p.name.c_str(), p.dist);
+                        ImVec2 labelSz = ImGui::CalcTextSize(label);
+                        float lx = (std::max)(4.0f, (std::min)(bodyX - labelSz.x * 0.5f, (float)winW - labelSz.x - 4.0f));
+                        float ly = (std::max)(4.0f, bMin.y - labelSz.y - 6.0f);
+                        fg->AddText(ImVec2(lx + 1, ly + 1), overlayTheme.moduleTextShadow, label);
+                        fg->AddText(ImVec2(lx, ly), warnText, label);
+                    }
+
+                    if (cfg.fireballWarningArrow) {
+                        if (onScreen) {
+                            fg->AddLine(ImVec2(cx, (float)winH - 12.0f), ImVec2((feetX + headX) * 0.5f, (feetY + headY) * 0.5f),
+                                IM_COL32(255, 110, 80, 170), 1.5f);
+                        }
+                        double toX = p.ex - sharedCam.x;
+                        double toZ = p.ez - sharedCam.z;
+                        float targetYaw = (float)(std::atan2(-toX, toZ) * radToDeg);
+                        float delta = targetYaw - sharedYaw;
+                        while (delta > 180.0f) delta -= 360.0f;
+                        while (delta < -180.0f) delta += 360.0f;
+                        float ang = delta * 3.14159265358979f / 180.0f;
+                        float ax = cx + std::sin(ang) * edgeRadius;
+                        float ay = cy - std::cos(ang) * edgeRadius;
+                        // Triangle pointing outward.
+                        float sz = 10.0f;
+                        float dx = std::sin(ang), dy = -std::cos(ang);
+                        float px = -dy, py = dx;
+                        ImVec2 tip(ax + dx * sz, ay + dy * sz);
+                        ImVec2 left(ax - dx * sz * 0.6f + px * sz * 0.7f, ay - dy * sz * 0.6f + py * sz * 0.7f);
+                        ImVec2 right(ax - dx * sz * 0.6f - px * sz * 0.7f, ay - dy * sz * 0.6f - py * sz * 0.7f);
+                        fg->AddTriangleFilled(tip, left, right, IM_COL32(255, 90, 65, 235));
+                        fg->AddTriangle(tip, left, right, IM_COL32(255, 200, 180, 255), 1.5f);
+                    }
+                }
+            }
+
             bool renderGtbHelper = TRACE261_IF("renderGtbHelper", cfg.gtbHelper);
             if (renderGtbHelper) {
                 std::string hint = cfg.gtbHint;
@@ -18316,6 +18735,7 @@ static void RenderOverlayPanels(
                 if (cfg.autoTotemEnabled) pushMod("AutoTotem");
                 if (cfg.antiDebuffEnabled) pushMod("AntiDebuff");
                 if (cfg.bedPlates)     pushMod("BedPlates");
+                if (cfg.fireballWarning) pushMod("Fireball Warning");
                 if (cfg.hitDelayFixEnabled) pushMod("Hit Delay Fix");
 
                 // Sort by width descending (staggered original look)

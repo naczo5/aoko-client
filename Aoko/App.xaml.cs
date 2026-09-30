@@ -1,3 +1,4 @@
+using System;
 using System.Windows;
 using System.Windows.Interop;
 using System.Windows.Media;
@@ -9,7 +10,10 @@ public partial class App : Application
 {
     protected override void OnStartup(StartupEventArgs e)
     {
-        RenderOptions.ProcessRenderMode = RenderMode.SoftwareOnly;
+        // Hardware rendering is the default. Force software only as an explicit escape
+        // hatch (broken GPU / RDP capture issues) since it CPU-rasterizes the whole window.
+        if (Environment.GetEnvironmentVariable("AOKO_SOFTWARE_RENDERING") == "1")
+            RenderOptions.ProcessRenderMode = RenderMode.SoftwareOnly;
 
         base.OnStartup(e);
 

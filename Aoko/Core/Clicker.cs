@@ -556,6 +556,7 @@ public class Clicker : INotifyPropertyChanged
             AutoToolEnabled = false;
             AntiDebuffEnabled = false;
             HitDelayFixEnabled = false;
+            FireballWarningEnabled = false;
 
             ShowModuleList = false;
             ShowLogo = false;
@@ -1936,6 +1937,58 @@ public class Clicker : INotifyPropertyChanged
         {
             _hitDelayFixEnabled = value;
             OnPropertyChanged(nameof(HitDelayFixEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _fireballWarningEnabled = false;
+    public bool FireballWarningEnabled
+    {
+        get => _fireballWarningEnabled;
+        set
+        {
+            if (_fireballWarningEnabled == value) return;
+            _fireballWarningEnabled = value;
+            OnPropertyChanged(nameof(FireballWarningEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _fireballWarningBox = true;
+    public bool FireballWarningBox
+    {
+        get => _fireballWarningBox;
+        set
+        {
+            if (_fireballWarningBox == value) return;
+            _fireballWarningBox = value;
+            OnPropertyChanged(nameof(FireballWarningBox));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _fireballWarningArrow = true;
+    public bool FireballWarningArrow
+    {
+        get => _fireballWarningArrow;
+        set
+        {
+            if (_fireballWarningArrow == value) return;
+            _fireballWarningArrow = value;
+            OnPropertyChanged(nameof(FireballWarningArrow));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _fireballWarningSound = true;
+    public bool FireballWarningSound
+    {
+        get => _fireballWarningSound;
+        set
+        {
+            if (_fireballWarningSound == value) return;
+            _fireballWarningSound = value;
+            OnPropertyChanged(nameof(FireballWarningSound));
             StateChanged?.Invoke();
         }
     }

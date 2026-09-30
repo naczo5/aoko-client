@@ -208,6 +208,11 @@ public class Profile
     public bool AntiDebuffEnabled { get; set; } = false;
     public bool HitDelayFixEnabled { get; set; } = false;
 
+    public bool FireballWarningEnabled { get; set; } = false;
+    public bool FireballWarningBox { get; set; } = true;
+    public bool FireballWarningArrow { get; set; } = true;
+    public bool FireballWarningSound { get; set; } = true;
+
     // Nullable so older JSON (without hudLayout) deserializes without error;
     // a null value is treated as canonical defaults in ApplyToClicker.
     public Dictionary<string, HudElementLayout>? HudLayout { get; set; }
@@ -240,6 +245,7 @@ public class Profile
         ["autotool"]         = 0,
         ["antidebuff"]       = 0,
         ["hitdelayfix"]     = 0,
+        ["fireballwarning"]  = 0,
         ["panic"]            = 0,
         ["hudeditor"]        = 0,
     };
@@ -672,6 +678,11 @@ public static class ProfileManager
             AntiDebuffEnabled = clicker.AntiDebuffEnabled,
             HitDelayFixEnabled = clicker.HitDelayFixEnabled,
 
+            FireballWarningEnabled = clicker.FireballWarningEnabled,
+            FireballWarningBox = clicker.FireballWarningBox,
+            FireballWarningArrow = clicker.FireballWarningArrow,
+            FireballWarningSound = clicker.FireballWarningSound,
+
             HudLayout = BuildHudLayoutDict(clicker.HudLayout),
 
             ModuleKeys = new Dictionary<string, int>(InputHooks.ModuleKeys),
@@ -822,6 +833,11 @@ public static class ProfileManager
 
         clicker.AntiDebuffEnabled = profile.AntiDebuffEnabled;
         clicker.HitDelayFixEnabled = profile.HitDelayFixEnabled;
+
+        clicker.FireballWarningEnabled = profile.FireballWarningEnabled;
+        clicker.FireballWarningBox = profile.FireballWarningBox;
+        clicker.FireballWarningArrow = profile.FireballWarningArrow;
+        clicker.FireballWarningSound = profile.FireballWarningSound;
 
         clicker.HudLayout = BuildHudLayout(profile.HudLayout);
 

@@ -15,6 +15,7 @@ aoko client is an open-source Windows utility client and external overlay for Lu
 - Supported versions: **26.2**, **26.1**, **1.21.x**, and **1.8.9**.
 - Supported environments: **Lunar Client** as well as **standalone Minecraft instances** (1.8.9 on Forge, modern versions on Fabric).
 - On **modern 26.2** the game can present via OpenGL or the new **Vulkan** renderer; `bridge_261.dll` auto-detects OpenGL vs Vulkan at runtime and renders the overlay natively on either (kill-switch: set `AOKO_BRIDGE261_VULKAN=0` to force-disable the Vulkan path).
+- The external GUI uses hardware rendering by default; set `AOKO_SOFTWARE_RENDERING=1` to force software rendering (e.g. broken GPU drivers or RDP capture issues).
 
 ## Features (current)
 
@@ -36,7 +37,7 @@ aoko client is an open-source Windows utility client and external overlay for Lu
 - Refill (shift-clicks Instant Health/Regen pots and golden apples into empty hotbar slots while your inventory is open)
 - GTB Helper & Pixel Party Assist
 - Discord Rich Presence
-- Nametags, Closest Player panel, Fight Status, Chest ESP, Block ESP, BedPlates
+- Nametags, Closest Player panel, Fight Status, Chest ESP, Block ESP, BedPlates, Fireball Warning
 - In-Game ClickGUI (Dear ImGui midnight blue glass menu with category tabs, real-time search, animated collapsible module cards, pill toggles, and inline keybind configuration)
 - GUI Modes (Hybrid External WPF + In-Game ClickGUI, External Only, In-Game Only)
 - In-game HUD Editor & module list styling

@@ -77,6 +77,7 @@ public static class ModuleCatalog
         new("autotool", "AutoTool", "cfg.autoToolEnabled", c => c.AutoToolEnabled),
         new("antidebuff", "AntiDebuff", "cfg.antiDebuffEnabled", c => c.AntiDebuffEnabled),
         new("hitdelayfix", "Hit Delay Fix", "cfg.hitDelayFixEnabled", c => c.HitDelayFixEnabled),
+        new("fireballwarning", "Fireball Warning", "cfg.fireballWarning", c => c.FireballWarningEnabled),
 
         // Keybind-only emergency action — not a toggleable feature module.
         new("panic", "Panic", "", _ => false,

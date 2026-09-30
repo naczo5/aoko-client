@@ -66,6 +66,7 @@ export default defineConfig({
                 { label: 'Chest ESP', slug: 'modules/visual/chest-esp' },
                 { label: 'Block ESP', slug: 'modules/visual/block-esp' },
                 { label: 'BedPlates', slug: 'modules/visual/bedplates' },
+                { label: 'Fireball Warning', slug: 'modules/visual/fireball-warning' },
                 { label: 'Module List & Logo', slug: 'modules/visual/module-list' },
                 { label: 'HUD Editor', slug: 'modules/visual/hud-editor' },
               ],

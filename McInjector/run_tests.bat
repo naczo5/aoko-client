@@ -178,6 +178,14 @@ echo [NativeTests] Running reach_core_tests.exe...
 tests\reach_core_tests.exe
 if %errorlevel% neq 0 exit /b %errorlevel%
 
+echo [NativeTests] Building fireball_warning_tests.exe...
+"%GPP%" -m64 -std=c++11 -O2 -static-libgcc -static-libstdc++ -o tests\fireball_warning_tests.exe tests\fireball_warning_tests.cpp
+if %errorlevel% neq 0 exit /b %errorlevel%
+
+echo [NativeTests] Running fireball_warning_tests.exe...
+tests\fireball_warning_tests.exe
+if %errorlevel% neq 0 exit /b %errorlevel%
+
 echo [NativeTests] Building reach_bytecode_injector_tests.exe...
 "%GPP%" -m64 -std=c++11 -O2 -static-libgcc -static-libstdc++ -o tests\reach_bytecode_injector_tests.exe tests\reach_bytecode_injector_tests.cpp
 if %errorlevel% neq 0 exit /b %errorlevel%

@@ -102,6 +102,7 @@ public static class InputHooks
         ["autotool"]         = 0,
         ["antidebuff"]       = 0,
         ["hitdelayfix"]     = 0,
+        ["fireballwarning"]  = 0,
         ["panic"]            = 0,
         ["hudeditor"]        = 0,
     };
@@ -165,28 +166,27 @@ public static class InputHooks
 
     private static bool CanConsumeAutoRodAction()
     {
+        // Hook-thread hot path: only do the expensive foreground/game-state checks when
+        // the module could actually consume the key. Order matters for cost.
+        // Keep the predicate in sync with ShouldConsumeAutoRodAction (test seam above).
+        if (!Clicker.Instance.AutoRodEnabled) return false;
         var client = GameStateClient.Instance;
+        if (!client.IsConnected || !client.SupportsModule("autorod")) return false;
         GameState state = client.CurrentState;
-        return ShouldConsumeAutoRodAction(
-            Clicker.Instance.AutoRodEnabled,
-            client.SupportsModule("autorod"),
-            client.IsConnected,
-            WindowDetection.IsMinecraftForeground(),
-            state.InWorld,
-            IsAnyGameScreenOpen(state));
+        if (!state.InWorld || IsAnyGameScreenOpen(state)) return false;
+        return WindowDetection.IsMinecraftForeground();
     }
 
     private static bool CanConsumeThrowPotAction()
     {
+        // Same ordering rationale as CanConsumeAutoRodAction; predicate mirrors
+        // ShouldConsumeAutoRodAction — keep them in sync.
+        if (!Clicker.Instance.ThrowpotEnabled) return false;
         var client = GameStateClient.Instance;
+        if (!client.IsConnected || !client.SupportsModule("throwpot")) return false;
         GameState state = client.CurrentState;
-        return ShouldConsumeAutoRodAction(
-            Clicker.Instance.ThrowpotEnabled,
-            client.SupportsModule("throwpot"),
-            client.IsConnected,
-            WindowDetection.IsMinecraftForeground(),
-            state.InWorld,
-            IsAnyGameScreenOpen(state));
+        if (!state.InWorld || IsAnyGameScreenOpen(state)) return false;
+        return WindowDetection.IsMinecraftForeground();
     }
 
     internal sealed class PressLatch
@@ -283,13 +283,16 @@ public static class InputHooks
             case "autotool":         c.AutoToolEnabled = !c.AutoToolEnabled; break;
             case "antidebuff":       c.AntiDebuffEnabled = !c.AntiDebuffEnabled; break;
             case "hitdelayfix":     c.HitDelayFixEnabled = !c.HitDelayFixEnabled; break;
+            case "fireballwarning": c.FireballWarningEnabled = !c.FireballWarningEnabled; break;
             case "hudeditor":        c.HudEditorActive = !c.HudEditorActive; break;
         }
     }
 
     private static bool ShouldBlockModuleKeybinds()
     {
-        if (!WindowDetection.IsMinecraftForeground())
+        // O(1) foreground check first; only when a known game process is foreground do we
+        // spend on game-state inspection. This keeps the low-level hook thread cheap.
+        if (!WindowDetection.IsForegroundKnownGame())
             return true;
 
         if (GameStateClient.Instance.IsConnected)

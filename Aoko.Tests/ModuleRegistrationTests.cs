@@ -118,7 +118,8 @@ public class ModuleRegistrationTests
             ["autoheal"] = "autoHealEnabled",
             ["autotool"] = "autoToolEnabled",
             ["antidebuff"] = "antiDebuffEnabled",
-            ["hitdelayfix"] = "hitDelayFixEnabled"
+            ["hitdelayfix"] = "hitDelayFixEnabled",
+            ["fireballwarning"] = "fireballWarning"
         };
 
         var catalogIds = ModuleCatalog.Requiring(ModuleCatalog.Surfaces.OverlayList)
@@ -384,6 +385,7 @@ public class ModuleRegistrationTests
             case "autotool": clicker.AutoToolEnabled = enabled; return true;
             case "antidebuff": clicker.AntiDebuffEnabled = enabled; return true;
             case "hitdelayfix": clicker.HitDelayFixEnabled = enabled; return true;
+            case "fireballwarning": clicker.FireballWarningEnabled = enabled; return true;
             default: return false;
         }
     }

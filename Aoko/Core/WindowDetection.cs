@@ -60,14 +60,47 @@ public static class WindowDetection
     private static IntPtr _targetHwnd = IntPtr.Zero;
     private static readonly List<WindowTarget> _selectableWindows = new();
 
+    // Process IDs that own a detected Minecraft window. Used as a cheap O(1)
+    // foreground check on the low-level input hooks so they never enumerate windows.
+    private static volatile HashSet<int> _knownGamePids = new();
+
     public static void SetTargetWindow(IntPtr hwnd)
     {
         _targetHwnd = hwnd;
+        CacheGamePid(hwnd);
     }
 
     public static void ClearTargetWindow()
     {
         _targetHwnd = IntPtr.Zero;
+    }
+
+    private static void CacheGamePid(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero) return;
+        int pid = GetWindowProcessId(hwnd);
+        if (pid <= 0 || _knownGamePids.Contains(pid)) return;
+        // Cap the set: OS PID reuse plus launcher churn would otherwise grow it
+        // without bound. Resetting to just the fresh PID is fail-safe — worst case
+        // an old game PID is forgotten and keybinds block until the next detection.
+        var next = new HashSet<int>(_knownGamePids) { pid };
+        if (next.Count > 16)
+            next = new HashSet<int> { pid };
+        _knownGamePids = next;
+    }
+
+    /// <summary>
+    /// O(1) hot-path check used by the low-level input hooks: is the current
+    /// foreground window a process we've already identified as Minecraft? Never
+    /// enumerates windows, so it is safe to call on the hook thread on every key.
+    /// Returns false (fail-safe) until a game window has been seen.
+    /// </summary>
+    public static bool IsForegroundKnownGame()
+    {
+        IntPtr foreground = GetForegroundWindow();
+        if (foreground == IntPtr.Zero) return false;
+        GetWindowThreadProcessId(foreground, out uint pid);
+        return pid != 0 && _knownGamePids.Contains((int)pid);
     }
 
     public static IntPtr GetForegroundWindowHandle() => GetForegroundWindow();
@@ -163,6 +196,13 @@ public static class WindowDetection
         IntPtr foreground = GetForegroundWindow();
         if (foreground == IntPtr.Zero) return false;
 
+        // Fast path: compare against an already-known game window without enumerating.
+        if (_targetHwnd != IntPtr.Zero && IsWindow(_targetHwnd))
+            return foreground == _targetHwnd;
+
+        if (_foundWindow != IntPtr.Zero && IsWindow(_foundWindow))
+            return foreground == _foundWindow;
+
         IntPtr minecraft = FindMinecraftWindow();
         if (minecraft == IntPtr.Zero) return false;
 
@@ -176,6 +216,8 @@ public static class WindowDetection
 
         _foundWindow = IntPtr.Zero;
         EnumWindows(EnumWindowCallback, IntPtr.Zero);
+        if (_foundWindow != IntPtr.Zero)
+            CacheGamePid(_foundWindow);
         return _foundWindow;
     }
 
@@ -192,6 +234,7 @@ public static class WindowDetection
             if (windowTitle.Contains(gameTitle, StringComparison.OrdinalIgnoreCase))
             {
                 _foundWindow = hWnd;
+                CacheGamePid(hWnd);
                 return false;
             }
         }

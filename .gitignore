@@ -57,3 +57,7 @@ Desktop.ini
 
 # ── Secrets / local config ───────────────────────────────────────
 # Profile saves live in %AppData%, not the repo
+
+# ── Local showcase tooling ───────────────────────────────────────
+# Remotion video project (local-only; generated audio + lockfile noise)
+/motion/
