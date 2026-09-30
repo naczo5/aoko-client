@@ -3,7 +3,8 @@ import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 
 // The site is published to GitHub Pages at https://naczo5.github.io/aoko-client/
-// The hand-rolled landing page lives in `public/` and keeps the site root ("/aoko-client/").
+// The hand-rolled landing page lives in `src/landing.html` and is served at the site
+// root ("/aoko-client/") by `src/pages/index.astro`.
 // Starlight owns the documentation routes underneath it (e.g. /getting-started/, /modules/...).
 export default defineConfig({
   site: 'https://naczo5.github.io',
@@ -23,7 +24,7 @@ export default defineConfig({
           href: 'https://github.com/naczo5/aoko-client',
         },
       ],
-      // A small link back to the marketing landing page that lives in public/.
+      // A small link back to the marketing landing page served at the site root.
       components: {},
       sidebar: [
         {
@@ -93,6 +94,11 @@ export default defineConfig({
             { label: 'Discord Rich Presence', slug: 'integration/discord-rpc' },
             { label: 'GUI Customization', slug: 'integration/gui-customization' },
           ],
+        },
+        {
+          // A page under src/pages/ rather than a docs collection entry, so it links by path.
+          label: 'Project',
+          items: [{ label: 'Changelog', link: '/changelog' }],
         },
       ],
     }),

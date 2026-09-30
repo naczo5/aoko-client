@@ -2,6 +2,10 @@
 dist/
 .astro/
 
+# GitHub Releases snapshot used as an offline fallback when the build cannot
+# reach the API. Regenerated on every successful build.
+.releases-cache.json
+
 # dependencies
 node_modules/
 

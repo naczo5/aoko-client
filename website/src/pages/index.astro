@@ -1,8 +1,18 @@
 ---
 import fs from 'node:fs';
 import path from 'node:path';
+import { getReleases, latestVersionLabel } from '../lib/releases';
 
-const file = path.resolve('./public/index.html');
-const html = fs.readFileSync(file, 'utf-8');
+const file = path.resolve('./src/landing.html');
+let html = fs.readFileSync(file, 'utf-8');
+
+const version = latestVersionLabel(await getReleases());
+const versionPattern = /(<span>version<\/span><span class="v" id="release-version">)[^<]*(<\/span>)/;
+if (!versionPattern.test(html)) {
+	console.warn('[index] Could not find the release version placeholder in src/landing.html.');
+} else {
+	html = html.replace(versionPattern, `$1${version}$2`);
+}
 ---
+
 <Fragment set:html={html} />

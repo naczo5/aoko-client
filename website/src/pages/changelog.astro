@@ -1,0 +1,154 @@
+---
+import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro';
+import { REPO_URL, formatReleaseDate, getReleases } from '../lib/releases';
+
+const releases = await getReleases();
+---
+
+<StarlightPage
+	frontmatter={{
+		title: 'Changelog',
+		description: 'Every published aoko client release, pulled from GitHub at build time.',
+		tableOfContents: false,
+	}}
+>
+	<p class="lede">
+		Release notes for every published aoko client build, generated from the
+		<a href={`${REPO_URL}/releases`}>GitHub releases feed</a> when this site is built. Drafts are
+		hidden; pre-releases are marked.
+	</p>
+
+	{
+		releases.length === 0 ? (
+			<aside class="empty">
+				<p>Release notes could not be loaded at build time.</p>
+				<p>
+					Read them on <a href={`${REPO_URL}/releases`}>GitHub</a> instead.
+				</p>
+			</aside>
+		) : (
+			<ol class="releases">
+				{releases.map((release) => (
+					<li class="release">
+						<div class="release-head">
+							<h2>{release.title}</h2>
+							<div class="release-meta">
+								{release.latest && <span class="badge badge-latest">latest</span>}
+								{release.prerelease && <span class="badge badge-pre">pre-release</span>}
+								<time datetime={release.publishedAt ?? undefined}>
+									{formatReleaseDate(release.publishedAt)}
+								</time>
+							</div>
+						</div>
+						{release.notesHtml ? (
+							<div class="sl-markdown-content" set:html={release.notesHtml} />
+						) : (
+							<p class="no-notes">No release notes were provided for this build.</p>
+						)}
+						<a class="release-link" href={release.url}>
+							view on GitHub <span aria-hidden="true">↗</span>
+						</a>
+					</li>
+				))}
+			</ol>
+		)
+	}
+</StarlightPage>
+
+<style>
+	.lede {
+		color: var(--sl-color-text-accent);
+	}
+
+	.empty {
+		border: 1px solid var(--sl-color-hairline);
+		border-radius: 0.5rem;
+		padding: 1rem 1.25rem;
+		background: var(--sl-color-gray-6);
+	}
+
+	.releases {
+		list-style: none;
+		padding: 0;
+		margin: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 1.5rem;
+	}
+
+	.release {
+		border: 1px solid var(--sl-color-hairline);
+		border-radius: 0.5rem;
+		padding: 1rem 1.25rem 1.25rem;
+		background: var(--sl-color-gray-6);
+	}
+
+	.release-head {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: baseline;
+		justify-content: space-between;
+		gap: 0.5rem 1rem;
+	}
+
+	.release-head h2 {
+		font-size: 1.25rem;
+		margin: 0;
+		letter-spacing: 0.01em;
+	}
+
+	.release-meta {
+		display: flex;
+		align-items: center;
+		gap: 0.5rem;
+		font-size: var(--sl-text-xs);
+		color: var(--sl-color-text-accent);
+		white-space: nowrap;
+	}
+
+	.badge {
+		border: 1px solid var(--sl-color-hairline);
+		border-radius: 999px;
+		padding: 0.05rem 0.5rem;
+		text-transform: uppercase;
+		letter-spacing: 0.12em;
+		font-size: 0.7rem;
+	}
+
+	.badge-latest {
+		border-color: var(--sl-color-accent);
+		color: var(--sl-color-text-accent);
+	}
+
+	.badge-pre {
+		border-color: var(--sl-color-orange);
+		color: var(--sl-color-orange);
+	}
+
+	.release :global(.sl-markdown-content > :first-child) {
+		margin-top: 0.75rem;
+	}
+
+	.release :global(.sl-markdown-content > :last-child) {
+		margin-bottom: 0;
+	}
+
+	.no-notes {
+		margin: 0.75rem 0 0;
+		color: var(--sl-color-text-accent);
+		font-style: italic;
+	}
+
+	.release-link {
+		display: inline-block;
+		margin-top: 0.75rem;
+		font-size: var(--sl-text-xs);
+		text-transform: uppercase;
+		letter-spacing: 0.12em;
+		text-decoration: none;
+	}
+
+	.release-link:hover {
+		text-decoration: underline;
+	}
+</style>

@@ -6,6 +6,9 @@ on:
     paths:
       - 'website/**'
       - '.github/workflows/docs.yml'
+  # Publishing a release should refresh the changelog page.
+  release:
+    types: [published]
   # Allow manual runs from the Actions tab.
   workflow_dispatch:
 
@@ -28,8 +31,12 @@ jobs:
         uses: actions/checkout@v4
       - name: Build Astro site
         uses: withastro/action@v4
+        env:
+          # Raises the GitHub Releases API rate limit so the changelog build
+          # never falls back to the cached release list.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          # The Astro project (with the landing page in public/) lives in website/.
+          # The Astro project (with the landing page in src/landing.html) lives in website/.
           path: website
           node-version: 22
 
