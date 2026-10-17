@@ -29,9 +29,7 @@
 #include <GL/gl.h>
 #include "gl_loader.h"
 #include "MinHook.h"
-#include "imgui.h"
-#include "imgui_impl_win32.h"
-#include "imgui_impl_opengl3.h"
+#include "overlay_canvas.h"
 #include "json_config_reader.h"
 #include "bounded_newline_buffer.h"
 #include "auto_rod_core.h"
@@ -12691,7 +12689,9 @@ static void MaybeLogNativePerfDiagnostics()
         "chestScan",
         "blockScan",
         "statePublish",
-        "overlayRender"
+        "overlayRender",
+        "overlayJni",
+        "overlayDraw"
     };
 
     std::ostringstream line;
@@ -19153,7 +19153,17 @@ void Bridge_RenderOverlayPanels(bool inWorld) {
     RenderOverlayPanels(inWorld, cfg, overlayTheme, hudLayout, winW, winH);
 }
 
+static void OverlayLogThunk(const char* msg) {
+    if (msg) Log(std::string("[Overlay] ") + msg);
+}
+
 void Bridge_EndOverlayImGuiFrame_OpenGL() {
+    static bool overlayLogSet = false;
+    if (!overlayLogSet) {
+        Overlay_SetLog(OverlayLogThunk);
+        overlayLogSet = true;
+    }
+    NativePerfScope overlayDrawPerf(lc::PERF_OVERLAY_DRAW);
     ImGui::Render();
     ImGuiIO& io = ImGui::GetIO();
     if (io.DisplaySize.x > 1.0f && io.DisplaySize.y > 1.0f) {
@@ -19162,11 +19172,8 @@ void Bridge_EndOverlayImGuiFrame_OpenGL() {
     glFlush();
 }
 
-// The former Vulkan aux-OpenGL overlay path (Bridge_EndOverlayImGuiFrame_VulkanAuxGL,
-// FindGlfwGameWindowForOverlay, Bridge_RenderVulkanOverlayFrame) has been removed. Vulkan
-// sessions now render through the real Vulkan ImGui backend in render_backend.cpp, which
-// composites into the game's own swapchain images (no secondary GL context / no GL-over-
-// Vulkan race).
+// Vulkan sessions record the overlay into the game swapchain render pass from
+// render_backend.cpp (no secondary GL context).
 
 // ===================== HOOKED SwapBuffers =====================
 // Frame counter: skip first few frames after GL backend init to let driver stabilize.

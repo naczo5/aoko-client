@@ -18,9 +18,7 @@
 #include <deque>
 #include "gl_loader.h"
 #include "MinHook.h"
-#include "imgui.h"
-#include "imgui_impl_win32.h"
-#include "imgui_impl_opengl3.h"
+#include "overlay_canvas.h"
 #include "json_config_reader.h"
 #include "bounded_newline_buffer.h"
 #include "auto_rod_core.h"
@@ -52,7 +50,6 @@
 #include "reach_bytecode_injector.h"
 
 // Forward declare ImGui Win32 WndProc handler (declaration is in #if 0 block in header)
-extern LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 // MinGW's <GL/gl.h> may not declare modern GL enums used while preserving
 // Minecraft's render state around ImGui backend initialization.
@@ -737,6 +734,11 @@ static bool g_legacyNametagSuppressionActive = false;
 static bool g_loggedLegacyNametagSuppressionUnavailable = false;
 static std::unordered_map<std::string, jobject> g_modifiedTeamVisibilityLegacy;
 static std::unordered_set<std::string> g_lcHideTagsMembersLegacy;
+// Names already handled by the current suppression generation. Re-running the
+// scoreboard JNI for every player every 50 ms was a per-entity cost on the
+// render thread; apply new names immediately and re-verify the whole list on a
+// slow periodic sweep instead.
+static std::unordered_set<std::string> g_suppressedTagNamesLegacy;
 static jobject g_lastLegacyNametagSuppressionWorld = nullptr;
 static jmethodID g_objectHashCodeMethod = nullptr;
 static jfieldID g_rotationYawField = nullptr;
@@ -1316,7 +1318,9 @@ static void MaybeLogNativePerfDiagnostics()
         "chestRenderScan",
         "blockScan",
         "statePublish",
-        "overlayRender"
+        "overlayRender",
+        "overlayJni",
+        "overlayDraw"
     };
 
     std::ostringstream line;
@@ -3517,6 +3521,7 @@ static void ResetLegacyNametagSuppressionState(JNIEnv* env, const char* reason) 
     }
     g_modifiedTeamVisibilityLegacy.clear();
     g_lcHideTagsMembersLegacy.clear();
+    g_suppressedTagNamesLegacy.clear();
     g_legacyNametagSuppressionActive = false;
     g_loggedLegacyNametagSuppressionUnavailable = false;
     if (reason && *reason) {
@@ -15551,12 +15556,28 @@ static void ApplyLegacyNametagSuppressionOnClientThread(JNIEnv* env, const Confi
         LockGuard lk(g_overlayPlayersMutex18);
         players = g_overlayPlayers18;
     }
+
+    // New names (joins, respawns) are handled immediately; names already
+    // handled this generation are skipped. A slow full sweep re-verifies the
+    // whole list in case the server re-sent team data and re-enabled tags.
+    static DWORD lastFullSweepMs = 0;
+    const bool fullSweep = (now - lastFullSweepMs) >= 1000;
+    if (fullSweep) {
+        g_suppressedTagNamesLegacy.clear();
+        lastFullSweepMs = now;
+    }
+
     bool applied = false;
     if (scoreboard) {
         for (size_t i = 0; i < players.size(); ++i) {
             const std::string& targetName = players[i].rawName.empty() ? players[i].displayName : players[i].rawName;
-            if (ApplyLegacyVanillaNametagSuppression(env, scoreboard, hideTeam, targetName))
+            if (targetName.empty()) continue;
+            if (!fullSweep && g_suppressedTagNamesLegacy.find(targetName) != g_suppressedTagNamesLegacy.end())
+                continue;
+            if (ApplyLegacyVanillaNametagSuppression(env, scoreboard, hideTeam, targetName)) {
                 applied = true;
+                g_suppressedTagNamesLegacy.insert(targetName);
+            }
         }
     }
     if (applied) g_legacyNametagSuppressionActive = true;
@@ -15576,8 +15597,17 @@ static void ApplyLegacyClientThreadOnlyJni(JNIEnv* env, const Config& cfg) {
     }
 }
 
+static void OverlayLogThunk(const char* msg) {
+    if (msg) Log(std::string("[Overlay] ") + msg);
+}
+
 // ===================== SWAPBUFFERS HOOK =====================
 BOOL WINAPI HookedSwapBuffers(HDC hdc) {
+    static bool overlayLogSet = false;
+    if (!overlayLogSet) {
+        Overlay_SetLog(OverlayLogThunk);
+        overlayLogSet = true;
+    }
     LegacyRenderCallbackLease renderLease;
     if (!renderLease.Active()) return CallOriginalSwapBuffers(hdc);
     if (!hdc) return CallOriginalSwapBuffers(hdc);
@@ -15732,6 +15762,7 @@ BOOL WINAPI HookedSwapBuffers(HDC hdc) {
         }
 
         if (JNIEnv* clientEnv = TryGetLegacyClientJniEnv()) {
+            NativePerfScope overlayJniPerf(lc::PERF_OVERLAY_JNI);
             ApplyLegacyClientThreadOnlyJni(clientEnv, renderConfig);
         }
 
@@ -15757,12 +15788,15 @@ BOOL WINAPI HookedSwapBuffers(HDC hdc) {
             RenderFireballWarning(w, h, renderConfig);
         }
 
-        ImGui::Render();
-        ImGuiIO& io = ImGui::GetIO();
-        if (io.DisplaySize.x > 1.0f && io.DisplaySize.y > 1.0f) {
-            ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        {
+            NativePerfScope overlayDrawPerf(lc::PERF_OVERLAY_DRAW);
+            ImGui::Render();
+            ImGuiIO& io = ImGui::GetIO();
+            if (io.DisplaySize.x > 1.0f && io.DisplaySize.y > 1.0f) {
+                ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+            }
+            glFlush();
         }
-        glFlush();
     }
 
     return CallOriginalSwapBuffers(hdc);

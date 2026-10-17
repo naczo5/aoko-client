@@ -13,6 +13,8 @@ enum NativePerfMetric
     PERF_BLOCK_SCAN,
     PERF_STATE_PUBLISH,
     PERF_OVERLAY_RENDER,
+    PERF_OVERLAY_JNI,    // render-thread client-only JNI inside the overlay frame
+    PERF_OVERLAY_DRAW,   // facade render + GL/Vulkan draw submission + flush
     PERF_METRIC_COUNT
 };
 

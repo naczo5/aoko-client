@@ -33,9 +33,7 @@
 #include <string>
 
 #include "MinHook.h"
-#include "imgui.h"
-#include "imgui_impl_win32.h"
-#include "imgui_impl_vulkan.h"
+#include "overlay_canvas.h"
 
 // ============================================================================
 // Logging / config
@@ -394,43 +392,33 @@ static bool BuildSwapchainResources(VkFormat format, VkExtent2D extent) {
 // Dear ImGui Vulkan backend init
 // ============================================================================
 
-static void ImGuiVkCheckResult(VkResult err) {
-    if (err != VK_SUCCESS) { char b[64]; _snprintf(b, sizeof(b), "Vulkan: ImGui backend VkResult=%d", (int)err); RbLog(b); }
+static void* OverlayVkResolve(const char* name, void* user) {
+    return (void*)ImGuiVkLoader(name, user);
 }
 
 static bool InitImGuiVulkanIfNeeded() {
     if (g_imguiVulkanInit) return true;
     if (g_renderPass == VK_NULL_HANDLE || g_images.empty()) return false;
 
-    if (!ImGui_ImplVulkan_LoadFunctions(g_instanceApiVersion, ImGuiVkLoader, nullptr)) {
-        RbLog("Vulkan: ImGui_ImplVulkan_LoadFunctions failed.");
-        return false;
-    }
-    uint32_t imageCount = (uint32_t)g_images.size();
-    ImGui_ImplVulkan_InitInfo ii = {};
-    ii.ApiVersion = g_instanceApiVersion;
-    ii.Instance = g_instance;
-    ii.PhysicalDevice = g_physicalDevice;
-    ii.Device = g_device;
-    ii.QueueFamily = g_queueFamily;
-    ii.Queue = g_queue;
-    ii.DescriptorPoolSize = IMGUI_IMPL_VULKAN_MINIMUM_IMAGE_SAMPLER_POOL_SIZE;
-    ii.MinImageCount = vkoverlay::NormalizeMinImageCount(imageCount);
-    ii.ImageCount = imageCount < ii.MinImageCount ? ii.MinImageCount : imageCount;
-    ii.PipelineInfoMain.RenderPass = g_renderPass;
-    ii.UseDynamicRendering = false;
-    ii.CheckVkResultFn = ImGuiVkCheckResult;
-
-    if (!ImGui_ImplVulkan_Init(&ii)) { RbLog("Vulkan: ImGui_ImplVulkan_Init failed."); return false; }
+    OverlayVkCreate info = {};
+    info.apiVersion = g_instanceApiVersion;
+    info.instance = (void*)g_instance;
+    info.physicalDevice = (void*)g_physicalDevice;
+    info.device = (void*)g_device;
+    info.queueFamily = g_queueFamily;
+    info.queue = (void*)g_queue;
+    info.renderPass = (void*)g_renderPass;
+    info.resolve = OverlayVkResolve;
+    if (!Overlay_InitVulkan(&info)) { RbLog("Vulkan: overlay renderer init failed."); return false; }
     g_imguiVulkanInit = true;
-    RbLog("Vulkan: ImGui_ImplVulkan initialized (fonts upload lazily on first render).");
+    RbLog("Vulkan: overlay renderer initialized.");
     return true;
 }
 
 static void ShutdownImGuiVulkan() {
     if (g_imguiVulkanInit) {
         if (p_vkDeviceWaitIdle && g_device) p_vkDeviceWaitIdle(g_device);
-        ImGui_ImplVulkan_Shutdown();
+        Overlay_ShutdownVulkan();
         g_imguiVulkanInit = false;
     }
 }
@@ -493,9 +481,9 @@ static bool RenderOverlayIntoImage(HWND hwnd, uint32_t imageIndex,
     if (!EnsureOverlayResources(hwnd)) return false;
     if (imageIndex >= g_framebuffers.size()) return false;
 
-    ImGui_ImplVulkan_NewFrame();
     ImDrawData* drawData = Bridge_BuildOverlayDrawData((int)g_swapExtent.width, (int)g_swapExtent.height);
     if (!drawData) return false;
+    Overlay_PrepareVulkan();
 
     VkFence fence = g_fences[imageIndex];
     p_vkWaitForFences(g_device, 1, &fence, VK_TRUE, UINT64_MAX);
@@ -517,7 +505,8 @@ static bool RenderOverlayIntoImage(HWND hwnd, uint32_t imageIndex,
     rp.clearValueCount = 0;
     p_vkCmdBeginRenderPass(cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
 
-    ImGui_ImplVulkan_RenderDrawData(drawData, cmd, VK_NULL_HANDLE);
+    Overlay_RecordVulkan(cmd);
+    (void)drawData;
 
     p_vkCmdEndRenderPass(cmd);
     if (p_vkEndCommandBuffer(cmd) != VK_SUCCESS) return false;

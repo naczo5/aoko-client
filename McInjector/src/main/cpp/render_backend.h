@@ -25,21 +25,21 @@ void RenderBackend_NotifyOpenGlFrame(HWND hwnd);   // called from the wglSwapBuf
 
 // -----------------------------------------------------------------------------
 // Renderer-neutral overlay seams implemented in bridge_261.cpp.
-// These own the ImGui context, Win32 platform backend, fonts and panel drawing,
-// independent of the renderer (OpenGL3 vs Vulkan) that ultimately rasterizes them.
+// These own the overlay context, Win32 mouse polling, fonts and panel drawing,
+// independent of the renderer (OpenGL vs Vulkan) that ultimately rasterizes them.
 // -----------------------------------------------------------------------------
 
-// Create the ImGui context + load fonts (DPI-aware) + init the Win32 platform backend.
+// Create the overlay context + load fonts (DPI-aware) + init the Win32 platform backend.
 // Idempotent; renderer-neutral (performs no OpenGL/Vulkan calls). Returns true when ready.
 bool Bridge_EnsureImGuiPlatform(HWND hwnd);
 
 // True once Bridge_EnsureImGuiPlatform has completed successfully.
 bool Bridge_IsImGuiPlatformReady();
 
-// Build one overlay frame: platform NewFrame + ImGui::NewFrame + game-state update +
-// panel draw + ImGui::Render(). MUST be called AFTER the active renderer backend's own
-// NewFrame() for the frame. Returns the finalized ImDrawData, or nullptr when the frame
-// should be skipped (context not ready, world transition, degenerate display size).
+// Build one overlay frame: platform NewFrame + panel draw. MUST run before the
+// render pass is begun. Returns non-null when the frame should be recorded, or
+// nullptr when the frame should be skipped (context not ready, world transition,
+// degenerate display size).
 struct ImDrawData;
 ImDrawData* Bridge_BuildOverlayDrawData(int winW, int winH);
 

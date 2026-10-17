@@ -1,13 +1,11 @@
 #pragma once
 
-// BedPlates icon helpers: Minecraft jar texture path candidates, procedural
-// fallback icons, and an ImGui ImTextureData cache (works with OpenGL + Vulkan
-// backends via RegisterUserTexture / RendererHasTextures).
+// BedPlates icon helpers: Minecraft jar texture path candidates and procedural
+// fallback icons. Chips are drawn with the overlay canvas, not a texture atlas.
 
 #include "bedplates_common.h"
 
-#include "imgui.h"
-#include "imgui_internal.h"
+#include "overlay_canvas.h"
 
 #include <jni.h>
 #include <algorithm>
@@ -146,86 +144,6 @@ inline void BedPlateTexturePathCandidates(const std::string& rawId, std::vector<
         out.push_back("assets/minecraft/textures/block/glass.png");
     }
 }
-
-struct BedPlateIconEntry {
-    ImTextureData* tex = nullptr;
-    bool ready = false;
-};
-
-struct BedPlateIconCache {
-    std::map<std::string, BedPlateIconEntry> icons;
-    int nextUniqueId = 9000;
-
-    void clear() {
-        for (std::map<std::string, BedPlateIconEntry>::iterator it = icons.begin();
-             it != icons.end(); ++it) {
-            if (it->second.tex) {
-                ImGuiContext* ctx = ImGui::GetCurrentContext();
-                if (ctx) ImGui::UnregisterUserTexture(it->second.tex);
-                it->second.tex->WantDestroyNextFrame = true;
-                it->second.tex->SetStatus(ImTextureStatus_WantDestroy);
-                // Keep pixels until backend destroys; leak on shutdown is fine for DLL unload.
-            }
-        }
-        icons.clear();
-    }
-
-    ImTextureData* ensureProcedural(const std::string& rawId) {
-        std::string id = BlockEspNormalizeId(rawId);
-        if (id.empty()) return nullptr;
-        BedPlateIconEntry& e = icons[id];
-        if (e.tex) return e.tex;
-        if (!ImGui::GetCurrentContext()) return nullptr;
-
-        ImTextureData* tex = IM_NEW(ImTextureData)();
-        tex->UniqueID = nextUniqueId++;
-        tex->Create(ImTextureFormat_RGBA32, 16, 16);
-        BedPlateFillProceduralIcon(id, (unsigned char*)tex->GetPixels());
-        tex->UseColors = true;
-        ImGui::RegisterUserTexture(tex);
-        e.tex = tex;
-        e.ready = true;
-        return tex;
-    }
-
-    // Install pre-decoded RGBA8 pixels (any size; will be nearest-scaled to 16x16).
-    ImTextureData* ensureFromRgba(const std::string& rawId, const unsigned char* src,
-                                  int srcW, int srcH) {
-        std::string id = BlockEspNormalizeId(rawId);
-        if (id.empty() || !src || srcW <= 0 || srcH <= 0) return ensureProcedural(rawId);
-        BedPlateIconEntry& e = icons[id];
-        if (e.tex) return e.tex;
-        if (!ImGui::GetCurrentContext()) return nullptr;
-
-        ImTextureData* tex = IM_NEW(ImTextureData)();
-        tex->UniqueID = nextUniqueId++;
-        tex->Create(ImTextureFormat_RGBA32, 16, 16);
-        unsigned char* dst = (unsigned char*)tex->GetPixels();
-        for (int y = 0; y < 16; y++) {
-            int sy = y * srcH / 16;
-            for (int x = 0; x < 16; x++) {
-                int sx = x * srcW / 16;
-                const unsigned char* p = src + (sy * srcW + sx) * 4;
-                unsigned char* d = dst + (y * 16 + x) * 4;
-                d[0] = p[0]; d[1] = p[1]; d[2] = p[2]; d[3] = p[3] ? p[3] : 255;
-            }
-        }
-        tex->UseColors = true;
-        ImGui::RegisterUserTexture(tex);
-        e.tex = tex;
-        e.ready = true;
-        return tex;
-    }
-
-    ImTextureRef getRef(const std::string& rawId) {
-        ImTextureData* tex = ensureProcedural(rawId);
-        if (!tex) {
-            ImTextureRef empty;
-            return empty;
-        }
-        return tex->GetTexRef();
-    }
-};
 
 // Vape-like plate metrics. Chips are wider than square icons so short labels fit.
 static const float kBedPlateIconSize = 18.0f;
@@ -391,31 +309,6 @@ inline bool BedPlateLoadPngViaImageIO(JNIEnv* env, jobject classLoader, const st
     if (outW) *outW = w;
     if (outH) *outH = h;
     return true;
-}
-
-inline ImTextureRef BedPlateResolveIcon(JNIEnv* env, jobject classLoader, BedPlateIconCache& cache,
-                                        const std::string& rawId) {
-    std::string id = BlockEspNormalizeId(rawId);
-    if (id.empty()) {
-        ImTextureRef empty;
-        return empty;
-    }
-    std::map<std::string, BedPlateIconEntry>::iterator it = cache.icons.find(id);
-    if (it != cache.icons.end() && it->second.tex)
-        return it->second.tex->GetTexRef();
-
-    if (env && classLoader) {
-        std::vector<std::string> paths;
-        BedPlateTexturePathCandidates(id, paths);
-        for (size_t i = 0; i < paths.size(); i++) {
-            std::vector<unsigned char> rgba;
-            int w = 0, h = 0;
-            if (!BedPlateLoadPngViaImageIO(env, classLoader, paths[i], rgba, &w, &h)) continue;
-            ImTextureData* tex = cache.ensureFromRgba(id, rgba.data(), w, h);
-            if (tex) return tex->GetTexRef();
-        }
-    }
-    return cache.getRef(id);
 }
 
 } // namespace lc

@@ -1,0 +1,3 @@
+[submodule "McInjector/third_party/aris-ui"]
+	path = McInjector/third_party/aris-ui
+	url = https://github.com/naczo5/aris-ui.git

@@ -10,6 +10,7 @@ Aoko/bridge.dll
 
 # ── C++ build outputs ────────────────────────────────────────────
 McInjector/bridge.dll
+McInjector/overlay_canvas.o
 McInjector/build/
 McInjector/dist/
 McInjector/tests/*.exe
@@ -61,3 +62,7 @@ Desktop.ini
 # ── Local showcase tooling ───────────────────────────────────────
 # Remotion video project (local-only; generated audio + lockfile noise)
 /motion/
+
+# Generated MSDF atlas staged next to the bridges (source: McInjector/assets/font)
+Aoko/inter.png
+Aoko/inter.json
