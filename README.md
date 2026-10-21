@@ -5,6 +5,8 @@
 [![Stars](https://img.shields.io/github/stars/naczo5/aoko-client?style=flat-square&color=475569&labelColor=1e293b&logo=github)](https://github.com/naczo5/aoko-client/stargazers)
 [![License](https://img.shields.io/github/license/naczo5/aoko-client?style=flat-square&color=475569&labelColor=1e293b)](https://github.com/naczo5/aoko-client/blob/main/LICENSE)
 
+**English** | [简体中文](README.zh-CN.md)
+
 aoko client is an open-source Windows utility client and external overlay for Lunar Client and Forge/Fabric Minecraft instances.
 
 # Showcase
@@ -38,8 +40,6 @@ aoko client is an open-source Windows utility client and external overlay for Lu
 - GTB Helper & Pixel Party Assist
 - Discord Rich Presence
 - Nametags, Closest Player panel, Fight Status, Chest ESP, Block ESP, BedPlates, Fireball Warning
-- In-Game ClickGUI (Dear ImGui midnight blue glass menu with category tabs, real-time search, animated collapsible module cards, pill toggles, and inline keybind configuration)
-- GUI Modes (Hybrid External WPF + In-Game ClickGUI, External Only, In-Game Only)
 - In-game HUD Editor & module list styling
 - Per-module keybinds (all unbound by default, configurable in WPF & ClickGUI)
 - Profiles saved in `%AppData%\Aoko\profiles\`
@@ -136,7 +136,7 @@ aoko/
 
 - The C# loader injects the bridge DLL into Lunar and manages settings/UI.
 - Bridge and loader communicate over TCP (`25590`).
-- Bridge renders overlays through OpenGL/ImGui and reads game state via JNI.
+- Bridge renders overlays through an immediate-mode UI over OpenGL/Vulkan and reads game state via JNI.
 - Input actions are usually sent through Win32 `SendInput`.
 - Bridge capabilities gate version-specific modules and controls.
 
