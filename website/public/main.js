@@ -2,9 +2,13 @@
 (function () {
   if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
   const items = document.querySelectorAll(
-    '.section-head, .reg-group, .node, .wire, .col, .dl-block'
+    '.section-head, .reg-group, .node, .wire, .col, .dl-block, .src-block'
   );
   items.forEach((el) => el.classList.add('reveal'));
+  if (!('IntersectionObserver' in window)) {
+    items.forEach((el) => el.classList.add('visible'));
+    return;
+  }
   const observer = new IntersectionObserver((entries) => {
     entries.forEach((entry) => {
       if (!entry.isIntersecting) return;
@@ -32,8 +36,8 @@
     scene.style.setProperty('--moon-brightness', (1.08 - progress * 0.18).toFixed(4));
     scene.style.setProperty('--moon-glow', (0.34 - progress * 0.22).toFixed(4));
     scene.style.setProperty('--moon-halo', (0.19 - progress * 0.12).toFixed(4));
-    scene.style.setProperty('--scene-opacity', (1 - progress * 0.08).toFixed(4));
-    scene.style.setProperty('--haze-opacity', (0.74 - progress * 0.14).toFixed(4));
+    scene.style.setProperty('--scene-opacity', (1 - progress * 0.55).toFixed(4));
+    scene.style.setProperty('--haze-opacity', (0.74 - progress * 0.34).toFixed(4));
     scene.style.setProperty('--beam-one-opacity', (0.46 - progress * 0.32).toFixed(4));
     scene.style.setProperty('--beam-two-opacity', (0.32 - progress * 0.24).toFixed(4));
     scene.style.setProperty('--stars-one-y', `${(-progress * 1.5).toFixed(2)}vh`);
@@ -114,6 +118,7 @@
   }
 
   setupCopyButton('copy-scoop-cmd', 'scoop-cmd-text');
+  setupCopyButton('copy-build-cmd', 'build-cmd-text');
   setupCopyButton('copy-scoop-install-cmd', 'scoop-install-cmd-text');
 })();
 

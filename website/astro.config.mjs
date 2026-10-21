@@ -16,6 +16,28 @@ export default defineConfig({
       description:
         'Documentation for aoko client — an open-source utility client for Lunar Client and standalone Minecraft instances (1.8.9 Forge, modern Fabric).',
       tagline: 'Open-source utility client for Lunar Client & standalone Minecraft instances (1.8.9, 1.21.x, 26.1, 26.2).',
+      logo: {
+        src: './src/assets/logo.svg',
+        alt: 'aoko client',
+      },
+      customCss: ['./src/styles/docs.css'],
+      head: [
+        {
+          tag: 'link',
+          attrs: { rel: 'preconnect', href: 'https://fonts.googleapis.com' },
+        },
+        {
+          tag: 'link',
+          attrs: { rel: 'preconnect', href: 'https://fonts.gstatic.com', crossorigin: 'anonymous' },
+        },
+        {
+          tag: 'link',
+          attrs: {
+            rel: 'stylesheet',
+            href: 'https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=JetBrains+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap',
+          },
+        },
+      ],
       // Link the docs back to the landing page (served at the site root).
       social: [
         {

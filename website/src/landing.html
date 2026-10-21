@@ -28,7 +28,7 @@
   <meta name="twitter:description" content="Supports Lunar Client and standalone Minecraft instances across 1.8.9 (Forge), 1.21.x, 26.1, and 26.2 (Fabric)." />
   <meta name="twitter:image" content="https://naczo5.github.io/aoko-client/screenshots/gameplay.jpg" />
   <title>aoko - open-source utility client for Minecraft (Lunar & Standalone 1.8.9, 1.21.x, 26.1, 26.2)</title>
-  <link rel="stylesheet" href="style.css?v=6" />
+  <link rel="stylesheet" href="style.css?v=7" />
   <link rel="stylesheet" href="preview.css?v=2" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -219,7 +219,7 @@
     </div>
 
     <div class="reg-group" data-group="visual">
-      <div class="reg-label">visual<span class="reg-count">7</span></div>
+      <div class="reg-label">visual<span class="reg-count">8</span></div>
       <div class="reg-rows">
         <details class="mod">
           <summary><span class="mod-i">▸</span><span class="mod-name">nametags</span><span class="mod-tag">esp</span></summary>
@@ -244,6 +244,10 @@
         <details class="mod">
           <summary><span class="mod-i">▸</span><span class="mod-name">bedplates</span><span class="mod-tag">esp</span></summary>
           <p>Highlights player beds with in-world bounding boxes and distance indicators.</p>
+        </details>
+        <details class="mod">
+          <summary><span class="mod-i">▸</span><span class="mod-name">fireball warning</span><span class="mod-tag">alert</span></summary>
+          <p>Read-only box, arrow, and sound alerts when a nearby player holds a fireball or fire charge.</p>
         </details>
         <details class="mod">
           <summary><span class="mod-i">▸</span><span class="mod-name">module list &amp; hud editor</span><span class="mod-tag">hud</span></summary>
@@ -378,17 +382,53 @@
   <section id="download" class="section">
     <div class="section-head">
       <h2><span class="eyebrow">04 / download</span> Make it yours</h2>
-      <p>Open-source build for Windows x64.</p>
+      <p>Grab the latest build, or compile the same tree yourself.</p>
     </div>
-    <div class="dl-block">
-      <div class="dl-meta">
-        <div><span>version</span><span class="v" id="release-version">latest (main)</span></div>
-        <div><span>target</span><span class="v">lunar &amp; standalone (1.8.9 forge · modern fabric)</span></div>
-        <div><span>platform</span><span class="v">windows x64</span></div>
-        <div><span>license</span><span class="v">gpl-3</span></div>
+    <div class="dl-grid">
+      <div class="dl-block">
+        <div class="dl-meta">
+          <div><span>version</span><span class="v" id="release-version">latest (main)</span></div>
+          <div><span>target</span><span class="v">lunar &amp; standalone (1.8.9 forge · modern fabric)</span></div>
+          <div><span>platform</span><span class="v">windows x64</span></div>
+          <div><span>license</span><span class="v">gpl-3</span></div>
+        </div>
+        <a href="https://github.com/naczo5/aoko-client/releases" class="btn-primary" id="github-link">open latest releases →</a>
+        <p class="dl-note">self-contained exe · no .net install required</p>
       </div>
-      <a href="https://github.com/naczo5/aoko-client/releases" class="btn-primary" id="github-link">open latest releases →</a>
-      <p class="dl-note"># or build from source - see <code>README.md</code></p>
+
+      <div class="src-block" id="source">
+        <div class="col-num">build from source</div>
+        <p class="dl-note">Needs .NET 8 SDK, MinGW-w64, and JDK 17 headers. The release script builds both bridges and publishes the loader.</p>
+        <div class="install-card">
+          <div class="install-card-bar">
+            <div class="install-card-title">
+              <span class="install-card-dot"></span>
+              <span>powershell · local build</span>
+            </div>
+            <div class="install-card-actions">
+              <button type="button" class="btn-copy-scoop" id="copy-build-cmd" title="Copy commands">
+                <svg class="copy-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                <span class="copy-text">copy</span>
+              </button>
+            </div>
+          </div>
+          <div class="install-card-body" id="build-cmd-text">
+            <div class="install-line">
+              <span class="t-prompt">&gt;</span>
+              <span class="t-cmd">git clone https://github.com/naczo5/aoko-client</span>
+            </div>
+            <div class="install-line">
+              <span class="t-prompt">&gt;</span>
+              <span class="t-cmd">cd aoko-client</span>
+            </div>
+            <div class="install-line">
+              <span class="t-prompt">&gt;</span>
+              <span class="t-cmd">.\build_release.bat</span>
+            </div>
+          </div>
+        </div>
+        <a href="https://github.com/naczo5/aoko-client" class="btn-text">view source on github <span class="arrow">↗</span></a>
+      </div>
     </div>
   </section>
 
@@ -397,6 +437,12 @@
     <div class="footer-inner">
       <span class="logo-mini">aoko</span>
       <p>use at your own risk.</p>
+      <nav class="footer-links" aria-label="Footer">
+        <a href="#registry">modules</a>
+        <a href="getting-started/">docs</a>
+        <a href="changelog/">changelog</a>
+        <a href="https://github.com/naczo5/aoko-client">github</a>
+      </nav>
       <p class="footer-small">not affiliated with mojang, microsoft, or lunar client. for educational purposes only.</p>
     </div>
   </footer>
@@ -518,7 +564,7 @@
     </div>
   </div>
 
-  <script src="main.js?v=4"></script>
+  <script src="main.js?v=5"></script>
   <script src="preview-data.js?v=2"></script>
   <script src="preview.js?v=1"></script>
 </body>
