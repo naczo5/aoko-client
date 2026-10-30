@@ -528,9 +528,11 @@ struct ModuleEntry {
     std::string tag;
     ImU32 accent;
     float nameW;
-    ModuleEntry() : accent(0), nameW(0.0f) {}
+    float tagW;
+    float sortW;
+    ModuleEntry() : accent(0), nameW(0.0f), tagW(0.0f), sortW(0.0f) {}
     ModuleEntry(const std::string& n, const std::string& t, ImU32 a)
-        : name(n), tag(t), accent(a), nameW(0.0f) {}
+        : name(n), tag(t), accent(a), nameW(0.0f), tagW(0.0f), sortW(0.0f) {}
 };
 
 struct ModuleListRow {
@@ -585,7 +587,8 @@ public:
             r.accent = e.accent;
             r.active = true;
             r.nameW = e.nameW > 0.0f ? e.nameW : ImGui::CalcTextSize(e.name.c_str()).x;
-            r.tagW = e.tag.empty() ? 0.0f : ImGui::CalcTextSize(e.tag.c_str()).x;
+            r.tagW = e.tag.empty() ? 0.0f
+                : (e.tagW > 0.0f ? e.tagW : ImGui::CalcTextSize(e.tag.c_str()).x);
         }
 
         for (std::map<std::string, ModuleListRow>::iterator it = rows_.begin(); it != rows_.end();) {
@@ -716,7 +719,9 @@ private:
         }
         std::sort(visible_.begin(), visible_.end(),
                   [](const ModuleListRow* a, const ModuleListRow* b) {
-                      if (a->nameW != b->nameW) return a->nameW > b->nameW;
+                      const float aw = a->nameW + (a->tag.empty() ? 0.0f : a->tagW * 0.82f + 14.0f);
+                      const float bw = b->nameW + (b->tag.empty() ? 0.0f : b->tagW * 0.82f + 14.0f);
+                      if (aw != bw) return aw > bw;
                       return a->name < b->name;
                   });
     }

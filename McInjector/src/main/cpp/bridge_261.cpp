@@ -18996,7 +18996,10 @@ static void RenderOverlayPanels(
                 auto pushMod = [&](const std::string& name, const std::string& tag = "") {
                     if (name.empty()) return;
                     modEntries.push_back(aoko::ui::ModuleEntry(name, tag, 0));
-                    modEntries.back().nameW = ImGui::CalcTextSize(name.c_str()).x;
+                    aoko::ui::ModuleEntry& e = modEntries.back();
+                    e.nameW = ImGui::CalcTextSize(name.c_str()).x;
+                    e.tagW = tag.empty() ? 0.0f : ImGui::CalcTextSize(tag.c_str()).x;
+                    e.sortW = e.nameW + (tag.empty() ? 0.0f : e.tagW * 0.82f + 14.0f);
                 };
 
                 if (cfg.armed) {
@@ -19039,7 +19042,7 @@ static void RenderOverlayPanels(
 
                 std::sort(modEntries.begin(), modEntries.end(),
                     [](const aoko::ui::ModuleEntry& a, const aoko::ui::ModuleEntry& b) {
-                        if (a.nameW != b.nameW) return a.nameW > b.nameW;
+                        if (a.sortW != b.sortW) return a.sortW > b.sortW;
                         return a.name < b.name;
                     });
                 aoko::ui::Theme accentTheme = BuildOverlayUiTheme(overlayTheme);
