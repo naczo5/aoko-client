@@ -63,6 +63,9 @@ struct HudEditorState {
     std::string grabbedId;
     enum class Mode { None, Move, Resize } mode = Mode::None;
     ImVec2 grabOffset{0,0};
+    float resizeStartMouseX = 0.0f;
+    float resizeStartW = 0.0f;
+    float resizeRightEdge = 0.0f;
     bool layoutDirty = false;
 };
 

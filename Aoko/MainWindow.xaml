@@ -1872,7 +1872,7 @@
                                     <Run Text="{Binding ModuleListStyle}" Foreground="{DynamicResource AccentBrush}"/>
                                 </TextBlock>
 
-                                <CheckBox Content="Show 'aoko' Logo" IsChecked="{Binding ShowLogo, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}" Margin="0,10,0,0"/>
+                                <CheckBox Content="Show client watermark (latency · aoko · FPS)" IsChecked="{Binding ShowLogo, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}" Margin="0,10,0,0"/>
                                 <CheckBox Content="Dev Mode" IsChecked="{Binding DevMode, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}" Margin="0,8,0,0"/>
                                 <TextBlock Text="Shows unfinished modules (Kill Aura, …) in the GUI. Off by default."
                                            Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,4,0,0" TextWrapping="Wrap"/>

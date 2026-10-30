@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cmath>
 #include <cctype>
+#include <atomic>
 #include <unordered_map>
 #include <unordered_set>
 #include <deque>
@@ -31,6 +32,7 @@
 #include "nick_hider_jvmti.h"
 #include "anti_debuff_jvmti.h"
 #include "hud_layout.h"
+#include "overlay_ui.h"
 #include "block_esp_common.h"
 #include "chest_esp_common.h"
 #include "chunk_scan_common.h"
@@ -601,6 +603,11 @@ struct GameState {
 };
 static GameState g_gameState;
 static Mutex g_stateMutex;
+// Overlay-only telemetry sampled on the JNI worker; never sent over TCP.
+static std::atomic<int> g_overlayPingMs(-1);
+static float g_moduleListBaseWidth = 220.0f;
+static float g_moduleListBaseHeight = 240.0f;
+static int UpdateOverlayPingLegacy(JNIEnv* env, jobject player);
 static Mutex g_socketMutex; // Protects socket writes
 static Mutex g_jsonMutex;   // Protects shared JSON buffer
 static std::string g_pendingJson; // Entity telemetry projected on the render thread
@@ -10789,6 +10796,7 @@ GameState ReadGameState(JNIEnv* env) {
 
     jobject player = env->GetObjectField(g_mcInstance, g_thePlayerField);
     if (env->ExceptionCheck()) { env->ExceptionClear(); player = nullptr; }
+    UpdateOverlayPingLegacy(env, player);
     if (player) {
             s.inWorld = worldPresent;
             if (g_getHealthMethod) { s.health = env->CallFloatMethod(player, g_getHealthMethod); if (env->ExceptionCheck()) env->ExceptionClear(); }
@@ -12276,6 +12284,25 @@ static OverlayTheme ResolveOverlayTheme(const std::string& guiTheme) {
     };
 }
 
+// Shared overlay UI theme derived from the legacy theme table.
+static aoko::ui::Theme BuildOverlayUiTheme(const OverlayTheme& t) {
+    aoko::ui::Theme u;
+    u.accent = ToImU32(t.accentPrimary);
+    u.accent2 = ToImU32(t.accentSecondary);
+    u.accent3 = ToImU32(t.accentTertiary);
+    u.text = ToImU32(t.moduleText);
+    u.textDim = ToImU32(t.moduleTagText);
+    u.textFaint = WithAlpha(t.moduleTagText, 165);
+    u.panel = aoko::ui::Mix(ToImU32(t.moduleBg), IM_COL32(7, 18, 31, 255), 0.18f);
+    u.panelTop = aoko::ui::Mix(ToImU32(t.moduleOutlinedBg), IM_COL32(255, 255, 255, 255), 0.07f);
+    u.border = aoko::ui::WithAlpha(ToImU32(t.moduleGlassBorder), 82);
+    u.highlight = IM_COL32(255, 255, 255, 28);
+    u.shadow = IM_COL32(0, 0, 0, 165);
+    u.gradient = t.isGradient;
+    u.triColor = t.isTriColor;
+    return u;
+}
+
 float SwordDamageFromUnlocalizedName(const std::string& unlocLower) {
     if (unlocLower.find("sword") == std::string::npos) return 0.0f;
     if (unlocLower.find("stone") != std::string::npos) return 5.0f;
@@ -12851,6 +12878,10 @@ static void UpdateHudEditor(int winW, int winH) {
         lc::HudElementLayout el = layoutSnap.Resolve(baseSizes[i].id);
         float sw = baseSizes[i].w * el.scale;
         float sh = baseSizes[i].h * el.scale;
+        if (std::strcmp(baseSizes[i].id, lc::ELEM_MODULELIST) == 0) {
+            sw = g_moduleListBaseWidth * el.scale;
+            sh = g_moduleListBaseHeight * el.scale;
+        }
         ImVec2 tl = lc::HudElementPixelPos(el, sw, sh, winW, winH);
         elems.push_back({ baseSizes[i].id, tl, sw, sh });
     }
@@ -12874,6 +12905,9 @@ static void UpdateHudEditor(int winW, int winH) {
             if (inGrip) {
                 g_hudEditor.grabbedId = e.id;
                 g_hudEditor.mode = lc::HudEditorState::Mode::Resize;
+                g_hudEditor.resizeStartMouseX = mouse.x;
+                g_hudEditor.resizeStartW = e.w;
+                g_hudEditor.resizeRightEdge = e.tl.x + e.w;
                 break;
             } else if (inBody) {
                 g_hudEditor.grabbedId = e.id;
@@ -12900,9 +12934,20 @@ static void UpdateHudEditor(int winW, int winH) {
             for (int i = 0; bs[i].id; ++i) {
                 if (g_hudEditor.grabbedId == bs[i].id) { baseW = bs[i].w; break; }
             }
-            float anchorPx = el.x * (float)winW;
-            float desiredW = mouse.x - anchorPx;
+            if (g_hudEditor.grabbedId == lc::ELEM_MODULELIST && g_moduleListBaseWidth > 1.0f) {
+                baseW = g_moduleListBaseWidth;
+            }
+            const bool rightAnchored = (g_hudEditor.grabbedId == lc::ELEM_MODULELIST);
+            const float deltaX = mouse.x - g_hudEditor.resizeStartMouseX;
+            const float desiredW = rightAnchored
+                ? g_hudEditor.resizeStartW - deltaX
+                : g_hudEditor.resizeStartW + deltaX;
             el.scale = lc::ClampHudScale(desiredW / baseW);
+            if (rightAnchored) {
+                const float appliedW = el.scale * baseW;
+                el.x = lc::ClampHudCoord(
+                    (g_hudEditor.resizeRightEdge - appliedW) / (float)winW);
+            }
         }
     }
 
@@ -12919,24 +12964,16 @@ static void UpdateHudEditor(int winW, int winH) {
     grabbedIdForDraw = g_hudEditor.grabbedId;
     }
     ImDrawList* fg = ImGui::GetForegroundDrawList();
+    const float editorScale = (std::max)(0.75f, ImGui::GetFontSize() / 16.0f);
     for (const auto& e : elems) {
         lc::HudElementLayout el = layoutDraw.Resolve(e.id);
-        float sw = e.w; // already scaled
-        float sh = e.h;
+        const float sw = e.w; // already scaled
+        const float sh = e.h;
         ImVec2 tl = lc::HudElementPixelPos(el, sw, sh, winW, winH);
         ImVec2 br(tl.x + sw, tl.y + sh);
-
-        bool grabbed = (grabbedIdForDraw == e.id);
-        ImU32 boxCol = grabbed ? IM_COL32(255, 200, 50, 200) : IM_COL32(80, 180, 255, 140);
-        fg->AddRect(tl, br, boxCol, 4.0f, 0, grabbed ? 2.0f : 1.5f);
-
-        // Label
-        fg->AddText(ImVec2(tl.x + 4, tl.y + 3), IM_COL32(255, 255, 255, 200), e.id.c_str());
-
-        // Corner resize grip
-        const float gripSz = 12.0f;
-        ImVec2 gripTL(br.x - gripSz, br.y - gripSz);
-        fg->AddRectFilled(gripTL, br, boxCol, 2.0f);
+        const bool grabbed = (grabbedIdForDraw == e.id);
+        aoko::ui::EditorOutline(fg, tl, br, IM_COL32(127, 158, 255, 255),
+                                aoko::ui::PrettyElementId(e.id.c_str()), grabbed, editorScale);
     }
 }
 
@@ -12958,23 +12995,15 @@ void RenderHUD(
     ImDrawList* fg = ImGui::GetForegroundDrawList();
     ImGuiIO& io = ImGui::GetIO();
 
-    struct ModLine {
-        std::string name;
-        std::string tag;
-        ImU32 accent;
-        float width;
-        float nameWidth;
-        float tagWidth;
-    };
-    static thread_local std::vector<ModLine> mods;
-    mods.clear();
-    if (mods.capacity() < 32) mods.reserve(32);
+    // ── Signature watermark + module list ──────────────────────────────
+    static thread_local std::vector<aoko::ui::ModuleEntry> modEntries;
+    modEntries.clear();
+    if (modEntries.capacity() < 32) modEntries.reserve(32);
 
     auto pushMod = [&](const std::string& name, const std::string& tag = "") {
         if (name.empty()) return;
-        float nw = ImGui::CalcTextSize(name.c_str()).x;
-        float tw = tag.empty() ? 0.0f : ImGui::CalcTextSize((" " + tag).c_str()).x;
-        mods.push_back({ name, tag, 0, nw + tw, nw, tw });
+        modEntries.push_back(aoko::ui::ModuleEntry(name, tag, 0));
+        modEntries.back().nameW = ImGui::CalcTextSize(name.c_str()).x;
     };
 
     if (cfg.armed) {
@@ -13014,268 +13043,37 @@ void RenderHUD(
     if (cfg.fireballWarning)   pushMod("Fireball Warning");
     if (cfg.hitDelayFixEnabled) pushMod("Hit Delay Fix");
 
-    std::sort(mods.begin(), mods.end(), [](const ModLine& a, const ModLine& b) {
-        if (a.width != b.width) return a.width > b.width;
-        return a.name < b.name;
-    });
-
-    for (size_t i = 0; i < mods.size(); i++) {
-        if (theme.isGradient) {
-            float t = mods.size() > 1 ? (float)i / (float)(mods.size() - 1) : 0.0f;
-            Color4 c = theme.isTriColor
-                ? LerpColor4Tri(theme.accentPrimary, theme.accentSecondary, theme.accentTertiary, t)
-                : LerpColor4(theme.accentPrimary, theme.accentSecondary, t);
-            mods[i].accent = ToImU32(c);
-        } else {
-            mods[i].accent = ToImU32(theme.accentPrimary);
-        }
+    std::sort(modEntries.begin(), modEntries.end(),
+        [](const aoko::ui::ModuleEntry& a, const aoko::ui::ModuleEntry& b) {
+            if (a.nameW != b.nameW) return a.nameW > b.nameW;
+            return a.name < b.name;
+        });
+    aoko::ui::Theme accentTheme = BuildOverlayUiTheme(theme);
+    for (size_t i = 0; i < modEntries.size(); ++i) {
+        const float t = modEntries.size() > 1
+            ? (float)i / (float)(modEntries.size() - 1) : 0.0f;
+        modEntries[i].accent = accentTheme.AccentAt(t);
     }
 
-    // Honor the HUD layout anchor + scale so the module list can be moved AND
-    // resized in the HUD editor.
     lc::HudElementLayout modLayout = hudLayout.Resolve(lc::ELEM_MODULELIST);
-    const float scale = modLayout.scale;
-
-    const float padX       = 8.0f * scale;
-    const float padY       = 3.0f * scale;
-    const float barW       = 3.0f * scale;
-    const float gapY       = 2.0f * scale;
-    const float fontH      = ImGui::GetFontSize() * scale;
-    const float shadowOff  = (std::max)(1.0f, scale);
-    const float rightInset = 6.0f * scale;
     const int style = (std::max)(0, (std::min)(6, cfg.moduleListStyle));
-    ImFont* font = ImGui::GetFont();
 
-    const char* logoPart1 = "aoko";
-    const char* logoPart2 = " client";
-    const float logoP1W = ImGui::CalcTextSize(logoPart1).x * scale;
-    const float logoP2W = ImGui::CalcTextSize(logoPart2).x * scale;
-    const float logoW   = (logoP1W + logoP2W);
-    const float logoH   = fontH;
-    const float logoGap = 8.0f * scale;
-    const float boxH    = padY + fontH + padY;
-
-    // ── Measuring pass: compute the block bounds (right-aligned bars). ──
-    float blockW = 0.0f;
-    float blockH = 0.0f;
-    if (cfg.showLogo) {
-        float logoBoxW = (style == 0 || style == 2 || style == 3 || style == 4)
-            ? (barW + padX + logoW + padX)
-            : (logoW + 6.0f * scale);
-        blockW  = (std::max)(blockW, logoBoxW + rightInset);
-        blockH += (style == 0 || style == 2 || style == 3 || style == 4) ? (boxH + logoGap) : (logoH + logoGap);
-    }
-    for (size_t i = 0; i < mods.size(); i++) {
-        float textW = mods[i].width * scale;
-        float boxW  = (style == 1 || style == 5 || style == 6)
-            ? (textW + 6.0f * scale)
-            : (barW + padX + textW + padX);
-        blockW = (std::max)(blockW, boxW + rightInset);
-        blockH += boxH;
-        if (i + 1 < mods.size()) blockH += gapY;
-    }
-
-    if (!mods.empty() || cfg.showLogo) {
-        ImVec2 tl = lc::HudElementPixelPos(modLayout, blockW, blockH, winW, winH);
-        const float x1 = tl.x + blockW - rightInset; // right edge of bars
-        float y = tl.y;
-
-        if (cfg.showLogo) {
-            if (style == 0) {
-                // Default: Dark panel card with left accent bar
-                float boxW = barW + padX + logoW + padX;
-                float x0 = x1 - boxW;
-                fg->AddRectFilled(ImVec2(x0, y), ImVec2(x1, y + boxH), ToImU32(theme.moduleBg));
-                fg->AddRectFilled(ImVec2(x0, y), ImVec2(x0 + barW, y + boxH), ToImU32(theme.accentPrimary));
-                fg->AddRect(ImVec2(x0, y), ImVec2(x1, y + boxH), ToImU32(theme.moduleBorder));
-                ImVec2 tx(x0 + barW + padX, y + padY);
-                fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), ToImU32(theme.logoShadow), logoPart1);
-                fg->AddText(font, fontH, tx, ToImU32(theme.accentPrimary), logoPart1);
-                fg->AddText(font, fontH, ImVec2(tx.x + logoP1W + shadowOff, tx.y + shadowOff), ToImU32(theme.logoShadow), logoPart2);
-                fg->AddText(font, fontH, ImVec2(tx.x + logoP1W, tx.y), ToImU32(theme.moduleText), logoPart2);
-                y += boxH + logoGap;
-            } else if (style == 1) {
-                // Minimal: Right-aligned text with right bar
-                float logoX = x1 - logoW - 4.0f * scale;
-                fg->AddRectFilled(ImVec2(x1 - 2.5f * scale, y), ImVec2(x1, y + logoH), ToImU32(theme.accentPrimary));
-                fg->AddText(font, fontH, ImVec2(logoX + shadowOff, y + shadowOff), ToImU32(theme.logoShadow), logoPart1);
-                fg->AddText(font, fontH, ImVec2(logoX, y), ToImU32(theme.accentPrimary), logoPart1);
-                fg->AddText(font, fontH, ImVec2(logoX + logoP1W + shadowOff, y + shadowOff), ToImU32(theme.logoShadow), logoPart2);
-                fg->AddText(font, fontH, ImVec2(logoX + logoP1W, y), ToImU32(theme.moduleText), logoPart2);
-                y += logoH + logoGap;
-            } else if (style == 2) {
-                // Outlined: Outlined badge
-                float boxW = barW + padX + logoW + padX;
-                float x0 = x1 - boxW;
-                fg->AddRectFilled(ImVec2(x0, y), ImVec2(x1, y + boxH), ToImU32(theme.moduleOutlinedBg));
-                fg->AddRect(ImVec2(x0, y), ImVec2(x1, y + boxH), ToImU32(theme.accentPrimary), 4.0f, 0, 1.5f);
-                ImVec2 tx(x0 + barW + padX, y + padY);
-                fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), ToImU32(theme.logoShadow), logoPart1);
-                fg->AddText(font, fontH, tx, ToImU32(theme.accentPrimary), logoPart1);
-                fg->AddText(font, fontH, ImVec2(tx.x + logoP1W + shadowOff, tx.y + shadowOff), ToImU32(theme.logoShadow), logoPart2);
-                fg->AddText(font, fontH, ImVec2(tx.x + logoP1W, tx.y), ToImU32(theme.moduleText), logoPart2);
-                y += boxH + logoGap;
-            } else if (style == 3) {
-                // Glass: Glass badge
-                float boxW = barW + padX + logoW + padX;
-                float x0 = x1 - boxW;
-                fg->AddRectFilled(ImVec2(x0, y), ImVec2(x1, y + boxH), ToImU32(theme.moduleMinimalBg), 4.0f);
-                fg->AddRect(ImVec2(x0, y), ImVec2(x1, y + boxH), ToImU32(theme.moduleGlassBorder), 4.0f, 0, 1.0f);
-                fg->AddRectFilled(ImVec2(x0 + 1.0f * scale, y + 1.0f * scale), ImVec2(x0 + barW + 1.0f * scale, y + boxH - 1.0f * scale), ToImU32(theme.accentPrimary));
-                ImVec2 tx(x0 + barW + padX, y + padY);
-                fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), ToImU32(theme.logoShadow), logoPart1);
-                fg->AddText(font, fontH, tx, ToImU32(theme.accentPrimary), logoPart1);
-                fg->AddText(font, fontH, ImVec2(tx.x + logoP1W + shadowOff, tx.y + shadowOff), ToImU32(theme.logoShadow), logoPart2);
-                fg->AddText(font, fontH, ImVec2(tx.x + logoP1W, tx.y), ToImU32(theme.moduleText), logoPart2);
-                y += boxH + logoGap;
-            } else if (style == 4) {
-                // Bold: Solid accent pill
-                float boxW = barW + padX + logoW + padX;
-                float x0 = x1 - boxW;
-                fg->AddRectFilled(ImVec2(x0, y), ImVec2(x1, y + boxH), ToImU32(theme.accentPrimary), 4.0f);
-                fg->AddRect(ImVec2(x0, y), ImVec2(x1, y + boxH), ToImU32(theme.moduleBorder), 4.0f, 0, 1.0f);
-                ImVec2 tx(x0 + barW + padX, y + padY);
-                fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), ToImU32(theme.logoShadow), logoPart1);
-                fg->AddText(font, fontH, tx, ToImU32(theme.moduleBoldText), logoPart1);
-                fg->AddText(font, fontH, ImVec2(tx.x + logoP1W + shadowOff, tx.y + shadowOff), ToImU32(theme.logoShadow), logoPart2);
-                fg->AddText(font, fontH, ImVec2(tx.x + logoP1W, tx.y), ToImU32(theme.moduleBoldText), logoPart2);
-                y += boxH + logoGap;
-            } else if (style == 5) {
-                // Classic: Minecraft-style right-aligned header with right bar
-                const char* cP1 = "Aoko";
-                const char* cP2 = " Client";
-                float cP1W = ImGui::CalcTextSize(cP1).x * scale;
-                float logoX = x1 - logoW - 4.0f * scale;
-                fg->AddRectFilled(ImVec2(x1 - 2.5f * scale, y), ImVec2(x1, y + logoH), ToImU32(theme.accentPrimary));
-                fg->AddText(font, fontH, ImVec2(logoX + shadowOff, y + shadowOff), ToImU32(theme.logoShadow), cP1);
-                fg->AddText(font, fontH, ImVec2(logoX, y), ToImU32(theme.accentPrimary), cP1);
-                fg->AddText(font, fontH, ImVec2(logoX + cP1W + shadowOff, y + shadowOff), ToImU32(theme.logoShadow), cP2);
-                fg->AddText(font, fontH, ImVec2(logoX + cP1W, y), ToImU32(theme.moduleText), cP2);
-                y += logoH + logoGap;
-            } else {
-                // Modern: Clean lowercase pill with right bar
-                float logoX = x1 - logoW - 5.0f * scale;
-                fg->AddRectFilled(ImVec2(logoX - 3.0f * scale, y - 1.0f * scale), ImVec2(x1, y + logoH + 1.0f * scale), ToImU32(theme.moduleMinimalBg), 2.0f);
-                fg->AddRectFilled(ImVec2(x1 - 2.0f * scale, y - 1.0f * scale), ImVec2(x1, y + logoH + 1.0f * scale), ToImU32(theme.accentPrimary));
-                fg->AddText(font, fontH, ImVec2(logoX + shadowOff, y + shadowOff), ToImU32(theme.logoShadow), logoPart1);
-                fg->AddText(font, fontH, ImVec2(logoX, y), ToImU32(theme.accentPrimary), logoPart1);
-                fg->AddText(font, fontH, ImVec2(logoX + logoP1W + shadowOff, y + shadowOff), ToImU32(theme.logoShadow), logoPart2);
-                fg->AddText(font, fontH, ImVec2(logoX + logoP1W, y), ToImU32(theme.moduleTagText), logoPart2);
-                y += logoH + logoGap;
-            }
-        }
-
-        for (size_t i = 0; i < mods.size(); i++) {
-            const ModLine& m = mods[i];
-            float textW = m.width * scale;
-            float nameW = m.nameWidth * scale;
-            float boxW  = barW + padX + textW + padX;
-            float x0 = x1 - boxW;
-            float y0 = y;
-            float y1 = y + boxH;
-
-            if (style == 0) {
-                // Default: Left bar + text + dim tag
-                fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleBg));
-                fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + barW, y1), m.accent);
-                fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleBorder));
-                ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
-                fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), ToImU32(theme.moduleTextShadow), m.name.c_str());
-                fg->AddText(font, fontH, tx, ToImU32(theme.moduleText), m.name.c_str());
-                if (!m.tag.empty()) {
-                    std::string tagStr = " " + m.tag;
-                    ImVec2 tagTx(tx.x + nameW, tx.y);
-                    fg->AddText(font, fontH, ImVec2(tagTx.x + shadowOff, tagTx.y + shadowOff), ToImU32(theme.moduleTextShadow), tagStr.c_str());
-                    fg->AddText(font, fontH, tagTx, ToImU32(theme.moduleTagText), tagStr.c_str());
-                }
-            } else if (style == 1) {
-                // Minimal: Right bar + colored name + dim tag
-                float minX0 = x1 - textW - 6.0f * scale;
-                fg->AddRectFilled(ImVec2(minX0, y0), ImVec2(x1, y1), ToImU32(theme.moduleMinimalBg));
-                fg->AddRectFilled(ImVec2(x1 - 2.0f * scale, y0), ImVec2(x1, y1), m.accent);
-                ImVec2 tx = ImVec2(minX0 + 2.0f * scale, y0 + padY);
-                fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), ToImU32(theme.moduleTextShadow), m.name.c_str());
-                fg->AddText(font, fontH, tx, m.accent, m.name.c_str());
-                if (!m.tag.empty()) {
-                    std::string tagStr = " " + m.tag;
-                    ImVec2 tagTx(tx.x + nameW, tx.y);
-                    fg->AddText(font, fontH, ImVec2(tagTx.x + shadowOff, tagTx.y + shadowOff), ToImU32(theme.moduleTextShadow), tagStr.c_str());
-                    fg->AddText(font, fontH, tagTx, ToImU32(theme.moduleTagText), tagStr.c_str());
-                }
-            } else if (style == 2) {
-                // Outlined: Border with accent + colored name + dim tag
-                fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleOutlinedBg));
-                fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), m.accent, 4.0f, 0, 1.5f);
-                ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
-                fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), ToImU32(theme.moduleTextShadow), m.name.c_str());
-                fg->AddText(font, fontH, tx, m.accent, m.name.c_str());
-                if (!m.tag.empty()) {
-                    std::string tagStr = " " + m.tag;
-                    ImVec2 tagTx(tx.x + nameW, tx.y);
-                    fg->AddText(font, fontH, ImVec2(tagTx.x + shadowOff, tagTx.y + shadowOff), ToImU32(theme.moduleTextShadow), tagStr.c_str());
-                    fg->AddText(font, fontH, tagTx, ToImU32(theme.moduleTagText), tagStr.c_str());
-                }
-            } else if (style == 3) {
-                // Glass: Frosted glass panel with specular border and left pip
-                fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleMinimalBg), 4.0f);
-                fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleGlassBorder), 4.0f, 0, 1.0f);
-                fg->AddRectFilled(ImVec2(x0 + 1.0f * scale, y0 + 1.0f * scale), ImVec2(x0 + barW + 1.0f * scale, y1 - 1.0f * scale), m.accent);
-                ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
-                fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), ToImU32(theme.moduleTextShadow), m.name.c_str());
-                fg->AddText(font, fontH, tx, ToImU32(theme.moduleText), m.name.c_str());
-                if (!m.tag.empty()) {
-                    std::string tagStr = " " + m.tag;
-                    ImVec2 tagTx(tx.x + nameW, tx.y);
-                    fg->AddText(font, fontH, ImVec2(tagTx.x + shadowOff, tagTx.y + shadowOff), ToImU32(theme.moduleTextShadow), tagStr.c_str());
-                    fg->AddText(font, fontH, tagTx, ToImU32(theme.moduleTagText), tagStr.c_str());
-                }
-            } else if (style == 4) {
-                // Bold: Solid accent block fill
-                fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), m.accent, 4.0f);
-                fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleBorder), 4.0f, 0, 1.0f);
-                ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
-                fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), ToImU32(theme.moduleTextShadow), m.name.c_str());
-                fg->AddText(font, fontH, tx, ToImU32(theme.moduleBoldText), m.name.c_str());
-                if (!m.tag.empty()) {
-                    std::string tagStr = " " + m.tag;
-                    ImVec2 tagTx(tx.x + nameW, tx.y);
-                    fg->AddText(font, fontH, ImVec2(tagTx.x + shadowOff, tagTx.y + shadowOff), ToImU32(theme.moduleTextShadow), tagStr.c_str());
-                    fg->AddText(font, fontH, tagTx, ToImU32(theme.moduleBoldText), tagStr.c_str());
-                }
-            } else if (style == 5) {
-                // Classic: Minecraft-style right-side bar with shadow and colored name + dim tag
-                float minX0 = x1 - textW - 6.0f * scale;
-                fg->AddRectFilled(ImVec2(minX0, y0), ImVec2(x1, y1), ToImU32(theme.moduleMinimalBg));
-                fg->AddRectFilled(ImVec2(x1 - 2.5f * scale, y0), ImVec2(x1, y1), m.accent);
-                ImVec2 tx = ImVec2(minX0 + 2.0f * scale, y0 + padY);
-                fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), ToImU32(theme.moduleTextShadow), m.name.c_str());
-                fg->AddText(font, fontH, tx, m.accent, m.name.c_str());
-                if (!m.tag.empty()) {
-                    std::string tagStr = " " + m.tag;
-                    ImVec2 tagTx(tx.x + nameW, tx.y);
-                    fg->AddText(font, fontH, ImVec2(tagTx.x + shadowOff, tagTx.y + shadowOff), ToImU32(theme.moduleTextShadow), tagStr.c_str());
-                    fg->AddText(font, fontH, tagTx, ToImU32(theme.moduleTagText), tagStr.c_str());
-                }
-            } else {
-                // Modern: Clean lowercase with right bar and subtle background
-                std::string lowName = ToLowerAscii(m.name);
-                std::string lowTag = ToLowerAscii(m.tag);
-                float minX0 = x1 - textW - 6.0f * scale;
-                fg->AddRectFilled(ImVec2(minX0, y0), ImVec2(x1, y1), ToImU32(theme.moduleMinimalBg), 2.0f);
-                fg->AddRectFilled(ImVec2(x1 - 2.0f * scale, y0), ImVec2(x1, y1), m.accent);
-                ImVec2 tx = ImVec2(minX0 + 2.0f * scale, y0 + padY);
-                fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), ToImU32(theme.moduleTextShadow), lowName.c_str());
-                fg->AddText(font, fontH, tx, m.accent, lowName.c_str());
-                if (!lowTag.empty()) {
-                    std::string tagStr = " " + lowTag;
-                    ImVec2 tagTx(tx.x + nameW, tx.y);
-                    fg->AddText(font, fontH, ImVec2(tagTx.x + shadowOff, tagTx.y + shadowOff), ToImU32(theme.moduleTextShadow), tagStr.c_str());
-                    fg->AddText(font, fontH, tagTx, ToImU32(theme.moduleTagText), tagStr.c_str());
-                }
-            }
-
-            y += boxH + gapY;
-        }
+    static thread_local aoko::ui::ModuleList moduleList;
+    const float uiDt = io.DeltaTime;
+    ImVec2 blockSize = moduleList.Update(
+        modEntries, modLayout.scale, cfg.showLogo, style, uiDt);
+    if (blockSize.x > 0.0f && blockSize.y > 0.0f) {
+        g_moduleListBaseWidth = blockSize.x /
+            (modLayout.scale > 0.001f ? modLayout.scale : 1.0f);
+        g_moduleListBaseHeight = blockSize.y /
+            (modLayout.scale > 0.001f ? modLayout.scale : 1.0f);
+        ImVec2 tl = lc::HudElementPixelPos(
+            modLayout, blockSize.x, blockSize.y, winW, winH);
+        aoko::ui::Theme uiTheme = BuildOverlayUiTheme(theme);
+        aoko::ui::Telemetry telemetry;
+        telemetry.pingMs = g_overlayPingMs;
+        telemetry.fps = (int)(io.Framerate + 0.5f);
+        moduleList.Draw(fg, tl, uiTheme, telemetry, (float)ImGui::GetTime());
     }
 
     if (cfg.gtbHelper) {
@@ -13336,13 +13134,49 @@ void RenderHUD(
         const float x0 = (std::max)(10.0f, x1 - panelW);
         const float y0 = (std::max)(10.0f, y1 - panelH);
 
-        fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), ToImU32(theme.moduleBg), 5.0f);
-        fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), WithAlpha(theme.accentTertiary, 220), 5.0f, 0, 1.2f);
+        aoko::ui::Theme gtbUi = BuildOverlayUiTheme(theme);
+        aoko::ui::Panel(fg, gtbUi, ImVec2(x0, y0), ImVec2(x1, y1), 6.0f, 8.0f);
+        const float gtbHeadH = 25.0f;
+        fg->AddRectFilledMultiColor(
+            ImVec2(x0 + 1.0f, y0 + 1.0f), ImVec2(x1 - 1.0f, y0 + gtbHeadH),
+            aoko::ui::WithAlpha(gtbUi.accent, 30), aoko::ui::WithAlpha(gtbUi.accent, 12),
+            aoko::ui::WithAlpha(gtbUi.panel, 0), aoko::ui::WithAlpha(gtbUi.panel, 0));
+        fg->AddLine(ImVec2(x0 + 6.0f, y0 + gtbHeadH), ImVec2(x1 - 6.0f, y0 + gtbHeadH),
+                    gtbUi.border, 1.0f);
+        fg->AddRectFilled(ImVec2(x0 + 1.0f, y0 + 7.0f), ImVec2(x0 + 3.5f, y1 - 7.0f),
+                          gtbUi.accent, 1.0f);
 
-        char hintBuf[320];
-        snprintf(hintBuf, sizeof(hintBuf), "GTB: %s (%d)", hint.c_str(), (std::max)(0, cfg.gtbCount));
-        fg->AddText(ImVec2(x0 + 9.0f, y0 + 8.0f), WithAlpha(theme.accentTertiary, 245), hintBuf);
+        const float gtbPad = 9.0f;
+        char countBuf[24];
+        snprintf(countBuf, sizeof(countBuf), "%d", (std::max)(0, cfg.gtbCount));
+        const float countW = aoko::ui::TextWidth(countBuf, 10.0f) + 12.0f;
+        ImVec2 chipA(x1 - gtbPad - countW, y0 + 5.0f);
+        ImVec2 chipB(x1 - gtbPad, y0 + gtbHeadH - 4.0f);
+        fg->AddRectFilled(chipA, chipB, aoko::ui::WithAlpha(gtbUi.accent, 30), 2.0f);
+        fg->AddRect(chipA, chipB, aoko::ui::WithAlpha(gtbUi.accent, 90), 2.0f, 0, 1.0f);
+        aoko::ui::TextCentered(fg, (chipA.x + chipB.x) * 0.5f, chipA.y + 2.0f,
+                               countBuf, 10.0f, gtbUi.text);
 
+        aoko::ui::TrackedText(fg, ImVec2(x0 + gtbPad, y0 + 8.0f), "GTB", 9.0f,
+                              gtbUi.accent, 1.5f);
+        const float gtbTitleW = aoko::ui::TrackedWidth("GTB", 9.0f, 1.5f);
+        float hintMax = (chipA.x - 7.0f) - (x0 + gtbPad + gtbTitleW + 8.0f);
+        std::string hintShown = hint;
+        while (!hintShown.empty() && aoko::ui::TextWidth(hintShown.c_str(), 10.0f) > hintMax)
+            hintShown.erase(hintShown.size() - 1);
+        if (hintShown.size() < hint.size() && hintShown.size() > 2) {
+            hintShown.erase(hintShown.size() - 2);
+            hintShown += "..";
+        }
+        aoko::ui::TextShadowed(fg, ImVec2(x0 + gtbPad + gtbTitleW + 8.0f, y0 + 8.0f),
+                               hintShown.c_str(), 10.0f, gtbUi.textDim,
+                               aoko::ui::WithAlpha(gtbUi.shadow, 150), 1.0f);
+
+        for (size_t col = 1; col < numCols; col++) {
+            const float vx = x0 + padXGtb + (colW + colPad) * (float)col - colPad * 0.5f;
+            aoko::ui::VerticalRule(fg, vx, y0 + gtbHeadH + 6.0f, y1 - 8.0f,
+                                   aoko::ui::WithAlpha(gtbUi.text, 18));
+        }
         size_t visiblePerCol = linesPerCol;
         if (visiblePerCol < 1) visiblePerCol = 1;
         for (size_t col = 0; col < numCols; col++) {
@@ -13354,12 +13188,130 @@ void RenderHUD(
             float ty = y0 + 8.0f + lineH + 6.0f;
 
             for (size_t i = startIdx; i < endIdx; i++) {
-                std::string row = "- " + lines[i];
-                fg->AddText(ImVec2(cx, ty), ToImU32(theme.moduleText), row.c_str());
+                aoko::ui::Diamond(fg, ImVec2(cx + 1.0f, ty + lineH * 0.5f), 1.4f,
+                                  aoko::ui::WithAlpha(gtbUi.accent, 170));
+                aoko::ui::TextShadowed(fg, ImVec2(cx + 8.0f, ty), lines[i].c_str(),
+                                       ImGui::GetFontSize() * 0.94f, gtbUi.text,
+                                       aoko::ui::WithAlpha(gtbUi.shadow, 150), 1.0f);
                 ty += lineH;
             }
         }
     }
+}
+
+// Overlay-only latency probe: reads the local tab-list entry once per second.
+// Runs on the JNI worker and never mutates gameplay state.
+static int UpdateOverlayPingLegacy(JNIEnv* env, jobject player) {
+    static DWORD nextProbeMs = 0;
+    jmethodID getPlayerInfo = nullptr;
+    jmethodID getResponseTime = nullptr;
+
+    const DWORD now = GetTickCount();
+    if (now < nextProbeMs) return g_overlayPingMs;
+    nextProbeMs = now + 1000;
+
+    if (!env || !g_mcInstance || !player) {
+        g_overlayPingMs = -1;
+        return g_overlayPingMs;
+    }
+    if (env->PushLocalFrame(20) < 0) return g_overlayPingMs;
+
+    // Resolve locally so the probe never races the Nick Hider path on the shared
+    // g_legacyMcGetNetHandlerMethod cache.
+    jmethodID getNetHandler = nullptr;
+    jclass mcCls = env->GetObjectClass(g_mcInstance);
+    if (mcCls) {
+        const char* names[] = { "getNetHandler", "func_147114_u", nullptr };
+        for (int i = 0; names[i] && !getNetHandler; ++i) {
+            getNetHandler = env->GetMethodID(mcCls, names[i],
+                "()Lnet/minecraft/client/network/NetHandlerPlayClient;");
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+                getNetHandler = nullptr;
+            }
+        }
+        env->DeleteLocalRef(mcCls);
+    }
+    if (!getNetHandler) {
+        env->PopLocalFrame(nullptr);
+        return g_overlayPingMs;
+    }
+
+    jobject netHandler = env->CallObjectMethod(g_mcInstance, getNetHandler);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); netHandler = nullptr; }
+    if (!netHandler) {
+        g_overlayPingMs = -1;
+        env->PopLocalFrame(nullptr);
+        return g_overlayPingMs;
+    }
+
+    jclass nhCls = env->GetObjectClass(netHandler);
+    if (nhCls && !getPlayerInfo) {
+        const char* names[] = { "getPlayerInfo", "func_175104_a", nullptr };
+        for (int i = 0; names[i] && !getPlayerInfo; ++i) {
+            getPlayerInfo = env->GetMethodID(nhCls, names[i],
+                "(Ljava/lang/String;)Lnet/minecraft/client/network/NetworkPlayerInfo;");
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+                getPlayerInfo = nullptr;
+            }
+        }
+    }
+    if (nhCls) env->DeleteLocalRef(nhCls);
+
+    const std::string stableName = GetStablePlayerName(env, player);
+    std::vector<std::string> lookupNames;
+    if (!stableName.empty()) lookupNames.push_back(stableName);
+    {
+        LockGuard lk(g_configMutex);
+        if (g_config.nickHiderEnabled && !g_config.nickHiderAlias.empty() &&
+            g_config.nickHiderAlias != stableName) {
+            lookupNames.push_back(g_config.nickHiderAlias);
+        }
+    }
+    if (!getPlayerInfo || lookupNames.empty()) {
+        env->DeleteLocalRef(netHandler);
+        env->PopLocalFrame(nullptr);
+        return g_overlayPingMs;
+    }
+
+    jobject info = nullptr;
+    for (size_t i = 0; i < lookupNames.size() && !info; ++i) {
+        jstring jname = env->NewStringUTF(lookupNames[i].c_str());
+        info = jname ? env->CallObjectMethod(netHandler, getPlayerInfo, jname) : nullptr;
+        if (env->ExceptionCheck()) { env->ExceptionClear(); info = nullptr; }
+        if (jname) env->DeleteLocalRef(jname);
+    }
+    env->DeleteLocalRef(netHandler);
+    if (!info) {
+        env->PopLocalFrame(nullptr);
+        return g_overlayPingMs;
+    }
+
+    jclass infoCls = env->GetObjectClass(info);
+    if (infoCls && !getResponseTime) {
+        const char* names[] = { "getResponseTime", "func_178853_c", nullptr };
+        for (int i = 0; names[i] && !getResponseTime; ++i) {
+            getResponseTime = env->GetMethodID(infoCls, names[i], "()I");
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+                getResponseTime = nullptr;
+            }
+        }
+    }
+    if (infoCls) env->DeleteLocalRef(infoCls);
+
+    if (getResponseTime) {
+        jint ping = env->CallIntMethod(info, getResponseTime);
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        } else if (ping >= 0 && ping <= 9999) {
+            g_overlayPingMs = (int)ping;
+        }
+    }
+    env->DeleteLocalRef(info);
+    env->PopLocalFrame(nullptr);
+    return g_overlayPingMs;
 }
 
 // ===================== NAMETAGS =====================
@@ -14290,47 +14242,95 @@ void RenderPixelPartyAssist(
 
     OverlayTheme ppTheme = ResolveOverlayTheme(config.guiTheme);
     ImDrawList* fg = ImGui::GetForegroundDrawList();
+    const aoko::ui::Theme ppUi = BuildOverlayUiTheme(ppTheme);
     const float fontSz = ImGui::GetFontSize();
-    const float smallSz = std::floor(fontSz * 0.82f);
+    const float smallSz = fontSz * 0.80f;
+    const float microSz = fontSz * 0.50f;
     const float padX = 10.0f;
-    const float padY = 6.0f;
-    const float gapRow = 3.0f;
-    const float boxW = 240.0f;
+    const float padY = 7.0f;
+    const float gapRow = 3.5f;
+    const float boxW = 216.0f;
+    const ImU32 partyCol = ppSnap.targetFound ? aoko::ui::PartyColor(ppSnap.colorLabel) : ppUi.accent;
 
-    ImVec2 titleSz = ImGui::CalcTextSize(titleRow.c_str());
-    ImVec2 mainSz = ImGui::CalcTextSize(mainRow);
-    ImVec2 subSz = subRow.empty() ? ImVec2(0, 0) : ImGui::CalcTextSize(subRow.c_str());
+    std::string mainText;
+    if (ppSnap.targetFound) {
+        mainText = ppSnap.colorLabel.empty() ? "Target" : ppSnap.colorLabel;
+    } else if (!ppSnap.holdingValid) {
+        mainText = "Hold terracotta";
+    } else {
+        mainText = ppSnap.status.empty() ? "No match" : ppSnap.status;
+    }
 
-    float contentW = (std::max)(boxW, (std::max)(titleSz.x + padX * 2.0f, (std::max)(mainSz.x + padX * 2.0f, subSz.x + padX * 2.0f)));
-    float contentH = padY + smallSz + gapRow + fontSz + gapRow;
-    if (!subRow.empty()) contentH += smallSz + gapRow;
+    std::string statusText;
+    if (ppSnap.targetFound && !ppSnap.status.empty()) statusText = ppSnap.status;
+    else if (!ppSnap.targetFound && ppSnap.holdingValid && !ppSnap.status.empty())
+        statusText = ppSnap.status;
+
+    const ImVec2 mainSz = ImGui::CalcTextSize(mainText.c_str());
+    const ImVec2 statusSz = statusText.empty() ? ImVec2(0, 0) : ImGui::CalcTextSize(statusText.c_str());
+    float contentW = (std::max)(boxW, mainSz.x + 42.0f);
+    if (!statusText.empty()) contentW = (std::max)(contentW, statusSz.x + padX * 2.0f);
+    float contentH = padY + microSz + gapRow + fontSz + gapRow;
+    if (!statusText.empty()) contentH += smallSz + gapRow;
     contentH += padY;
 
-    float cx = (float)w * 0.5f;
-    float bottomOffset = config.closestPlayerInfo ? 200.0f : 120.0f;
-    float by = (float)h - bottomOffset;
-    float rx = std::floor(cx - contentW * 0.5f);
-    float ry = std::floor(by - contentH);
+    const float cx = (float)w * 0.5f;
+    const float bottomOffset = config.closestPlayerInfo ? 208.0f : 128.0f;
+    const float rx = std::floor(cx - contentW * 0.5f);
+    const float ry = std::floor((float)h - bottomOffset - contentH);
+    const float rxe = rx + contentW;
+    const float rye = ry + contentH;
 
-    fg->AddRectFilled(ImVec2(rx, ry), ImVec2(rx + contentW, ry + contentH), ToImU32(ppTheme.moduleBg), 6.0f);
-    fg->AddRect(ImVec2(rx, ry), ImVec2(rx + contentW, ry + contentH), ToImU32(ppTheme.moduleGlassBorder), 6.0f, 0, 1.0f);
+    const float pulse = ppSnap.targetFound
+        ? 0.60f + 0.40f * (0.5f + 0.5f * std::sin((float)ImGui::GetTime() * 4.4f))
+        : 0.0f;
+    aoko::ui::Panel(fg, ppUi, ImVec2(rx, ry), ImVec2(rxe, rye), 7.0f,
+                    2.0f + pulse * 8.0f, true);
+    fg->AddRectFilled(ImVec2(rx + 1.0f, ry + 6.0f), ImVec2(rx + 3.2f, rye - 6.0f),
+                      aoko::ui::WithAlpha(partyCol, (int)(160 + pulse * 70.0f)), 1.0f);
 
     float curY = ry + padY;
-    float ttx = std::floor(cx - titleSz.x * 0.5f);
-    fg->AddText(ImGui::GetFont(), smallSz, ImVec2(ttx + 1, curY + 1), ToImU32(ppTheme.moduleTextShadow), titleRow.c_str());
-    fg->AddText(ImGui::GetFont(), smallSz, ImVec2(ttx, curY), ToImU32(ppTheme.accentPrimary), titleRow.c_str());
-    curY += smallSz + gapRow;
 
-    float mtx = std::floor(cx - mainSz.x * 0.5f);
-    fg->AddText(ImVec2(mtx + 1, curY + 1), ToImU32(ppTheme.moduleTextShadow), mainRow);
-    fg->AddText(ImVec2(mtx, curY), ToImU32(ppTheme.moduleText), mainRow);
+    aoko::ui::TrackedText(fg, ImVec2(rx + padX, curY), "PIXEL PARTY", microSz,
+                          ppUi.accent, 1.3f);
+    char stateBuf[24];
+    if (ppSnap.targetFound) snprintf(stateBuf, sizeof(stateBuf), "LOCK");
+    else if (ppSnap.holdingValid) snprintf(stateBuf, sizeof(stateBuf), "SEARCH");
+    else snprintf(stateBuf, sizeof(stateBuf), "IDLE");
+    const float stateW = aoko::ui::TextWidth(stateBuf, microSz * 0.96f) + 10.0f;
+    ImVec2 chipA(rxe - padX - stateW, curY - 1.0f);
+    ImVec2 chipB(rxe - padX, chipA.y + microSz + 5.0f);
+    fg->AddRectFilled(chipA, chipB, aoko::ui::WithAlpha(partyCol, ppSnap.targetFound ? 34 : 18), 2.0f);
+    fg->AddRect(chipA, chipB, aoko::ui::WithAlpha(partyCol, 70), 2.0f, 0, 1.0f);
+    aoko::ui::TextCentered(fg, (chipA.x + chipB.x) * 0.5f, chipA.y + 2.0f, stateBuf,
+                           microSz * 0.96f, ppSnap.targetFound ? partyCol : ppUi.textDim);
+
+    curY += microSz + gapRow;
+
+    // Color dot + target name.
+    const float dotR = 4.0f;
+    ImVec2 dotC(rx + padX + dotR + 0.5f, curY + fontSz * 0.5f);
+    fg->AddCircleFilled(dotC, dotR + 1.6f, aoko::ui::WithAlpha(partyCol, 32), 16);
+    fg->AddCircleFilled(dotC, dotR, partyCol, 16);
+    aoko::ui::TextShadowed(fg, ImVec2(dotC.x + dotR + 7.0f, curY), mainText.c_str(),
+                           fontSz, ppUi.text, aoko::ui::WithAlpha(ppUi.shadow, 120), 1.0f);
+
+    if (ppSnap.targetFound) {
+        char distBuf[24];
+        snprintf(distBuf, sizeof(distBuf), "%.0fm", (float)ppSnap.dist);
+        const float distW = aoko::ui::TextWidth(distBuf, fontSz * 0.92f);
+        aoko::ui::Chevron(fg, ImVec2(rxe - padX - distW - 9.0f, curY + fontSz * 0.5f),
+                          dirArrow, 3.6f, partyCol);
+        aoko::ui::TextRight(fg, ImVec2(rxe - padX, curY + 1.0f), distBuf,
+                            fontSz * 0.92f, aoko::ui::Mix(partyCol, ppUi.text, 0.35f));
+    }
     curY += fontSz + gapRow;
 
-    if (!subRow.empty()) {
-        float stx = std::floor(cx - subSz.x * 0.5f);
-        fg->AddText(ImGui::GetFont(), smallSz, ImVec2(stx + 1, curY + 1), ToImU32(ppTheme.moduleTextShadow), subRow.c_str());
-        fg->AddText(ImGui::GetFont(), smallSz, ImVec2(stx, curY), ToImU32(ppTheme.moduleTagText), subRow.c_str());
+    if (!statusText.empty()) {
+        aoko::ui::TextShadowed(fg, ImVec2(rx + padX, curY), statusText.c_str(), smallSz,
+                               ppUi.textDim, aoko::ui::WithAlpha(ppUi.shadow, 105), 1.0f);
     }
+
 }
 
 void RenderClosestPlayerInfo(
@@ -14382,58 +14382,115 @@ void RenderClosestPlayerInfo(
 
     ImDrawList* fg = ImGui::GetForegroundDrawList();
     OverlayTheme theme = ResolveOverlayTheme(guiTheme);
-    const float fontSz = ImGui::GetFontSize();
-    const float smallSz = std::floor(fontSz * 0.82f);
-    const float padX = 10.0f;
-    const float padY = 6.0f;
-    const float boxW = 220.0f;
-    const float hpBarH = 4.0f;
-    const float gapRow = 3.0f;
 
-    ImVec2 nameSz = ImGui::CalcTextSize(nameRow);
+    const lc::HudElementLayout cpLayout = hudLayout.Resolve(lc::ELEM_CLOSESTPLAYER);
+    const float cpScale = cpLayout.scale;
+    const float fontSz = ImGui::GetFontSize() * cpScale;
+    const float smallSz = fontSz * 0.80f;
+    const float microSz = fontSz * 0.50f;
+    const float padX = 9.0f * cpScale;
+    const float padY = 7.0f * cpScale;
+    const float hpBarH = 5.0f * cpScale;
+    const float gapRow = 3.0f * cpScale;
+
+    ImVec2 nameSz = ImGui::CalcTextSize(snapshot.name.c_str());
+    nameSz.x *= cpScale;
     ImVec2 statsSz = statsRow.empty() ? ImVec2(0, 0) : ImGui::CalcTextSize(statsRow.c_str());
+    statsSz.x *= cpScale;
+    statsSz.y *= cpScale;
 
-    lc::HudElementLayout cpLayout =
-        hudLayout.Resolve(lc::ELEM_CLOSESTPLAYER);
-
-    float contentW = (std::max)(boxW, (std::max)(nameSz.x + padX * 2.0f, statsSz.x + padX * 2.0f));
-    contentW *= cpLayout.scale;
-    float contentH = padY + fontSz + gapRow + hpBarH + gapRow;
-    if (!statsRow.empty()) contentH += smallSz + gapRow;
+    float contentW = (std::max)(220.0f * cpScale, nameSz.x + 28.0f * cpScale + padX * 2.0f);
+    contentW = (std::max)(contentW, statsSz.x + padX * 2.0f);
+    float contentH = padY + microSz + gapRow + fontSz + gapRow * 1.5f + hpBarH + gapRow;
+    if (!statsRow.empty()) contentH += statsSz.y + gapRow;
     contentH += padY;
-    contentH *= cpLayout.scale;
 
     ImVec2 cpTL = lc::HudElementPixelPos(cpLayout, contentW, contentH, w, h);
-    float rx = cpTL.x;
-    float ry = cpTL.y;
-    float cx = rx + contentW * 0.5f;
+    const float rx = cpTL.x;
+    const float ry = cpTL.y;
+    const float rxe = rx + contentW;
+    const float rye = ry + contentH;
 
-    ImVec2 pMin(rx, ry);
-    ImVec2 pMax(rx + contentW, ry + contentH);
-    fg->AddRectFilled(pMin, pMax, ToImU32(theme.moduleBg), 6.0f);
-    fg->AddRect(pMin, pMax, ToImU32(theme.moduleGlassBorder), 6.0f, 0, 1.0f);
-    fg->AddRectFilled(ImVec2(rx, ry), ImVec2(rx + 3.0f * cpLayout.scale, ry + contentH), ToImU32(theme.accentPrimary), 3.0f);
+    const aoko::ui::Theme cpUi = BuildOverlayUiTheme(theme);
+    const float hpPct = (std::max)(0.0f, (std::min)(health / 20.0f, 1.0f));
+    const float lowPulse = health <= 6.0f
+        ? 0.55f + 0.45f * (0.5f + 0.5f * std::sin((float)ImGui::GetTime() * 6.2f))
+        : 0.0f;
+    aoko::ui::Panel(fg, cpUi, ImVec2(rx, ry), ImVec2(rxe, rye), 7.0f * cpScale,
+                    2.0f + lowPulse * 7.0f, true);
+    fg->AddRectFilled(ImVec2(rx + 1.0f, ry + 6.0f * cpScale),
+                      ImVec2(rx + 3.2f * cpScale, rye - 6.0f * cpScale),
+                      aoko::ui::WithAlpha(cpUi.accent, (int)(170 + lowPulse * 60.0f)),
+                      1.0f * cpScale);
 
     float curY = ry + padY;
-    float ntx = std::floor(cx - nameSz.x * 0.5f);
-    fg->AddText(ImVec2(ntx + 1, curY + 1), ToImU32(theme.moduleTextShadow), nameRow);
-    fg->AddText(ImVec2(ntx, curY), ToImU32(theme.moduleText), nameRow);
-    curY += fontSz + gapRow;
 
-    float hpPct = (std::max)(0.0f, (std::min)(health / 20.0f, 1.0f));
-    float barX0 = rx + padX;
-    float barX1 = rx + contentW - padX;
-    float barFill = barX0 + (barX1 - barX0) * hpPct;
-    ImU32 barCol = IM_COL32((int)(255 * (1.0f - hpPct)), (int)(220 * hpPct + 35), 60, 255);
-    fg->AddRectFilled(ImVec2(barX0, curY), ImVec2(barX1, curY + hpBarH), IM_COL32(20, 24, 32, 200), 2.0f);
-    fg->AddRectFilled(ImVec2(barX0, curY), ImVec2(barFill, curY + hpBarH), barCol, 2.0f);
+    // Header: eyebrow + distance chip.
+    aoko::ui::TrackedText(fg, ImVec2(rx + padX, curY), "CLOSEST", microSz,
+                          cpUi.accent, 1.3f * cpScale);
+    char distBuf[24];
+    snprintf(distBuf, sizeof(distBuf), "%.0fm", snapshot.distance);
+    const float distW = aoko::ui::TextWidth(distBuf, smallSz * 0.92f);
+    const float chipW = 7.0f * cpScale + 3.5f * cpScale + 4.0f * cpScale + distW + 7.0f * cpScale;
+    const float chipH = microSz + 6.0f * cpScale;
+    ImVec2 chipA(rxe - padX - chipW, curY - 1.0f * cpScale);
+    ImVec2 chipB(rxe - padX, chipA.y + chipH);
+    fg->AddRectFilled(chipA, chipB, aoko::ui::WithAlpha(cpUi.accent, 24), 2.0f * cpScale);
+    fg->AddRect(chipA, chipB, aoko::ui::WithAlpha(cpUi.accent, 62), 2.0f * cpScale, 0, 1.0f);
+    aoko::ui::Chevron(fg, ImVec2(chipA.x + 6.5f * cpScale, (chipA.y + chipB.y) * 0.5f),
+                      dirArrow, 3.0f * cpScale, cpUi.accent);
+    aoko::ui::Text(fg, ImVec2(chipA.x + 12.0f * cpScale, chipA.y + 2.5f * cpScale),
+                   distBuf, smallSz * 0.92f, cpUi.textDim);
+
+    curY += microSz + gapRow;
+
+    // Avatar medallion + name.
+    const float avatarR = 7.0f * cpScale;
+    ImVec2 avatarC(rx + padX + avatarR, curY + fontSz * 0.5f);
+    fg->AddCircleFilled(avatarC, avatarR, aoko::ui::WithAlpha(cpUi.accent, 30), 18);
+    fg->AddCircle(avatarC, avatarR, aoko::ui::WithAlpha(cpUi.accent, 95), 18, 1.0f);
+    char initial[2] = { 0, 0 };
+    for (size_t i = 0; i < snapshot.name.size(); ++i) {
+        if (std::isalnum((unsigned char)snapshot.name[i])) {
+            initial[0] = (char)std::toupper((unsigned char)snapshot.name[i]);
+            break;
+        }
+    }
+    if (!initial[0]) initial[0] = '?';
+    aoko::ui::TextCentered(fg, avatarC.x, avatarC.y - smallSz * 0.5f, initial,
+                           smallSz * 0.92f, cpUi.text);
+
+    aoko::ui::TextShadowed(fg, ImVec2(avatarC.x + avatarR + 6.0f * cpScale, curY),
+                           snapshot.name.c_str(), fontSz, cpUi.text,
+                           aoko::ui::WithAlpha(cpUi.shadow, 120), (std::max)(1.0f, cpScale));
+    curY += fontSz + gapRow * 1.5f;
+
+    // Health track.
+    const float barX0 = rx + padX;
+    const float barX1 = rxe - padX;
+    const float barFill = barX0 + (barX1 - barX0) * hpPct;
+    fg->AddRectFilled(ImVec2(barX0, curY), ImVec2(barX1, curY + hpBarH),
+                      IM_COL32(8, 14, 22, 190), 2.0f * cpScale);
+    if (hpPct > 0.0f) {
+        const ImU32 hpCol = aoko::ui::HealthColor(hpPct);
+        fg->AddRectFilledMultiColor(
+            ImVec2(barX0, curY), ImVec2(barFill, curY + hpBarH),
+            aoko::ui::WithAlpha(hpCol, 235), aoko::ui::WithAlpha(hpCol, 235),
+            aoko::ui::WithAlpha(aoko::ui::Mix(hpCol, IM_COL32(0, 0, 0, 255), 0.24f), 235),
+            aoko::ui::WithAlpha(aoko::ui::Mix(hpCol, IM_COL32(0, 0, 0, 255), 0.24f), 235));
+        fg->AddRectFilled(ImVec2(barX0, curY + 0.5f * cpScale),
+                          ImVec2(barFill, curY + 1.2f * cpScale),
+                          IM_COL32(255, 255, 255, 70), 1.0f * cpScale);
+    }
+    fg->AddLine(ImVec2(barX0 + (barX1 - barX0) * 0.5f, curY + 0.5f * cpScale),
+                ImVec2(barX0 + (barX1 - barX0) * 0.5f, curY + hpBarH - 0.5f * cpScale),
+                IM_COL32(0, 0, 0, 55), 1.0f);
     curY += hpBarH + gapRow;
 
     if (!statsRow.empty()) {
-        float stx = std::floor(cx - statsSz.x * 0.5f);
-        fg->AddText(ImGui::GetFont(), smallSz, ImVec2(stx + 1, curY + 1), ToImU32(theme.moduleTextShadow), statsRow.c_str());
-        ImU32 sCol = health <= 6.0f ? IM_COL32(255, 100, 100, 240) : ToImU32(theme.moduleTagText);
-        fg->AddText(ImGui::GetFont(), smallSz, ImVec2(stx, curY), sCol, statsRow.c_str());
+        aoko::ui::TextShadowed(fg, ImVec2(rx + padX, curY), statsRow.c_str(), smallSz,
+                               health <= 6.0f ? aoko::ui::SemanticBad() : cpUi.textDim,
+                               aoko::ui::WithAlpha(cpUi.shadow, 110), 1.0f);
     }
 }
 
@@ -15228,18 +15285,27 @@ void RenderBlockESP(
         contentW *= beLayout.scale; contentH *= beLayout.scale;
         ImVec2 beTL = lc::HudElementPixelPos(beLayout, contentW, contentH, w, h);
         ImVec2 pMin(beTL.x, beTL.y), pMax(beTL.x + contentW, beTL.y + contentH);
-        fg->AddRectFilled(pMin, pMax, ToImU32(blockTheme.moduleBg), 6.0f);
-        fg->AddRect(pMin, pMax, ToImU32(blockTheme.moduleGlassBorder), 6.0f, 0, 1.0f);
+        const aoko::ui::Theme beUi = BuildOverlayUiTheme(blockTheme);
+        aoko::ui::Panel(fg, beUi, pMin, pMax, 6.0f, 5.0f, true);
+        fg->AddRectFilled(ImVec2(beTL.x + 1.0f, beTL.y + 6.0f),
+                          ImVec2(beTL.x + 3.2f, pMax.y - 6.0f),
+                          aoko::ui::WithAlpha(beUi.accent, 175), 1.0f);
 
         float curY = beTL.y + padY;
-        fg->AddText(ImVec2(beTL.x + padX + 1, curY + 1), ToImU32(blockTheme.moduleTextShadow), title.c_str());
-        fg->AddText(ImVec2(beTL.x + padX, curY), ToImU32(blockTheme.accentPrimary), title.c_str());
+        aoko::ui::TrackedText(fg, ImVec2(beTL.x + padX, curY), "BLOCK ESP",
+                              ImGui::GetFontSize() * 0.52f, beUi.accent, 1.25f);
+        char beCount[16];
+        snprintf(beCount, sizeof(beCount), "%d", (int)rows.size());
+        aoko::ui::TextRight(fg, ImVec2(pMax.x - padX, curY), beCount,
+                            ImGui::GetFontSize() * 0.58f, beUi.textFaint);
         curY += rowH;
         for (size_t i = 0; i < rows.size(); i++) {
             float swY = curY + (rowH - sw) * 0.5f;
-            fg->AddRectFilled(ImVec2(beTL.x + padX, swY), ImVec2(beTL.x + padX + sw, swY + sw), rowColors[i], 2.0f);
-            fg->AddText(ImVec2(beTL.x + padX + sw + 6.0f + 1, curY + 1), ToImU32(blockTheme.moduleTextShadow), rows[i].c_str());
-            fg->AddText(ImVec2(beTL.x + padX + sw + 6.0f, curY), ToImU32(blockTheme.moduleText), rows[i].c_str());
+            fg->AddRectFilled(ImVec2(beTL.x + padX, swY),
+                              ImVec2(beTL.x + padX + sw, swY + sw), rowColors[i], 2.0f);
+            aoko::ui::TextShadowed(fg, ImVec2(beTL.x + padX + sw + 6.0f, curY),
+                                   rows[i].c_str(), ImGui::GetFontSize() * 0.94f, beUi.text,
+                                   aoko::ui::WithAlpha(beUi.shadow, 150), 1.0f);
             curY += rowH;
         }
     }
@@ -15471,7 +15537,7 @@ static void ConfigureImGuiFontAndStyle(HWND hwnd) {
 
     io.Fonts->Clear();
     ImFontConfig fontCfg;
-    fontCfg.RasterizerDensity = 1.0f;
+    fontCfg.RasterizerDensity = 2.0f;
     fontCfg.SizePixels = 16.0f * dpiScale;
     fontCfg.OversampleH = 3;
     fontCfg.OversampleV = 2;
@@ -15479,7 +15545,13 @@ static void ConfigureImGuiFontAndStyle(HWND hwnd) {
 
     ImFont* loadedFont = nullptr;
     std::string bridgeDir = GetBridgeDir();
+    // Prefer the Aoko overlay face (Manrope Medium, OFL); Minecraftia remains
+    // the compatibility fallback for older installs that do not ship Data\.
     std::vector<std::string> fontCandidates = {
+        bridgeDir + "\\Manrope-Medium.ttf",
+        bridgeDir + "\\manrope-medium.ttf",
+        bridgeDir + "\\Data\\Manrope-Medium.ttf",
+        bridgeDir + "\\Data\\manrope-medium.ttf",
         bridgeDir + "\\minecraftia.ttf",
         bridgeDir + "\\Minecraftia.ttf",
         bridgeDir + "\\Data\\minecraftia.ttf",
@@ -15498,7 +15570,7 @@ static void ConfigureImGuiFontAndStyle(HWND hwnd) {
     }
     if (!loadedFont) {
         io.Fonts->AddFontDefault(&fontCfg);
-        Log("Minecraftia not found, using default ImGui font.");
+        Log("No overlay font found (Manrope/Minecraftia), using default ImGui font.");
     }
 
     io.FontGlobalScale = 1.0f;

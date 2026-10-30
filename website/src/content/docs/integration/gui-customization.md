@@ -14,13 +14,13 @@ Loader feature. Applies to the external GUI, overlays, and in-game ClickGUI acro
 | Setting | Description | Default |
 | ------- | ----------- | ------- |
 | GUI theme | Slate-based color palette applied to the external GUI and overlays. | `Slate` |
-| Module list style | Style of the in-game module list (see [Module List & Logo](/aoko-client/modules/visual/module-list/)). | `Default` |
-| Show logo | Toggles the in-game client logo. | On |
+| Module list style | Style of the in-game module list (see [Module List & Watermark](/aoko-client/modules/visual/module-list/)). | `Default` |
+| Show watermark | Toggles the latency / aoko / FPS segment above the module list. | On |
 
 ## Usage notes
 
 - The theme drives the colors of both the external WPF GUI and the in-game ImGui overlays.
-- Theme, module-list style, and logo visibility are all stored per config, so different configs can carry different looks.
+- Theme, module-list style, and watermark visibility are all stored per config, so different configs can carry different looks.
 
 :::tip
 Pair a subtle **GUI theme** with a `Minimal` module-list style for a low-profile on-screen footprint.

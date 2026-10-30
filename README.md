@@ -43,7 +43,7 @@ aoko client is an open-source Windows utility client and external overlay for Lu
 - In-game HUD Editor & module list styling
 - Per-module keybinds (all unbound by default, configurable in WPF & ClickGUI)
 - Profiles saved in `%AppData%\Aoko\profiles\`
-- GUI customization (slate palettes, module list style, show logo)
+- GUI customization (slate palettes, module list style, client watermark)
 
 ## Screenshots
 
@@ -151,3 +151,7 @@ Pull requests are welcome for bug fixes and new modules.
 ## Support
 
 ETH - `0x04166c3bec4e2e28799AdFa0b336b0159d90c699`
+
+## Third-party assets
+
+- Manrope font (`Aoko/Data/Manrope-Medium.ttf`), SIL Open Font License 1.1. The license text is bundled at `Aoko/Data/Manrope-OFL.md`.

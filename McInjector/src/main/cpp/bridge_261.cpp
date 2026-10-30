@@ -19,6 +19,7 @@
 #include <vector>
 #include <algorithm>
 #include <cctype>
+#include <atomic>
 #include <unordered_map>
 #include <unordered_set>
 #include <deque>
@@ -42,6 +43,7 @@
 #include "nick_hider_jvmti.h"
 #include "anti_debuff_jvmti.h"
 #include "hud_layout.h"
+#include "overlay_ui.h"
 #include "block_esp_common.h"
 #include "chest_esp_common.h"
 #include "chunk_scan_common.h"
@@ -1006,6 +1008,25 @@ static OverlayTheme ResolveOverlayTheme(const std::string& guiTheme)
     };
 }
 
+// Shared overlay UI theme derived from the modern theme table.
+static aoko::ui::Theme BuildOverlayUiTheme(const OverlayTheme& t) {
+    aoko::ui::Theme u;
+    u.accent = t.accentPrimary;
+    u.accent2 = t.accentSecondary;
+    u.accent3 = t.accentTertiary;
+    u.text = t.moduleText;
+    u.textDim = t.moduleTagText;
+    u.textFaint = WithAlpha(t.moduleTagText, 165);
+    u.panel = aoko::ui::Mix(t.moduleBg, IM_COL32(7, 18, 31, 255), 0.18f);
+    u.panelTop = aoko::ui::Mix(t.moduleOutlinedBg, IM_COL32(255, 255, 255, 255), 0.07f);
+    u.border = aoko::ui::WithAlpha(t.moduleGlassBorder, 82);
+    u.highlight = IM_COL32(255, 255, 255, 28);
+    u.shadow = IM_COL32(0, 0, 0, 165);
+    u.gradient = t.isGradient;
+    u.triColor = t.isTriColor;
+    return u;
+}
+
 // ===================== GLOBALS =====================
 static volatile LONG g_running = 1;
 static bool IsBridgeRunning121() {
@@ -1122,6 +1143,10 @@ static std::string g_jniScreenName;
 static std::string g_jniActionBar;
 static bool        g_jniGuiOpen     = false;
 static bool        g_jniInWorld     = false;
+// Overlay-only telemetry sampled on the JNI worker; never sent over TCP.
+static std::atomic<int> g_overlayPingMs(-1);
+static float       g_moduleListBaseWidth121 = 220.0f;
+static float       g_moduleListBaseHeight121 = 240.0f;
 static bool        g_jniLookingAtBlock = false;
 static bool        g_jniLookingAtEntity = false;
 static bool        g_jniLookingAtEntityLatched = false;
@@ -1970,6 +1995,7 @@ static jmethodID g_getGameProfile_121 = nullptr;   // PlayerEntity.getGameProfil
 static jmethodID g_gameProfileGetName_121 = nullptr; // GameProfile.getName() -> String
 static jfieldID  g_gameProfileNameField_121 = nullptr;
 static jmethodID g_connGetPlayerInfoByName_121 = nullptr;
+static jmethodID g_playerInfoGetLatency_121 = nullptr;
 static jmethodID g_connGetLocalGameProfile_121 = nullptr;
 static jmethodID g_playerInfoGetProfile_121 = nullptr;
 static std::string g_nickHiderOriginalProfileName_121;
@@ -2825,6 +2851,126 @@ static std::string GetStablePlayerName(JNIEnv* env, jobject playerObj) {
     // keep the cleaned display rather than dropping everything.
     if (!cleanDisplay.empty() && !LooksLikeFakePlayerLine(cleanDisplay)) return cleanDisplay;
     return "";
+}
+
+// Overlay-only latency probe: reads the local PlayerInfo entry once per second.
+// Runs on the JNI worker; no packet or game-state mutation.
+static int UpdateOverlayPing121(JNIEnv* env) {
+    static DWORD nextProbeMs = 0;
+    const DWORD now = GetTickCount();
+    if (now < nextProbeMs) return g_overlayPingMs;
+    nextProbeMs = now + 1000;
+
+    if (!env || !g_mcInstance || !g_playerField_121) {
+        g_overlayPingMs = -1;
+        return g_overlayPingMs;
+    }
+    if (env->PushLocalFrame(24) < 0) return g_overlayPingMs;
+
+    if (!g_getConnectionMethod_121) {
+        jclass mcCls = env->GetObjectClass(g_mcInstance);
+        if (mcCls) {
+            const char* names[] = { "getConnection", "method_1558", nullptr };
+            const char* sigs[] = {
+                "()Lnet/minecraft/client/multiplayer/ClientPacketListener;",
+                "()Lnet/minecraft/class_634;",
+                nullptr
+            };
+            for (int i = 0; names[i] && !g_getConnectionMethod_121; ++i) {
+                for (int k = 0; sigs[k] && !g_getConnectionMethod_121; ++k) {
+                    g_getConnectionMethod_121 = env->GetMethodID(mcCls, names[i], sigs[k]);
+                    if (env->ExceptionCheck()) {
+                        env->ExceptionClear();
+                        g_getConnectionMethod_121 = nullptr;
+                    }
+                }
+            }
+            env->DeleteLocalRef(mcCls);
+        }
+    }
+    if (!g_getConnectionMethod_121) {
+        env->PopLocalFrame(nullptr);
+        return g_overlayPingMs;
+    }
+
+    jobject connection = env->CallObjectMethod(g_mcInstance, g_getConnectionMethod_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); connection = nullptr; }
+    if (!connection) {
+        g_overlayPingMs = -1;
+        env->PopLocalFrame(nullptr);
+        return g_overlayPingMs;
+    }
+    EnsureModernNickHiderConnectionCaches(env, connection);
+    if (!g_connGetPlayerInfoByName_121) {
+        env->DeleteLocalRef(connection);
+        env->PopLocalFrame(nullptr);
+        return g_overlayPingMs;
+    }
+
+    jobject self = env->GetObjectField(g_mcInstance, g_playerField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); self = nullptr; }
+    if (!self) {
+        g_overlayPingMs = -1;
+        env->DeleteLocalRef(connection);
+        env->PopLocalFrame(nullptr);
+        return g_overlayPingMs;
+    }
+    const std::string stableName = GetStablePlayerName(env, self);
+    env->DeleteLocalRef(self);
+    std::vector<std::string> lookupNames;
+    if (!stableName.empty()) lookupNames.push_back(stableName);
+    {
+        LockGuard lk(g_configMutex);
+        if (g_config.nickHiderEnabled && !g_config.nickHiderAlias.empty() &&
+            g_config.nickHiderAlias != stableName) {
+            lookupNames.push_back(g_config.nickHiderAlias);
+        }
+    }
+    if (lookupNames.empty()) {
+        g_overlayPingMs = -1;
+        env->DeleteLocalRef(connection);
+        env->PopLocalFrame(nullptr);
+        return g_overlayPingMs;
+    }
+
+    jobject info = nullptr;
+    for (size_t i = 0; i < lookupNames.size() && !info; ++i) {
+        jstring jname = env->NewStringUTF(lookupNames[i].c_str());
+        info = jname
+            ? env->CallObjectMethod(connection, g_connGetPlayerInfoByName_121, jname) : nullptr;
+        if (env->ExceptionCheck()) { env->ExceptionClear(); info = nullptr; }
+        if (jname) env->DeleteLocalRef(jname);
+    }
+    env->DeleteLocalRef(connection);
+    if (!info) {
+        env->PopLocalFrame(nullptr);
+        return g_overlayPingMs;
+    }
+
+    jclass infoCls = env->GetObjectClass(info);
+    if (infoCls && !g_playerInfoGetLatency_121) {
+        const char* names[] = { "getLatency", "method_2959", "m_105295_", nullptr };
+        for (int i = 0; names[i] && !g_playerInfoGetLatency_121; ++i) {
+            g_playerInfoGetLatency_121 = env->GetMethodID(infoCls, names[i], "()I");
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+                g_playerInfoGetLatency_121 = nullptr;
+            }
+        }
+    }
+    if (infoCls) env->DeleteLocalRef(infoCls);
+
+    if (g_playerInfoGetLatency_121) {
+        jint ping = env->CallIntMethod(info, g_playerInfoGetLatency_121);
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        } else if (ping >= 0 && ping <= 9999) {
+            g_overlayPingMs = (int)ping;
+        }
+    }
+    env->DeleteLocalRef(info);
+    env->PopLocalFrame(nullptr);
+    return g_overlayPingMs;
 }
 
 // HitResult / crosshair target caches (for lookingAtBlock)
@@ -13063,6 +13209,7 @@ static void ResetModernJniRuntimeCaches121(JNIEnv* env, const char* reason) {
     g_gameProfileGetName_121 = nullptr;
     g_gameProfileNameField_121 = nullptr;
     g_connGetPlayerInfoByName_121 = nullptr;
+    g_playerInfoGetLatency_121 = nullptr;
     g_connGetLocalGameProfile_121 = nullptr;
     g_playerInfoGetProfile_121 = nullptr;
     g_nickHiderOriginalProfileName_121.clear();
@@ -14511,6 +14658,7 @@ static void UpdateJniState() {
     JNIEnv* env = nullptr;
     bool envReady = TRACE261_IF("jniEnvReady", (g_jvm->GetEnv((void**)&env, JNI_VERSION_1_8) == JNI_OK && env));
     if (!envReady) return;
+    UpdateOverlayPing121(env);
     unsigned long long nowMs = (unsigned long long)GetTickCount64();
     bool hitDelayFixEnabled = false;
     { LockGuard lk(g_configMutex); hitDelayFixEnabled = g_config.hitDelayFixEnabled; }
@@ -17522,6 +17670,10 @@ static void UpdateHudEditor(int winW, int winH) {
         lc::HudElementLayout el = layoutSnap.Resolve(baseSizes[i].id);
         float sw = baseSizes[i].w * el.scale;
         float sh = baseSizes[i].h * el.scale;
+        if (std::strcmp(baseSizes[i].id, lc::ELEM_MODULELIST) == 0) {
+            sw = g_moduleListBaseWidth121 * el.scale;
+            sh = g_moduleListBaseHeight121 * el.scale;
+        }
         ImVec2 tl = lc::HudElementPixelPos(el, sw, sh, winW, winH);
         elems.push_back({ baseSizes[i].id, tl, sw, sh });
     }
@@ -17545,6 +17697,9 @@ static void UpdateHudEditor(int winW, int winH) {
             if (inGrip) {
                 g_hudEditor.grabbedId = e.id;
                 g_hudEditor.mode = lc::HudEditorState::Mode::Resize;
+                g_hudEditor.resizeStartMouseX = mouse.x;
+                g_hudEditor.resizeStartW = e.w;
+                g_hudEditor.resizeRightEdge = e.tl.x + e.w;
                 break;
             } else if (inBody) {
                 g_hudEditor.grabbedId = e.id;
@@ -17571,9 +17726,20 @@ static void UpdateHudEditor(int winW, int winH) {
             for (int i = 0; bs[i].id; ++i) {
                 if (g_hudEditor.grabbedId == bs[i].id) { baseW = bs[i].w; break; }
             }
-            float anchorPx = el.x * (float)winW;
-            float desiredW = mouse.x - anchorPx;
+            if (g_hudEditor.grabbedId == lc::ELEM_MODULELIST && g_moduleListBaseWidth121 > 1.0f) {
+                baseW = g_moduleListBaseWidth121;
+            }
+            const bool rightAnchored = (g_hudEditor.grabbedId == lc::ELEM_MODULELIST);
+            const float deltaX = mouse.x - g_hudEditor.resizeStartMouseX;
+            const float desiredW = rightAnchored
+                ? g_hudEditor.resizeStartW - deltaX
+                : g_hudEditor.resizeStartW + deltaX;
             el.scale = lc::ClampHudScale(desiredW / baseW);
+            if (rightAnchored) {
+                const float appliedW = el.scale * baseW;
+                el.x = lc::ClampHudCoord(
+                    (g_hudEditor.resizeRightEdge - appliedW) / (float)winW);
+            }
         }
     }
 
@@ -17590,24 +17756,16 @@ static void UpdateHudEditor(int winW, int winH) {
     grabbedIdForDraw = g_hudEditor.grabbedId;
     }
     ImDrawList* fg = ImGui::GetForegroundDrawList();
+    const float editorScale = (std::max)(0.75f, ImGui::GetFontSize() / 16.0f);
     for (const auto& e : elems) {
         lc::HudElementLayout el = layoutDraw.Resolve(e.id);
-        float sw = e.w; // already scaled
-        float sh = e.h;
+        const float sw = e.w; // already scaled
+        const float sh = e.h;
         ImVec2 tl = lc::HudElementPixelPos(el, sw, sh, winW, winH);
         ImVec2 br(tl.x + sw, tl.y + sh);
-
-        bool grabbed = (grabbedIdForDraw == e.id);
-        ImU32 boxCol = grabbed ? IM_COL32(255, 200, 50, 200) : IM_COL32(80, 180, 255, 140);
-        fg->AddRect(tl, br, boxCol, 4.0f, 0, grabbed ? 2.0f : 1.5f);
-
-        // Label
-        fg->AddText(ImVec2(tl.x + 4, tl.y + 3), IM_COL32(255, 255, 255, 200), e.id.c_str());
-
-        // Corner resize grip
-        const float gripSz = 12.0f;
-        ImVec2 gripTL(br.x - gripSz, br.y - gripSz);
-        fg->AddRectFilled(gripTL, br, boxCol, 2.0f);
+        const bool grabbed = (grabbedIdForDraw == e.id);
+        aoko::ui::EditorOutline(fg, tl, br, IM_COL32(127, 158, 255, 255),
+                                aoko::ui::PrettyElementId(e.id.c_str()), grabbed, editorScale);
     }
 }
 
@@ -17699,58 +17857,118 @@ static void RenderOverlayPanels(
                     statsRow += cp.heldItem;
                 }
 
-                // Layout
-                ImVec2 nameSz  = ImGui::CalcTextSize(nameRow);
-                ImVec2 statsSz = statsRow.empty() ? ImVec2{0,0} : ImGui::CalcTextSize(statsRow.c_str());
+                lc::HudElementLayout cpLayout = hudLayout.Resolve(lc::ELEM_CLOSESTPLAYER);
+                const float cpScale = cpLayout.scale;
+                const float cpFont = fontSz * cpScale;
+                const float cpSmall = cpFont * 0.80f;
+                const float cpMicro = cpFont * 0.50f;
+                const float cpPadX = 9.0f * cpScale;
+                const float cpPadY = 7.0f * cpScale;
+                const float cpHpBarH = 5.0f * cpScale;
+                const float cpGap = 3.0f * cpScale;
 
-                float contentW = std::max({boxW, nameSz.x + padX * 2, statsSz.x + padX * 2});
-                float contentH = padY + fontSz + gapRow;
-                contentH += hpBarH + gapRow;
-                if (!statsRow.empty()) contentH += smallSz + gapRow;
-                contentH += padY;
+                ImVec2 nameSz = ImGui::CalcTextSize(cp.name.c_str());
+                nameSz.x *= cpScale;
+                ImVec2 statsSz = statsRow.empty() ? ImVec2(0, 0) : ImGui::CalcTextSize(statsRow.c_str());
+                statsSz.x *= cpScale;
+                statsSz.y *= cpScale;
 
-                lc::HudElementLayout cpLayout;
-                cpLayout = hudLayout.Resolve(lc::ELEM_CLOSESTPLAYER);
-                contentW *= cpLayout.scale;
-                contentH *= cpLayout.scale;
+                float contentW = (std::max)(220.0f * cpScale,
+                    nameSz.x + 28.0f * cpScale + cpPadX * 2.0f);
+                contentW = (std::max)(contentW, statsSz.x + cpPadX * 2.0f);
+                float contentH = cpPadY + cpMicro + cpGap + cpFont + cpGap * 1.5f +
+                    cpHpBarH + cpGap;
+                if (!statsRow.empty()) contentH += statsSz.y + cpGap;
+                contentH += cpPadY;
 
                 ImVec2 cpTL = lc::HudElementPixelPos(cpLayout, contentW, contentH, winW, winH);
-                float rx = cpTL.x;
-                float ry = cpTL.y;
-                float cx = rx + contentW * 0.5f;
+                const float rx = cpTL.x;
+                const float ry = cpTL.y;
+                const float rxe = rx + contentW;
+                const float rye = ry + contentH;
 
-                ImVec2 pMin(rx, ry);
-                ImVec2 pMax(rx + contentW, ry + contentH);
+                const aoko::ui::Theme cpUi = BuildOverlayUiTheme(overlayTheme);
+                const float hpPct = std::max(0.0f, std::min((float)cp.hp / 20.0f, 1.0f));
+                const float lowPulse = cp.hp <= 6.0f
+                    ? 0.55f + 0.45f * (0.5f + 0.5f * std::sin((float)ImGui::GetTime() * 6.2f))
+                    : 0.0f;
+                aoko::ui::Panel(fg, cpUi, ImVec2(rx, ry), ImVec2(rxe, rye), 7.0f * cpScale,
+                                2.0f + lowPulse * 7.0f, true);
+                fg->AddRectFilled(ImVec2(rx + 1.0f, ry + 6.0f * cpScale),
+                                  ImVec2(rx + 3.2f * cpScale, rye - 6.0f * cpScale),
+                                  aoko::ui::WithAlpha(cpUi.accent, (int)(170 + lowPulse * 60.0f)),
+                                  1.0f * cpScale);
 
-                // Background + outline + left accent bar
-                fg->AddRectFilled(pMin, pMax, overlayTheme.moduleBg, 6.0f);
-                fg->AddRect(pMin, pMax, overlayTheme.moduleGlassBorder, 6.0f, 0, 1.0f);
-                fg->AddRectFilled(ImVec2(rx, ry), ImVec2(rx + 3.0f * cpLayout.scale, ry + contentH), overlayTheme.accentPrimary, 3.0f);
+                float curY = ry + cpPadY;
 
-                float curY = ry + padY;
+                aoko::ui::TrackedText(fg, ImVec2(rx + cpPadX, curY), "CLOSEST", cpMicro,
+                                      cpUi.accent, 1.3f * cpScale);
+                char distBuf[24];
+                snprintf(distBuf, sizeof(distBuf), "%.0fm", cp.dist);
+                const float distW = aoko::ui::TextWidth(distBuf, cpSmall * 0.92f);
+                const float chipW = 7.0f * cpScale + 3.5f * cpScale + 4.0f * cpScale +
+                    distW + 7.0f * cpScale;
+                const float chipH = cpMicro + 6.0f * cpScale;
+                ImVec2 chipA(rxe - cpPadX - chipW, curY - 1.0f * cpScale);
+                ImVec2 chipB(rxe - cpPadX, chipA.y + chipH);
+                fg->AddRectFilled(chipA, chipB, aoko::ui::WithAlpha(cpUi.accent, 24), 2.0f * cpScale);
+                fg->AddRect(chipA, chipB, aoko::ui::WithAlpha(cpUi.accent, 62),
+                            2.0f * cpScale, 0, 1.0f);
+                aoko::ui::Chevron(fg, ImVec2(chipA.x + 6.5f * cpScale,
+                                             (chipA.y + chipB.y) * 0.5f),
+                                  dirArrow, 3.0f * cpScale, cpUi.accent);
+                aoko::ui::Text(fg, ImVec2(chipA.x + 12.0f * cpScale, chipA.y + 2.5f * cpScale),
+                               distBuf, cpSmall * 0.92f, cpUi.textDim);
 
-                // Name + distance row (white)
-                float ntx = std::floor(cx - nameSz.x * 0.5f);
-                fg->AddText(ImVec2(ntx + 1, curY + 1), overlayTheme.moduleTextShadow, nameRow);
-                fg->AddText(ImVec2(ntx, curY), overlayTheme.moduleText, nameRow);
-                curY += fontSz + gapRow;
+                curY += cpMicro + cpGap;
 
-                // HP bar
-                float hpPct = std::max(0.0f, std::min((float)cp.hp / 20.0f, 1.0f));
-                float barX0 = rx + padX;
-                float barX1 = rx + contentW - padX;
-                float barFill = barX0 + (barX1 - barX0) * hpPct;
-                ImU32 barCol = IM_COL32((int)(255*(1.0f-hpPct)), (int)(220*hpPct+35), 60, 255);
-                fg->AddRectFilled(ImVec2(barX0, curY), ImVec2(barX1, curY + hpBarH), IM_COL32(20, 24, 32, 200), 2.0f);
-                fg->AddRectFilled(ImVec2(barX0, curY), ImVec2(barFill, curY + hpBarH), barCol, 2.0f);
-                curY += hpBarH + gapRow;
+                const float avatarR = 7.0f * cpScale;
+                ImVec2 avatarC(rx + cpPadX + avatarR, curY + cpFont * 0.5f);
+                fg->AddCircleFilled(avatarC, avatarR, aoko::ui::WithAlpha(cpUi.accent, 30), 18);
+                fg->AddCircle(avatarC, avatarR, aoko::ui::WithAlpha(cpUi.accent, 95), 18, 1.0f);
+                char initial[2] = { 0, 0 };
+                for (size_t i = 0; i < cp.name.size(); ++i) {
+                    if (std::isalnum((unsigned char)cp.name[i])) {
+                        initial[0] = (char)std::toupper((unsigned char)cp.name[i]);
+                        break;
+                    }
+                }
+                if (!initial[0]) initial[0] = '?';
+                aoko::ui::TextCentered(fg, avatarC.x, avatarC.y - cpSmall * 0.5f, initial,
+                                       cpSmall * 0.92f, cpUi.text);
 
-                // Stats row (smaller, soft colour)
+                aoko::ui::TextShadowed(fg, ImVec2(avatarC.x + avatarR + 6.0f * cpScale, curY),
+                                       cp.name.c_str(), cpFont, cpUi.text,
+                                       aoko::ui::WithAlpha(cpUi.shadow, 120),
+                                       (std::max)(1.0f, cpScale));
+                curY += cpFont + cpGap * 1.5f;
+
+                const float barX0 = rx + cpPadX;
+                const float barX1 = rxe - cpPadX;
+                const float barFill = barX0 + (barX1 - barX0) * hpPct;
+                fg->AddRectFilled(ImVec2(barX0, curY), ImVec2(barX1, curY + cpHpBarH),
+                                  IM_COL32(8, 14, 22, 190), 2.0f * cpScale);
+                if (hpPct > 0.0f) {
+                    const ImU32 hpCol = aoko::ui::HealthColor(hpPct);
+                    fg->AddRectFilledMultiColor(
+                        ImVec2(barX0, curY), ImVec2(barFill, curY + cpHpBarH),
+                        aoko::ui::WithAlpha(hpCol, 235), aoko::ui::WithAlpha(hpCol, 235),
+                        aoko::ui::WithAlpha(aoko::ui::Mix(hpCol, IM_COL32(0, 0, 0, 255), 0.24f), 235),
+                        aoko::ui::WithAlpha(aoko::ui::Mix(hpCol, IM_COL32(0, 0, 0, 255), 0.24f), 235));
+                    fg->AddRectFilled(ImVec2(barX0, curY + 0.5f * cpScale),
+                                      ImVec2(barFill, curY + 1.2f * cpScale),
+                                      IM_COL32(255, 255, 255, 70), 1.0f * cpScale);
+                }
+                fg->AddLine(ImVec2(barX0 + (barX1 - barX0) * 0.5f, curY + 0.5f * cpScale),
+                            ImVec2(barX0 + (barX1 - barX0) * 0.5f, curY + cpHpBarH - 0.5f * cpScale),
+                            IM_COL32(0, 0, 0, 55), 1.0f);
+                curY += cpHpBarH + cpGap;
+
                 if (!statsRow.empty()) {
-                    float stx = std::floor(cx - statsSz.x * 0.5f);
-                    fg->AddText(ImGui::GetFont(), smallSz, ImVec2(stx + 1, curY + 1), overlayTheme.moduleTextShadow, statsRow.c_str());
-                    ImU32 sCol = cp.hp <= 6.0f ? IM_COL32(255, 100, 100, 240) : overlayTheme.moduleTagText;
-                    fg->AddText(ImGui::GetFont(), smallSz, ImVec2(stx, curY), sCol, statsRow.c_str());
+                    aoko::ui::TextShadowed(fg, ImVec2(rx + cpPadX, curY), statsRow.c_str(),
+                                           cpSmall,
+                                           cp.hp <= 6.0f ? aoko::ui::SemanticBad() : cpUi.textDim,
+                                           aoko::ui::WithAlpha(cpUi.shadow, 110), 1.0f);
                 }
             }
 
@@ -17760,16 +17978,11 @@ static void RenderOverlayPanels(
                 PixelPartySnap121 ppSnap;
                 { LockGuard lk(g_pixelPartyMutex); ppSnap = g_pixelPartySnap; }
 
-                const float fontSz = ImGui::GetFontSize();
-                const float smallSz = std::floor(fontSz * 0.82f);
-                const float padX = 10.0f;
-                const float padY = 6.0f;
-                const float gapRow = 3.0f;
-                const float boxW = 240.0f;
-
-                char mainRow[128];
+                const float baseFont = ImGui::GetFontSize();
                 char dirArrow = '^';
                 bool dirResolved = false;
+                const ImU32 partyCol = ppSnap.targetFound
+                    ? aoko::ui::PartyColor(ppSnap.colorLabel) : overlayTheme.accentPrimary;
 
                 if (ppSnap.targetFound && cpCamState.camFound) {
                     LegoVec3 camPos = { cpCamState.camX, cpCamState.camY, cpCamState.camZ };
@@ -17792,7 +18005,7 @@ static void RenderOverlayPanels(
                         fg->AddLine(
                             ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f),
                             ImVec2(sx, sy),
-                            WithAlpha(overlayTheme.accentPrimary, 120), 1.5f);
+                            aoko::ui::WithAlpha(partyCol, 110), 1.4f);
                     }
                 }
 
@@ -17806,61 +18019,105 @@ static void RenderOverlayPanels(
                     else dirArrow = (delta < 0.0f) ? '<' : '>';
                 }
 
-                const char* colorName = ppSnap.colorLabel.empty() ? "?" : ppSnap.colorLabel.c_str();
+                std::string mainText;
                 if (ppSnap.targetFound) {
-                    snprintf(mainRow, sizeof(mainRow), "%c %s  %.0fm", dirArrow, colorName, ppSnap.dist);
+                    mainText = ppSnap.colorLabel.empty() ? "Target" : ppSnap.colorLabel;
                 } else if (!ppSnap.holdingValid) {
-                    snprintf(mainRow, sizeof(mainRow), "Hold terracotta");
+                    mainText = "Hold terracotta";
                 } else {
-                    snprintf(mainRow, sizeof(mainRow), "%s", ppSnap.status.empty() ? "No match" : ppSnap.status.c_str());
+                    mainText = ppSnap.status.empty() ? "No match" : ppSnap.status;
                 }
-
-                std::string titleRow = "Pixel Party";
-                std::string subRow;
-                if (!ppSnap.status.empty() && ppSnap.targetFound)
-                    subRow = ppSnap.status;
+                std::string statusText;
+                if (!ppSnap.status.empty() && ppSnap.targetFound) statusText = ppSnap.status;
                 else if (ppSnap.holdingValid && !ppSnap.targetFound && !ppSnap.status.empty())
-                    subRow = ppSnap.status;
+                    statusText = ppSnap.status;
 
-                ImVec2 titleSz = ImGui::CalcTextSize(titleRow.c_str());
-                ImVec2 mainSz = ImGui::CalcTextSize(mainRow);
-                ImVec2 subSz = subRow.empty() ? ImVec2{0,0} : ImGui::CalcTextSize(subRow.c_str());
+                lc::HudElementLayout ppLayout = hudLayout.Resolve(lc::ELEM_PIXELPARTY);
+                const float ppScale = ppLayout.scale;
+                const float fontSz = baseFont * ppScale;
+                const float smallSz = fontSz * 0.80f;
+                const float microSz = fontSz * 0.50f;
+                const float padX = 10.0f * ppScale;
+                const float padY = 7.0f * ppScale;
+                const float gapRow = 3.5f * ppScale;
+                const float minW = 216.0f * ppScale;
 
-                float contentW = std::max({boxW, titleSz.x + padX * 2, mainSz.x + padX * 2, subSz.x + padX * 2});
-                float contentH = padY + smallSz + gapRow + fontSz + gapRow;
-                if (!subRow.empty()) contentH += smallSz + gapRow;
+                const ImVec2 mainSz = ImGui::CalcTextSize(mainText.c_str());
+                const ImVec2 statusSz = statusText.empty() ? ImVec2(0, 0)
+                    : ImGui::CalcTextSize(statusText.c_str());
+                float contentW = (std::max)(minW, (mainSz.x + 42.0f) * ppScale);
+                if (!statusText.empty())
+                    contentW = (std::max)(contentW, statusSz.x * ppScale + padX * 2.0f);
+                float contentH = padY + microSz + gapRow + fontSz + gapRow;
+                if (!statusText.empty()) contentH += smallSz + gapRow;
                 contentH += padY;
 
-                lc::HudElementLayout ppLayout;
-                ppLayout = hudLayout.Resolve(lc::ELEM_PIXELPARTY);
-                contentW *= ppLayout.scale;
-                contentH *= ppLayout.scale;
-
                 ImVec2 ppTL = lc::HudElementPixelPos(ppLayout, contentW, contentH, winW, winH);
-                float rx = ppTL.x;
-                float ry = ppTL.y;
-                float cx = rx + contentW * 0.5f;
-                ImVec2 pMin(rx, ry);
-                ImVec2 pMax(rx + contentW, ry + contentH);
+                const float rx = ppTL.x;
+                const float ry = ppTL.y;
+                const float rxe = rx + contentW;
+                const float rye = ry + contentH;
 
-                fg->AddRectFilled(pMin, pMax, overlayTheme.moduleBg, 6.0f);
-                fg->AddRect(pMin, pMax, overlayTheme.moduleGlassBorder, 6.0f, 0, 1.0f);
+                const float pulse = ppSnap.targetFound
+                    ? 0.60f + 0.40f * (0.5f + 0.5f * std::sin((float)ImGui::GetTime() * 4.4f))
+                    : 0.0f;
+                const aoko::ui::Theme ppUi = BuildOverlayUiTheme(overlayTheme);
+                aoko::ui::Panel(fg, ppUi, ImVec2(rx, ry), ImVec2(rxe, rye), 7.0f * ppScale,
+                                2.0f + pulse * 8.0f, true);
+                fg->AddRectFilled(ImVec2(rx + 1.0f, ry + 6.0f * ppScale),
+                                  ImVec2(rx + 3.2f * ppScale, rye - 6.0f * ppScale),
+                                  aoko::ui::WithAlpha(partyCol, (int)(160 + pulse * 70.0f)),
+                                  1.0f * ppScale);
 
                 float curY = ry + padY;
-                float ttx = std::floor(cx - titleSz.x * 0.5f);
-                fg->AddText(ImGui::GetFont(), smallSz, ImVec2(ttx + 1, curY + 1), overlayTheme.moduleTextShadow, titleRow.c_str());
-                fg->AddText(ImGui::GetFont(), smallSz, ImVec2(ttx, curY), overlayTheme.accentPrimary, titleRow.c_str());
-                curY += smallSz + gapRow;
 
-                float mtx = std::floor(cx - mainSz.x * 0.5f);
-                fg->AddText(ImVec2(mtx + 1, curY + 1), overlayTheme.moduleTextShadow, mainRow);
-                fg->AddText(ImVec2(mtx, curY), overlayTheme.moduleText, mainRow);
+                aoko::ui::TrackedText(fg, ImVec2(rx + padX, curY), "PIXEL PARTY", microSz,
+                                      ppUi.accent, 1.3f * ppScale);
+                char stateBuf[24];
+                if (ppSnap.targetFound) snprintf(stateBuf, sizeof(stateBuf), "LOCK");
+                else if (ppSnap.holdingValid) snprintf(stateBuf, sizeof(stateBuf), "SEARCH");
+                else snprintf(stateBuf, sizeof(stateBuf), "IDLE");
+                const float stateW = aoko::ui::TextWidth(stateBuf, microSz * 0.96f) + 10.0f * ppScale;
+                ImVec2 chipA(rxe - padX - stateW, curY - 1.0f * ppScale);
+                ImVec2 chipB(rxe - padX, chipA.y + microSz + 5.0f * ppScale);
+                fg->AddRectFilled(chipA, chipB,
+                                  aoko::ui::WithAlpha(partyCol, ppSnap.targetFound ? 34 : 18),
+                                  2.0f * ppScale);
+                fg->AddRect(chipA, chipB, aoko::ui::WithAlpha(partyCol, 70),
+                            2.0f * ppScale, 0, 1.0f);
+                aoko::ui::TextCentered(fg, (chipA.x + chipB.x) * 0.5f, chipA.y + 2.0f * ppScale,
+                                       stateBuf, microSz * 0.96f,
+                                       ppSnap.targetFound ? partyCol : ppUi.textDim);
+
+                curY += microSz + gapRow;
+
+                const float dotR = 4.0f * ppScale;
+                ImVec2 dotC(rx + padX + dotR + 0.5f * ppScale, curY + fontSz * 0.5f);
+                fg->AddCircleFilled(dotC, dotR + 1.6f * ppScale,
+                                    aoko::ui::WithAlpha(partyCol, 32), 16);
+                fg->AddCircleFilled(dotC, dotR, partyCol, 16);
+                aoko::ui::TextShadowed(fg, ImVec2(dotC.x + dotR + 7.0f * ppScale, curY),
+                                       mainText.c_str(), fontSz, ppUi.text,
+                                       aoko::ui::WithAlpha(ppUi.shadow, 120),
+                                       (std::max)(1.0f, ppScale));
+
+                if (ppSnap.targetFound) {
+                    char distBuf[24];
+                    snprintf(distBuf, sizeof(distBuf), "%.0fm", (float)ppSnap.dist);
+                    const float distW = aoko::ui::TextWidth(distBuf, fontSz * 0.92f);
+                    aoko::ui::Chevron(fg, ImVec2(rxe - padX - distW - 9.0f * ppScale,
+                                                 curY + fontSz * 0.5f),
+                                      dirArrow, 3.6f * ppScale, partyCol);
+                    aoko::ui::TextRight(fg, ImVec2(rxe - padX, curY + 1.0f * ppScale), distBuf,
+                                        fontSz * 0.92f,
+                                        aoko::ui::Mix(partyCol, ppUi.text, 0.35f));
+                }
                 curY += fontSz + gapRow;
 
-                if (!subRow.empty()) {
-                    float stx = std::floor(cx - subSz.x * 0.5f);
-                    fg->AddText(ImGui::GetFont(), smallSz, ImVec2(stx + 1, curY + 1), overlayTheme.moduleTextShadow, subRow.c_str());
-                    fg->AddText(ImGui::GetFont(), smallSz, ImVec2(stx, curY), overlayTheme.moduleTagText, subRow.c_str());
+                if (!statusText.empty()) {
+                    aoko::ui::TextShadowed(fg, ImVec2(rx + padX, curY), statusText.c_str(),
+                                           smallSz, ppUi.textDim,
+                                           aoko::ui::WithAlpha(ppUi.shadow, 105), 1.0f);
                 }
             }
 
@@ -18442,19 +18699,32 @@ static void RenderOverlayPanels(
                     ImVec2 beTL = lc::HudElementPixelPos(beLayout, contentW, contentH, winW, winH);
                     ImVec2 pMin(beTL.x, beTL.y);
                     ImVec2 pMax(beTL.x + contentW, beTL.y + contentH);
-                    fg->AddRectFilled(pMin, pMax, overlayTheme.moduleBg, 6.0f);
-                    fg->AddRect(pMin, pMax, overlayTheme.moduleGlassBorder, 6.0f, 0, 1.0f);
+                    const aoko::ui::Theme beUi = BuildOverlayUiTheme(overlayTheme);
+                    aoko::ui::Panel(fg, beUi, pMin, pMax, 6.0f, 5.0f, true);
+                    fg->AddRectFilled(ImVec2(beTL.x + 1.0f, beTL.y + 6.0f),
+                                      ImVec2(beTL.x + 3.2f, pMax.y - 6.0f),
+                                      aoko::ui::WithAlpha(beUi.accent, 175), 1.0f);
 
                     float curY = beTL.y + padY;
-                    fg->AddText(ImVec2(beTL.x + padX + 1, curY + 1), overlayTheme.moduleTextShadow, title.c_str());
-                    fg->AddText(ImVec2(beTL.x + padX, curY), overlayTheme.accentPrimary, title.c_str());
+                    aoko::ui::TrackedText(fg, ImVec2(beTL.x + padX, curY),
+                                          "BLOCK ESP", ImGui::GetFontSize() * 0.52f,
+                                          beUi.accent, 1.25f);
+                    char beCount[16];
+                    snprintf(beCount, sizeof(beCount), "%d", (int)rows.size());
+                    aoko::ui::TextRight(fg, ImVec2(pMax.x - padX, curY),
+                                        beCount, ImGui::GetFontSize() * 0.58f,
+                                        beUi.textFaint);
                     curY += rowH;
 
                     for (size_t i = 0; i < rows.size(); i++) {
                         float swY = curY + (rowH - sw) * 0.5f;
-                        fg->AddRectFilled(ImVec2(beTL.x + padX, swY), ImVec2(beTL.x + padX + sw, swY + sw), rowColors[i], 2.0f);
-                        fg->AddText(ImVec2(beTL.x + padX + sw + 6.0f + 1, curY + 1), overlayTheme.moduleTextShadow, rows[i].c_str());
-                        fg->AddText(ImVec2(beTL.x + padX + sw + 6.0f, curY), overlayTheme.moduleText, rows[i].c_str());
+                        fg->AddRectFilled(ImVec2(beTL.x + padX, swY),
+                                          ImVec2(beTL.x + padX + sw, swY + sw),
+                                          rowColors[i], 2.0f);
+                        aoko::ui::TextShadowed(
+                            fg, ImVec2(beTL.x + padX + sw + 6.0f, curY),
+                            rows[i].c_str(), ImGui::GetFontSize() * 0.94f, beUi.text,
+                            aoko::ui::WithAlpha(beUi.shadow, 150), 1.0f);
                         curY += rowH;
                     }
                 }
@@ -18653,13 +18923,49 @@ static void RenderOverlayPanels(
                 const float x0 = (std::max)(10.0f, x1 - panelW);
                 const float y0 = (std::max)(10.0f, y1 - panelH);
 
-                fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleBg, 5.0f);
-                fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.gtbBorder, 5.0f, 0, 1.2f);
+                aoko::ui::Theme gtbUi = BuildOverlayUiTheme(overlayTheme);
+                aoko::ui::Panel(fg, gtbUi, ImVec2(x0, y0), ImVec2(x1, y1), 6.0f, 8.0f);
+                const float gtbHeadH = 25.0f;
+                fg->AddRectFilledMultiColor(
+                    ImVec2(x0 + 1.0f, y0 + 1.0f), ImVec2(x1 - 1.0f, y0 + gtbHeadH),
+                    WithAlpha(gtbUi.accent, 30), WithAlpha(gtbUi.accent, 12),
+                    WithAlpha(gtbUi.panel, 0), WithAlpha(gtbUi.panel, 0));
+                fg->AddLine(ImVec2(x0 + 6.0f, y0 + gtbHeadH), ImVec2(x1 - 6.0f, y0 + gtbHeadH),
+                            gtbUi.border, 1.0f);
+                fg->AddRectFilled(ImVec2(x0 + 1.0f, y0 + 7.0f), ImVec2(x0 + 3.5f, y1 - 7.0f),
+                                  gtbUi.accent, 1.0f);
 
-                char hintBuf[320];
-                snprintf(hintBuf, sizeof(hintBuf), "GTB: %s (%d)", hint.c_str(), (std::max)(0, cfg.gtbCount));
-                fg->AddText(ImVec2(x0 + 9.0f, y0 + 8.0f), overlayTheme.gtbTitle, hintBuf);
+                const float gtbPad = 9.0f;
+                char countBuf[24];
+                snprintf(countBuf, sizeof(countBuf), "%d", (std::max)(0, cfg.gtbCount));
+                const float countW = aoko::ui::TextWidth(countBuf, 10.0f) + 12.0f;
+                ImVec2 chipA(x1 - gtbPad - countW, y0 + 5.0f);
+                ImVec2 chipB(x1 - gtbPad, y0 + gtbHeadH - 4.0f);
+                fg->AddRectFilled(chipA, chipB, WithAlpha(gtbUi.accent, 30), 2.0f);
+                fg->AddRect(chipA, chipB, WithAlpha(gtbUi.accent, 90), 2.0f, 0, 1.0f);
+                aoko::ui::TextCentered(fg, (chipA.x + chipB.x) * 0.5f, chipA.y + 2.0f,
+                                       countBuf, 10.0f, gtbUi.text);
 
+                aoko::ui::TrackedText(fg, ImVec2(x0 + gtbPad, y0 + 8.0f), "GTB", 9.0f,
+                                      gtbUi.accent, 1.5f);
+                const float gtbTitleW = aoko::ui::TrackedWidth("GTB", 9.0f, 1.5f);
+                float hintMax = (chipA.x - 7.0f) - (x0 + gtbPad + gtbTitleW + 8.0f);
+                std::string hintShown = hint;
+                while (!hintShown.empty() && aoko::ui::TextWidth(hintShown.c_str(), 10.0f) > hintMax)
+                    hintShown.erase(hintShown.size() - 1);
+                if (hintShown.size() < hint.size() && hintShown.size() > 2) {
+                    hintShown.erase(hintShown.size() - 2);
+                    hintShown += "..";
+                }
+                aoko::ui::TextShadowed(fg, ImVec2(x0 + gtbPad + gtbTitleW + 8.0f, y0 + 8.0f),
+                                       hintShown.c_str(), 10.0f, gtbUi.textDim,
+                                       WithAlpha(gtbUi.shadow, 150), 1.0f);
+
+                for (size_t col = 1; col < numCols; col++) {
+                    const float vx = x0 + padX + (colW + colPad) * (float)col - colPad * 0.5f;
+                    aoko::ui::VerticalRule(fg, vx, y0 + gtbHeadH + 6.0f, y1 - 8.0f,
+                                           WithAlpha(gtbUi.text, 18));
+                }
                 size_t visiblePerCol = linesPerCol;
                 if (visiblePerCol < 1) visiblePerCol = 1;
                 for (size_t col = 0; col < numCols; col++) {
@@ -18671,8 +18977,11 @@ static void RenderOverlayPanels(
                     float yy = y0 + 8.0f + lineH + 6.0f;
 
                     for (size_t i = startIdx; i < endIdx; i++) {
-                        std::string row = "- " + lines[i];
-                        fg->AddText(ImVec2(cx, yy), overlayTheme.gtbRow, row.c_str());
+                        aoko::ui::Diamond(fg, ImVec2(cx + 1.0f, yy + lineH * 0.5f), 1.4f,
+                                          WithAlpha(gtbUi.accent, 170));
+                        aoko::ui::TextShadowed(fg, ImVec2(cx + 8.0f, yy), lines[i].c_str(),
+                                               ImGui::GetFontSize() * 0.94f, gtbUi.text,
+                                               WithAlpha(gtbUi.shadow, 150), 1.0f);
                         yy += lineH;
                     }
                 }
@@ -18680,24 +18989,14 @@ static void RenderOverlayPanels(
 
             bool renderModuleList = TRACE261_IF("renderModuleList", cfg.showModuleList);
             if (renderModuleList) {
-                // Module list (top-right)
-                struct ModLine {
-                    std::string name;
-                    std::string tag;
-                    ImU32 accent;
-                    float width;
-                    float nameWidth;
-                    float tagWidth;
-                };
-                ModLine mods[32];
-                int modCount = 0;
+                static thread_local std::vector<aoko::ui::ModuleEntry> modEntries;
+                modEntries.clear();
+                if (modEntries.capacity() < 32) modEntries.reserve(32);
 
                 auto pushMod = [&](const std::string& name, const std::string& tag = "") {
                     if (name.empty()) return;
-                    if (modCount >= (int)(sizeof(mods) / sizeof(mods[0]))) return;
-                    float nw = ImGui::CalcTextSize(name.c_str()).x;
-                    float tw = tag.empty() ? 0.0f : ImGui::CalcTextSize((" " + tag).c_str()).x;
-                    mods[modCount++] = { name, tag, 0, nw + tw, nw, tw };
+                    modEntries.push_back(aoko::ui::ModuleEntry(name, tag, 0));
+                    modEntries.back().nameW = ImGui::CalcTextSize(name.c_str()).x;
                 };
 
                 if (cfg.armed) {
@@ -18710,7 +19009,7 @@ static void RenderOverlayPanels(
                 }
                 if (cfg.clickInChests) pushMod("Click in Chests");
                 if (cfg.closestPlayer) pushMod("Closest Player");
-                if (cfg.fightStatus) pushMod("Fight Status");
+                if (cfg.fightStatus)   pushMod("Fight Status");
                 if (cfg.rightClick)    pushMod("Rightclick");
                 if (cfg.aimAssist)     pushMod("Aim Assist");
                 if (cfg.triggerbot)    pushMod("Triggerbot");
@@ -18738,273 +19037,39 @@ static void RenderOverlayPanels(
                 if (cfg.fireballWarning) pushMod("Fireball Warning");
                 if (cfg.hitDelayFixEnabled) pushMod("Hit Delay Fix");
 
-                // Sort by width descending (staggered original look)
-                for (int a = 0; a < modCount; a++) {
-                    for (int b = a + 1; b < modCount; b++) {
-                        if (mods[b].width > mods[a].width) {
-                            ModLine tmp = mods[a]; mods[a] = mods[b]; mods[b] = tmp;
-                        }
-                    }
+                std::sort(modEntries.begin(), modEntries.end(),
+                    [](const aoko::ui::ModuleEntry& a, const aoko::ui::ModuleEntry& b) {
+                        if (a.nameW != b.nameW) return a.nameW > b.nameW;
+                        return a.name < b.name;
+                    });
+                aoko::ui::Theme accentTheme = BuildOverlayUiTheme(overlayTheme);
+                for (size_t i = 0; i < modEntries.size(); ++i) {
+                    const float t = modEntries.size() > 1
+                        ? (float)i / (float)(modEntries.size() - 1) : 0.0f;
+                    modEntries[i].accent = accentTheme.AccentAt(t);
                 }
 
-                for (int i = 0; i < modCount; i++) {
-                    if (overlayTheme.isGradient) {
-                        float t = modCount > 1 ? (float)i / (float)(modCount - 1) : 0.0f;
-                        mods[i].accent = overlayTheme.isTriColor
-                            ? LerpImU32Tri(overlayTheme.accentPrimary, overlayTheme.accentSecondary, overlayTheme.accentTertiary, t)
-                            : LerpImU32(overlayTheme.accentPrimary, overlayTheme.accentSecondary, t);
-                    } else {
-                        mods[i].accent = overlayTheme.accentPrimary;
-                    }
-                }
-
-                // Honor the HUD layout anchor + scale so the module list can be
-                // moved/resized in the HUD editor like the other screen-anchored panels.
                 lc::HudElementLayout mlLayout = hudLayout.Resolve(lc::ELEM_MODULELIST);
-                const float scale = mlLayout.scale;
-
-                const float padX      = 8.0f * scale;
-                const float padY      = 3.0f * scale;
-                const float barW      = 3.0f * scale;
-                const float gapY      = 2.0f * scale;
-                const float fontH     = ImGui::GetFontSize() * scale;
-                const float shadowOff = (std::max)(1.0f, scale);
-                const float rightInset = 6.0f * scale;
                 const int style = (std::max)(0, (std::min)(6, cfg.moduleListStyle));
-                ImFont* font = ImGui::GetFont();
 
-                const char* logoPart1 = "aoko";
-                const char* logoPart2 = " client";
-                const float logoP1W = ImGui::CalcTextSize(logoPart1).x * scale;
-                const float logoP2W = ImGui::CalcTextSize(logoPart2).x * scale;
-                const float logoW   = (logoP1W + logoP2W);
-                const float logoH   = fontH;
-                const float logoGap = 8.0f * scale;
-                const float boxH    = padY + fontH + padY;
-
-                // ── Measuring pass: compute the block bounds (right-aligned bars). ──
-                float blockW = 0.0f;
-                float blockH = 0.0f;
-                if (cfg.showLogo) {
-                    float logoBoxW = (style == 0 || style == 2 || style == 3 || style == 4)
-                        ? (barW + padX + logoW + padX)
-                        : (logoW + 6.0f * scale);
-                    blockW  = (std::max)(blockW, logoBoxW + rightInset);
-                    blockH += (style == 0 || style == 2 || style == 3 || style == 4) ? (boxH + logoGap) : (logoH + logoGap);
-                }
-                for (int i = 0; i < modCount; i++) {
-                    float textW = mods[i].width * scale;
-                    float boxW  = (style == 1 || style == 5 || style == 6)
-                        ? (textW + 6.0f * scale)
-                        : (barW + padX + textW + padX);
-                    blockW = (std::max)(blockW, boxW + rightInset);
-                    blockH += boxH;
-                    if (i + 1 < modCount) blockH += gapY;
-                }
-
-                if (modCount > 0 || cfg.showLogo) {
-                    ImVec2 tl = lc::HudElementPixelPos(mlLayout, blockW, blockH, winW, winH);
-                    const float x1 = tl.x + blockW - rightInset; // right edge of bars
-                    float y = tl.y;
-
-                    if (cfg.showLogo) {
-                        if (style == 0) {
-                            // Default: Dark panel card with left accent bar
-                            float boxW = barW + padX + logoW + padX;
-                            float x0 = x1 - boxW;
-                            fg->AddRectFilled(ImVec2(x0, y), ImVec2(x1, y + boxH), overlayTheme.moduleBg);
-                            fg->AddRectFilled(ImVec2(x0, y), ImVec2(x0 + barW, y + boxH), overlayTheme.accentPrimary);
-                            fg->AddRect(ImVec2(x0, y), ImVec2(x1, y + boxH), overlayTheme.moduleBorder);
-                            ImVec2 tx(x0 + barW + padX, y + padY);
-                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.logoShadow, logoPart1);
-                            fg->AddText(font, fontH, tx, overlayTheme.accentPrimary, logoPart1);
-                            fg->AddText(font, fontH, ImVec2(tx.x + logoP1W + shadowOff, tx.y + shadowOff), overlayTheme.logoShadow, logoPart2);
-                            fg->AddText(font, fontH, ImVec2(tx.x + logoP1W, tx.y), overlayTheme.moduleText, logoPart2);
-                            y += boxH + logoGap;
-                        } else if (style == 1) {
-                            // Minimal: Right-aligned text with right bar
-                            float logoX = x1 - logoW - 4.0f * scale;
-                            fg->AddRectFilled(ImVec2(x1 - 2.5f * scale, y), ImVec2(x1, y + logoH), overlayTheme.accentPrimary);
-                            fg->AddText(font, fontH, ImVec2(logoX + shadowOff, y + shadowOff), overlayTheme.logoShadow, logoPart1);
-                            fg->AddText(font, fontH, ImVec2(logoX, y), overlayTheme.accentPrimary, logoPart1);
-                            fg->AddText(font, fontH, ImVec2(logoX + logoP1W + shadowOff, y + shadowOff), overlayTheme.logoShadow, logoPart2);
-                            fg->AddText(font, fontH, ImVec2(logoX + logoP1W, y), overlayTheme.moduleText, logoPart2);
-                            y += logoH + logoGap;
-                        } else if (style == 2) {
-                            // Outlined: Outlined badge
-                            float boxW = barW + padX + logoW + padX;
-                            float x0 = x1 - boxW;
-                            fg->AddRectFilled(ImVec2(x0, y), ImVec2(x1, y + boxH), overlayTheme.moduleOutlinedBg);
-                            fg->AddRect(ImVec2(x0, y), ImVec2(x1, y + boxH), overlayTheme.accentPrimary, 4.0f, 0, 1.5f);
-                            ImVec2 tx(x0 + barW + padX, y + padY);
-                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.logoShadow, logoPart1);
-                            fg->AddText(font, fontH, tx, overlayTheme.accentPrimary, logoPart1);
-                            fg->AddText(font, fontH, ImVec2(tx.x + logoP1W + shadowOff, tx.y + shadowOff), overlayTheme.logoShadow, logoPart2);
-                            fg->AddText(font, fontH, ImVec2(tx.x + logoP1W, tx.y), overlayTheme.moduleText, logoPart2);
-                            y += boxH + logoGap;
-                        } else if (style == 3) {
-                            // Glass: Glass badge
-                            float boxW = barW + padX + logoW + padX;
-                            float x0 = x1 - boxW;
-                            fg->AddRectFilled(ImVec2(x0, y), ImVec2(x1, y + boxH), overlayTheme.moduleMinimalBg, 4.0f);
-                            fg->AddRect(ImVec2(x0, y), ImVec2(x1, y + boxH), overlayTheme.moduleGlassBorder, 4.0f, 0, 1.0f);
-                            fg->AddRectFilled(ImVec2(x0 + 1.0f * scale, y + 1.0f * scale), ImVec2(x0 + barW + 1.0f * scale, y + boxH - 1.0f * scale), overlayTheme.accentPrimary);
-                            ImVec2 tx(x0 + barW + padX, y + padY);
-                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.logoShadow, logoPart1);
-                            fg->AddText(font, fontH, tx, overlayTheme.accentPrimary, logoPart1);
-                            fg->AddText(font, fontH, ImVec2(tx.x + logoP1W + shadowOff, tx.y + shadowOff), overlayTheme.logoShadow, logoPart2);
-                            fg->AddText(font, fontH, ImVec2(tx.x + logoP1W, tx.y), overlayTheme.moduleText, logoPart2);
-                            y += boxH + logoGap;
-                        } else if (style == 4) {
-                            // Bold: Solid accent pill
-                            float boxW = barW + padX + logoW + padX;
-                            float x0 = x1 - boxW;
-                            fg->AddRectFilled(ImVec2(x0, y), ImVec2(x1, y + boxH), overlayTheme.accentPrimary, 4.0f);
-                            fg->AddRect(ImVec2(x0, y), ImVec2(x1, y + boxH), overlayTheme.moduleBorder, 4.0f, 0, 1.0f);
-                            ImVec2 tx(x0 + barW + padX, y + padY);
-                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.logoShadow, logoPart1);
-                            fg->AddText(font, fontH, tx, overlayTheme.moduleBoldText, logoPart1);
-                            fg->AddText(font, fontH, ImVec2(tx.x + logoP1W + shadowOff, tx.y + shadowOff), overlayTheme.logoShadow, logoPart2);
-                            fg->AddText(font, fontH, ImVec2(tx.x + logoP1W, tx.y), overlayTheme.moduleBoldText, logoPart2);
-                            y += boxH + logoGap;
-                        } else if (style == 5) {
-                            // Classic: Minecraft-style right-aligned header with right bar
-                            const char* cP1 = "Aoko";
-                            const char* cP2 = " Client";
-                            float cP1W = ImGui::CalcTextSize(cP1).x * scale;
-                            float logoX = x1 - logoW - 4.0f * scale;
-                            fg->AddRectFilled(ImVec2(x1 - 2.5f * scale, y), ImVec2(x1, y + logoH), overlayTheme.accentPrimary);
-                            fg->AddText(font, fontH, ImVec2(logoX + shadowOff, y + shadowOff), overlayTheme.logoShadow, cP1);
-                            fg->AddText(font, fontH, ImVec2(logoX, y), overlayTheme.accentPrimary, cP1);
-                            fg->AddText(font, fontH, ImVec2(logoX + cP1W + shadowOff, y + shadowOff), overlayTheme.logoShadow, cP2);
-                            fg->AddText(font, fontH, ImVec2(logoX + cP1W, y), overlayTheme.moduleText, cP2);
-                            y += logoH + logoGap;
-                        } else {
-                            // Modern: Clean lowercase pill with right bar
-                            float logoX = x1 - logoW - 5.0f * scale;
-                            fg->AddRectFilled(ImVec2(logoX - 3.0f * scale, y - 1.0f * scale), ImVec2(x1, y + logoH + 1.0f * scale), overlayTheme.moduleMinimalBg, 2.0f);
-                            fg->AddRectFilled(ImVec2(x1 - 2.0f * scale, y - 1.0f * scale), ImVec2(x1, y + logoH + 1.0f * scale), overlayTheme.accentPrimary);
-                            fg->AddText(font, fontH, ImVec2(logoX + shadowOff, y + shadowOff), overlayTheme.logoShadow, logoPart1);
-                            fg->AddText(font, fontH, ImVec2(logoX, y), overlayTheme.accentPrimary, logoPart1);
-                            fg->AddText(font, fontH, ImVec2(logoX + logoP1W + shadowOff, y + shadowOff), overlayTheme.logoShadow, logoPart2);
-                            fg->AddText(font, fontH, ImVec2(logoX + logoP1W, y), overlayTheme.moduleTagText, logoPart2);
-                            y += logoH + logoGap;
-                        }
-                    }
-
-                    for (int i = 0; i < modCount; i++) {
-                        const ModLine& m = mods[i];
-                        float textW = m.width * scale;
-                        float nameW = m.nameWidth * scale;
-                        float boxW  = barW + padX + textW + padX;
-                        float x0 = x1 - boxW;
-                        float y0 = y;
-                        float y1 = y + boxH;
-
-                        if (style == 0) {
-                            // Default: Left bar + text + dim tag
-                            fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleBg);
-                            fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + barW, y1), m.accent);
-                            fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleBorder);
-                            ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
-                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.moduleTextShadow, m.name.c_str());
-                            fg->AddText(font, fontH, tx, overlayTheme.moduleText, m.name.c_str());
-                            if (!m.tag.empty()) {
-                                std::string tagStr = " " + m.tag;
-                                ImVec2 tagTx(tx.x + nameW, tx.y);
-                                fg->AddText(font, fontH, ImVec2(tagTx.x + shadowOff, tagTx.y + shadowOff), overlayTheme.moduleTextShadow, tagStr.c_str());
-                                fg->AddText(font, fontH, tagTx, overlayTheme.moduleTagText, tagStr.c_str());
-                            }
-                        } else if (style == 1) {
-                            // Minimal: Right bar + colored name + dim tag
-                            float minX0 = x1 - textW - 6.0f * scale;
-                            fg->AddRectFilled(ImVec2(minX0, y0), ImVec2(x1, y1), overlayTheme.moduleMinimalBg);
-                            fg->AddRectFilled(ImVec2(x1 - 2.0f * scale, y0), ImVec2(x1, y1), m.accent);
-                            ImVec2 tx = ImVec2(minX0 + 2.0f * scale, y0 + padY);
-                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.moduleTextShadow, m.name.c_str());
-                            fg->AddText(font, fontH, tx, m.accent, m.name.c_str());
-                            if (!m.tag.empty()) {
-                                std::string tagStr = " " + m.tag;
-                                ImVec2 tagTx(tx.x + nameW, tx.y);
-                                fg->AddText(font, fontH, ImVec2(tagTx.x + shadowOff, tagTx.y + shadowOff), overlayTheme.moduleTextShadow, tagStr.c_str());
-                                fg->AddText(font, fontH, tagTx, overlayTheme.moduleTagText, tagStr.c_str());
-                            }
-                        } else if (style == 2) {
-                            // Outlined: Border with accent + colored name + dim tag
-                            fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleOutlinedBg);
-                            fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), m.accent, 4.0f, 0, 1.5f);
-                            ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
-                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.moduleTextShadow, m.name.c_str());
-                            fg->AddText(font, fontH, tx, m.accent, m.name.c_str());
-                            if (!m.tag.empty()) {
-                                std::string tagStr = " " + m.tag;
-                                ImVec2 tagTx(tx.x + nameW, tx.y);
-                                fg->AddText(font, fontH, ImVec2(tagTx.x + shadowOff, tagTx.y + shadowOff), overlayTheme.moduleTextShadow, tagStr.c_str());
-                                fg->AddText(font, fontH, tagTx, overlayTheme.moduleTagText, tagStr.c_str());
-                            }
-                        } else if (style == 3) {
-                            // Glass: Frosted glass panel with specular border and left pip
-                            fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleMinimalBg, 4.0f);
-                            fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleGlassBorder, 4.0f, 0, 1.0f);
-                            fg->AddRectFilled(ImVec2(x0 + 1.0f * scale, y0 + 1.0f * scale), ImVec2(x0 + barW + 1.0f * scale, y1 - 1.0f * scale), m.accent);
-                            ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
-                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.moduleTextShadow, m.name.c_str());
-                            fg->AddText(font, fontH, tx, overlayTheme.moduleText, m.name.c_str());
-                            if (!m.tag.empty()) {
-                                std::string tagStr = " " + m.tag;
-                                ImVec2 tagTx(tx.x + nameW, tx.y);
-                                fg->AddText(font, fontH, ImVec2(tagTx.x + shadowOff, tagTx.y + shadowOff), overlayTheme.moduleTextShadow, tagStr.c_str());
-                                fg->AddText(font, fontH, tagTx, overlayTheme.moduleTagText, tagStr.c_str());
-                            }
-                        } else if (style == 4) {
-                            // Bold: Solid accent block fill
-                            fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), m.accent, 4.0f);
-                            fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleBorder, 4.0f, 0, 1.0f);
-                            ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
-                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.moduleTextShadow, m.name.c_str());
-                            fg->AddText(font, fontH, tx, overlayTheme.moduleBoldText, m.name.c_str());
-                            if (!m.tag.empty()) {
-                                std::string tagStr = " " + m.tag;
-                                ImVec2 tagTx(tx.x + nameW, tx.y);
-                                fg->AddText(font, fontH, ImVec2(tagTx.x + shadowOff, tagTx.y + shadowOff), overlayTheme.moduleTextShadow, tagStr.c_str());
-                                fg->AddText(font, fontH, tagTx, overlayTheme.moduleBoldText, tagStr.c_str());
-                            }
-                        } else if (style == 5) {
-                            // Classic: Minecraft-style right-side bar with shadow and colored name + dim tag
-                            float minX0 = x1 - textW - 6.0f * scale;
-                            fg->AddRectFilled(ImVec2(minX0, y0), ImVec2(x1, y1), overlayTheme.moduleMinimalBg);
-                            fg->AddRectFilled(ImVec2(x1 - 2.5f * scale, y0), ImVec2(x1, y1), m.accent);
-                            ImVec2 tx = ImVec2(minX0 + 2.0f * scale, y0 + padY);
-                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.moduleTextShadow, m.name.c_str());
-                            fg->AddText(font, fontH, tx, m.accent, m.name.c_str());
-                            if (!m.tag.empty()) {
-                                std::string tagStr = " " + m.tag;
-                                ImVec2 tagTx(tx.x + nameW, tx.y);
-                                fg->AddText(font, fontH, ImVec2(tagTx.x + shadowOff, tagTx.y + shadowOff), overlayTheme.moduleTextShadow, tagStr.c_str());
-                                fg->AddText(font, fontH, tagTx, overlayTheme.moduleTagText, tagStr.c_str());
-                            }
-                        } else {
-                            // Modern: Clean lowercase with right bar and subtle background
-                            std::string lowName = ToLowerAscii(m.name);
-                            std::string lowTag = ToLowerAscii(m.tag);
-                            float minX0 = x1 - textW - 6.0f * scale;
-                            fg->AddRectFilled(ImVec2(minX0, y0), ImVec2(x1, y1), overlayTheme.moduleMinimalBg, 2.0f);
-                            fg->AddRectFilled(ImVec2(x1 - 2.0f * scale, y0), ImVec2(x1, y1), m.accent);
-                            ImVec2 tx = ImVec2(minX0 + 2.0f * scale, y0 + padY);
-                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.moduleTextShadow, lowName.c_str());
-                            fg->AddText(font, fontH, tx, m.accent, lowName.c_str());
-                            if (!lowTag.empty()) {
-                                std::string tagStr = " " + lowTag;
-                                ImVec2 tagTx(tx.x + nameW, tx.y);
-                                fg->AddText(font, fontH, ImVec2(tagTx.x + shadowOff, tagTx.y + shadowOff), overlayTheme.moduleTextShadow, tagStr.c_str());
-                                fg->AddText(font, fontH, tagTx, overlayTheme.moduleTagText, tagStr.c_str());
-                            }
-                        }
-
-                        y += boxH + gapY;
-                    }
+                static thread_local aoko::ui::ModuleList moduleList;
+                ImVec2 blockSize = moduleList.Update(
+                    modEntries, mlLayout.scale, cfg.showLogo, style, io.DeltaTime);
+                if (blockSize.x > 0.0f && blockSize.y > 0.0f) {
+                    g_moduleListBaseWidth121 = blockSize.x /
+                        (mlLayout.scale > 0.001f ? mlLayout.scale : 1.0f);
+                    g_moduleListBaseHeight121 = blockSize.y /
+                        (mlLayout.scale > 0.001f ? mlLayout.scale : 1.0f);
+                    ImVec2 tl = lc::HudElementPixelPos(
+                        mlLayout, blockSize.x, blockSize.y, winW, winH);
+                    aoko::ui::Theme uiTheme = BuildOverlayUiTheme(overlayTheme);
+                    aoko::ui::Telemetry telemetry;
+                    telemetry.pingMs = g_overlayPingMs;
+                    telemetry.fps = (int)(io.Framerate + 0.5f);
+                    moduleList.Draw(fg, tl, uiTheme, telemetry, (float)ImGui::GetTime());
                 }
             }
+
 }
 
 // ── Renderer-neutral ImGui init ──────────────────────────────────────────────
@@ -19040,14 +19105,20 @@ static bool EnsureImGuiContextNeutral(HWND hwnd, bool forOpenGL) {
     }
     io.Fonts->Clear();
     ImFontConfig fontCfg;
-    fontCfg.RasterizerDensity = 1.0f;
+    fontCfg.RasterizerDensity = 2.0f;
     fontCfg.SizePixels = 16.0f * dpiScale;
     fontCfg.OversampleH = 3;
     fontCfg.OversampleV = 2;
     fontCfg.PixelSnapH = true;
     ImFont* loadedFont = nullptr;
     std::string bridgeDir = GetBridgeDir();
+    // Prefer the Aoko overlay face (Manrope Medium, OFL); Minecraftia remains
+    // the compatibility fallback for older installs that do not ship Data\.
     std::vector<std::string> fontCandidates = {
+        bridgeDir + "\\Manrope-Medium.ttf",
+        bridgeDir + "\\manrope-medium.ttf",
+        bridgeDir + "\\Data\\Manrope-Medium.ttf",
+        bridgeDir + "\\Data\\manrope-medium.ttf",
         bridgeDir + "\\minecraftia.ttf",
         bridgeDir + "\\Minecraftia.ttf",
         bridgeDir + "\\Data\\minecraftia.ttf",
@@ -19069,7 +19140,7 @@ static bool EnsureImGuiContextNeutral(HWND hwnd, bool forOpenGL) {
     }
     if (!loadedFont) {
         io.Fonts->AddFontDefault(&fontCfg);
-        Log("Minecraftia not found, using default ImGui font.");
+        Log("No overlay font found (Manrope/Minecraftia), using default ImGui font.");
     }
     io.FontGlobalScale = 1.0f;
     ImGuiStyle& st = ImGui::GetStyle();

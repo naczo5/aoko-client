@@ -25,6 +25,7 @@ Operating guide for coding agents working in `aoko-client` (`legoclickerC`). Bui
 - `Aoko/Core/`: clicker engine, input hooks, profile persistence, TCP client, GTB solver.
 - `McInjector/`: native bridge DLLs (`bridge.dll` for 1.8.9, `bridge_261.dll` for 26.1 / 26.2 / 1.21.x).
 - `McInjector/src/main/cpp/`: JNI/Win32/OpenGL/Vulkan/ImGui/MinHook bridge sources.
+  - `overlay_ui.h`: header-only shared HUD layer (theme tokens, watermark, module list, cards, HUD-editor outline). Both bridges include it; keep new overlay drawing here so the two versions stay visually in sync.
 - `McInjector/src/main/java/`: Unused/obsolete Java agent code (ignore). Bridges perform all JNI, rendering, and TCP duties themselves.
 
 ## Required Toolchain
