@@ -14346,7 +14346,7 @@ void RenderClosestPlayerInfo(
     const bool showHealth = config.nametagShowHealth;
     const bool showArmor = config.nametagShowArmor;
     const std::string& guiTheme = config.guiTheme;
-    const float health = snapshot.health;
+    const float health = std::isfinite(snapshot.health) ? snapshot.health : 20.0f;
     const int armorPoints = snapshot.armorPoints;
     const std::string& heldText = snapshot.heldText;
 
@@ -15540,7 +15540,7 @@ static void ConfigureImGuiFontAndStyle(HWND hwnd) {
 
     io.Fonts->Clear();
     ImFontConfig fontCfg;
-    fontCfg.RasterizerDensity = 2.0f;
+    fontCfg.RasterizerDensity = 1.0f;
     fontCfg.SizePixels = 16.0f * dpiScale;
     fontCfg.OversampleH = 3;
     fontCfg.OversampleV = 2;
@@ -15653,6 +15653,20 @@ static void ApplyLegacyClientThreadOnlyJni(JNIEnv* env, const Config& cfg) {
 
 // ===================== SWAPBUFFERS HOOK =====================
 BOOL WINAPI HookedSwapBuffers(HDC hdc) {
+    static const bool s_overlayDisabled = []() {
+        char value[16] = {};
+        DWORD n = GetEnvironmentVariableA("AOKO_BRIDGE_NO_OVERLAY", value, sizeof(value));
+        return n > 0 && value[0] != '0';
+    }();
+    if (s_overlayDisabled) {
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            Log("AOKO_BRIDGE_NO_OVERLAY set; overlay rendering disabled.");
+        }
+        return CallOriginalSwapBuffers(hdc);
+    }
+
     LegacyRenderCallbackLease renderLease;
     if (!renderLease.Active()) return CallOriginalSwapBuffers(hdc);
     if (!hdc) return CallOriginalSwapBuffers(hdc);

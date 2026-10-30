@@ -17888,8 +17888,9 @@ static void RenderOverlayPanels(
                 const float rye = ry + contentH;
 
                 const aoko::ui::Theme cpUi = BuildOverlayUiTheme(overlayTheme);
-                const float hpPct = std::max(0.0f, std::min((float)cp.hp / 20.0f, 1.0f));
-                const float lowPulse = cp.hp <= 6.0f
+                const float cpHealth = std::isfinite(cp.hp) ? (float)cp.hp : 20.0f;
+                const float hpPct = std::max(0.0f, std::min(cpHealth / 20.0f, 1.0f));
+                const float lowPulse = cpHealth <= 6.0f
                     ? 0.55f + 0.45f * (0.5f + 0.5f * std::sin((float)ImGui::GetTime() * 6.2f))
                     : 0.0f;
                 aoko::ui::Panel(fg, cpUi, ImVec2(rx, ry), ImVec2(rxe, rye), 7.0f * cpScale,
@@ -17967,7 +17968,7 @@ static void RenderOverlayPanels(
                 if (!statsRow.empty()) {
                     aoko::ui::TextShadowed(fg, ImVec2(rx + cpPadX, curY), statsRow.c_str(),
                                            cpSmall,
-                                           cp.hp <= 6.0f ? aoko::ui::SemanticBad() : cpUi.textDim,
+                                           cpHealth <= 6.0f ? aoko::ui::SemanticBad() : cpUi.textDim,
                                            aoko::ui::WithAlpha(cpUi.shadow, 110), 1.0f);
                 }
             }
@@ -19108,7 +19109,7 @@ static bool EnsureImGuiContextNeutral(HWND hwnd, bool forOpenGL) {
     }
     io.Fonts->Clear();
     ImFontConfig fontCfg;
-    fontCfg.RasterizerDensity = 2.0f;
+    fontCfg.RasterizerDensity = 1.0f;
     fontCfg.SizePixels = 16.0f * dpiScale;
     fontCfg.OversampleH = 3;
     fontCfg.OversampleV = 2;
@@ -19247,6 +19248,20 @@ void Bridge_EndOverlayImGuiFrame_OpenGL() {
 // Two-phase init: phase 1 = ImGui context + Win32 (no GL), phase 2 = GL backend (deferred).
 
 BOOL WINAPI hwglSwapBuffers(HDC hDc) {
+    static const bool s_overlayDisabled = []() {
+        char value[16] = {};
+        DWORD n = GetEnvironmentVariableA("AOKO_BRIDGE261_NO_OVERLAY", value, sizeof(value));
+        return n > 0 && value[0] != '0';
+    }();
+    if (s_overlayDisabled) {
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            Log("AOKO_BRIDGE261_NO_OVERLAY set; overlay rendering disabled.");
+        }
+        return o_wglSwapBuffers(hDc);
+    }
+
     ModernRenderCallbackLease renderLease;
     if (!renderLease.Active()) return o_wglSwapBuffers(hDc);
     TRACE261_PATH("enter");
