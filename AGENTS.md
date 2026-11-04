@@ -32,8 +32,8 @@ Operating guide for coding agents working in `aoko-client` (`legoclickerC`). Bui
 
 - Windows 10/11 x64.
 - .NET SDK 8.x.
-- MinGW-w64 at `C:\mingw64\mingw64\bin\g++.exe`.
-- JDK 17 headers at `C:\Program Files\Java\jdk-17\include`.
+- MinGW-w64 at `C:\mingw64\mingw64\bin\g++.exe` (override with `AOKO_GXX`).
+- JDK 17 headers at `C:\Program Files\Java\jdk-17\include` (override with `JAVA_HOME`).
 
 ## Build Commands
 
@@ -52,6 +52,8 @@ Bridge build scripts auto-copy output to `Aoko\bin\Debug\`, `Release\`, and `pub
 - Publish (self-contained single-file): `build_exe.bat`
 - Full local package (bridges + publish): `build_release.bat` (invoked by the GitHub release script; do not run it extra when publishing)
 - GitHub release: `.\scripts\New-GitHubRelease.ps1 -Version 0.x.y` from clean `main` (see `release-verification` skill). Beta pre-release from `dev`: add `-Beta` (tag `v0.x.y-beta`, GitHub prerelease, Scoop unaffected).
+- CI release: **Actions → Build and publish release** (`.github/workflows/release.yml`). Tag pushes of `v<version>` or `v<version>-beta` also trigger it.
+- Release notes: short 4–6 bullet user-facing list, Full Changelog link last (see `release-verification`).
 
 ### Run locally
 - Run app: `dotnet run --project Aoko\Aoko.csproj` (ensure existing `Aoko.exe` is closed).

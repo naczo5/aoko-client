@@ -3,6 +3,7 @@ setlocal
 cd /d "%~dp0"
 
 set "GPP=C:\mingw64\mingw64\bin\g++.exe"
+if defined AOKO_GXX set "GPP=%AOKO_GXX%"
 if not exist "%GPP%" (
     echo [NativeTests] ERROR: compiler not found at %GPP%
     exit /b 1
