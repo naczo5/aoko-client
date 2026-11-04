@@ -1247,6 +1247,24 @@ static bool g_speedBridgeWasEdge_121 = false;
 static DWORD g_speedBridgeLastEdgeMs_121 = 0;
 static bool g_loggedSpeedBridgeResolveFail_121 = false;
 
+// ===================== NEW MODULES JNI GLOBALS (1.21) =====================
+static jfieldID g_itemUseCooldownField_121 = nullptr;
+static jfieldID g_sprintKeyField_121 = nullptr;
+static bool     g_sprintManaging121 = false;
+static DWORD    g_lastWTapResetMs121 = 0;
+static bool     g_wTapInReset121 = false;
+static jmethodID g_setSprintingMethod_121 = nullptr;
+
+struct ModernTntRecord {
+    double x, y, z;
+    float fuseSeconds;
+};
+static std::vector<ModernTntRecord> g_modernTntRecords;
+static Mutex g_modernTntMutex;
+static jclass g_tntClass_121 = nullptr;
+static jfieldID g_tntFuseField_121 = nullptr;
+static jmethodID g_tntGetFuse_121 = nullptr;
+
 // ===================== CHEST STEALER JNI GLOBALS =====================
 static jfieldID  g_chestStealerScreenHandlerField_121 = nullptr;
 static jfieldID  g_chestStealerScreenXField_121 = nullptr;
@@ -4755,6 +4773,148 @@ static void ResetSpeedBridgeMovementTracking121() {
     g_speedBridgeLastEdgeMs_121 = 0;
 }
 
+static jobject GetSprintKeyBinding121(JNIEnv* env) {
+    if (!env || !g_mcInstance || !g_optionsField_121) return nullptr;
+    jobject opts = env->GetObjectField(g_mcInstance, g_optionsField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
+    if (!opts) return nullptr;
+
+    if (!g_sprintKeyField_121) {
+        jclass optsCls = env->GetObjectClass(opts);
+        if (optsCls) {
+            const char* names[] = { "sprintKey", "keySprint", "field_1867", "f_92083_", nullptr };
+            const char* sigs[] = {
+                "Lnet/minecraft/client/KeyMapping;",
+                "Lnet/minecraft/client/option/KeyBinding;",
+                "Lnet/minecraft/class_304;",
+                nullptr
+            };
+            for (int ni = 0; names[ni] && !g_sprintKeyField_121; ni++) {
+                for (int si = 0; sigs[si] && !g_sprintKeyField_121; si++) {
+                    g_sprintKeyField_121 = env->GetFieldID(optsCls, names[ni], sigs[si]);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_sprintKeyField_121 = nullptr; }
+                }
+            }
+            env->DeleteLocalRef(optsCls);
+        } else if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        }
+    }
+
+    jobject key = nullptr;
+    if (g_sprintKeyField_121) {
+        key = env->GetObjectField(opts, g_sprintKeyField_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); key = nullptr; }
+    }
+    env->DeleteLocalRef(opts);
+    return key;
+}
+
+static void UpdateSprint121(JNIEnv* env, bool enabled, bool guiOpen, bool inWorld) {
+    if (!env) return;
+    const bool isMovingForward = (GetAsyncKeyState('W') & 0x8000) != 0;
+    if (!enabled || guiOpen || !inWorld || !isMovingForward) {
+        if (g_sprintManaging121) {
+            jobject key = GetSprintKeyBinding121(env);
+            if (key) {
+                EnsureSpeedBridgeKeyMethods(env, key);
+                if (g_speedBridgeKeySetPressed_121) {
+                    env->CallVoidMethod(key, g_speedBridgeKeySetPressed_121, JNI_FALSE);
+                    if (env->ExceptionCheck()) env->ExceptionClear();
+                }
+                env->DeleteLocalRef(key);
+            }
+            g_sprintManaging121 = false;
+        }
+        return;
+    }
+
+    jobject key = GetSprintKeyBinding121(env);
+    if (key) {
+        EnsureSpeedBridgeKeyMethods(env, key);
+        if (g_speedBridgeKeySetPressed_121) {
+            env->CallVoidMethod(key, g_speedBridgeKeySetPressed_121, JNI_TRUE);
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            else g_sprintManaging121 = true;
+        }
+        env->DeleteLocalRef(key);
+    }
+}
+
+static void UpdateFastPlace121(JNIEnv* env, bool enabled, bool guiOpen, bool inWorld, jclass mcCls) {
+    if (!env || !enabled || guiOpen || !inWorld || !g_mcInstance) return;
+    if (!g_itemUseCooldownField_121 && mcCls) {
+        const char* names[] = { "itemUseCooldown", "field_1752", "f_91071_", nullptr };
+        for (int i = 0; names[i] && !g_itemUseCooldownField_121; ++i) {
+            g_itemUseCooldownField_121 = env->GetFieldID(mcCls, names[i], "I");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_itemUseCooldownField_121 = nullptr; }
+        }
+    }
+    if (g_itemUseCooldownField_121) {
+        jint delay = env->GetIntField(g_mcInstance, g_itemUseCooldownField_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); return; }
+        if (delay > 0) {
+            env->SetIntField(g_mcInstance, g_itemUseCooldownField_121, 0);
+            if (env->ExceptionCheck()) env->ExceptionClear();
+        }
+    }
+}
+
+static void UpdateNoHurtCam121(JNIEnv* env, bool enabled, jobject selfObj) {
+    if (!env || !enabled || !selfObj) return;
+    if (!g_hurtTimeField_121) {
+        jclass entCls = env->GetObjectClass(selfObj);
+        if (entCls) {
+            const char* names[] = { "field_6012", "hurtTime", "f_20916_", "f_19864_", nullptr };
+            for (int i = 0; names[i] && !g_hurtTimeField_121; i++) {
+                g_hurtTimeField_121 = env->GetFieldID(entCls, names[i], "I");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_hurtTimeField_121 = nullptr; }
+            }
+            env->DeleteLocalRef(entCls);
+        }
+    }
+    if (!g_hurtTimeField_121) return;
+    jint ht = env->GetIntField(selfObj, g_hurtTimeField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return; }
+    if (ht > 0) {
+        env->SetIntField(selfObj, g_hurtTimeField_121, 0);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+}
+
+static void UpdateWTap121(JNIEnv* env, bool enabled, bool guiOpen, bool inWorld, jobject selfObj) {
+    if (!env || !enabled || guiOpen || !inWorld || !selfObj) return;
+    const DWORD nowMs = GetTickCount();
+    if (g_wTapInReset121) {
+        if (nowMs - g_lastWTapResetMs121 >= 60) {
+            g_wTapInReset121 = false;
+        }
+        return;
+    }
+
+    const bool isMovingForward = (GetAsyncKeyState('W') & 0x8000) != 0;
+    const bool isLmb = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+    if (isMovingForward && isLmb && (nowMs - g_lastWTapResetMs121 >= 250)) {
+        if (!g_setSprintingMethod_121) {
+            jclass playerCls = env->GetObjectClass(selfObj);
+            if (playerCls) {
+                const char* names[] = { "setSprinting", "method_5728", "m_6858_", nullptr };
+                for (int i = 0; names[i] && !g_setSprintingMethod_121; ++i) {
+                    g_setSprintingMethod_121 = env->GetMethodID(playerCls, names[i], "(Z)V");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_setSprintingMethod_121 = nullptr; }
+                }
+                env->DeleteLocalRef(playerCls);
+            }
+        }
+        if (g_setSprintingMethod_121) {
+            env->CallVoidMethod(selfObj, g_setSprintingMethod_121, JNI_FALSE);
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            g_wTapInReset121 = true;
+            g_lastWTapResetMs121 = nowMs;
+        }
+    }
+}
+
 static void UpdateSpeedBridgeDirection121(double posX, double posZ) {
     if (!g_speedBridgeHaveLastPos_121) {
         g_speedBridgeHaveLastPos_121 = true;
@@ -6624,6 +6784,7 @@ static void UpdatePlayerListOverlay(JNIEnv* env) {
         double x, y, z;
     };
     std::vector<LightweightEntity> lwList;
+    std::vector<ModernTntRecord> localTntList;
 
     for (int i = 0; i < maxPlayersToProcess; i++) {
         jobject entObj = env->GetObjectArrayElement(entArr, i);
@@ -6666,6 +6827,49 @@ static void UpdatePlayerListOverlay(JNIEnv* env) {
         double dx = ex - sx, dy = ey - sy, dz = ez - sz;
         double dist = sqrt(dx*dx + dy*dy + dz*dz);
         if (dist != dist) { env->DeleteLocalRef(entObj); continue; }
+
+        if (cfg.tntTimer) {
+            if (!g_tntClass_121) {
+                const char* cnames[] = {
+                    "net/minecraft/entity/TntEntity",
+                    "net/minecraft/class_1541",
+                    "net/minecraft/world/entity/item/PrimedTnt",
+                    nullptr
+                };
+                for (int ci = 0; cnames[ci] && !g_tntClass_121; ++ci) {
+                    jclass c = env->FindClass(cnames[ci]);
+                    if (c && !env->ExceptionCheck()) {
+                        g_tntClass_121 = (jclass)env->NewGlobalRef(c);
+                        const char* fnames[] = { "fuse", "field_7196", "f_32074_", nullptr };
+                        for (int fi = 0; fnames[fi] && !g_tntFuseField_121; ++fi) {
+                            g_tntFuseField_121 = env->GetFieldID(c, fnames[fi], "I");
+                            if (env->ExceptionCheck()) { env->ExceptionClear(); g_tntFuseField_121 = nullptr; }
+                        }
+                        const char* mnames[] = { "getFuse", "method_6968", "m_32089_", nullptr };
+                        for (int mi = 0; mnames[mi] && !g_tntGetFuse_121; ++mi) {
+                            g_tntGetFuse_121 = env->GetMethodID(c, mnames[mi], "()I");
+                            if (env->ExceptionCheck()) { env->ExceptionClear(); g_tntGetFuse_121 = nullptr; }
+                        }
+                        env->DeleteLocalRef(c);
+                    } else if (env->ExceptionCheck()) {
+                        env->ExceptionClear();
+                    }
+                }
+            }
+            if (g_tntClass_121 && env->IsInstanceOf(entObj, g_tntClass_121)) {
+                int fuse = 80;
+                if (g_tntGetFuse_121) {
+                    fuse = env->CallIntMethod(entObj, g_tntGetFuse_121);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); fuse = 80; }
+                } else if (g_tntFuseField_121) {
+                    fuse = env->GetIntField(entObj, g_tntFuseField_121);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); fuse = 80; }
+                }
+                localTntList.push_back({ ex, ey + 0.9, ez, (float)fuse / 20.0f });
+                env->DeleteLocalRef(entObj);
+                continue;
+            }
+        }
 
         lwList.push_back({entObj, dist, ex, ey, ez});
     }
@@ -6941,6 +7145,11 @@ static void UpdatePlayerListOverlay(JNIEnv* env) {
             }
         }
         MaybePlayFireballWarningSound121(env, holderPresent, true, now);
+    }
+
+    {
+        LockGuard lk(g_modernTntMutex);
+        g_modernTntRecords.swap(localTntList);
     }
 
     if (gameRendererForProjection) env->DeleteLocalRef(gameRendererForProjection);
@@ -14680,8 +14889,9 @@ static void UpdateJniState() {
     if (!envReady) return;
     UpdateOverlayPing121(env);
     unsigned long long nowMs = (unsigned long long)GetTickCount64();
-    bool hitDelayFixEnabled = false;
-    { LockGuard lk(g_configMutex); hitDelayFixEnabled = g_config.hitDelayFixEnabled; }
+    Config cfg;
+    { LockGuard lk(g_configMutex); cfg = g_config; }
+    bool hitDelayFixEnabled = cfg.hitDelayFixEnabled;
 
     jobject scr = GetCurrentScreenObject(env, g_mcInstance);
     if (env->ExceptionCheck()) { env->ExceptionClear(); return; }
@@ -14771,6 +14981,9 @@ static void UpdateJniState() {
         // If world is null (main menu / not in-game), treat as not looking at a block.
         inWorld = IsInWorldNow(env);
         if (!inWorld) lookingAtBlock = false;
+
+        UpdateFastPlace121(env, cfg.fastPlace, guiOpen, inWorld, mcCls);
+        UpdateSprint121(env, cfg.sprint, guiOpen, inWorld);
 
         EnsureCrosshairTargetField(env, mcCls);
         jfieldID hitFld = g_crosshairTargetField_121;
@@ -14880,6 +15093,8 @@ static void UpdateJniState() {
         if (plFld) {
             jobject plObj = env->GetObjectField(g_mcInstance, plFld);
             if (plObj && !env->ExceptionCheck()) {
+                UpdateNoHurtCam121(env, cfg.noHurtCam, plObj);
+                UpdateWTap121(env, cfg.wTap, guiOpen, inWorld, plObj);
                 jclass plCls = env->GetObjectClass(plObj);
                 if (plCls) {
                     static jmethodID s_getHealthMethod = nullptr;
@@ -17257,6 +17472,10 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
     DWORD lastPixelPartyMs = 0;
     DWORD lastClosestPlayerMs = 0;
     DWORD lastNickHiderFallbackMs = 0;
+    DWORD lastFastPlaceMs = 0;
+    DWORD lastSprintMs = 0;
+    DWORD lastWTapMs = 0;
+    DWORD lastNoHurtCamMs = 0;
     bool chestEspScanWasEnabled = false;
     bool entityProducerWasEnabled = false;
     // Teleport detection: track last scanned player position to catch same-world jumps
@@ -17471,6 +17690,46 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                             lastPixelPartyMs = nowMs;
                         }
                     }
+
+                    static bool s_fastPlaceWasEnabled = false;
+                    if (cfg.fastPlace || s_fastPlaceWasEnabled) {
+                        if (!cfg.fastPlace || lc::IsTelemetryIntervalDue(nowMs, lastFastPlaceMs, lc::kFastPlaceIntervalMs)) {
+                            jclass mcCls = env->GetObjectClass(g_mcInstance);
+                            UpdateFastPlace121(env, cfg.fastPlace, g_realGuiOpen, inWorldNow, mcCls);
+                            if (mcCls) env->DeleteLocalRef(mcCls);
+                            lastFastPlaceMs = nowMs;
+                            s_fastPlaceWasEnabled = cfg.fastPlace;
+                        }
+                    }
+
+                    static bool s_sprintWasEnabled = false;
+                    if (cfg.sprint || s_sprintWasEnabled || g_sprintManaging121) {
+                        if (lc::IsTelemetryIntervalDue(nowMs, lastSprintMs, lc::kSprintIntervalMs) ||
+                            (!cfg.sprint && s_sprintWasEnabled)) {
+                            UpdateSprint121(env, cfg.sprint, g_realGuiOpen, inWorldNow);
+                            lastSprintMs = nowMs;
+                            s_sprintWasEnabled = cfg.sprint;
+                        }
+                    }
+
+                    static bool s_wTapWasEnabled = false;
+                    if (cfg.wTap || s_wTapWasEnabled) {
+                        if (!cfg.wTap || lc::IsTelemetryIntervalDue(nowMs, lastWTapMs, lc::kWTapIntervalMs)) {
+                            UpdateWTap121(env, cfg.wTap, g_realGuiOpen, inWorldNow, lastObservedPlayer);
+                            lastWTapMs = nowMs;
+                            s_wTapWasEnabled = cfg.wTap;
+                        }
+                    }
+
+                    static bool s_noHurtCamWasEnabled = false;
+                    if (cfg.noHurtCam || s_noHurtCamWasEnabled) {
+                        if (!cfg.noHurtCam || lc::IsTelemetryIntervalDue(nowMs, lastNoHurtCamMs, lc::kNoHurtCamIntervalMs)) {
+                            UpdateNoHurtCam121(env, cfg.noHurtCam, lastObservedPlayer);
+                            lastNoHurtCamMs = nowMs;
+                            s_noHurtCamWasEnabled = cfg.noHurtCam;
+                        }
+                    }
+
                     const bool chunkScansEnabled = cfg.chestEsp || cfg.chestStealer || cfg.blockEsp || cfg.bedPlates;
                     const bool chunkScanReady = !chunkScansEnabled ||
                         (!IsWorldTransitionActive() && ProbeModernChunkObject(env));
@@ -17480,7 +17739,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                     const bool entityProducerEnabled =
                         cfg.nametags || cfg.nickHiderEnabled || cfg.closestPlayer ||
                         cfg.fightStatus || cfg.aimAssist || cfg.triggerbot ||
-                        cfg.fireballWarning ||
+                        cfg.fireballWarning || cfg.tntTimer ||
                         cfg.nametagHideVanilla || g_nametagSuppressionActive_121;
                     const unsigned int playerInterval = lc::PlayerOverlayIntervalMs(
                         cfg.aimAssist || cfg.triggerbot);
@@ -17595,7 +17854,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                 &sleepMs, sleepNow, lastPlayerScanMs,
                 lc::PlayerOverlayIntervalMs(cfg.aimAssist || cfg.triggerbot),
                 cfg.nametags || cfg.nickHiderEnabled || cfg.closestPlayer ||
-                cfg.fireballWarning ||
+                cfg.fireballWarning || cfg.tntTimer ||
                 cfg.fightStatus || cfg.aimAssist || cfg.triggerbot || cfg.nametagHideVanilla);
             lc::ConsiderJobSleep(
                 &sleepMs, sleepNow, lastChestEspScanMs, lc::kChestEspScanIntervalMs,
@@ -17603,6 +17862,18 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
             lc::ConsiderJobSleep(
                 &sleepMs, sleepNow, lastNickHiderFallbackMs, lc::kStateReadIntervalMs,
                 cfg.nickHiderEnabled);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastFastPlaceMs, lc::kFastPlaceIntervalMs,
+                cfg.fastPlace);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastSprintMs, lc::kSprintIntervalMs,
+                cfg.sprint || g_sprintManaging121);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastWTapMs, lc::kWTapIntervalMs,
+                cfg.wTap);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastNoHurtCamMs, lc::kNoHurtCamIntervalMs,
+                cfg.noHurtCam);
         }
         if (sleepMs > 0) Sleep(sleepMs);
     }
@@ -18879,6 +19150,37 @@ static void RenderOverlayPanels(
                         ImVec2 right(ax - dx * sz * 0.6f - px * sz * 0.7f, ay - dy * sz * 0.6f - py * sz * 0.7f);
                         fg->AddTriangleFilled(tip, left, right, IM_COL32(255, 90, 65, 235));
                         fg->AddTriangle(tip, left, right, IM_COL32(255, 200, 180, 255), 1.5f);
+                    }
+                }
+            }
+
+            if (!g_realGuiOpen && cfg.tntTimer && sharedCamFound) {
+                const int winW = (int)io.DisplaySize.x;
+                const int winH = (int)io.DisplaySize.y;
+                std::vector<ModernTntRecord> tntSnap;
+                {
+                    LockGuard lk(g_modernTntMutex);
+                    tntSnap = g_modernTntRecords;
+                }
+                ImDrawList* dl = ImGui::GetBackgroundDrawList();
+                for (const auto& t : tntSnap) {
+                    LegoVec3 pos = { (float)t.x, (float)t.y, (float)t.z };
+                    float sx = 0, sy = 0;
+                    bool projected = sharedMatsOk
+                        ? WorldToScreen(pos, sharedCam, sharedView, sharedProj, winW, winH, &sx, &sy)
+                        : WorldToScreen_Angles(pos, sharedCam, sharedYaw, sharedPitch, cpCamState.fov, winW, winH, &sx, &sy);
+                    if (projected && sx >= -50.0f && sx <= (float)winW + 50.0f && sy >= -50.0f && sy <= (float)winH + 50.0f) {
+                        char buf[32];
+                        snprintf(buf, sizeof(buf), "%.1fs", t.fuseSeconds);
+                        ImVec2 tsz = ImGui::CalcTextSize(buf);
+                        ImVec2 pMin(sx - tsz.x * 0.5f - 5.0f, sy - tsz.y * 0.5f - 3.0f);
+                        ImVec2 pMax(sx + tsz.x * 0.5f + 5.0f, sy + tsz.y * 0.5f + 3.0f);
+                        dl->AddRectFilled(pMin, pMax, IM_COL32(10, 15, 24, 210), 4.0f);
+                        dl->AddRect(pMin, pMax, IM_COL32(50, 180, 240, 180), 4.0f);
+                        ImU32 col = t.fuseSeconds > 2.0f ? IM_COL32(80, 255, 120, 255)
+                                  : t.fuseSeconds > 1.0f ? IM_COL32(255, 200, 60, 255)
+                                  : IM_COL32(255, 70, 70, 255);
+                        dl->AddText(ImVec2(sx - tsz.x * 0.5f, sy - tsz.y * 0.5f), col, buf);
                     }
                 }
             }
