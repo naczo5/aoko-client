@@ -8617,10 +8617,12 @@ static void UpdateJumpResetLegacy(JNIEnv* env, const Config& cfg, const GameStat
     if (!env) return;
     const DWORD nowMs = GetTickCount();
     if (g_jumpResetHolding && nowMs - g_jumpResetPressMs >= lc::beta::kJumpResetHoldMs) {
-        SetJumpKeyLegacy(env, false);
-        g_jumpResetHolding = false;
+        // Keep retrying the release; give up after a second so a missing mapping cannot jam it.
+        if (SetJumpKeyLegacy(env, false) || nowMs - g_jumpResetPressMs >= lc::beta::kJumpResetReleaseGiveUpMs)
+            g_jumpResetHolding = false;
     }
     if (!cfg.jumpReset || !state.mapped || !state.inWorld || !g_mcInstance || !g_thePlayerField) {
+        if (!cfg.jumpReset) SetModuleStatusLegacy("jumpreset", "");
         g_jumpResetPrevHurt = 0;
         g_jumpResetSeenHurt = 0;
         return;
@@ -8644,6 +8646,8 @@ static void UpdateJumpResetLegacy(JNIEnv* env, const Config& cfg, const GameStat
     }
     if (!g_hurtTimeField || !g_onGroundField || !g_keyBindingPressedField) {
         SetModuleStatusLegacy("jumpreset", "Missing hurtTime, onGround or KeyBinding.pressed mapping");
+        // Do not make No Hurt Cam wait on a Jump Reset that cannot sample.
+        g_jumpResetSeenHurt = 1000;
         env->DeleteLocalRef(player);
         return;
     }
@@ -15557,8 +15561,9 @@ static void ClearLegacyTrajectory() {
 }
 
 static void UpdateTrajectoriesLegacy(JNIEnv* env, const Config& cfg) {
+    if (!cfg.trajectories) SetModuleStatusLegacy("trajectories", "");
     if (!env || !cfg.trajectories || !g_mcInstance || !g_thePlayerField || !g_posXField ||
-        !g_rotationYawField || !g_rotationPitchField || !g_getHeldItemMethod) {
+        !g_posYField || !g_posZField || !g_rotationYawField || !g_rotationPitchField || !g_getHeldItemMethod) {
         if (cfg.trajectories) SetModuleStatusLegacy("trajectories", "Missing player position, rotation or held-item mapping");
         ClearLegacyTrajectory();
         return;
@@ -15691,8 +15696,9 @@ static void ClearLegacyMurderMystery(JNIEnv* env) {
 }
 
 static void UpdateMurderMysteryLegacy(JNIEnv* env, const Config& cfg) {
+    if (!cfg.murderMystery) SetModuleStatusLegacy("murdermystery", "");
     if (!env || !cfg.murderMystery || !g_mcInstance || !g_theWorldField || !g_playerEntitiesField ||
-        !g_thePlayerField || !g_posXField || !g_listSizeMethod || !g_listGetMethod) {
+        !g_thePlayerField || !g_posXField || !g_posYField || !g_posZField || !g_listSizeMethod || !g_listGetMethod) {
         if (cfg.murderMystery) SetModuleStatusLegacy("murdermystery", "Missing world player list mapping");
         ClearLegacyMurderMystery(env);
         return;
@@ -15891,6 +15897,7 @@ static bool ReadLegacyBlockPos(JNIEnv* env, jobject pos, int* x, int* y, int* z)
 }
 
 static void UpdateBreakProgressLegacy(JNIEnv* env, const Config& cfg) {
+    if (!cfg.breakProgress) SetModuleStatusLegacy("breakprogress", "");
     if (!env || !cfg.breakProgress || !g_mcInstance || !g_thePlayerField || !g_theWorldField) {
         LockGuard lk(g_legacyBreaksMutex);
         g_legacyBreaks.clear();

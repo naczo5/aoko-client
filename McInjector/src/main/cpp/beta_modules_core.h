@@ -34,6 +34,8 @@ inline bool ShouldJumpReset(const JumpResetInput& in) {
 
 // Hold the jump key long enough for one client tick to read it (50 ms tick).
 static const unsigned int kJumpResetHoldMs = 70;
+// Stop retrying a failed release after this long so the key cannot stay stuck.
+static const unsigned int kJumpResetReleaseGiveUpMs = 1000;
 
 // ── Trajectories ────────────────────────────────────────────────────────────
 enum ProjectileKind {
@@ -90,18 +92,17 @@ struct TrajectoryResult {
     TrajPoint impact;
 };
 
-// Launch direction in Minecraft angles (yaw 0 = +Z, pitch + = down).
+// Launch direction in Minecraft angles (yaw 0 = +Z, pitch + = down), matching
+// vanilla shootFromRotation: the pitch offset only bends Y and the vector is
+// not renormalized, so offset throws (potions) are slightly slower.
 inline void LaunchDirection(float yawDeg, float pitchDeg, float pitchOffsetDeg,
                             double* dx, double* dy, double* dz) {
     const double r = 3.14159265358979323846 / 180.0;
     const double yaw = yawDeg * r;
     const double pitch = pitchDeg * r;
-    double x = -std::sin(yaw) * std::cos(pitch);
-    double y = -std::sin((pitchDeg + pitchOffsetDeg) * r);
-    double z = std::cos(yaw) * std::cos(pitch);
-    const double len = std::sqrt(x * x + y * y + z * z);
-    if (len > 1e-9) { x /= len; y /= len; z /= len; }
-    *dx = x; *dy = y; *dz = z;
+    *dx = -std::sin(yaw) * std::cos(pitch);
+    *dy = -std::sin((pitchDeg + pitchOffsetDeg) * r);
+    *dz = std::cos(yaw) * std::cos(pitch);
 }
 
 // Steps the projectile like the vanilla entity tick (move, drag, gravity) and

@@ -3806,6 +3806,7 @@ static void ResetRefillModernCaches(JNIEnv* env);
 static void ResetAutoToolModernCaches(JNIEnv* env);
 static void ExecuteAutoRodModern(JNIEnv* env);
 static void ResetModernJniRuntimeCaches121(JNIEnv* env, const char* reason);
+static void ResetBetaModuleCaches121(JNIEnv* env);
 static bool TrackSuppressionWorldContext121(JNIEnv* env, jobject worldObj);
 static bool IsWorldTransitionActive();
 static bool WorldTransitionRequiresWorld();
@@ -13330,6 +13331,7 @@ static void ResetAutoTotemCaches(JNIEnv* env) {
     g_nextAntiDebuffResolveMs_121 = 0;
 
     DeleteGlobalRefSafe(env, g_tntClass_121);
+    ResetBetaModuleCaches121(env);
     g_tntFuseField_121 = nullptr;
     g_tntGetFuse_121 = nullptr;
     g_clientWorldGetEntities_121 = nullptr;
@@ -13391,6 +13393,7 @@ static void CleanupJniGlobals(JNIEnv* env) {
     DeleteGlobalRefSafe(env, g_visibilityRuleClass_121);
     DeleteGlobalRefSafe(env, g_visibilityRuleNever_121);
     DeleteGlobalRefSafe(env, g_tntClass_121);
+    ResetBetaModuleCaches121(env);
     DeleteGlobalRefSafe(env, g_lastNametagSuppressionWorld_121);
     DeleteGlobalRefSafe(env, g_lastAutoTotemWorld_121);
     DeleteGlobalRefSafe(env, g_itemStackClass_121);
@@ -17774,9 +17777,10 @@ static void UpdateJumpReset121(JNIEnv* env, const Config& cfg) {
     if (!env) return;
     const DWORD nowMs = GetTickCount();
     if (g_jumpResetHolding_121 && nowMs - g_jumpResetPressMs_121 >= lc::beta::kJumpResetHoldMs) {
-        SetJumpKey121(env, false);
-        g_jumpResetHolding_121 = false;
+        if (SetJumpKey121(env, false) || nowMs - g_jumpResetPressMs_121 >= lc::beta::kJumpResetReleaseGiveUpMs)
+            g_jumpResetHolding_121 = false;
     }
+    if (!cfg.jumpReset) SetModuleStatus121("jumpreset", "");
     bool guiOpen = false, inWorld = false;
     { LockGuard lk(g_jniStateMtx); guiOpen = g_jniGuiOpen; inWorld = g_jniInWorld; }
     if (!cfg.jumpReset || !inWorld || !g_mcInstance || !g_playerField_121 || IsWorldTransitionActive()) {
@@ -17901,6 +17905,7 @@ static void ClearModernTrajectory() {
 }
 
 static void UpdateTrajectories121(JNIEnv* env, const Config& cfg) {
+    if (!cfg.trajectories) SetModuleStatus121("trajectories", "");
     if (!env || !cfg.trajectories || !g_mcInstance || !g_playerField_121) { ClearModernTrajectory(); return; }
     if (!g_trajClassesTried_121) {
         g_trajClassesTried_121 = true;
@@ -18004,6 +18009,7 @@ static void ClearModernMurderMystery(JNIEnv* env) {
 }
 
 static void UpdateMurderMystery121(JNIEnv* env, const Config& cfg) {
+    if (!cfg.murderMystery) SetModuleStatus121("murdermystery", "");
     if (!env || !cfg.murderMystery || !g_mcInstance || !g_worldField_121 || !g_playerField_121) {
         ClearModernMurderMystery(env);
         return;
@@ -18196,6 +18202,7 @@ static bool ReadBlockPos121(JNIEnv* env, jobject pos, int* x, int* y, int* z) {
 }
 
 static void UpdateBreakProgress121(JNIEnv* env, const Config& cfg) {
+    if (!cfg.breakProgress) SetModuleStatus121("breakprogress", "");
     if (!env || !cfg.breakProgress || !g_mcInstance || !g_worldField_121 || !g_playerField_121) {
         LockGuard lk(g_modernBreaksMutex);
         g_modernBreaks.clear();
@@ -18313,6 +18320,40 @@ static void ClearModernBetaOverlays(JNIEnv* env) {
     ClearModernTrajectory();
     ClearModernMurderMystery(env);
     { LockGuard lk(g_modernBreaksMutex); g_modernBreaks.clear(); }
+}
+
+// Re-arms the Beta modules' resolve-once latches and releases their class refs.
+// Called from the mapping reload path and from CleanupJniGlobals.
+static void ResetBetaModuleCaches121(JNIEnv* env) {
+    DeleteGlobalRefSafe(env, g_livingEntityClass_121);
+    g_entityHitResultGetEntity_121 = nullptr;
+    g_hitSelectResolved_121 = false;
+    DeleteGlobalRefSafe(env, g_trajBowCls_121);
+    DeleteGlobalRefSafe(env, g_trajSnowballCls_121);
+    DeleteGlobalRefSafe(env, g_trajEggCls_121);
+    DeleteGlobalRefSafe(env, g_trajPearlCls_121);
+    DeleteGlobalRefSafe(env, g_trajPotionCls_121);
+    DeleteGlobalRefSafe(env, g_trajExpCls_121);
+    g_trajClassesTried_121 = false;
+    g_trajUseTicks_121 = nullptr;
+    g_trajEyeY_121 = nullptr;
+    g_betaStackGetItem_121 = nullptr;
+    g_betaItemTranslationKey_121 = nullptr;
+    g_bpWorldMapField_121 = nullptr;
+    g_bpRendererField_121 = nullptr;
+    g_bpRendererMapField_121 = nullptr;
+    g_bpGameModeField_121 = nullptr;
+    g_bpSelfPosField_121 = nullptr;
+    g_bpSelfProgressField_121 = nullptr;
+    g_bpInfoActor_121 = g_bpInfoPos_121 = g_bpInfoStage_121 = nullptr;
+    g_bpPosX_121 = g_bpPosY_121 = g_bpPosZ_121 = nullptr;
+    g_bpWorldGetEntity_121 = nullptr;
+    g_bpEntityGetId_121 = nullptr;
+    g_bpResolved_121 = false;
+    g_jumpKeyField_121 = nullptr;
+    g_jumpResetOnGround_121 = nullptr;
+    DeleteGlobalRefSafe(env, g_modernMurderWorld);
+    g_modernMurderers.clear();
 }
 
 static DWORD WINAPI FastPollThreadProc(LPVOID) {

@@ -70,6 +70,21 @@ public class ModuleRegistrationTests
     }
 
     [Fact]
+    public void NativeCapabilities_KeepKillAuraSettingsMacroInBothVersions()
+    {
+        string header = File.ReadAllText(Path.Combine(RepoRoot, "McInjector", "src", "main", "cpp", "bridge_capabilities.h"));
+        foreach (string anchor in new[] { "LegacyCapabilitiesJson", "ModernCapabilitiesJson" })
+        {
+            int start = header.IndexOf(anchor, StringComparison.Ordinal);
+            Assert.True(start >= 0, $"{anchor} not found");
+            int settings = header.IndexOf("\\\"settings\\\":[", start, StringComparison.Ordinal);
+            int state = header.IndexOf("\\\"state\\\":[", settings, StringComparison.Ordinal);
+            Assert.True(settings > start && state > settings, $"{anchor} settings/state lists not found");
+            Assert.Contains("LC_KILLAURA_SETTINGS", header[settings..state], StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
     public void Catalog_ToggleModules_HaveManagedConfigPayloadFields()
     {
         string source = File.ReadAllText(Path.Combine(RepoRoot, "Aoko", "Core", "GameStateClient.cs"));
