@@ -37,7 +37,7 @@ $releaseBranch = if ($Beta) { 'dev' } else { 'main' }
 $tag = if ($Beta) { "v$Version-beta" } else { "v$Version" }
 $title = if ($Beta) { "aoko v$Version-beta" } else { "aoko v$Version" }
 
-$currentBranch = (& git branch --show-current).Trim()
+$currentBranch = ((& git branch --show-current) -join '').Trim()
 $detachedHead = [string]::IsNullOrWhiteSpace($currentBranch)
 if (-not $detachedHead -and $currentBranch -ne $releaseBranch) {
     throw "GitHub releases must be created from the $releaseBranch branch."
@@ -67,7 +67,7 @@ if ($detachedHead) {
     }
 }
 
-$repository = (& gh repo view --json nameWithOwner --jq '.nameWithOwner').Trim()
+$repository = ((& gh repo view --json nameWithOwner --jq '.nameWithOwner') -join '').Trim()
 if ([string]::IsNullOrWhiteSpace($repository) -or $LASTEXITCODE -ne 0) {
     throw 'Could not resolve the GitHub repository from origin.'
 }
@@ -117,8 +117,8 @@ $tagExists = $false
 & git rev-parse --verify --quiet "refs/tags/$tag" | Out-Null
 if ($LASTEXITCODE -eq 0) { $tagExists = $true }
 if ($tagExists) {
-    $tagCommit = (& git rev-list -n 1 $tag).Trim()
-    $headCommit = (& git rev-parse HEAD).Trim()
+    $tagCommit = ((& git rev-list -n 1 $tag) -join '').Trim()
+    $headCommit = ((& git rev-parse HEAD) -join '').Trim()
     if ($tagCommit -ne $headCommit) {
         throw "Tag $tag points to $tagCommit, not HEAD $headCommit. Check out the tagged commit or use a new version."
     }
