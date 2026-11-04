@@ -17461,7 +17461,7 @@ static void UpdateFastPlace121(JNIEnv* env, bool enabled, bool guiOpen, bool inW
     { LockGuard lk(g_killAuraRenderMutex_121); kaBlocking = g_killAuraRenderSnapshot_121.blocking; }
     if (IsAutoRodTransactionActive121() || kaBlocking) return;
     if (!g_itemUseCooldownField_121 && mcCls) {
-        const char* names[] = { "itemUseCooldown", "field_1752", "f_91071_", nullptr };
+        const char* names[] = { "itemUseCooldown", "field_1752", "rightClickDelay", "f_91071_", nullptr };
         for (int i = 0; names[i] && !g_itemUseCooldownField_121; ++i) {
             g_itemUseCooldownField_121 = env->GetFieldID(mcCls, names[i], "I");
             if (env->ExceptionCheck()) { env->ExceptionClear(); g_itemUseCooldownField_121 = nullptr; }

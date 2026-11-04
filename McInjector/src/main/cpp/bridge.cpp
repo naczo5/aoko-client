@@ -8381,8 +8381,11 @@ static void UpdateNoHurtCamLegacy(JNIEnv* env, const Config& cfg, const GameStat
 
     jint hurtTime = env->GetIntField(player, g_hurtTimeField);
     if (env->ExceptionCheck()) { env->ExceptionClear(); env->DeleteLocalRef(player); return; }
-    // Only zero lingering hurtTime after velocity has processed the new hit edge
-    if (hurtTime > 0 && hurtTime <= g_lastHurtTime) {
+    // With Velocity on, wait until UpdateVelocity has seen the new hit edge
+    // (g_lastHurtTime caught up). With Velocity off, ServerLoop holds
+    // g_lastHurtTime at 0, so clear the camera shake immediately.
+    const bool velocitySawHit = !cfg.velocityEnabled || hurtTime <= g_lastHurtTime;
+    if (hurtTime > 0 && velocitySawHit) {
         env->SetIntField(player, g_hurtTimeField, 0);
         if (env->ExceptionCheck()) env->ExceptionClear();
     }
