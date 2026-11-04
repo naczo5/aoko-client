@@ -127,7 +127,7 @@ old mentions instead of documenting removals).
 | Kind | Typical work | Extra skill |
 | :--- | :--- | :--- |
 | Overlay / ESP / HUD | ParseConfig + ImGui + WorldToScreen | none |
-| C# input (clicker, aim, SpeedBridge) | Clicker loop + config so ClickGUI matches | none unless it also swaps items |
+| C# input (clicker, aim, SpeedBridge) | Clicker loop + config so the external GUI matches | none unless it also swaps items |
 | Native JNI / packets / hotbar | Both bridges + exclusive-resource lockout | **packet-and-call-hygiene** |
 | Port from in-JVM Java | Unwrap to vanilla APIs, then pick a row above | **java-to-jni-port** |
 

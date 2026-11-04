@@ -39,10 +39,8 @@ aoko client is an open-source Windows utility client and external overlay for Lu
 - GTB Helper & Pixel Party Assist
 - Discord Rich Presence
 - Nametags, Closest Player panel, Fight Status, Chest ESP, Block ESP, BedPlates, Fireball Warning
-- In-Game ClickGUI (Dear ImGui midnight blue glass menu with category tabs, real-time search, animated collapsible module cards, pill toggles, and inline keybind configuration)
-- GUI Modes (Hybrid External WPF + In-Game ClickGUI, External Only, In-Game Only)
 - In-game HUD Editor & module list styling
-- Per-module keybinds (all unbound by default, configurable in WPF & ClickGUI)
+- Per-module keybinds (all unbound by default, configurable in the external GUI)
 - Profiles saved in `%AppData%\Aoko\profiles\`
 - GUI customization (slate palettes, module list style, client watermark)
 

@@ -14,4 +14,4 @@ description: Sprint reset assist to maximize dealt knockback on hit and sustain 
 ## Usage notes
 
 - Engages while attacking an opponent, briefly resetting the sprint state to deal first-hit sprint knockback repeatedly.
-- Can be bound to a custom key in the External GUI or ClickGUI.
+- Can be bound to a custom key in the External GUI.
