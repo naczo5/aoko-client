@@ -562,6 +562,11 @@ public class Clicker : INotifyPropertyChanged
             SprintEnabled = false;
             TntTimerEnabled = false;
             WTapEnabled = false;
+            JumpResetEnabled = false;
+            HitSelectEnabled = false;
+            TrajectoriesEnabled = false;
+            MurderMysteryEnabled = false;
+            BreakProgressEnabled = false;
 
             ShowModuleList = false;
             ShowLogo = false;
@@ -2088,6 +2093,85 @@ public class Clicker : INotifyPropertyChanged
         }
     }
 
+    private bool _jumpResetEnabled = false;
+    public bool JumpResetEnabled
+    {
+        get => _jumpResetEnabled;
+        set
+        {
+            if (_jumpResetEnabled == value) return;
+            _jumpResetEnabled = value;
+            OnPropertyChanged(nameof(JumpResetEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _hitSelectEnabled = false;
+    public bool HitSelectEnabled
+    {
+        get => _hitSelectEnabled;
+        set
+        {
+            if (_hitSelectEnabled == value) return;
+            _hitSelectEnabled = value;
+            OnPropertyChanged(nameof(HitSelectEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _trajectoriesEnabled = false;
+    public bool TrajectoriesEnabled
+    {
+        get => _trajectoriesEnabled;
+        set
+        {
+            if (_trajectoriesEnabled == value) return;
+            _trajectoriesEnabled = value;
+            OnPropertyChanged(nameof(TrajectoriesEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _murderMysteryEnabled = false;
+    public bool MurderMysteryEnabled
+    {
+        get => _murderMysteryEnabled;
+        set
+        {
+            if (_murderMysteryEnabled == value) return;
+            _murderMysteryEnabled = value;
+            OnPropertyChanged(nameof(MurderMysteryEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _breakProgressEnabled = false;
+    public bool BreakProgressEnabled
+    {
+        get => _breakProgressEnabled;
+        set
+        {
+            if (_breakProgressEnabled == value) return;
+            _breakProgressEnabled = value;
+            OnPropertyChanged(nameof(BreakProgressEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private int _jumpResetChance = 80;
+    public int JumpResetChance
+    {
+        get => _jumpResetChance;
+        set
+        {
+            int clamped = Math.Clamp(value, 0, 100);
+            if (_jumpResetChance == clamped) return;
+            _jumpResetChance = clamped;
+            OnPropertyChanged(nameof(JumpResetChance));
+            StateChanged?.Invoke();
+        }
+    }
+
     private bool _triggerbotEnabled = false;
     public bool TriggerbotEnabled
     {
@@ -3097,6 +3181,19 @@ public class Clicker : INotifyPropertyChanged
                 }
             }
             
+            // Hit Select: skip left clicks while the crosshair target is still inside its
+            // hurt window, where the server ignores the hit. Bridges that do not report
+            // lookingAtEntityHurtTime leave it at 0, so this fails open.
+            if (_useLeftButton && HitSelectEnabled && GameStateClient.Instance.IsConnected)
+            {
+                var state = GameStateClient.Instance.CurrentState;
+                if (ShouldHitSelectSkip(state.LookingAtEntity, state.LookingAtEntityHurtTime))
+                {
+                    await Task.Delay(10, token).ConfigureAwait(false);
+                    continue;
+                }
+            }
+
             float minCps = _useLeftButton ? MinCPS : RightMinCPS;
             float maxCps = _useLeftButton ? MaxCPS : RightMaxCPS;
             if (minCps > maxCps) minCps = maxCps;
@@ -3154,6 +3251,16 @@ public class Clicker : INotifyPropertyChanged
         }
     }
     
+    /// <summary>
+    /// Target hurtTime counts down 10..0 after each damaging hit. Clicks that land
+    /// while it is above this value hit the target's invulnerability window.
+    /// One tick of slack covers the round trip to the server.
+    /// </summary>
+    internal const int HitSelectHurtTimeThreshold = 1;
+
+    internal static bool ShouldHitSelectSkip(bool lookingAtEntity, int targetHurtTime)
+        => lookingAtEntity && targetHurtTime > HitSelectHurtTimeThreshold;
+
     private void PerformClick(bool leftButton)
     {
         INPUT[] inputs = leftButton ? _leftClickInputs : _rightClickInputs;

@@ -19,7 +19,7 @@ aoko client is an open-source Windows utility client and external overlay for Lu
 
 ## Features (current)
 
-- Kill Aura (configurable CPS, attack/swing ranges, FOV, auto-block, smooth rotations)
+- Kill Aura (Beta; configurable CPS, attack/swing ranges, FOV, auto-block, smooth rotations)
 - Autoclicker (left/right, CPS range, jitter, block-only options)
 - Aim Assist
 - Triggerbot
@@ -33,16 +33,12 @@ aoko client is an open-source Windows utility client and external overlay for Lu
 - AntiDebuff (hides Blindness/Nausea client-side, plus Darkness on 1.21/26.1/26.2)
 - Nick Hider (JVMTI-based local name spoofing)
 - Hit Delay Fix (removes 1.8.9 attack cooldown delays)
-- Fast Place (removes 4-tick right-click delay for instant block and projectile placement)
-- No Hurt Cam (removes camera wobble on damage, stabilizing combat vision)
-- Sprint (automatic forward sprint without double-tapping or holding a sprint key)
-- TNT Timer (displays countdown fuse time above ignited TNT entities)
-- WTap (sprint reset to maximize knockback on hits and sustain combos)
+- Beta modules (Beta tab, not thoroughly tested): Fast Place, No Hurt Cam, Sprint, TNT Timer, WTap, Jump Reset, Hit Select, Trajectories, Murder Mystery helper, Break Progress
 - Chest Stealer (external cursor-based with menu check)
 - Refill (shift-clicks Instant Health/Regen pots and golden apples into empty hotbar slots while your inventory is open)
 - GTB Helper & Pixel Party Assist
 - Discord Rich Presence
-- Nametags, Closest Player panel, Fight Status, Chest ESP, Block ESP, BedPlates, Fireball Warning, TNT Timer
+- Nametags, Closest Player panel, Fight Status, Chest ESP, Block ESP, BedPlates, Fireball Warning
 - In-Game ClickGUI (Dear ImGui midnight blue glass menu with category tabs, real-time search, animated collapsible module cards, pill toggles, and inline keybind configuration)
 - GUI Modes (Hybrid External WPF + In-Game ClickGUI, External Only, In-Game Only)
 - In-game HUD Editor & module list styling

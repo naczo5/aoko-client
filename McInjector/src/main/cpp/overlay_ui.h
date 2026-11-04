@@ -864,5 +864,120 @@ private:
     }
 };
 
+
+// ── Beta world overlays (Trajectories, Murder Mystery, Break Progress) ──────
+// Shared by both bridges. project(x, y, z, &sx, &sy) maps a world point to
+// screen pixels and returns false when it is behind the camera.
+
+struct WorldPoint { double x, y, z; };
+
+template <typename PointVec, typename Point, typename ProjectFn>
+inline void DrawTrajectory(ImDrawList* dl, const Theme& th, const PointVec& points,
+                           bool hitBlock, const Point& impact, ProjectFn project) {
+    if (!dl || points.size() < 2) return;
+    bool havePrev = false;
+    float prevX = 0.0f, prevY = 0.0f;
+    const size_t n = points.size();
+    for (size_t i = 0; i < n; ++i) {
+        float sx = 0.0f, sy = 0.0f;
+        const bool ok = project(points[i].x, points[i].y, points[i].z, &sx, &sy);
+        if (ok && havePrev) {
+            const float t = (float)i / (float)(n - 1);
+            dl->AddLine(ImVec2(prevX, prevY), ImVec2(sx, sy), WithAlpha(th.AccentAt(t), 220), 2.0f);
+        }
+        havePrev = ok;
+        prevX = sx;
+        prevY = sy;
+    }
+    float ix = 0.0f, iy = 0.0f;
+    if (project(impact.x, impact.y, impact.z, &ix, &iy)) {
+        const ImU32 col = hitBlock ? SemanticGood() : SemanticWarn();
+        dl->AddCircle(ImVec2(ix, iy), 7.0f, WithAlpha(col, 230), 20, 2.0f);
+        Diamond(dl, ImVec2(ix, iy), 3.0f, col);
+    }
+}
+
+struct MurderTag {
+    std::string name;
+    double x, y, z;
+    float dist;
+    int role; // 1 = bow holder, 2 = murderer (lc::beta::MurderRole)
+};
+
+// Role tags above players plus a murderer alert near the top of the screen.
+template <typename ProjectFn>
+inline void DrawMurderTags(ImDrawList* dl, int screenW, const std::vector<MurderTag>& tags,
+                           ProjectFn project) {
+    if (!dl) return;
+    const ImU32 murdererCol = IM_COL32(238, 92, 92, 255);
+    const ImU32 bowCol = IM_COL32(104, 156, 246, 255);
+    std::string alert;
+    for (size_t i = 0; i < tags.size(); ++i) {
+        const MurderTag& r = tags[i];
+        const bool murderer = r.role == 2;
+        if (murderer) {
+            char buf[96];
+            snprintf(buf, sizeof(buf), "%s%s (%.0fm)", alert.empty() ? "" : ", ", r.name.c_str(), r.dist);
+            alert += buf;
+        }
+        float sx = 0.0f, sy = 0.0f;
+        if (!project(r.x, r.y + 2.45, r.z, &sx, &sy)) continue;
+        const char* label = murderer ? "MURDERER" : "BOW";
+        const ImU32 col = murderer ? murdererCol : bowCol;
+        const ImVec2 ts = ImGui::CalcTextSize(label);
+        const ImVec2 a(sx - ts.x * 0.5f - 6.0f, sy - ts.y * 0.5f - 3.0f);
+        const ImVec2 b(sx + ts.x * 0.5f + 6.0f, sy + ts.y * 0.5f + 3.0f);
+        dl->AddRectFilled(a, b, IM_COL32(10, 15, 24, 215), 4.0f);
+        dl->AddRect(a, b, WithAlpha(col, 200), 4.0f);
+        dl->AddText(ImVec2(sx - ts.x * 0.5f, sy - ts.y * 0.5f), col, label);
+    }
+    if (!alert.empty()) {
+        const std::string text = "Murderer: " + alert;
+        const ImVec2 ts = ImGui::CalcTextSize(text.c_str());
+        const float x = (float)screenW * 0.5f - ts.x * 0.5f;
+        const float y = 64.0f;
+        const ImVec2 a(x - 10.0f, y - 5.0f), b(x + ts.x + 10.0f, y + ts.y + 5.0f);
+        dl->AddRectFilled(a, b, IM_COL32(24, 8, 10, 220), 5.0f);
+        dl->AddRect(a, b, WithAlpha(murdererCol, 210), 5.0f);
+        dl->AddText(ImVec2(x, y), murdererCol, text.c_str());
+    }
+}
+
+struct BreakTag {
+    double x, y, z; // block center
+    int percent;
+    bool self;
+    std::string breaker;
+};
+
+template <typename ProjectFn>
+inline void DrawBreakTags(ImDrawList* dl, const std::vector<BreakTag>& tags, ProjectFn project) {
+    if (!dl) return;
+    for (size_t i = 0; i < tags.size(); ++i) {
+        const BreakTag& r = tags[i];
+        float sx = 0.0f, sy = 0.0f;
+        if (!project(r.x, r.y, r.z, &sx, &sy)) continue;
+        char pct[16];
+        snprintf(pct, sizeof(pct), "%d%%", r.percent);
+        const float t = Clamp01((float)r.percent / 100.0f);
+        // Other players' progress shifts from amber to red; own mining stays neutral.
+        const ImU32 col = r.self ? IM_COL32(226, 234, 242, 250) : Mix(SemanticWarn(), SemanticBad(), t);
+        const float small = ImGui::GetFontSize() * 0.85f;
+        const ImVec2 ts = ImGui::CalcTextSize(pct);
+        const float nameW = r.breaker.empty() ? 0.0f : TextWidth(r.breaker.c_str(), small);
+        const float wBox = (std::max)(ts.x, nameW) + 12.0f;
+        const float hBox = ts.y + (r.breaker.empty() ? 0.0f : small + 2.0f) + 8.0f;
+        const ImVec2 a(sx - wBox * 0.5f, sy - hBox * 0.5f);
+        const ImVec2 b(sx + wBox * 0.5f, sy + hBox * 0.5f);
+        dl->AddRectFilled(a, b, IM_COL32(10, 15, 24, 210), 4.0f);
+        dl->AddRect(a, b, WithAlpha(col, 170), 4.0f);
+        dl->AddRectFilled(ImVec2(a.x + 2.0f, b.y - 3.0f),
+                          ImVec2(a.x + 2.0f + (wBox - 4.0f) * t, b.y - 1.0f), col, 1.0f);
+        dl->AddText(ImVec2(sx - ts.x * 0.5f, a.y + 3.0f), col, pct);
+        if (!r.breaker.empty())
+            TextCentered(dl, sx, a.y + 3.0f + ts.y + 1.0f, r.breaker.c_str(), small, IM_COL32(190, 202, 214, 230));
+    }
+}
+
 } // namespace ui
 } // namespace aoko

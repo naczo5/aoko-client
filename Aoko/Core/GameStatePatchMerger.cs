@@ -56,6 +56,8 @@ internal static class GameStatePatchMerger
             LookingAtBlock = previous.LookingAtBlock,
             LookingAtEntity = previous.LookingAtEntity,
             LookingAtEntityLatched = previous.LookingAtEntityLatched,
+            LookingAtEntityHurtTime = previous.LookingAtEntityHurtTime,
+            ModuleStatus = previous.ModuleStatus,
             BreakingBlock = previous.BreakingBlock,
             AttackCooldown = previous.AttackCooldown,
             AttackCooldownPerTick = previous.AttackCooldownPerTick,
@@ -98,6 +100,11 @@ internal static class GameStatePatchMerger
                 case "lookingAtBlock": TryRead<bool>(value, v => merged.LookingAtBlock = v); break;
                 case "lookingAtEntity": TryRead<bool>(value, v => merged.LookingAtEntity = v); break;
                 case "lookingAtEntityLatched": TryRead<bool>(value, v => merged.LookingAtEntityLatched = v); break;
+                case "lookingAtEntityHurtTime": TryRead<int>(value, v => merged.LookingAtEntityHurtTime = v); break;
+                case "moduleStatus":
+                    if (value is null) merged.ModuleStatus = new Dictionary<string, string>();
+                    else TryRead<Dictionary<string, string>>(value, v => merged.ModuleStatus = v ?? new());
+                    break;
                 case "breakingBlock": TryRead<bool>(value, v => merged.BreakingBlock = v); break;
                 case "attackCooldown": TryRead<float>(value, v => merged.AttackCooldown = v); break;
                 case "attackCooldownPerTick": TryRead<float>(value, v => merged.AttackCooldownPerTick = v); break;

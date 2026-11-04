@@ -325,6 +325,11 @@ public class GameStateAndProfileTests
     [InlineData("SprintEnabled", "sprintEnabled")]
     [InlineData("TntTimerEnabled", "tntTimerEnabled")]
     [InlineData("WTapEnabled", "wTapEnabled")]
+    [InlineData("JumpResetEnabled", "jumpResetEnabled")]
+    [InlineData("HitSelectEnabled", "hitSelectEnabled")]
+    [InlineData("TrajectoriesEnabled", "trajectoriesEnabled")]
+    [InlineData("MurderMysteryEnabled", "murderMysteryEnabled")]
+    [InlineData("BreakProgressEnabled", "breakProgressEnabled")]
     public void Profile_NewModules_DefaultFalseAndSerializeRoundTrip(string propertyName, string jsonKey)
     {
         var defaultProfile = new Profile();

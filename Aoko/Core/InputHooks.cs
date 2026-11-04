@@ -108,6 +108,11 @@ public static class InputHooks
         ["sprint"]           = 0,
         ["tnttimer"]         = 0,
         ["wtap"]             = 0,
+        ["jumpreset"]        = 0,
+        ["hitselect"]        = 0,
+        ["trajectories"]     = 0,
+        ["murdermystery"]    = 0,
+        ["breakprogress"]    = 0,
         ["panic"]            = 0,
         ["hudeditor"]        = 0,
     };
@@ -294,6 +299,11 @@ public static class InputHooks
             case "sprint":           c.SprintEnabled = !c.SprintEnabled; break;
             case "tnttimer":         c.TntTimerEnabled = !c.TntTimerEnabled; break;
             case "wtap":             c.WTapEnabled = !c.WTapEnabled; break;
+            case "jumpreset":        c.JumpResetEnabled = !c.JumpResetEnabled; break;
+            case "hitselect":        c.HitSelectEnabled = !c.HitSelectEnabled; break;
+            case "trajectories":     c.TrajectoriesEnabled = !c.TrajectoriesEnabled; break;
+            case "murdermystery":    c.MurderMysteryEnabled = !c.MurderMysteryEnabled; break;
+            case "breakprogress":    c.BreakProgressEnabled = !c.BreakProgressEnabled; break;
             case "hudeditor":        c.HudEditorActive = !c.HudEditorActive; break;
         }
     }

@@ -1290,6 +1290,12 @@ public class GameStateClient : INotifyPropertyChanged
                     sprint = clicker.SprintEnabled,
                     tntTimer = clicker.TntTimerEnabled,
                     wTap = clicker.WTapEnabled,
+                    jumpReset = clicker.JumpResetEnabled,
+                    hitSelect = clicker.HitSelectEnabled,
+                    trajectories = clicker.TrajectoriesEnabled,
+                    murderMystery = clicker.MurderMysteryEnabled,
+                    breakProgress = clicker.BreakProgressEnabled,
+                    jumpResetChance = clicker.JumpResetChance,
                     // Per-module keybinds
                     keybindAutoclicker   = InputHooks.GetModuleKey("autoclicker"),
                     keybindRightClick    = InputHooks.GetModuleKey("rightclick"),
@@ -1317,6 +1323,11 @@ public class GameStateClient : INotifyPropertyChanged
                     keybindSprint = InputHooks.GetModuleKey("sprint"),
                     keybindTntTimer = InputHooks.GetModuleKey("tnttimer"),
                     keybindWTap = InputHooks.GetModuleKey("wtap"),
+                    keybindJumpReset = InputHooks.GetModuleKey("jumpreset"),
+                    keybindHitSelect = InputHooks.GetModuleKey("hitselect"),
+                    keybindTrajectories = InputHooks.GetModuleKey("trajectories"),
+                    keybindMurderMystery = InputHooks.GetModuleKey("murdermystery"),
+                    keybindBreakProgress = InputHooks.GetModuleKey("breakprogress"),
                     hudEditor = clicker.HudEditorActive,
                     hudLayout = clicker.HudLayout.ToJson()
                     };

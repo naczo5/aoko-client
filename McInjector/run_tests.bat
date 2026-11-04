@@ -194,6 +194,14 @@ echo [NativeTests] Running reach_bytecode_injector_tests.exe...
 tests\reach_bytecode_injector_tests.exe
 if %errorlevel% neq 0 exit /b %errorlevel%
 
+echo [NativeTests] Building beta_modules_tests.exe...
+"%GPP%" -m64 -std=c++11 -O2 -static-libgcc -static-libstdc++ -o tests\beta_modules_tests.exe tests\beta_modules_tests.cpp
+if %errorlevel% neq 0 exit /b %errorlevel%
+
+echo [NativeTests] Running beta_modules_tests.exe...
+tests\beta_modules_tests.exe
+if %errorlevel% neq 0 exit /b %errorlevel%
+
 echo [NativeTests] All native harness tests passed.
 exit /b 0
 

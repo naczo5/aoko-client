@@ -270,7 +270,7 @@ Sync-File $tempStill "121_gui.png"
 
 # 2. Capture individual tab screenshots if requested
 if ($IncludeTabs) {
-    $tabNames = @("combat", "render", "utility", "risky", "stats", "settings")
+    $tabNames = @("combat", "render", "utility", "risky", "beta", "stats", "settings")
     for ($idx = 0; $idx -lt $tabNames.Length; $idx++) {
         $tName = $tabNames[$idx]
         $cp.SelectedIndex = $idx
@@ -381,9 +381,7 @@ if (-not $NoVideo -or -not $NoGif) {
             Smooth-Scroll 2 0 $h2 50 "Magic"
             Hold-View 16
 
-            # --- TAB 3: Risky (Theme: Graphite -> mid-scroll Coral, DevMode OFF: KillAura hidden) ---
-            $card = $win.FindName("KillAuraCard")
-            if ($card) { $card.Visibility = [System.Windows.Visibility]::Collapsed }
+            # --- TAB 3: Risky (Theme: Graphite -> mid-scroll Coral) ---
             Set-Theme "Graphite"
             $cp.SelectedIndex = 3
             $tab3 = $cp.Items[3]
@@ -400,23 +398,36 @@ if (-not $NoVideo -or -not $NoGif) {
                 Hold-View 18
             }
 
-            # --- TAB 4: Stats (Theme: Blend -> mid-view Digital Horizon) ---
-            Set-Theme "Blend"
+            # --- TAB 4: Beta (Theme: Ink -> mid-scroll Steel, DevMode OFF: KillAura hidden) ---
+            $card = $win.FindName("KillAuraCard")
+            if ($card) { $card.Visibility = [System.Windows.Visibility]::Collapsed }
+            Set-Theme "Ink"
             $cp.SelectedIndex = 4
+            $tab4 = $cp.Items[4]
+            $tab4.Content.ScrollToVerticalOffset(0)
+            Pump-Events 15
+            Hold-View 18
+            $h4 = $tab4.Content.ScrollableHeight
+            Smooth-Scroll 4 0 $h4 50 "Steel"
+            Hold-View 16
+
+            # --- TAB 5: Stats (Theme: Blend -> mid-view Digital Horizon) ---
+            Set-Theme "Blend"
+            $cp.SelectedIndex = 5
             Pump-Events 15
             Hold-View 20
             Set-Theme "Digital Horizon"
             Hold-View 20
 
-            # --- TAB 5: Settings (Theme: Lime Water -> mid-scroll Blossom -> bottom Steel) ---
+            # --- TAB 6: Settings (Theme: Lime Water -> mid-scroll Blossom -> bottom Steel) ---
             Set-Theme "Lime Water"
-            $cp.SelectedIndex = 5
-            $tab5 = $cp.Items[5]
-            $tab5.Content.ScrollToVerticalOffset(0)
+            $cp.SelectedIndex = 6
+            $tab6 = $cp.Items[6]
+            $tab6.Content.ScrollToVerticalOffset(0)
             Pump-Events 15
             Hold-View 18
-            $h5 = $tab5.Content.ScrollableHeight
-            Smooth-Scroll 5 0 $h5 48 "Blossom"
+            $h6 = $tab6.Content.ScrollableHeight
+            Smooth-Scroll 6 0 $h6 48 "Blossom"
             Hold-View 16
 
             # Switch back to canonical Steel theme at the end of Settings

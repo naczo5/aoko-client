@@ -124,7 +124,12 @@ public class ModuleRegistrationTests
             ["nohurtcam"] = "noHurtCam",
             ["sprint"] = "sprint",
             ["tnttimer"] = "tntTimer",
-            ["wtap"] = "wTap"
+            ["wtap"] = "wTap",
+            ["jumpreset"] = "jumpReset",
+            ["hitselect"] = "hitSelect",
+            ["trajectories"] = "trajectories",
+            ["murdermystery"] = "murderMystery",
+            ["breakprogress"] = "breakProgress"
         };
 
         var catalogIds = ModuleCatalog.Requiring(ModuleCatalog.Surfaces.OverlayList)
@@ -350,6 +355,73 @@ public class ModuleRegistrationTests
         AssertMissing("bridge_capabilities.h LegacyCapabilitiesJson modules", fallbackIds, nativeIds);
     }
 
+    [Fact]
+    public void BetaModules_CardsLiveInBetaTab()
+    {
+        string xaml = File.ReadAllText(Path.Combine(RepoRoot, "Aoko", "MainWindow.xaml"));
+        int start = xaml.IndexOf("<TabItem Header=\"Beta\">", StringComparison.Ordinal);
+        Assert.True(start >= 0, "Beta tab not found in MainWindow.xaml");
+        int end = xaml.IndexOf("</TabItem>", start, StringComparison.Ordinal);
+        string betaTab = xaml[start..end];
+        Assert.Contains("not thoroughly tested", betaTab, StringComparison.OrdinalIgnoreCase);
+
+        foreach (ModuleCatalog.Entry entry in ModuleCatalog.All)
+        {
+            string tagPattern = $@"x:Name=""Keybind\w+Button""\s+Tag=""{Regex.Escape(entry.Id)}""";
+            bool inBeta = Regex.IsMatch(betaTab, tagPattern);
+            if (entry.Beta)
+                Assert.True(inBeta, $"Beta module '{entry.Id}' card must be in the Beta tab.");
+            else
+                Assert.False(inBeta, $"Non-beta module '{entry.Id}' card must not be in the Beta tab.");
+        }
+    }
+
+    [Fact]
+    public void SettingSpecs_AreWiredOnEverySurface()
+    {
+        string payload = File.ReadAllText(Path.Combine(RepoRoot, "Aoko", "Core", "GameStateClient.cs"));
+        string legacy = File.ReadAllText(Path.Combine(RepoRoot, "McInjector", "src", "main", "cpp", "bridge.cpp"));
+        string modern = File.ReadAllText(Path.Combine(RepoRoot, "McInjector", "src", "main", "cpp", "bridge_261.cpp"));
+        var legacyCaps = BridgeCapabilities.ForVersionFallback("1.8.9");
+        var modernCaps = BridgeCapabilities.ForVersionFallback("26.1");
+
+        foreach (ModuleCatalog.Entry entry in ModuleCatalog.All.Where(e => e.Settings != null))
+        {
+            foreach (ModuleCatalog.SettingSpec spec in entry.Settings!)
+            {
+                string where = $"{entry.Id}.{spec.WireKey}";
+                Assert.True(spec.Min <= spec.Default && spec.Default <= spec.Max, $"{where}: default outside range");
+
+                var clickerProp = typeof(Clicker).GetProperty(spec.Property);
+                var profileProp = typeof(Profile).GetProperty(spec.Property);
+                Assert.True(clickerProp != null, $"{where}: Clicker.{spec.Property} missing");
+                Assert.True(profileProp != null, $"{where}: Profile.{spec.Property} missing");
+                Assert.Equal(spec.Default, (int)profileProp!.GetValue(new Profile())!);
+
+                Assert.Matches($@"(?m)^\s*{Regex.Escape(spec.WireKey)}\s*=\s*clicker\.{Regex.Escape(spec.Property)}\b", payload);
+                Assert.Contains($"\"{spec.WireKey}\"", legacy, StringComparison.Ordinal);
+                Assert.Contains($"\"{spec.WireKey}\"", modern, StringComparison.Ordinal);
+                Assert.True(legacyCaps.SupportsSetting(spec.WireKey), $"{where}: legacy capability missing");
+                Assert.True(modernCaps.SupportsSetting(spec.WireKey), $"{where}: modern capability missing");
+
+                // Clicker must clamp to the declared range.
+                Clicker clicker = Clicker.Instance;
+                object? saved = clickerProp!.GetValue(clicker);
+                try
+                {
+                    clickerProp.SetValue(clicker, spec.Max + 1000);
+                    Assert.Equal(spec.Max, (int)clickerProp.GetValue(clicker)!);
+                    clickerProp.SetValue(clicker, spec.Min - 1000);
+                    Assert.Equal(spec.Min, (int)clickerProp.GetValue(clicker)!);
+                }
+                finally
+                {
+                    clickerProp.SetValue(clicker, saved);
+                }
+            }
+        }
+    }
+
     private static void ForceAllDiscordModules(Clicker clicker, bool enabled)
     {
         foreach (ModuleCatalog.Entry entry in ModuleCatalog.Requiring(ModuleCatalog.Surfaces.DiscordRpc))
@@ -396,6 +468,11 @@ public class ModuleRegistrationTests
             case "sprint": clicker.SprintEnabled = enabled; return true;
             case "tnttimer": clicker.TntTimerEnabled = enabled; return true;
             case "wtap": clicker.WTapEnabled = enabled; return true;
+            case "jumpreset": clicker.JumpResetEnabled = enabled; return true;
+            case "hitselect": clicker.HitSelectEnabled = enabled; return true;
+            case "trajectories": clicker.TrajectoriesEnabled = enabled; return true;
+            case "murdermystery": clicker.MurderMysteryEnabled = enabled; return true;
+            case "breakprogress": clicker.BreakProgressEnabled = enabled; return true;
             default: return false;
         }
     }

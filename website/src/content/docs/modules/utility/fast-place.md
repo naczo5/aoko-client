@@ -3,6 +3,8 @@ title: Fast Place
 description: Removes the right-click delay for fast block placement and projectile use.
 ---
 
+> **Beta.** This module lives in the Beta tab of the external GUI. It was not thoroughly tested; use it at your own risk.
+
 *Fast Place* removes the client-side 4-tick right-click delay, allowing continuous rapid placement of blocks, projectiles, and placeable items while holding right-click.
 
 ## Version support

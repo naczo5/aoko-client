@@ -38,6 +38,9 @@
 #include "chunk_scan_common.h"
 #include "bedplates_common.h"
 #include "bedplates_icons.h"
+#include "beta_modules_core.h"
+#include "combat_target.h"
+#include "module_status.h"
 #include "fight_status_core.h"
 #include "fireball_warning_common.h"
 #include "aim_assist_projection.h"
@@ -285,6 +288,17 @@ struct Config {
     int keybindTntTimer = 0;
     bool wTap = false;
     int keybindWTap = 0;
+    bool jumpReset = false;
+    int jumpResetChance = 80;
+    int keybindJumpReset = 0;
+    bool hitSelect = false;
+    int keybindHitSelect = 0;
+    bool trajectories = false;
+    int keybindTrajectories = 0;
+    bool murderMystery = false;
+    int keybindMurderMystery = 0;
+    bool breakProgress = false;
+    int keybindBreakProgress = 0;
     std::string gtbHint;
     int gtbCount = 0;
     std::string gtbPreview;
@@ -603,6 +617,7 @@ struct GameState {
     bool lookingAtBlock = false;
     bool lookingAtEntity = false;
     bool lookingAtEntityLatched = false;
+    int lookingAtEntityHurtTime = 0;
     bool breakingBlock = false;
     float attackCooldown = 1.0f;
     float attackCooldownPerTick = 0.08f;
@@ -946,6 +961,8 @@ static bool      g_killAuraPrevValid = false;
 static DWORD     g_killAuraNextResolveMs = 0;
 static DWORD     g_killAuraNextPremotionRefreshMs = 0;
 static int g_lastHurtTime = 0;
+// Last hurtTime Jump Reset sampled; No Hurt Cam waits for it so the hit edge is not cleared first.
+static int g_jumpResetSeenHurt = 0;
 
 // ---- AntiDebuff (module-owned; removes nausea and suppresses blindness rendering) ----
 // 1.8.9: EntityLivingBase.removePotionEffect(int id). Potion IDs: blindness=15, nausea/confusion=9.
@@ -4281,6 +4298,29 @@ void MaybeRefreshMappings(JNIEnv* env) {
     nextCoreRetryAt = now + coreRetryDelayMs;
 }
 
+// Shared-check facts for a 1.8.9 player candidate. KillAura and Murder Mystery
+// both call lc::target::Evaluate on these.
+static lc::target::Facts BuildTargetFactsLegacy(JNIEnv* env, jobject self, jobject candidate,
+                                                bool queryTeam, bool queryBot) {
+    lc::target::Facts f;
+    f.isSelf = env->IsSameObject(candidate, self) == JNI_TRUE;
+    if (f.isSelf) return f;
+    if (queryTeam && g_killAuraIsSameTeam) {
+        jboolean teammate = env->CallBooleanMethod(self, g_killAuraIsSameTeam, candidate);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); teammate = JNI_FALSE; }
+        f.teammate = teammate == JNI_TRUE;
+    }
+    if (g_getHealthMethod) {
+        f.health = env->CallFloatMethod(candidate, g_getHealthMethod);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); f.health = 0.0f; }
+    } else {
+        f.healthKnown = false;
+    }
+    f.stableName = GetStablePlayerName(env, candidate);
+    f.botLike = queryBot && !f.stableName.empty() && LooksLikeFakePlayerLine(f.stableName);
+    return f;
+}
+
 static void EnsureVelocityMappings(JNIEnv* env, jobject playerObj) {
     if (!env || !playerObj) return;
     if (g_motionXField && g_motionYField && g_motionZField && g_hurtTimeField) return;
@@ -4382,7 +4422,7 @@ static void UpdateVelocity(JNIEnv* env, const Config& cfg) {
 
     g_lastHurtTime = hurtTime;
 
-    if (cfg.noHurtCam && hurtTime > 0) {
+    if (cfg.noHurtCam && hurtTime > 0 && (!cfg.jumpReset || hurtTime <= g_jumpResetSeenHurt)) {
         env->SetIntField(selfObj, g_hurtTimeField, 0);
         if (env->ExceptionCheck()) env->ExceptionClear();
     }
@@ -5609,18 +5649,18 @@ static void UpdateKillAuraLegacy(JNIEnv* env, const Config& cfg) {
             if (env->ExceptionCheck()) { env->ExceptionClear(); visible = JNI_FALSE; }
             if (visible != JNI_TRUE) { env->DeleteLocalRef(candidate); continue; }
         }
-        if (cfg.killAuraTeams) {
-            jboolean teammate = env->CallBooleanMethod(selfObj, g_killAuraIsSameTeam, candidate);
-            if (env->ExceptionCheck()) { env->ExceptionClear(); teammate = JNI_FALSE; }
-            if (teammate == JNI_TRUE) { env->DeleteLocalRef(candidate); continue; }
-        }
-
-        float health = env->CallFloatMethod(candidate, g_getHealthMethod);
-        if (env->ExceptionCheck()) { env->ExceptionClear(); health = 0.0f; }
-        if (!std::isfinite(health) || health <= 0.1f) {
+        // Shared target rules (self, dead, teammate, nameless, bot) live in combat_target.h.
+        lc::target::Facts facts = BuildTargetFactsLegacy(
+            env, selfObj, candidate, cfg.killAuraTeams, cfg.killAuraBotCheck);
+        lc::target::Policy policy;
+        policy.skipTeammates = cfg.killAuraTeams;
+        policy.skipBots = cfg.killAuraBotCheck;
+        if (!lc::target::IsValid(facts, policy)) {
             env->DeleteLocalRef(candidate);
             continue;
         }
+        const std::string& stableName = facts.stableName;
+        const float health = facts.health;
 
         double x = env->GetDoubleField(candidate, g_posXField);
         double y = env->GetDoubleField(candidate, g_posYField);
@@ -5639,12 +5679,6 @@ static void UpdateKillAuraLegacy(JNIEnv* env, const Config& cfg) {
                 env->DeleteLocalRef(candidate);
                 continue;
             }
-        }
-
-        std::string stableName = GetStablePlayerName(env, candidate);
-        if (stableName.empty() || (cfg.killAuraBotCheck && LooksLikeFakePlayerLine(stableName))) {
-            env->DeleteLocalRef(candidate);
-            continue;
         }
 
         int armor = g_getTotalArmorValueMethod
@@ -8372,12 +8406,16 @@ static void UpdateFastPlaceLegacy(JNIEnv* env, const Config& cfg, const GameStat
 }
 
 static void UpdateNoHurtCamLegacy(JNIEnv* env, const Config& cfg, const GameState& state) {
-    if (!env || !cfg.noHurtCam || !state.mapped || !g_mcInstance || !g_thePlayerField || !g_hurtTimeField)
+    if (!env || !cfg.noHurtCam || !state.mapped || !g_mcInstance || !g_thePlayerField)
         return;
 
     jobject player = env->GetObjectField(g_mcInstance, g_thePlayerField);
     if (env->ExceptionCheck()) { env->ExceptionClear(); return; }
     if (!player) return;
+    // Velocity and Fight Status normally resolve hurtTime; resolve it here too so
+    // No Hurt Cam works on its own.
+    EnsureVelocityMappings(env, player);
+    if (!g_hurtTimeField) { env->DeleteLocalRef(player); return; }
 
     jint hurtTime = env->GetIntField(player, g_hurtTimeField);
     if (env->ExceptionCheck()) { env->ExceptionClear(); env->DeleteLocalRef(player); return; }
@@ -8385,7 +8423,8 @@ static void UpdateNoHurtCamLegacy(JNIEnv* env, const Config& cfg, const GameStat
     // (g_lastHurtTime caught up). With Velocity off, ServerLoop holds
     // g_lastHurtTime at 0, so clear the camera shake immediately.
     const bool velocitySawHit = !cfg.velocityEnabled || hurtTime <= g_lastHurtTime;
-    if (hurtTime > 0 && velocitySawHit) {
+    const bool jumpResetSawHit = !cfg.jumpReset || hurtTime <= g_jumpResetSeenHurt;
+    if (hurtTime > 0 && velocitySawHit && jumpResetSawHit) {
         env->SetIntField(player, g_hurtTimeField, 0);
         if (env->ExceptionCheck()) env->ExceptionClear();
     }
@@ -8496,6 +8535,153 @@ static void UpdateWTapLegacy(JNIEnv* env, const Config& cfg, const GameState& st
             }
         }
     }
+}
+
+// ===================== MODULE STATUS (1.8.9) =====================
+// Reasons a supported module is idle; sent to the loader as "moduleStatus".
+static lc::ModuleStatusMap g_moduleStatus18;
+static Mutex g_moduleStatusMutex18;
+
+static void SetModuleStatusLegacy(const char* moduleId, const std::string& reason) {
+    LockGuard lk(g_moduleStatusMutex18);
+    g_moduleStatus18.Set(moduleId, reason);
+}
+
+static std::string ModuleStatusJsonLegacy() {
+    LockGuard lk(g_moduleStatusMutex18);
+    return g_moduleStatus18.ToJson();
+}
+
+// ===================== JUMP RESET (1.8.9) =====================
+// Presses keyBindJump for one tick on the first sample of a new hit, which
+// cuts the knockback taken. Key-binding state only; no packets.
+static jfieldID g_keyBindJumpField = nullptr;
+static bool g_jumpResetHolding = false;
+static DWORD g_jumpResetPressMs = 0;
+static int g_jumpResetPrevHurt = 0;
+
+static jobject GetJumpKeyBindingLegacy(JNIEnv* env) {
+    if (!env || !g_mcInstance || !g_gameSettingsField) return nullptr;
+    jobject gs = env->GetObjectField(g_mcInstance, g_gameSettingsField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
+    if (!gs) return nullptr;
+    if (!g_keyBindJumpField) {
+        jclass gsCls = env->GetObjectClass(gs);
+        if (gsCls) {
+            const char* names[] = { "keyBindJump", "field_74314_A", nullptr };
+            for (int i = 0; names[i] && !g_keyBindJumpField; ++i) {
+                g_keyBindJumpField = env->GetFieldID(gsCls, names[i], "Lnet/minecraft/client/settings/KeyBinding;");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_keyBindJumpField = nullptr; }
+            }
+            env->DeleteLocalRef(gsCls);
+        }
+    }
+    jobject key = g_keyBindJumpField ? env->GetObjectField(gs, g_keyBindJumpField) : nullptr;
+    if (env->ExceptionCheck()) { env->ExceptionClear(); key = nullptr; }
+    env->DeleteLocalRef(gs);
+    return key;
+}
+
+static bool IsJumpKeyPhysicallyDownLegacy(JNIEnv* env, jobject key) {
+    if (env && key && g_keyBindingGetKeyCodeMethod && g_lwjglKeyboardClass && g_keyboardIsKeyDownMethod) {
+        jint code = env->CallIntMethod(key, g_keyBindingGetKeyCodeMethod);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); code = -1; }
+        if (code > 0) {
+            jboolean down = env->CallStaticBooleanMethod(g_lwjglKeyboardClass, g_keyboardIsKeyDownMethod, code);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); down = JNI_FALSE; }
+            return down == JNI_TRUE;
+        }
+    }
+    return (GetAsyncKeyState(VK_SPACE) & 0x8000) != 0;
+}
+
+static bool SetJumpKeyLegacy(JNIEnv* env, bool pressed) {
+    jobject key = GetJumpKeyBindingLegacy(env);
+    if (!key) return false;
+    bool ok = false;
+    if (pressed || !IsJumpKeyPhysicallyDownLegacy(env, key)) {
+        if (g_keyBindingPressedField) {
+            env->SetBooleanField(key, g_keyBindingPressedField, pressed ? JNI_TRUE : JNI_FALSE);
+            ok = !env->ExceptionCheck();
+            if (!ok) env->ExceptionClear();
+        }
+    } else {
+        ok = true; // user is holding jump; leave it pressed
+    }
+    env->DeleteLocalRef(key);
+    return ok;
+}
+
+static void UpdateJumpResetLegacy(JNIEnv* env, const Config& cfg, const GameState& state) {
+    if (!env) return;
+    const DWORD nowMs = GetTickCount();
+    if (g_jumpResetHolding && nowMs - g_jumpResetPressMs >= lc::beta::kJumpResetHoldMs) {
+        SetJumpKeyLegacy(env, false);
+        g_jumpResetHolding = false;
+    }
+    if (!cfg.jumpReset || !state.mapped || !state.inWorld || !g_mcInstance || !g_thePlayerField) {
+        g_jumpResetPrevHurt = 0;
+        g_jumpResetSeenHurt = 0;
+        return;
+    }
+
+    jobject player = env->GetObjectField(g_mcInstance, g_thePlayerField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); player = nullptr; }
+    if (!player) { g_jumpResetPrevHurt = 0; g_jumpResetSeenHurt = 0; return; }
+
+    EnsureVelocityMappings(env, player);
+    if (!g_onGroundField) {
+        jclass pc = env->GetObjectClass(player);
+        if (pc) {
+            const char* names[] = { "onGround", "field_70122_E", nullptr };
+            for (int i = 0; names[i] && !g_onGroundField; ++i) {
+                g_onGroundField = env->GetFieldID(pc, names[i], "Z");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_onGroundField = nullptr; }
+            }
+            env->DeleteLocalRef(pc);
+        }
+    }
+    if (!g_hurtTimeField || !g_onGroundField || !g_keyBindingPressedField) {
+        SetModuleStatusLegacy("jumpreset", "Missing hurtTime, onGround or KeyBinding.pressed mapping");
+        env->DeleteLocalRef(player);
+        return;
+    }
+
+    jint hurtTime = env->GetIntField(player, g_hurtTimeField);
+    jboolean onGround = env->GetBooleanField(player, g_onGroundField);
+    env->DeleteLocalRef(player);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return; }
+
+    lc::beta::JumpResetInput in;
+    in.hurtTime = hurtTime;
+    in.prevHurtTime = g_jumpResetPrevHurt;
+    in.onGround = onGround == JNI_TRUE;
+    in.movingForward = (GetAsyncKeyState('W') & 0x8000) != 0;
+    in.guiOpen = state.guiOpen;
+    in.chance = cfg.jumpResetChance;
+    in.roll = rand() % 100;
+    if (lc::beta::ShouldJumpReset(in)) {
+        if (SetJumpKeyLegacy(env, true)) {
+            g_jumpResetHolding = true;
+            g_jumpResetPressMs = nowMs;
+            SetModuleStatusLegacy("jumpreset", "");
+        } else {
+            SetModuleStatusLegacy("jumpreset", "Missing keyBindJump mapping");
+        }
+    }
+    g_jumpResetPrevHurt = hurtTime;
+    g_jumpResetSeenHurt = hurtTime;
+}
+
+static void UpdateSimpleModuleStatusLegacy(const Config& cfg) {
+    SetModuleStatusLegacy("fastplace", cfg.fastPlace && !g_rightClickDelayTimerField
+        ? "Missing Minecraft.rightClickDelayTimer mapping" : "");
+    SetModuleStatusLegacy("sprint", cfg.sprint && (!g_keyBindSprintField || !g_keyBindingPressedField)
+        ? "Missing keyBindSprint mapping" : "");
+    SetModuleStatusLegacy("nohurtcam", cfg.noHurtCam && !g_hurtTimeField
+        ? "Waiting for EntityLivingBase.hurtTime mapping" : "");
+    SetModuleStatusLegacy("hitselect", cfg.hitSelect && !g_entityHitField
+        ? "Missing MovingObjectPosition.entityHit mapping" : "");
 }
 
 static autotool::AutoToolState g_autoToolState18;
@@ -10924,6 +11110,34 @@ static void ExecuteAutoHealLegacy(JNIEnv* env, const Config& cfg, const GameStat
     env->PopLocalFrame(nullptr);
 }
 
+// Hit Select: hurtTime of the living entity under the crosshair (0 when none).
+static jclass g_hitSelectLivingCls18 = nullptr;
+static bool g_hitSelectLivingTried18 = false;
+static int ReadCrosshairEntityHurtTimeLegacy(JNIEnv* env, jobject mop) {
+    if (!env || !mop || !g_entityHitField) return 0;
+    if (!g_hitSelectLivingTried18) {
+        g_hitSelectLivingTried18 = true;
+        jobject gcl = EnsureGameClassLoader(env);
+        jclass c = gcl ? LoadClassWithLoader(env, gcl, "net.minecraft.entity.EntityLivingBase") : nullptr;
+        if (env->ExceptionCheck()) { env->ExceptionClear(); c = nullptr; }
+        if (c) { g_hitSelectLivingCls18 = (jclass)env->NewGlobalRef(c); env->DeleteLocalRef(c); }
+    }
+    if (!g_hitSelectLivingCls18) return 0;
+    jobject hit = env->GetObjectField(mop, g_entityHitField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return 0; }
+    if (!hit) return 0;
+    int hurt = 0;
+    if (env->IsInstanceOf(hit, g_hitSelectLivingCls18) == JNI_TRUE) {
+        EnsureVelocityMappings(env, hit);
+        if (g_hurtTimeField) {
+            hurt = env->GetIntField(hit, g_hurtTimeField);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); hurt = 0; }
+        }
+    }
+    env->DeleteLocalRef(hit);
+    return hurt;
+}
+
 GameState ReadGameState(JNIEnv* env) {
     GameState s = {};
     static DWORD nextRefreshAt = 0;
@@ -11151,6 +11365,7 @@ GameState ReadGameState(JNIEnv* env) {
                             s.lookingAtEntity = true;
                             s.lookingAtEntityLatched = true;
                             g_lastEntitySeenMs = s.stateMs;
+                            s.lookingAtEntityHurtTime = ReadCrosshairEntityHurtTimeLegacy(env, mop);
                         }
                         env->ReleaseStringUTFChars(nameStr, nameChars);
                     }
@@ -13242,6 +13457,11 @@ void RenderHUD(
     if (cfg.sprint)            pushMod("Sprint");
     if (cfg.tntTimer)          pushMod("TNT Timer");
     if (cfg.wTap)              pushMod("WTap");
+    if (cfg.jumpReset)         pushMod("Jump Reset");
+    if (cfg.hitSelect)         pushMod("Hit Select");
+    if (cfg.trajectories)      pushMod("Trajectories");
+    if (cfg.murderMystery)     pushMod("Murder Mystery");
+    if (cfg.breakProgress)     pushMod("Break Progress");
     if (cfg.hitDelayFixEnabled) pushMod("Hit Delay Fix");
 
     std::sort(modEntries.begin(), modEntries.end(),
@@ -15263,6 +15483,519 @@ static DWORD WINAPI FastPollThreadProc18(LPVOID) {
     return 0;
 }
 
+// ===================== BETA OVERLAYS (1.8.9) =====================
+// Trajectories, Murder Mystery and Break Progress. Scans run on the overlay
+// scan thread under g_renderJniMutex; Render* functions are draw-only.
+
+static jclass LoadLegacyClassGlobal(JNIEnv* env, const char* dottedName) {
+    jobject gcl = EnsureGameClassLoader(env);
+    jclass c = gcl ? LoadClassWithLoader(env, gcl, dottedName) : nullptr;
+    if (env->ExceptionCheck()) { env->ExceptionClear(); c = nullptr; }
+    if (!c) {
+        std::string slash = dottedName;
+        std::replace(slash.begin(), slash.end(), '.', '/');
+        c = env->FindClass(slash.c_str());
+        if (env->ExceptionCheck()) { env->ExceptionClear(); c = nullptr; }
+    }
+    if (!c) return nullptr;
+    jclass g = (jclass)env->NewGlobalRef(c);
+    env->DeleteLocalRef(c);
+    return g;
+}
+
+static jobject LegacyStackGetItem(JNIEnv* env, jobject stack) {
+    if (!env || !stack) return nullptr;
+    jclass stCls = env->GetObjectClass(stack);
+    if (!stCls) return nullptr;
+    jmethodID getItem = env->GetMethodID(stCls, "getItem", "()Lnet/minecraft/item/Item;");
+    if (!getItem) { env->ExceptionClear(); getItem = env->GetMethodID(stCls, "func_77973_b", "()Lnet/minecraft/item/Item;"); }
+    if (!getItem) env->ExceptionClear();
+    env->DeleteLocalRef(stCls);
+    if (!getItem) return nullptr;
+    jobject item = env->CallObjectMethod(stack, getItem);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
+    return item;
+}
+
+static std::string LegacyItemUnlocalizedName(JNIEnv* env, jobject item) {
+    if (!env || !item) return "";
+    jclass itemCls = env->GetObjectClass(item);
+    if (!itemCls) return "";
+    jmethodID getUnloc = env->GetMethodID(itemCls, "getUnlocalizedName", "()Ljava/lang/String;");
+    if (!getUnloc) { env->ExceptionClear(); getUnloc = env->GetMethodID(itemCls, "func_77658_a", "()Ljava/lang/String;"); }
+    if (!getUnloc) env->ExceptionClear();
+    env->DeleteLocalRef(itemCls);
+    if (!getUnloc) return "";
+    jstring js = (jstring)env->CallObjectMethod(item, getUnloc);
+    if (env->ExceptionCheck() || !js) { env->ExceptionClear(); return ""; }
+    const char* utf = env->GetStringUTFChars(js, nullptr);
+    std::string out = utf ? utf : "";
+    if (utf) env->ReleaseStringUTFChars(js, utf);
+    env->DeleteLocalRef(js);
+    return out;
+}
+
+// ── Trajectories ──
+struct LegacyTrajectorySnap {
+    bool active = false;
+    std::vector<lc::beta::TrajPoint> points;
+    bool hitBlock = false;
+    lc::beta::TrajPoint impact = { 0, 0, 0 };
+};
+static LegacyTrajectorySnap g_legacyTraj;
+static Mutex g_legacyTrajMutex;
+static jclass g_trajBowCls18 = nullptr, g_trajSnowballCls18 = nullptr, g_trajEggCls18 = nullptr;
+static jclass g_trajPearlCls18 = nullptr, g_trajPotionCls18 = nullptr, g_trajExpCls18 = nullptr;
+static bool g_trajClassesTried18 = false;
+static jmethodID g_trajItemInUseDuration18 = nullptr;
+static jfieldID g_trajItemDamageField18 = nullptr;
+
+static void ClearLegacyTrajectory() {
+    LockGuard lk(g_legacyTrajMutex);
+    g_legacyTraj = LegacyTrajectorySnap();
+}
+
+static void UpdateTrajectoriesLegacy(JNIEnv* env, const Config& cfg) {
+    if (!env || !cfg.trajectories || !g_mcInstance || !g_thePlayerField || !g_posXField ||
+        !g_rotationYawField || !g_rotationPitchField || !g_getHeldItemMethod) {
+        if (cfg.trajectories) SetModuleStatusLegacy("trajectories", "Missing player position, rotation or held-item mapping");
+        ClearLegacyTrajectory();
+        return;
+    }
+    if (!g_trajClassesTried18) {
+        g_trajClassesTried18 = true;
+        g_trajBowCls18 = LoadLegacyClassGlobal(env, "net.minecraft.item.ItemBow");
+        g_trajSnowballCls18 = LoadLegacyClassGlobal(env, "net.minecraft.item.ItemSnowball");
+        g_trajEggCls18 = LoadLegacyClassGlobal(env, "net.minecraft.item.ItemEgg");
+        g_trajPearlCls18 = LoadLegacyClassGlobal(env, "net.minecraft.item.ItemEnderPearl");
+        g_trajPotionCls18 = LoadLegacyClassGlobal(env, "net.minecraft.item.ItemPotion");
+        g_trajExpCls18 = LoadLegacyClassGlobal(env, "net.minecraft.item.ItemExpBottle");
+    }
+    if (!g_trajBowCls18 && !g_trajSnowballCls18) {
+        SetModuleStatusLegacy("trajectories", "Projectile item classes did not load");
+        ClearLegacyTrajectory();
+        return;
+    }
+
+    jobject player = env->GetObjectField(g_mcInstance, g_thePlayerField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); player = nullptr; }
+    if (!player) { ClearLegacyTrajectory(); return; }
+
+    LegacyTrajectorySnap snap;
+    jobject stack = env->CallObjectMethod(player, g_getHeldItemMethod);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); stack = nullptr; }
+    jobject item = LegacyStackGetItem(env, stack);
+    lc::beta::ProjectileKind kind = lc::beta::PROJECTILE_NONE;
+    int useTicks = 0;
+    if (item) {
+        auto is = [&](jclass c) { return c && env->IsInstanceOf(item, c) == JNI_TRUE; };
+        if (is(g_trajBowCls18)) {
+            kind = lc::beta::PROJECTILE_BOW;
+            if (!g_trajItemInUseDuration18) {
+                jclass pc = env->GetObjectClass(player);
+                const char* names[] = { "getItemInUseDuration", "func_71057_bx", nullptr };
+                for (int i = 0; pc && names[i] && !g_trajItemInUseDuration18; ++i) {
+                    g_trajItemInUseDuration18 = env->GetMethodID(pc, names[i], "()I");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_trajItemInUseDuration18 = nullptr; }
+                }
+                if (pc) env->DeleteLocalRef(pc);
+            }
+            if (g_trajItemInUseDuration18) {
+                useTicks = env->CallIntMethod(player, g_trajItemInUseDuration18);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); useTicks = 0; }
+            }
+        } else if (is(g_trajSnowballCls18) || is(g_trajEggCls18) || is(g_trajPearlCls18)) {
+            kind = lc::beta::PROJECTILE_THROWABLE;
+        } else if (is(g_trajExpCls18)) {
+            kind = lc::beta::PROJECTILE_EXP_BOTTLE;
+        } else if (is(g_trajPotionCls18) && stack) {
+            if (!g_trajItemDamageField18) {
+                jclass sc = env->GetObjectClass(stack);
+                const char* names[] = { "itemDamage", "field_77991_e", nullptr };
+                for (int i = 0; sc && names[i] && !g_trajItemDamageField18; ++i) {
+                    g_trajItemDamageField18 = env->GetFieldID(sc, names[i], "I");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_trajItemDamageField18 = nullptr; }
+                }
+                if (sc) env->DeleteLocalRef(sc);
+            }
+            if (g_trajItemDamageField18) {
+                jint meta = env->GetIntField(stack, g_trajItemDamageField18);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); meta = 0; }
+                if ((meta & 16384) != 0) kind = lc::beta::PROJECTILE_POTION; // ItemPotion.isSplash
+            }
+        }
+        env->DeleteLocalRef(item);
+    }
+    if (stack) env->DeleteLocalRef(stack);
+
+    lc::beta::ProjectileParams params = lc::beta::ParamsFor(kind, useTicks);
+    if (params.valid) {
+        const double px = env->GetDoubleField(player, g_posXField);
+        const double py = env->GetDoubleField(player, g_posYField);
+        const double pz = env->GetDoubleField(player, g_posZField);
+        const float yaw = env->GetFloatField(player, g_rotationYawField);
+        const float pitch = env->GetFloatField(player, g_rotationPitchField);
+        if (!env->ExceptionCheck()) {
+            // EntityArrow / EntityThrowable spawn offset from the eye.
+            const double yr = yaw / 180.0 * 3.14159265358979323846;
+            const double sx = px - std::cos(yr) * 0.16;
+            const double sy = py + 1.62 - 0.1;
+            const double sz = pz - std::sin(yr) * 0.16;
+            lc::beta::TrajectoryResult r = lc::beta::SimulateTrajectory(
+                sx, sy, sz, yaw, pitch, params,
+                [&](int bx, int by, int bz) {
+                    return IsSolidBlockAt(env, bx + 0.5, by + 0.5, bz + 0.5);
+                }, 160, 0.0);
+            snap.active = r.points.size() >= 2;
+            snap.points.swap(r.points);
+            snap.hitBlock = r.hitBlock;
+            snap.impact = r.impact;
+        } else {
+            env->ExceptionClear();
+        }
+    }
+    env->DeleteLocalRef(player);
+    SetModuleStatusLegacy("trajectories", "");
+    LockGuard lk(g_legacyTrajMutex);
+    g_legacyTraj.active = snap.active;
+    g_legacyTraj.points.swap(snap.points);
+    g_legacyTraj.hitBlock = snap.hitBlock;
+    g_legacyTraj.impact = snap.impact;
+}
+
+void RenderTrajectoriesLegacy(int w, int h, const Config& config) {
+    if (!config.trajectories) return;
+    static thread_local LegacyTrajectorySnap snap;
+    { LockGuard lk(g_legacyTrajMutex); snap = g_legacyTraj; }
+    if (!snap.active || snap.points.size() < 2) return;
+    BgCamState18 cam = SnapshotOverlayCamera18();
+    if (!cam.camFound || !cam.matsOk) return;
+    aoko::ui::Theme th = BuildOverlayUiTheme(ResolveOverlayTheme(config.guiTheme));
+    aoko::ui::DrawTrajectory(ImGui::GetBackgroundDrawList(), th, snap.points, snap.hitBlock, snap.impact,
+        [&](double x, double y, double z, float* sx, float* sy) {
+            return WorldToScreen(x - cam.camX, y - cam.camY, z - cam.camZ, cam.view, cam.proj, w, h, *sx, *sy);
+        });
+}
+
+// ── Murder Mystery ──
+static std::vector<aoko::ui::MurderTag> g_legacyMurder;
+static Mutex g_legacyMurderMutex;
+static std::unordered_set<std::string> g_legacyMurderers;
+static jobject g_legacyMurderWorld = nullptr;
+
+static void ClearLegacyMurderMystery(JNIEnv* env) {
+    { LockGuard lk(g_legacyMurderMutex); g_legacyMurder.clear(); }
+    g_legacyMurderers.clear();
+    if (env && g_legacyMurderWorld) { env->DeleteGlobalRef(g_legacyMurderWorld); g_legacyMurderWorld = nullptr; }
+}
+
+static void UpdateMurderMysteryLegacy(JNIEnv* env, const Config& cfg) {
+    if (!env || !cfg.murderMystery || !g_mcInstance || !g_theWorldField || !g_playerEntitiesField ||
+        !g_thePlayerField || !g_posXField || !g_listSizeMethod || !g_listGetMethod) {
+        if (cfg.murderMystery) SetModuleStatusLegacy("murdermystery", "Missing world player list mapping");
+        ClearLegacyMurderMystery(env);
+        return;
+    }
+    jobject world = env->GetObjectField(g_mcInstance, g_theWorldField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); world = nullptr; }
+    if (!world) { ClearLegacyMurderMystery(env); return; }
+    if (!g_legacyMurderWorld || env->IsSameObject(world, g_legacyMurderWorld) != JNI_TRUE) {
+        // New world = new round: forget previous murderers.
+        ClearLegacyMurderMystery(env);
+        g_legacyMurderWorld = env->NewGlobalRef(world);
+    }
+    jobject self = env->GetObjectField(g_mcInstance, g_thePlayerField);
+    jobject list = env->GetObjectField(world, g_playerEntitiesField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); self = nullptr; list = nullptr; }
+    if (!self || !list) {
+        if (self) env->DeleteLocalRef(self);
+        if (list) env->DeleteLocalRef(list);
+        env->DeleteLocalRef(world);
+        return;
+    }
+    const double sx = env->GetDoubleField(self, g_posXField);
+    const double sy = env->GetDoubleField(self, g_posYField);
+    const double sz = env->GetDoubleField(self, g_posZField);
+    int size = env->CallIntMethod(list, g_listSizeMethod);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); size = 0; }
+    if (size > 200) size = 200;
+
+    lc::target::Policy policy;
+    policy.skipTeammates = false; // MM has no teams
+    std::vector<aoko::ui::MurderTag> local;
+    for (int i = 0; i < size; ++i) {
+        jobject ent = env->CallObjectMethod(list, g_listGetMethod, (jint)i);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); break; }
+        if (!ent) continue;
+        lc::target::Facts facts = BuildTargetFactsLegacy(env, self, ent, false, true);
+        facts.healthKnown = false; // spectators/dead players still matter for the round
+        if (!lc::target::IsValid(facts, policy)) { env->DeleteLocalRef(ent); continue; }
+
+        std::string key;
+        jobject stack = GetEntityHeldItemStack(env, ent);
+        jobject item = LegacyStackGetItem(env, stack);
+        if (item) { key = LegacyItemUnlocalizedName(env, item); env->DeleteLocalRef(item); }
+        if (stack) env->DeleteLocalRef(stack);
+
+        const bool known = g_legacyMurderers.count(facts.stableName) != 0;
+        const lc::beta::MurderRole role = lc::beta::ClassifyMurderRole(key, known);
+        if (role == lc::beta::MM_ROLE_MURDERER) g_legacyMurderers.insert(facts.stableName);
+        if (role != lc::beta::MM_ROLE_NONE) {
+            aoko::ui::MurderTag rec;
+            rec.name = facts.stableName;
+            rec.x = env->GetDoubleField(ent, g_posXField);
+            rec.y = env->GetDoubleField(ent, g_posYField);
+            rec.z = env->GetDoubleField(ent, g_posZField);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); env->DeleteLocalRef(ent); continue; }
+            const double dx = rec.x - sx, dy = rec.y - sy, dz = rec.z - sz;
+            rec.dist = (float)std::sqrt(dx * dx + dy * dy + dz * dz);
+            rec.role = (int)role;
+            local.push_back(rec);
+        }
+        env->DeleteLocalRef(ent);
+    }
+    env->DeleteLocalRef(list);
+    env->DeleteLocalRef(self);
+    env->DeleteLocalRef(world);
+    SetModuleStatusLegacy("murdermystery", "");
+    LockGuard lk(g_legacyMurderMutex);
+    g_legacyMurder.swap(local);
+}
+
+void RenderMurderMysteryLegacy(int w, int h, const Config& config) {
+    if (!config.murderMystery) return;
+    static thread_local std::vector<aoko::ui::MurderTag> recs;
+    { LockGuard lk(g_legacyMurderMutex); recs = g_legacyMurder; }
+    if (recs.empty()) return;
+    BgCamState18 cam = SnapshotOverlayCamera18();
+    if (!cam.camFound || !cam.matsOk) return;
+    aoko::ui::DrawMurderTags(ImGui::GetForegroundDrawList(), w, recs,
+        [&](double x, double y, double z, float* sx, float* sy) {
+            return WorldToScreen(x - cam.camX, y - cam.camY, z - cam.camZ, cam.view, cam.proj, w, h, *sx, *sy);
+        });
+}
+
+// ── Break Progress ──
+static std::vector<aoko::ui::BreakTag> g_legacyBreaks;
+static Mutex g_legacyBreaksMutex;
+static jfieldID g_bpRenderGlobalField18 = nullptr;
+static jfieldID g_bpDamagedBlocksField18 = nullptr;
+static jfieldID g_bpMinerIdField18 = nullptr;
+static jfieldID g_bpPositionField18 = nullptr;
+static jfieldID g_bpStageField18 = nullptr;
+static jfieldID g_bpCurrentBlockField18 = nullptr;
+static jfieldID g_bpCurDamageField18 = nullptr;
+static jmethodID g_bpPosX18 = nullptr, g_bpPosY18 = nullptr, g_bpPosZ18 = nullptr;
+static jmethodID g_bpGetEntityById18 = nullptr;
+static jmethodID g_bpGetEntityId18 = nullptr;
+static jclass g_bpEntityPlayerCls18 = nullptr;
+static jmethodID g_bpMapValues18 = nullptr;
+static jmethodID g_bpCollectionToArray18 = nullptr;
+static bool g_bpResolved18 = false;
+
+static void ResolveBreakProgressLegacy(JNIEnv* env) {
+    if (g_bpResolved18 || !env || !g_mcInstance) return;
+    g_bpResolved18 = true;
+    jclass mcCls = env->GetObjectClass(g_mcInstance);
+    if (mcCls) {
+        const char* names[] = { "renderGlobal", "field_71438_f", nullptr };
+        for (int i = 0; names[i] && !g_bpRenderGlobalField18; ++i) {
+            g_bpRenderGlobalField18 = env->GetFieldID(mcCls, names[i], "Lnet/minecraft/client/renderer/RenderGlobal;");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_bpRenderGlobalField18 = nullptr; }
+        }
+        env->DeleteLocalRef(mcCls);
+    }
+    jclass rgCls = LoadLegacyClassGlobal(env, "net.minecraft.client.renderer.RenderGlobal");
+    if (rgCls) {
+        const char* names[] = { "damagedBlocks", "field_72738_E", nullptr };
+        for (int i = 0; names[i] && !g_bpDamagedBlocksField18; ++i) {
+            g_bpDamagedBlocksField18 = env->GetFieldID(rgCls, names[i], "Ljava/util/Map;");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_bpDamagedBlocksField18 = nullptr; }
+        }
+        env->DeleteGlobalRef(rgCls);
+    }
+    jclass dbp = LoadLegacyClassGlobal(env, "net.minecraft.client.renderer.DestroyBlockProgress");
+    if (dbp) {
+        auto field = [&](const char* a, const char* b, const char* sig) {
+            jfieldID f = env->GetFieldID(dbp, a, sig);
+            if (env->ExceptionCheck() || !f) { env->ExceptionClear(); f = env->GetFieldID(dbp, b, sig); }
+            if (env->ExceptionCheck()) { env->ExceptionClear(); f = nullptr; }
+            return f;
+        };
+        g_bpMinerIdField18 = field("miningPlayerEntId", "field_73115_a", "I");
+        g_bpPositionField18 = field("position", "field_180247_b", "Lnet/minecraft/util/BlockPos;");
+        g_bpStageField18 = field("partialBlockProgress", "field_73112_e", "I");
+        env->DeleteGlobalRef(dbp);
+    }
+    jclass pcm = LoadLegacyClassGlobal(env, "net.minecraft.client.multiplayer.PlayerControllerMP");
+    if (pcm) {
+        const char* posNames[] = { "currentBlock", "field_178895_c", nullptr };
+        for (int i = 0; posNames[i] && !g_bpCurrentBlockField18; ++i) {
+            g_bpCurrentBlockField18 = env->GetFieldID(pcm, posNames[i], "Lnet/minecraft/util/BlockPos;");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_bpCurrentBlockField18 = nullptr; }
+        }
+        const char* dmgNames[] = { "curBlockDamageMP", "field_78770_f", nullptr };
+        for (int i = 0; dmgNames[i] && !g_bpCurDamageField18; ++i) {
+            g_bpCurDamageField18 = env->GetFieldID(pcm, dmgNames[i], "F");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_bpCurDamageField18 = nullptr; }
+        }
+        env->DeleteGlobalRef(pcm);
+    }
+    jclass vec3i = LoadLegacyClassGlobal(env, "net.minecraft.util.Vec3i");
+    if (vec3i) {
+        auto method = [&](const char* a, const char* b) {
+            jmethodID m = env->GetMethodID(vec3i, a, "()I");
+            if (env->ExceptionCheck() || !m) { env->ExceptionClear(); m = env->GetMethodID(vec3i, b, "()I"); }
+            if (env->ExceptionCheck()) { env->ExceptionClear(); m = nullptr; }
+            return m;
+        };
+        g_bpPosX18 = method("getX", "func_177958_n");
+        g_bpPosY18 = method("getY", "func_177956_o");
+        g_bpPosZ18 = method("getZ", "func_177952_p");
+        env->DeleteGlobalRef(vec3i);
+    }
+    jclass worldCls = LoadLegacyClassGlobal(env, "net.minecraft.world.World");
+    if (worldCls) {
+        const char* names[] = { "getEntityByID", "func_73045_a", nullptr };
+        for (int i = 0; names[i] && !g_bpGetEntityById18; ++i) {
+            g_bpGetEntityById18 = env->GetMethodID(worldCls, names[i], "(I)Lnet/minecraft/entity/Entity;");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_bpGetEntityById18 = nullptr; }
+        }
+        env->DeleteGlobalRef(worldCls);
+    }
+    jclass entCls = LoadLegacyClassGlobal(env, "net.minecraft.entity.Entity");
+    if (entCls) {
+        const char* names[] = { "getEntityId", "func_145782_y", nullptr };
+        for (int i = 0; names[i] && !g_bpGetEntityId18; ++i) {
+            g_bpGetEntityId18 = env->GetMethodID(entCls, names[i], "()I");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_bpGetEntityId18 = nullptr; }
+        }
+        env->DeleteGlobalRef(entCls);
+    }
+    g_bpEntityPlayerCls18 = LoadLegacyClassGlobal(env, "net.minecraft.entity.player.EntityPlayer");
+    jclass mapCls = env->FindClass("java/util/Map");
+    if (mapCls) { g_bpMapValues18 = env->GetMethodID(mapCls, "values", "()Ljava/util/Collection;"); env->DeleteLocalRef(mapCls); }
+    jclass colCls = env->FindClass("java/util/Collection");
+    if (colCls) { g_bpCollectionToArray18 = env->GetMethodID(colCls, "toArray", "()[Ljava/lang/Object;"); env->DeleteLocalRef(colCls); }
+    if (env->ExceptionCheck()) env->ExceptionClear();
+}
+
+static bool ReadLegacyBlockPos(JNIEnv* env, jobject pos, int* x, int* y, int* z) {
+    if (!pos || !g_bpPosX18 || !g_bpPosY18 || !g_bpPosZ18) return false;
+    *x = env->CallIntMethod(pos, g_bpPosX18);
+    *y = env->CallIntMethod(pos, g_bpPosY18);
+    *z = env->CallIntMethod(pos, g_bpPosZ18);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return false; }
+    return true;
+}
+
+static void UpdateBreakProgressLegacy(JNIEnv* env, const Config& cfg) {
+    if (!env || !cfg.breakProgress || !g_mcInstance || !g_thePlayerField || !g_theWorldField) {
+        LockGuard lk(g_legacyBreaksMutex);
+        g_legacyBreaks.clear();
+        return;
+    }
+    ResolveBreakProgressLegacy(env);
+    const bool othersReady = g_bpRenderGlobalField18 && g_bpDamagedBlocksField18 && g_bpMinerIdField18 &&
+        g_bpPositionField18 && g_bpStageField18 && g_bpMapValues18 && g_bpCollectionToArray18;
+    const bool selfReady = g_playerControllerField && g_bpCurrentBlockField18 && g_bpCurDamageField18;
+    if (!othersReady && !selfReady) {
+        SetModuleStatusLegacy("breakprogress", "Missing RenderGlobal.damagedBlocks and PlayerControllerMP mappings");
+        LockGuard lk(g_legacyBreaksMutex);
+        g_legacyBreaks.clear();
+        return;
+    }
+    SetModuleStatusLegacy("breakprogress", othersReady ? "" : "Only your own mining is shown (damagedBlocks mapping missing)");
+
+    std::vector<aoko::ui::BreakTag> local;
+    jobject self = env->GetObjectField(g_mcInstance, g_thePlayerField);
+    jobject world = env->GetObjectField(g_mcInstance, g_theWorldField);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); self = nullptr; world = nullptr; }
+    jint selfId = -1;
+    if (self && g_bpGetEntityId18) {
+        selfId = env->CallIntMethod(self, g_bpGetEntityId18);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); selfId = -1; }
+    }
+
+    if (selfReady) {
+        jobject ctrl = env->GetObjectField(g_mcInstance, g_playerControllerField);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); ctrl = nullptr; }
+        if (ctrl) {
+            float dmg = env->GetFloatField(ctrl, g_bpCurDamageField18);
+            jobject pos = env->GetObjectField(ctrl, g_bpCurrentBlockField18);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); dmg = 0.0f; pos = nullptr; }
+            int bx, by, bz;
+            if (dmg > 0.0f && ReadLegacyBlockPos(env, pos, &bx, &by, &bz)) {
+                aoko::ui::BreakTag rec;
+                rec.x = bx + 0.5; rec.y = by + 0.5; rec.z = bz + 0.5;
+                rec.percent = lc::beta::BreakDamageToPercent(dmg);
+                rec.self = true;
+                local.push_back(rec);
+            }
+            if (pos) env->DeleteLocalRef(pos);
+            env->DeleteLocalRef(ctrl);
+        }
+    }
+
+    if (othersReady && world) {
+        jobject rg = env->GetObjectField(g_mcInstance, g_bpRenderGlobalField18);
+        jobject map = rg ? env->GetObjectField(rg, g_bpDamagedBlocksField18) : nullptr;
+        jobject values = map ? env->CallObjectMethod(map, g_bpMapValues18) : nullptr;
+        jobjectArray arr = values ? (jobjectArray)env->CallObjectMethod(values, g_bpCollectionToArray18) : nullptr;
+        if (env->ExceptionCheck()) { env->ExceptionClear(); arr = nullptr; }
+        const int n = arr ? (std::min)(64, (int)env->GetArrayLength(arr)) : 0;
+        for (int i = 0; i < n; ++i) {
+            jobject prog = env->GetObjectArrayElement(arr, i);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); break; }
+            if (!prog) continue;
+            jint miner = env->GetIntField(prog, g_bpMinerIdField18);
+            jint stage = env->GetIntField(prog, g_bpStageField18);
+            jobject pos = env->GetObjectField(prog, g_bpPositionField18);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); env->DeleteLocalRef(prog); continue; }
+            int bx, by, bz;
+            if (miner != selfId && stage >= 0 && ReadLegacyBlockPos(env, pos, &bx, &by, &bz)) {
+                aoko::ui::BreakTag rec;
+                rec.x = bx + 0.5; rec.y = by + 0.5; rec.z = bz + 0.5;
+                rec.percent = lc::beta::BreakStageToPercent(stage);
+                rec.self = false;
+                if (g_bpGetEntityById18) {
+                    jobject breaker = env->CallObjectMethod(world, g_bpGetEntityById18, miner);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); breaker = nullptr; }
+                    if (breaker) {
+                        if (g_bpEntityPlayerCls18 && env->IsInstanceOf(breaker, g_bpEntityPlayerCls18) == JNI_TRUE)
+                            rec.breaker = GetStablePlayerName(env, breaker);
+                        env->DeleteLocalRef(breaker);
+                    }
+                }
+                local.push_back(rec);
+            }
+            if (pos) env->DeleteLocalRef(pos);
+            env->DeleteLocalRef(prog);
+        }
+        if (arr) env->DeleteLocalRef(arr);
+        if (values) env->DeleteLocalRef(values);
+        if (map) env->DeleteLocalRef(map);
+        if (rg) env->DeleteLocalRef(rg);
+    }
+    if (world) env->DeleteLocalRef(world);
+    if (self) env->DeleteLocalRef(self);
+    LockGuard lk(g_legacyBreaksMutex);
+    g_legacyBreaks.swap(local);
+}
+
+void RenderBreakProgressLegacy(int w, int h, const Config& config) {
+    if (!config.breakProgress) return;
+    static thread_local std::vector<aoko::ui::BreakTag> recs;
+    { LockGuard lk(g_legacyBreaksMutex); recs = g_legacyBreaks; }
+    if (recs.empty()) return;
+    BgCamState18 cam = SnapshotOverlayCamera18();
+    if (!cam.camFound || !cam.matsOk) return;
+    aoko::ui::DrawBreakTags(ImGui::GetForegroundDrawList(), recs,
+        [&](double x, double y, double z, float* sx, float* sy) {
+            return WorldToScreen(x - cam.camX, y - cam.camY, z - cam.camZ, cam.view, cam.proj, w, h, *sx, *sy);
+        });
+}
+
 static DWORD WINAPI OverlayScanThreadProc18(LPVOID) {
     JNIEnv* env = JniEnv::Get(g_jvm);
     if (!env) return 1;
@@ -15270,6 +16003,9 @@ static DWORD WINAPI OverlayScanThreadProc18(LPVOID) {
     DWORD lastPlayerScanMs = 0;
     DWORD lastCameraMs = 0;
     DWORD lastTntScanMs = 0;
+    DWORD lastTrajectoryMs = 0;
+    DWORD lastMurderMysteryMs = 0;
+    DWORD lastBreakProgressMs = 0;
     bool chestEspScanWasEnabled = false;
     bool entityProducerWasEnabled = false;
     while (IsBridgeRunning()) {
@@ -15291,6 +16027,7 @@ static DWORD WINAPI OverlayScanThreadProc18(LPVOID) {
         const bool chunkScanEnabled = cfg.blockEsp || cfg.bedPlates;
         const bool overlayWork =
             entityProducerEnabled || chestEspScanEnabled || chunkScanEnabled || cfg.tntTimer ||
+            cfg.trajectories || cfg.murderMystery || cfg.breakProgress ||
             entityProducerWasEnabled || chestEspScanWasEnabled;
         const unsigned int playerInterval = lc::PlayerOverlayIntervalMs(cfg.aimAssist);
         {
@@ -15321,6 +16058,32 @@ static DWORD WINAPI OverlayScanThreadProc18(LPVOID) {
                     } else {
                         LockGuard lk(g_legacyTntMutex);
                         g_legacyTntRecords.clear();
+                    }
+
+                    if (cfg.trajectories) {
+                        if (lc::IsTelemetryIntervalDue(nowMs, lastTrajectoryMs, lc::kTrajectoryIntervalMs)) {
+                            UpdateTrajectoriesLegacy(env, cfg);
+                            lastTrajectoryMs = nowMs;
+                        }
+                    } else {
+                        ClearLegacyTrajectory();
+                    }
+                    if (cfg.murderMystery) {
+                        if (lc::IsTelemetryIntervalDue(nowMs, lastMurderMysteryMs, lc::kMurderMysteryIntervalMs)) {
+                            UpdateMurderMysteryLegacy(env, cfg);
+                            lastMurderMysteryMs = nowMs;
+                        }
+                    } else {
+                        ClearLegacyMurderMystery(env);
+                    }
+                    if (cfg.breakProgress) {
+                        if (lc::IsTelemetryIntervalDue(nowMs, lastBreakProgressMs, lc::kBreakProgressIntervalMs)) {
+                            UpdateBreakProgressLegacy(env, cfg);
+                            lastBreakProgressMs = nowMs;
+                        }
+                    } else {
+                        LockGuard lk(g_legacyBreaksMutex);
+                        g_legacyBreaks.clear();
                     }
 
                     const bool chestEspScanDue =
@@ -15358,6 +16121,9 @@ static DWORD WINAPI OverlayScanThreadProc18(LPVOID) {
                 { LockGuard lk(g_overlayChestsMutex18); g_overlayChests18.clear(); }
                 { LockGuard lk(g_blockEspListMutex); g_blockEspList.clear(); }
                 { LockGuard lk(g_bedPlateListMutex); g_bedPlateList.clear(); }
+                ClearLegacyTrajectory();
+                ClearLegacyMurderMystery(env);
+                { LockGuard lk(g_legacyBreaksMutex); g_legacyBreaks.clear(); }
                 { LockGuard lk(g_bgCamMutex18); g_bgCamState18 = BgCamState18(); }
             }
         }
@@ -15377,6 +16143,12 @@ static DWORD WINAPI OverlayScanThreadProc18(LPVOID) {
                 &sleepMs, sleepNow, g_lastBedPlatesScanMs, lc::kBedPlatesScanIntervalMs, cfg.bedPlates);
             lc::ConsiderJobSleep(
                 &sleepMs, sleepNow, lastTntScanMs, 50, cfg.tntTimer);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastTrajectoryMs, lc::kTrajectoryIntervalMs, cfg.trajectories);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastMurderMysteryMs, lc::kMurderMysteryIntervalMs, cfg.murderMystery);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastBreakProgressMs, lc::kBreakProgressIntervalMs, cfg.breakProgress);
         }
         if (sleepMs > 0) Sleep(sleepMs);
     }
@@ -15717,6 +16489,7 @@ static void UpdateTntScanLegacy(JNIEnv* env, const Config& cfg) {
             env->ExceptionClear();
         }
     }
+    SetModuleStatusLegacy("tnttimer", g_tntPrimedClass ? "" : "EntityTNTPrimed class did not load");
     if (!g_tntPrimedClass) {
         env->DeleteLocalRef(entList);
         env->DeleteLocalRef(world);
@@ -16199,6 +16972,9 @@ BOOL WINAPI HookedSwapBuffers(HDC hdc) {
             RenderBedPlates(w, h, renderConfig);
             RenderFireballWarning(w, h, renderConfig);
             RenderTntTimerLegacy(w, h, renderConfig);
+            RenderTrajectoriesLegacy(w, h, renderConfig);
+            RenderMurderMysteryLegacy(w, h, renderConfig);
+            RenderBreakProgressLegacy(w, h, renderConfig);
         }
 
         ImGui::Render();
@@ -16577,6 +17353,12 @@ void ParseConfig(const std::string& line) {
         g_config.sprint = reader.GetBool("sprint");
         g_config.tntTimer = reader.GetBool("tntTimer");
         g_config.wTap = reader.GetBool("wTap");
+        g_config.jumpReset = reader.GetBool("jumpReset");
+        g_config.jumpResetChance = lc::ClampInt(reader.GetInt("jumpResetChance", g_config.jumpResetChance), 0, 100);
+        g_config.hitSelect = reader.GetBool("hitSelect");
+        g_config.trajectories = reader.GetBool("trajectories");
+        g_config.murderMystery = reader.GetBool("murderMystery");
+        g_config.breakProgress = reader.GetBool("breakProgress");
         g_config.reachEnabled = reader.GetBool("reachEnabled");
         g_config.velocityEnabled = reader.GetBool("velocityEnabled");
         g_config.hitDelayFixEnabled = reader.GetBool("hitDelayFixEnabled");
@@ -16725,6 +17507,11 @@ void ParseConfig(const std::string& line) {
         { int v = reader.GetInt("keybindSprint", -1);        if (v >= 0) g_config.keybindSprint = lc::ClampInt(v, 0, 255); }
         { int v = reader.GetInt("keybindTntTimer", -1);      if (v >= 0) g_config.keybindTntTimer = lc::ClampInt(v, 0, 255); }
         { int v = reader.GetInt("keybindWTap", -1);          if (v >= 0) g_config.keybindWTap = lc::ClampInt(v, 0, 255); }
+        { int v = reader.GetInt("keybindJumpReset", -1);     if (v >= 0) g_config.keybindJumpReset = lc::ClampInt(v, 0, 255); }
+        { int v = reader.GetInt("keybindHitSelect", -1);     if (v >= 0) g_config.keybindHitSelect = lc::ClampInt(v, 0, 255); }
+        { int v = reader.GetInt("keybindTrajectories", -1);  if (v >= 0) g_config.keybindTrajectories = lc::ClampInt(v, 0, 255); }
+        { int v = reader.GetInt("keybindMurderMystery", -1); if (v >= 0) g_config.keybindMurderMystery = lc::ClampInt(v, 0, 255); }
+        { int v = reader.GetInt("keybindBreakProgress", -1); if (v >= 0) g_config.keybindBreakProgress = lc::ClampInt(v, 0, 255); }
 
         g_config.pixelPartyAssist = reader.GetBool("pixelPartyAssist");
         int ppRadius = reader.GetInt("pixelPartyScanRadius", g_config.pixelPartyScanRadius);
@@ -16876,6 +17663,7 @@ void ServerLoop() {
         DWORD lastFastPlaceMs = 0;
         DWORD lastSprintMs = 0;
         DWORD lastWTapMs = 0;
+        DWORD lastJumpResetMs = 0;
         DWORD lastNoHurtCamMs = 0;
         bool killAuraWasEnabled = false;
         while (IsBridgeRunning()) {
@@ -16940,6 +17728,8 @@ void ServerLoop() {
                 lc::IsTelemetryIntervalDue(nowMs, lastFastPlaceMs, lc::kFastPlaceIntervalMs);
             const bool sprintDue = (cfgSnapshot.sprint || g_sprintManagingSprint) &&
                 lc::IsTelemetryIntervalDue(nowMs, lastSprintMs, lc::kSprintIntervalMs);
+            const bool jumpResetDue = (cfgSnapshot.jumpReset || g_jumpResetHolding || g_jumpResetSeenHurt != 0) &&
+                lc::IsTelemetryIntervalDue(nowMs, lastJumpResetMs, lc::kJumpResetIntervalMs);
             const bool wTapDue = cfgSnapshot.wTap &&
                 lc::IsTelemetryIntervalDue(nowMs, lastWTapMs, lc::kWTapIntervalMs);
             const bool noHurtCamDue = cfgSnapshot.noHurtCam &&
@@ -16965,7 +17755,7 @@ void ServerLoop() {
             const bool jniDue =
                 stateDue || speedBridgeDue || autoRodDue || throwPotDue || autoHealDue || autoToolDue || hitDelayDue ||
                 reachDue || velocityDue || killAuraDue || pixelPartyDue || antiDebuffDue ||
-                fastPlaceDue || sprintDue || wTapDue || noHurtCamDue;
+                fastPlaceDue || sprintDue || wTapDue || noHurtCamDue || jumpResetDue;
             if (jniDue) {
                 LockGuard jniLk(g_stateJniMutex);
                 if (stateDue) {
@@ -16981,6 +17771,7 @@ void ServerLoop() {
                     }
                     state = ReadGameState(env);
                     TrackAutoRodLegacyWorld(env);
+                    UpdateSimpleModuleStatusLegacy(cfgSnapshot);
                     lastStateReadMs = nowMs;
                     { LockGuard lk(g_stateMutex); g_gameState = state; }
                 } else {
@@ -17042,6 +17833,10 @@ void ServerLoop() {
                     UpdateSprintLegacy(env, cfgSnapshot, state);
                     lastSprintMs = nowMs;
                 }
+                if (jumpResetDue) {
+                    UpdateJumpResetLegacy(env, cfgSnapshot, state);
+                    lastJumpResetMs = nowMs;
+                }
                 if (wTapDue) {
                     UpdateWTapLegacy(env, cfgSnapshot, state);
                     lastWTapMs = nowMs;
@@ -17081,6 +17876,8 @@ void ServerLoop() {
                 jsonToSend += "\"lookingAtBlock\":" + std::string(state.lookingAtBlock ? "true" : "false") + ",";
                 jsonToSend += "\"lookingAtEntity\":" + std::string(state.lookingAtEntity ? "true" : "false") + ",";
                 jsonToSend += "\"lookingAtEntityLatched\":" + std::string(state.lookingAtEntityLatched ? "true" : "false") + ",";
+                jsonToSend += "\"lookingAtEntityHurtTime\":" + std::to_string(state.lookingAtEntityHurtTime) + ",";
+                jsonToSend += "\"moduleStatus\":" + ModuleStatusJsonLegacy() + ",";
                 jsonToSend += "\"breakingBlock\":" + std::string(state.breakingBlock ? "true" : "false") + ",";
                 jsonToSend += "\"attackCooldown\":" + std::to_string(state.attackCooldown) + ",";
                 jsonToSend += "\"attackCooldownPerTick\":" + std::to_string(state.attackCooldownPerTick) + ",";
@@ -17210,6 +18007,9 @@ void ServerLoop() {
                 &sleepMs, sleepNow, lastSprintMs, lc::kSprintIntervalMs, cfgSnapshot.sprint || g_sprintManagingSprint);
             lc::ConsiderJobSleep(
                 &sleepMs, sleepNow, lastWTapMs, lc::kWTapIntervalMs, cfgSnapshot.wTap);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastJumpResetMs, lc::kJumpResetIntervalMs,
+                cfgSnapshot.jumpReset || g_jumpResetHolding);
             lc::ConsiderJobSleep(
                 &sleepMs, sleepNow, lastNoHurtCamMs, lc::kNoHurtCamIntervalMs, cfgSnapshot.noHurtCam);
             if (sleepMs > 0) Sleep(sleepMs);

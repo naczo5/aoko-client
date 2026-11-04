@@ -3,6 +3,8 @@ title: Sprint
 description: Automatic forward sprinting without holding a sprint key.
 ---
 
+> **Beta.** This module lives in the Beta tab of the external GUI. It was not thoroughly tested; use it at your own risk.
+
 *Sprint* keeps your player sprinting continuously whenever you are moving forward, eliminating the need to double-tap or hold a dedicated sprint key.
 
 ## Version support

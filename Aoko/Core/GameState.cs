@@ -49,6 +49,17 @@ public class GameState
     [JsonPropertyName("lookingAtEntityLatched")]
     public bool LookingAtEntityLatched { get; set; }
 
+    /// <summary>hurtTime of the living entity under the crosshair; 0 when none or unknown.</summary>
+    [JsonPropertyName("lookingAtEntityHurtTime")]
+    public int LookingAtEntityHurtTime { get; set; }
+
+    /// <summary>
+    /// Runtime reasons a supported module is idle (e.g. a mapping did not resolve),
+    /// keyed by catalog id. Absent ids are working.
+    /// </summary>
+    [JsonPropertyName("moduleStatus")]
+    public Dictionary<string, string> ModuleStatus { get; set; } = new();
+
     [JsonPropertyName("breakingBlock")]
     public bool BreakingBlock { get; set; }
 

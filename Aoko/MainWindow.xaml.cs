@@ -106,6 +106,11 @@ public partial class MainWindow : Window
         ["sprint"] = "Sprint",
         ["tnttimer"] = "TNT Timer",
         ["wtap"] = "WTap",
+        ["jumpreset"] = "Jump Reset",
+        ["hitselect"] = "Hit Select",
+        ["trajectories"] = "Trajectories",
+        ["murdermystery"] = "Murder Mystery",
+        ["breakprogress"] = "Break Progress",
         ["panic"] = "Panic"
     };
 
@@ -531,6 +536,11 @@ public partial class MainWindow : Window
         bool sprintSupported = IsModuleSupported("sprint");
         bool tntTimerSupported = IsModuleSupported("tnttimer");
         bool wTapSupported = IsModuleSupported("wtap");
+        bool jumpResetSupported = IsModuleSupported("jumpreset");
+        bool hitSelectSupported = IsModuleSupported("hitselect");
+        bool trajectoriesSupported = IsModuleSupported("trajectories");
+        bool murderMysterySupported = IsModuleSupported("murdermystery");
+        bool breakProgressSupported = IsModuleSupported("breakprogress");
         bool reloadMappingsSupported = GameStateClient.Instance.SupportsSetting("reloadMappingsNonce");
 
         AimAssistCard.IsEnabled = aimAssistSupported;
@@ -555,6 +565,11 @@ public partial class MainWindow : Window
         SprintCard.IsEnabled = sprintSupported;
         TntTimerCard.IsEnabled = tntTimerSupported;
         WTapCard.IsEnabled = wTapSupported;
+        JumpResetCard.IsEnabled = jumpResetSupported;
+        HitSelectCard.IsEnabled = hitSelectSupported;
+        TrajectoriesCard.IsEnabled = trajectoriesSupported;
+        MurderMysteryCard.IsEnabled = murderMysterySupported;
+        BreakProgressCard.IsEnabled = breakProgressSupported;
 
         if (!aimAssistSupported && clicker.AimAssistEnabled) clicker.AimAssistEnabled = false;
         if (!triggerbotSupported && clicker.TriggerbotEnabled) clicker.TriggerbotEnabled = false;
@@ -578,6 +593,11 @@ public partial class MainWindow : Window
         if (!sprintSupported && clicker.SprintEnabled) clicker.SprintEnabled = false;
         if (!tntTimerSupported && clicker.TntTimerEnabled) clicker.TntTimerEnabled = false;
         if (!wTapSupported && clicker.WTapEnabled) clicker.WTapEnabled = false;
+        if (!jumpResetSupported && clicker.JumpResetEnabled) clicker.JumpResetEnabled = false;
+        if (!hitSelectSupported && clicker.HitSelectEnabled) clicker.HitSelectEnabled = false;
+        if (!trajectoriesSupported && clicker.TrajectoriesEnabled) clicker.TrajectoriesEnabled = false;
+        if (!murderMysterySupported && clicker.MurderMysteryEnabled) clicker.MurderMysteryEnabled = false;
+        if (!breakProgressSupported && clicker.BreakProgressEnabled) clicker.BreakProgressEnabled = false;
 
         // Update availability text - only show unavailable message for Triggerbot (intentionally 1.21-only)
         AimAssistAvailabilityText.Text = aimAssistSupported ? "Available" : "Unavailable on current bridge";
@@ -601,6 +621,11 @@ public partial class MainWindow : Window
         SprintAvailabilityText.Text = sprintSupported ? "Available" : "Unavailable on current bridge";
         TntTimerAvailabilityText.Text = tntTimerSupported ? "Available" : "Unavailable on current bridge";
         WTapAvailabilityText.Text = wTapSupported ? "Available" : "Unavailable on current bridge";
+        JumpResetAvailabilityText.Text = jumpResetSupported ? "Available" : "Unavailable on current bridge";
+        HitSelectAvailabilityText.Text = hitSelectSupported ? "Available" : "Unavailable on current bridge";
+        TrajectoriesAvailabilityText.Text = trajectoriesSupported ? "Available" : "Unavailable on current bridge";
+        MurderMysteryAvailabilityText.Text = murderMysterySupported ? "Available" : "Unavailable on current bridge";
+        BreakProgressAvailabilityText.Text = breakProgressSupported ? "Available" : "Unavailable on current bridge";
         ChestStealerAvailabilityText.Text = chestStealerSupported ? "Available" : "Unavailable on current bridge";
         RefillAvailabilityText.Text = refillSupported ? "Available" : "Unavailable on current bridge";
         GtbHelperAvailabilityText.Text = gtbSupported
@@ -634,11 +659,61 @@ public partial class MainWindow : Window
         KeybindSprintButton.IsEnabled = sprintSupported;
         KeybindTntTimerButton.IsEnabled = tntTimerSupported;
         KeybindWTapButton.IsEnabled = wTapSupported;
+        KeybindJumpResetButton.IsEnabled = jumpResetSupported;
+        KeybindHitSelectButton.IsEnabled = hitSelectSupported;
+        KeybindTrajectoriesButton.IsEnabled = trajectoriesSupported;
+        KeybindMurderMysteryButton.IsEnabled = murderMysterySupported;
+        KeybindBreakProgressButton.IsEnabled = breakProgressSupported;
         KeybindPanicButton.IsEnabled = true;
         ReloadMappingsButton.IsEnabled = reloadMappingsSupported;
         ReloadMappingsAvailabilityText.Text = reloadMappingsSupported
             ? "Available"
             : "Unavailable on 1.8.9 bridge";
+
+        _lastModuleStatus = null;
+        RefreshModuleStatusTexts();
+    }
+
+    // Availability labels that can show a runtime reason from the bridge's
+    // moduleStatus map (e.g. "Missing jump key mapping"). Keyed by catalog id.
+    private Dictionary<string, TextBlock>? _moduleStatusTexts;
+    private Dictionary<string, string>? _lastModuleStatus;
+
+    private Dictionary<string, TextBlock> ModuleStatusTexts()
+    {
+        if (_moduleStatusTexts != null) return _moduleStatusTexts;
+        var map = new Dictionary<string, TextBlock>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (id, prefix) in new (string, string)[]
+        {
+            ("fastplace", "FastPlace"), ("nohurtcam", "NoHurtCam"), ("sprint", "Sprint"),
+            ("tnttimer", "TntTimer"), ("wtap", "WTap"), ("jumpreset", "JumpReset"),
+            ("hitselect", "HitSelect"), ("trajectories", "Trajectories"),
+            ("murdermystery", "MurderMystery"), ("breakprogress", "BreakProgress"),
+        })
+        {
+            if (FindName(prefix + "AvailabilityText") is TextBlock text)
+                map[id] = text;
+        }
+        _moduleStatusTexts = map;
+        return map;
+    }
+
+    /// <summary>
+    /// Shows the bridge-reported reason for a supported module that is idle.
+    /// Cheap: only re-applies when the bridge sent a new moduleStatus object.
+    /// </summary>
+    private void RefreshModuleStatusTexts()
+    {
+        var status = GameStateClient.Instance.CurrentState.ModuleStatus;
+        if (ReferenceEquals(status, _lastModuleStatus)) return;
+        _lastModuleStatus = status;
+        foreach (var (id, text) in ModuleStatusTexts())
+        {
+            if (!IsModuleSupported(id)) continue;
+            text.Text = status != null && status.TryGetValue(id, out string? reason) && !string.IsNullOrWhiteSpace(reason)
+                ? reason
+                : "Available";
+        }
     }
     
     private void TitleBar_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
@@ -1443,6 +1518,10 @@ public partial class MainWindow : Window
                     {
                         UpdateVersionAvailabilityUi();
                     }
+                    else
+                    {
+                        RefreshModuleStatusTexts();
+                    }
                 }
                 finally
                 {
@@ -1751,6 +1830,11 @@ public partial class MainWindow : Window
         SetKeybindButtonContent(KeybindSprintButton, "sprint");
         SetKeybindButtonContent(KeybindTntTimerButton, "tnttimer");
         SetKeybindButtonContent(KeybindWTapButton, "wtap");
+        SetKeybindButtonContent(KeybindJumpResetButton, "jumpreset");
+        SetKeybindButtonContent(KeybindHitSelectButton, "hitselect");
+        SetKeybindButtonContent(KeybindTrajectoriesButton, "trajectories");
+        SetKeybindButtonContent(KeybindMurderMysteryButton, "murdermystery");
+        SetKeybindButtonContent(KeybindBreakProgressButton, "breakprogress");
         SetKeybindButtonContent(KeybindPanicButton, "panic");
         AutoRodActionBindButton.Content = _pendingAutoRodActionBind
             ? "Action: [Press key or mouse...]"

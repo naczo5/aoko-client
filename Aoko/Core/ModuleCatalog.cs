@@ -40,7 +40,18 @@ public static class ModuleCatalog
         /// <summary>Hidden in the external GUI unless Clicker.DevMode is on.</summary>
         bool DevOnly = false,
         /// <summary>Implemented in managed code while native capability payloads are updated separately.</summary>
-        bool ManagedOnly = false);
+        bool ManagedOnly = false,
+        /// <summary>Not thoroughly tested; the GUI card lives in the Beta tab.</summary>
+        bool Beta = false,
+        /// <summary>
+        /// Numeric settings owned by this module. Each spec is the single declaration that
+        /// ModuleRegistrationTests checks against Profile, the TCP config payload, the
+        /// capability lists, and both bridges' ParseConfig.
+        /// </summary>
+        IReadOnlyList<SettingSpec>? Settings = null);
+
+    /// <summary>One integer module setting: TCP wire key, Profile/Clicker property, clamp range.</summary>
+    public sealed record SettingSpec(string WireKey, string Property, int Min, int Max, int Default);
 
     public static IReadOnlyList<Entry> All { get; } =
     [
@@ -55,7 +66,7 @@ public static class ModuleCatalog
             Surfaces.DiscordRpc | Surfaces.OverlayList | Surfaces.Capability),
         new("aimassist", "Aim Assist", "cfg.aimAssist", c => c.AimAssistEnabled),
         new("triggerbot", "Triggerbot", "cfg.triggerbot", c => c.TriggerbotEnabled),
-        new("killaura", "Kill Aura", "cfg.killAura", c => c.KillAuraEnabled, DevOnly: true),
+        new("killaura", "Kill Aura", "cfg.killAura", c => c.KillAuraEnabled, DevOnly: true, Beta: true),
         new("speedbridge", "SpeedBridge", "cfg.speedBridge", c => c.SpeedBridgeEnabled),
         new("gtbhelper", "GTB Helper", "cfg.gtbHelper", c => c.GtbHelperEnabled),
         new("pixelpartyassist", "Pixel Party Assist", "cfg.pixelPartyAssist", c => c.PixelPartyAssistEnabled),
@@ -69,7 +80,12 @@ public static class ModuleCatalog
         new("blockesp", "Block ESP", "cfg.blockEsp", c => c.BlockEspEnabled),
         new("bedplates", "BedPlates", "cfg.bedPlates", c => c.BedPlatesEnabled),
         new("reach", "Reach", "cfg.reachEnabled", c => c.ReachEnabled),
-        new("velocity", "Velocity", "cfg.velocityEnabled", c => c.VelocityEnabled),
+        new("velocity", "Velocity", "cfg.velocityEnabled", c => c.VelocityEnabled,
+            Settings: [
+                new("velocityHorizontal", "VelocityHorizontal", 1, 100, 100),
+                new("velocityVertical", "VelocityVertical", 1, 100, 100),
+                new("velocityChance", "VelocityChance", 1, 100, 100),
+            ]),
         new("autototem", "AutoTotem", "cfg.autoTotemEnabled", c => c.AutoTotemEnabled),
         new("autorod", "Auto Rod", "cfg.autoRodEnabled", c => c.AutoRodEnabled),
         new("throwpot", "Throwpot", "cfg.throwpotEnabled", c => c.ThrowpotEnabled),
@@ -78,11 +94,17 @@ public static class ModuleCatalog
         new("antidebuff", "AntiDebuff", "cfg.antiDebuffEnabled", c => c.AntiDebuffEnabled),
         new("hitdelayfix", "Hit Delay Fix", "cfg.hitDelayFixEnabled", c => c.HitDelayFixEnabled),
         new("fireballwarning", "Fireball Warning", "cfg.fireballWarning", c => c.FireballWarningEnabled),
-        new("fastplace", "Fast Place", "cfg.fastPlace", c => c.FastPlaceEnabled),
-        new("nohurtcam", "No Hurt Cam", "cfg.noHurtCam", c => c.NoHurtCamEnabled),
-        new("sprint", "Sprint", "cfg.sprint", c => c.SprintEnabled),
-        new("tnttimer", "TNT Timer", "cfg.tntTimer", c => c.TntTimerEnabled),
-        new("wtap", "WTap", "cfg.wTap", c => c.WTapEnabled),
+        new("fastplace", "Fast Place", "cfg.fastPlace", c => c.FastPlaceEnabled, Beta: true),
+        new("nohurtcam", "No Hurt Cam", "cfg.noHurtCam", c => c.NoHurtCamEnabled, Beta: true),
+        new("sprint", "Sprint", "cfg.sprint", c => c.SprintEnabled, Beta: true),
+        new("tnttimer", "TNT Timer", "cfg.tntTimer", c => c.TntTimerEnabled, Beta: true),
+        new("wtap", "WTap", "cfg.wTap", c => c.WTapEnabled, Beta: true),
+        new("jumpreset", "Jump Reset", "cfg.jumpReset", c => c.JumpResetEnabled, Beta: true,
+            Settings: [new("jumpResetChance", "JumpResetChance", 0, 100, 80)]),
+        new("hitselect", "Hit Select", "cfg.hitSelect", c => c.HitSelectEnabled, Beta: true),
+        new("trajectories", "Trajectories", "cfg.trajectories", c => c.TrajectoriesEnabled, Beta: true),
+        new("murdermystery", "Murder Mystery", "cfg.murderMystery", c => c.MurderMysteryEnabled, Beta: true),
+        new("breakprogress", "Break Progress", "cfg.breakProgress", c => c.BreakProgressEnabled, Beta: true),
 
         // Keybind-only emergency action — not a toggleable feature module.
         new("panic", "Panic", "", _ => false,

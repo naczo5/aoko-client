@@ -44,6 +44,9 @@
 #include "anti_debuff_jvmti.h"
 #include "hud_layout.h"
 #include "overlay_ui.h"
+#include "beta_modules_core.h"
+#include "combat_target.h"
+#include "module_status.h"
 #include "block_esp_common.h"
 #include "chest_esp_common.h"
 #include "chunk_scan_common.h"
@@ -258,6 +261,17 @@ struct Config {
     int   keybindTntTimer = 0;
     bool  wTap = false;
     int   keybindWTap = 0;
+    bool  jumpReset = false;
+    int   jumpResetChance = 80;
+    int   keybindJumpReset = 0;
+    bool  hitSelect = false;
+    int   keybindHitSelect = 0;
+    bool  trajectories = false;
+    int   keybindTrajectories = 0;
+    bool  murderMystery = false;
+    int   keybindMurderMystery = 0;
+    bool  breakProgress = false;
+    int   keybindBreakProgress = 0;
     bool  showModuleList = true;
     bool  closestPlayer  = false;
     bool  fightStatus    = false;
@@ -595,6 +609,17 @@ static void ParseConfig(const std::string& line) {
     g_config.keybindTntTimer = lc::ClampInt(reader.GetInt("keybindTntTimer", g_config.keybindTntTimer), 0, 255);
     g_config.wTap = reader.GetBool("wTap");
     g_config.keybindWTap = lc::ClampInt(reader.GetInt("keybindWTap", g_config.keybindWTap), 0, 255);
+    g_config.jumpReset = reader.GetBool("jumpReset");
+    g_config.jumpResetChance = lc::ClampInt(reader.GetInt("jumpResetChance", g_config.jumpResetChance), 0, 100);
+    g_config.keybindJumpReset = lc::ClampInt(reader.GetInt("keybindJumpReset", g_config.keybindJumpReset), 0, 255);
+    g_config.hitSelect = reader.GetBool("hitSelect");
+    g_config.keybindHitSelect = lc::ClampInt(reader.GetInt("keybindHitSelect", g_config.keybindHitSelect), 0, 255);
+    g_config.trajectories = reader.GetBool("trajectories");
+    g_config.keybindTrajectories = lc::ClampInt(reader.GetInt("keybindTrajectories", g_config.keybindTrajectories), 0, 255);
+    g_config.murderMystery = reader.GetBool("murderMystery");
+    g_config.keybindMurderMystery = lc::ClampInt(reader.GetInt("keybindMurderMystery", g_config.keybindMurderMystery), 0, 255);
+    g_config.breakProgress = reader.GetBool("breakProgress");
+    g_config.keybindBreakProgress = lc::ClampInt(reader.GetInt("keybindBreakProgress", g_config.keybindBreakProgress), 0, 255);
     g_config.rightClick    = reader.GetBool("right");
     g_config.rightMinCPS   = lc::ClampFloat(reader.GetFloat("rightMinCPS", g_config.rightMinCPS), 1.0f, 25.0f);
     g_config.rightMaxCPS   = lc::ClampFloat(reader.GetFloat("rightMaxCPS", g_config.rightMaxCPS), 1.0f, 25.0f);
@@ -10414,6 +10439,117 @@ static jfieldID  g_killAuraUseKeyField_121 = nullptr;
 static jmethodID g_killAuraKeyIsDown_121 = nullptr;
 static jmethodID g_killAuraCanSeeEntity_121 = nullptr;
 static jmethodID g_killAuraIsSameTeam_121 = nullptr;
+
+static jclass LoadModernClassGlobal(JNIEnv* env, const char* const* names) {
+    if (!env || !g_gameClassLoader) return nullptr;
+    for (int i = 0; names[i]; ++i) {
+        jclass c = LoadClassWithLoader(env, g_gameClassLoader, names[i]);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); c = nullptr; }
+        if (c) {
+            jclass g = (jclass)env->NewGlobalRef(c);
+            env->DeleteLocalRef(c);
+            return g;
+        }
+    }
+    return nullptr;
+}
+
+static jmethodID FindMethod121(JNIEnv* env, jclass cls, const char* const* names, const char* const* sigs) {
+    if (!env || !cls) return nullptr;
+    for (int ni = 0; names[ni]; ++ni) {
+        for (int si = 0; sigs[si]; ++si) {
+            jmethodID m = env->GetMethodID(cls, names[ni], sigs[si]);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); m = nullptr; }
+            if (m) return m;
+        }
+    }
+    return nullptr;
+}
+
+static jfieldID FindField121(JNIEnv* env, jclass cls, const char* const* names, const char* const* sigs) {
+    if (!env || !cls) return nullptr;
+    for (int ni = 0; names[ni]; ++ni) {
+        for (int si = 0; sigs[si]; ++si) {
+            jfieldID f = env->GetFieldID(cls, names[ni], sigs[si]);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); f = nullptr; }
+            if (f) return f;
+        }
+    }
+    return nullptr;
+}
+
+static const char* const kKeyMappingSigs121[] = {
+    "Lnet/minecraft/client/KeyMapping;",
+    "Lnet/minecraft/client/option/KeyBinding;",
+    "Lnet/minecraft/class_304;",
+    nullptr
+};
+
+// Shared-check facts for a modern player candidate (KillAura, Murder Mystery).
+static lc::target::Facts BuildTargetFacts121(JNIEnv* env, jobject self, jobject candidate,
+                                             bool queryTeam, bool queryBot) {
+    lc::target::Facts f;
+    f.isSelf = self && env->IsSameObject(candidate, self) == JNI_TRUE;
+    if (f.isSelf) return f;
+    if (g_playerEntityClass_121)
+        f.isPlayer = env->IsInstanceOf(candidate, g_playerEntityClass_121) == JNI_TRUE;
+    if (queryTeam && g_killAuraIsSameTeam_121 && self) {
+        jboolean teammate = env->CallBooleanMethod(self, g_killAuraIsSameTeam_121, candidate);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); teammate = JNI_FALSE; }
+        f.teammate = teammate == JNI_TRUE;
+    }
+    if (g_getHealth_121) {
+        f.health = env->CallFloatMethod(candidate, g_getHealth_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); f.health = 0.0f; }
+    } else {
+        f.healthKnown = false;
+    }
+    f.stableName = GetStablePlayerName(env, candidate);
+    f.botLike = queryBot && !f.stableName.empty() && LooksLikeFakePlayerLine(f.stableName);
+    return f;
+}
+
+// ===================== HIT SELECT (1.21 / 26.x) =====================
+static jmethodID g_entityHitResultGetEntity_121 = nullptr;
+static jclass g_livingEntityClass_121 = nullptr;
+static bool g_hitSelectResolved_121 = false;
+static int g_jniLookingAtEntityHurtTime = 0;
+
+static int ReadCrosshairEntityHurtTime121(JNIEnv* env, jobject hitObj) {
+    if (!env || !hitObj || !g_hurtTimeField_121) return 0;
+    if (!g_hitSelectResolved_121) {
+        g_hitSelectResolved_121 = true;
+        EnsureHitResultCaches(env);
+        static const char* const names[] = { "getEntity", "method_17782", nullptr };
+        static const char* const sigs[] = {
+            "()Lnet/minecraft/world/entity/Entity;",
+            "()Lnet/minecraft/class_1297;",
+            "()Lnet/minecraft/entity/Entity;",
+            nullptr
+        };
+        g_entityHitResultGetEntity_121 = FindMethod121(env, g_entityHitResultClass_121, names, sigs);
+        static const char* const living[] = {
+            "net.minecraft.class_1309",
+            "net.minecraft.world.entity.LivingEntity",
+            "net.minecraft.entity.LivingEntity",
+            nullptr
+        };
+        g_livingEntityClass_121 = LoadModernClassGlobal(env, living);
+    }
+    if (!g_entityHitResultGetEntity_121 || !g_livingEntityClass_121) return 0;
+    if (!g_entityHitResultClass_121 || env->IsInstanceOf(hitObj, g_entityHitResultClass_121) != JNI_TRUE) return 0;
+    jobject ent = env->CallObjectMethod(hitObj, g_entityHitResultGetEntity_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return 0; }
+    if (!ent) return 0;
+    int hurt = 0;
+    if (env->IsInstanceOf(ent, g_livingEntityClass_121) == JNI_TRUE) {
+        hurt = env->GetIntField(ent, g_hurtTimeField_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); hurt = 0; }
+    }
+    env->DeleteLocalRef(ent);
+    return hurt;
+}
+
 static DWORD     g_killAuraNextPremotionRefreshMs_121 = 0;
 static killaura::AutoBlockState g_killAuraAutoBlockState_121;
 static void SetKillAuraUnavailableReason(const std::string& reason);
@@ -11451,22 +11587,17 @@ static void UpdateKillAura(JNIEnv* env, const Config& cfg) {
             if (env->ExceptionCheck()) { env->ExceptionClear(); visible = JNI_FALSE; }
             if (visible != JNI_TRUE) { env->DeleteLocalRef(candidate); continue; }
         }
-        if (cfg.killAuraTeams) {
-            jboolean teammate = env->CallBooleanMethod(selfObj, g_killAuraIsSameTeam_121, candidate);
-            if (env->ExceptionCheck()) { env->ExceptionClear(); teammate = JNI_FALSE; }
-            if (teammate == JNI_TRUE) { env->DeleteLocalRef(candidate); continue; }
-        }
-        if (g_playerEntityClass_121 && env->IsInstanceOf(candidate, g_playerEntityClass_121) != JNI_TRUE) {
+        // Shared target rules (self, non-player, dead, teammate, nameless, bot) live in combat_target.h.
+        lc::target::Facts facts = BuildTargetFacts121(
+            env, selfObj, candidate, cfg.killAuraTeams, cfg.killAuraBotCheck);
+        lc::target::Policy policy;
+        policy.skipTeammates = cfg.killAuraTeams;
+        policy.skipBots = cfg.killAuraBotCheck;
+        if (!lc::target::IsValid(facts, policy)) {
             env->DeleteLocalRef(candidate);
             continue;
         }
-
-        float health = env->CallFloatMethod(candidate, g_getHealth_121);
-        if (env->ExceptionCheck()) { env->ExceptionClear(); health = 0.0f; }
-        if (!std::isfinite(health) || health <= 0.1f) {
-            env->DeleteLocalRef(candidate);
-            continue;
-        }
+        const float health = facts.health;
 
         double x = CallDoubleNoArgs(env, candidate, g_getX_121);
         double y = CallDoubleNoArgs(env, candidate, g_getY_121);
@@ -11487,11 +11618,7 @@ static void UpdateKillAura(JNIEnv* env, const Config& cfg) {
             }
         }
 
-        std::string stableName = GetStablePlayerName(env, candidate);
-        if (stableName.empty() || (cfg.killAuraBotCheck && LooksLikeFakePlayerLine(stableName))) {
-            env->DeleteLocalRef(candidate);
-            continue;
-        }
+        const std::string& stableName = facts.stableName;
 
         double fovScore = 0.0;
         if (horiz > 1e-6) {
@@ -14975,6 +15102,7 @@ static void UpdateJniState() {
     // ===== lookingAtBlock (crosshair hit = BLOCK) =====
     bool lookingAtBlock = false;
     bool lookingAtEntity = false;
+    int lookingAtEntityHurtTime = 0;
 
     // Find crosshairTarget / hitResult (field name varies across clients/mappings)
     jclass mcCls = env->GetObjectClass(g_mcInstance);
@@ -15000,6 +15128,7 @@ static void UpdateJniState() {
                     TRACE261_PATH("hitresult-ordinal-path");
                     lookingAtBlock = (hitOrd == 1);
                     lookingAtEntity = (hitOrd == 2);
+                    if (lookingAtEntity) lookingAtEntityHurtTime = ReadCrosshairEntityHurtTime121(env, hitObj);
                     UpdateHitDelayFix121(env, hitDelayFixEnabled, guiOpen, inWorld, mcCls, hitOrd);
                 }
                 env->DeleteLocalRef(hitObj);
@@ -15383,6 +15512,7 @@ static void UpdateJniState() {
             g_jniLookingAtBlock = lookingAtBlock;
             g_jniLookingAtEntity = lookingAtEntity;
             g_jniLookingAtEntityLatched = lookingAtEntityLatched;
+            g_jniLookingAtEntityHurtTime = lookingAtEntityHurtTime;
             g_jniBreakingBlock = breakingBlock;
             g_jniHoldingBlock = holdingBlock;
             g_jniHealth = healthVal;
@@ -15403,6 +15533,7 @@ static void UpdateJniState() {
         g_jniLookingAtBlock = lookingAtBlock;
         g_jniLookingAtEntity = lookingAtEntity;
         g_jniLookingAtEntityLatched = false;
+        g_jniLookingAtEntityHurtTime = 0;
         g_jniBreakingBlock = false;
         g_jniHoldingBlock = false;
         g_jniHealth = 20.0f;
@@ -17552,6 +17683,638 @@ static void UpdateWTap121(JNIEnv* env, bool enabled, bool guiOpen, bool inWorld,
     }
 }
 
+// ===================== MODULE STATUS (1.21 / 26.x) =====================
+static lc::ModuleStatusMap g_moduleStatus121;
+static Mutex g_moduleStatusMutex121;
+
+static void SetModuleStatus121(const char* moduleId, const std::string& reason) {
+    LockGuard lk(g_moduleStatusMutex121);
+    g_moduleStatus121.Set(moduleId, reason);
+}
+
+static std::string ModuleStatusJson121() {
+    LockGuard lk(g_moduleStatusMutex121);
+    return g_moduleStatus121.ToJson();
+}
+
+static void UpdateSimpleModuleStatus121(const Config& cfg) {
+    SetModuleStatus121("fastplace", cfg.fastPlace && !g_itemUseCooldownField_121
+        ? "Missing Minecraft.rightClickDelay mapping" : "");
+    SetModuleStatus121("sprint", cfg.sprint && (!g_sprintKeyField_121 || !g_speedBridgeKeySetPressed_121)
+        ? "Missing sprint key mapping" : "");
+    SetModuleStatus121("nohurtcam", cfg.noHurtCam && !g_hurtTimeField_121
+        ? "Waiting for LivingEntity.hurtTime mapping" : "");
+    SetModuleStatus121("tnttimer", cfg.tntTimer && !g_tntClass_121 && g_mcInstance
+        ? "Primed TNT class did not load" : "");
+}
+
+// ===================== JUMP RESET (1.21 / 26.x) =====================
+// Runs on the fast-poll thread before UpdateVelocity, so it always samples the
+// hit edge before No Hurt Cam clears hurtTime.
+static jfieldID g_jumpKeyField_121 = nullptr;
+static jmethodID g_jumpResetOnGround_121 = nullptr;
+static bool g_jumpResetHolding_121 = false;
+static DWORD g_jumpResetPressMs_121 = 0;
+static int g_jumpResetPrevHurt_121 = 0;
+
+static jobject GetJumpKeyBinding121(JNIEnv* env) {
+    if (!env || !g_mcInstance || !g_optionsField_121) return nullptr;
+    jobject opts = env->GetObjectField(g_mcInstance, g_optionsField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
+    if (!opts) return nullptr;
+    if (!g_jumpKeyField_121) {
+        jclass optsCls = env->GetObjectClass(opts);
+        static const char* const names[] = { "jumpKey", "keyJump", "field_1903", nullptr };
+        g_jumpKeyField_121 = FindField121(env, optsCls, names, kKeyMappingSigs121);
+        if (optsCls) env->DeleteLocalRef(optsCls);
+    }
+    jobject key = g_jumpKeyField_121 ? env->GetObjectField(opts, g_jumpKeyField_121) : nullptr;
+    if (env->ExceptionCheck()) { env->ExceptionClear(); key = nullptr; }
+    env->DeleteLocalRef(opts);
+    return key;
+}
+
+static bool IsJumpPhysicallyDown121(JNIEnv* env, jobject key) {
+    if (key && g_speedBridgeKeyGetBoundKey_121 && g_speedBridgeInputKeyGetCode_121 &&
+        glfwGetCurrentContext_fn && glfwGetKey_fn) {
+        void* win = glfwGetCurrentContext_fn();
+        if (win) {
+            jobject inputKey = env->CallObjectMethod(key, g_speedBridgeKeyGetBoundKey_121);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); inputKey = nullptr; }
+            if (inputKey) {
+                int code = env->CallIntMethod(inputKey, g_speedBridgeInputKeyGetCode_121);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); code = -1; }
+                env->DeleteLocalRef(inputKey);
+                if (code >= 0) return glfwGetKey_fn(win, code) == GLFW_PRESS;
+            }
+        }
+    }
+    return (GetAsyncKeyState(VK_SPACE) & 0x8000) != 0;
+}
+
+static bool SetJumpKey121(JNIEnv* env, bool pressed) {
+    jobject key = GetJumpKeyBinding121(env);
+    if (!key) return false;
+    EnsureSpeedBridgeKeyMethods(env, key);
+    bool ok = false;
+    if (g_speedBridgeKeySetPressed_121) {
+        if (pressed || !IsJumpPhysicallyDown121(env, key)) {
+            env->CallVoidMethod(key, g_speedBridgeKeySetPressed_121, pressed ? JNI_TRUE : JNI_FALSE);
+            ok = !env->ExceptionCheck();
+            if (!ok) env->ExceptionClear();
+        } else {
+            ok = true; // user holds jump; keep it down
+        }
+    }
+    env->DeleteLocalRef(key);
+    return ok;
+}
+
+static void UpdateJumpReset121(JNIEnv* env, const Config& cfg) {
+    if (!env) return;
+    const DWORD nowMs = GetTickCount();
+    if (g_jumpResetHolding_121 && nowMs - g_jumpResetPressMs_121 >= lc::beta::kJumpResetHoldMs) {
+        SetJumpKey121(env, false);
+        g_jumpResetHolding_121 = false;
+    }
+    bool guiOpen = false, inWorld = false;
+    { LockGuard lk(g_jniStateMtx); guiOpen = g_jniGuiOpen; inWorld = g_jniInWorld; }
+    if (!cfg.jumpReset || !inWorld || !g_mcInstance || !g_playerField_121 || IsWorldTransitionActive()) {
+        g_jumpResetPrevHurt_121 = 0;
+        return;
+    }
+    jobject self = env->GetObjectField(g_mcInstance, g_playerField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); self = nullptr; }
+    if (!self) { g_jumpResetPrevHurt_121 = 0; return; }
+
+    EnsureVelocityJni(env, self);
+    if (!g_jumpResetOnGround_121) {
+        jclass pc = env->GetObjectClass(self);
+        static const char* const names[] = { "onGround", "isOnGround", "method_24828", nullptr };
+        static const char* const sigs[] = { "()Z", nullptr };
+        g_jumpResetOnGround_121 = FindMethod121(env, pc, names, sigs);
+        if (pc) env->DeleteLocalRef(pc);
+    }
+    if (!g_hurtTimeField_121 || !g_jumpResetOnGround_121) {
+        SetModuleStatus121("jumpreset", "Missing hurtTime or onGround mapping");
+        env->DeleteLocalRef(self);
+        return;
+    }
+    jint hurtTime = env->GetIntField(self, g_hurtTimeField_121);
+    jboolean onGround = env->CallBooleanMethod(self, g_jumpResetOnGround_121);
+    env->DeleteLocalRef(self);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return; }
+
+    lc::beta::JumpResetInput in;
+    in.hurtTime = hurtTime;
+    in.prevHurtTime = g_jumpResetPrevHurt_121;
+    in.onGround = onGround == JNI_TRUE;
+    in.movingForward = (GetAsyncKeyState('W') & 0x8000) != 0;
+    in.guiOpen = guiOpen;
+    in.chance = cfg.jumpResetChance;
+    in.roll = rand() % 100;
+    if (lc::beta::ShouldJumpReset(in)) {
+        if (SetJumpKey121(env, true)) {
+            g_jumpResetHolding_121 = true;
+            g_jumpResetPressMs_121 = nowMs;
+            SetModuleStatus121("jumpreset", "");
+        } else {
+            SetModuleStatus121("jumpreset", "Missing jump key mapping");
+        }
+    }
+    g_jumpResetPrevHurt_121 = hurtTime;
+}
+
+// ===================== BETA OVERLAY SCANS (1.21 / 26.x) =====================
+static jmethodID g_betaStackGetItem_121 = nullptr;
+static jmethodID g_betaItemTranslationKey_121 = nullptr;
+
+static jobject StackGetItem121(JNIEnv* env, jobject stack) {
+    if (!env || !stack) return nullptr;
+    if (!g_betaStackGetItem_121) {
+        jclass sc = env->GetObjectClass(stack);
+        static const char* const names[] = { "getItem", "method_7909", "m_41720_", nullptr };
+        static const char* const sigs[] = {
+            "()Lnet/minecraft/world/item/Item;",
+            "()Lnet/minecraft/class_1792;",
+            "()Lnet/minecraft/item/Item;",
+            nullptr
+        };
+        g_betaStackGetItem_121 = FindMethod121(env, sc, names, sigs);
+        if (sc) env->DeleteLocalRef(sc);
+    }
+    if (!g_betaStackGetItem_121) return nullptr;
+    jobject item = env->CallObjectMethod(stack, g_betaStackGetItem_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
+    return item;
+}
+
+static std::string ItemTranslationKey121(JNIEnv* env, jobject item) {
+    if (!env || !item) return "";
+    if (!g_betaItemTranslationKey_121) {
+        static const char* const itemNames[] = {
+            "net.minecraft.class_1792", "net.minecraft.world.item.Item", "net.minecraft.item.Item", nullptr
+        };
+        jclass itemCls = LoadModernClassGlobal(env, itemNames);
+        static const char* const names[] = { "getDescriptionId", "getTranslationKey", "method_7876", nullptr };
+        static const char* const sigs[] = { "()Ljava/lang/String;", nullptr };
+        g_betaItemTranslationKey_121 = FindMethod121(env, itemCls, names, sigs);
+        if (itemCls) env->DeleteGlobalRef(itemCls);
+    }
+    if (!g_betaItemTranslationKey_121) return "";
+    jstring js = (jstring)env->CallObjectMethod(item, g_betaItemTranslationKey_121);
+    if (env->ExceptionCheck() || !js) { env->ExceptionClear(); return ""; }
+    const char* utf = env->GetStringUTFChars(js, nullptr);
+    std::string out = utf ? utf : "";
+    if (utf) env->ReleaseStringUTFChars(js, utf);
+    env->DeleteLocalRef(js);
+    return out;
+}
+
+static jobject MainHandStack121(JNIEnv* env, jobject entity) {
+    if (!env || !entity) return nullptr;
+    EnsureEntityMethods(env, entity);
+    if (!g_getMainHandStack_121) return nullptr;
+    jobject stack = env->CallObjectMethod(entity, g_getMainHandStack_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
+    return stack;
+}
+
+// ── Trajectories ──
+struct ModernTrajectorySnap {
+    bool active = false;
+    std::vector<lc::beta::TrajPoint> points;
+    bool hitBlock = false;
+    lc::beta::TrajPoint impact = { 0, 0, 0 };
+};
+static ModernTrajectorySnap g_modernTraj;
+static Mutex g_modernTrajMutex;
+static jclass g_trajBowCls_121 = nullptr, g_trajSnowballCls_121 = nullptr, g_trajEggCls_121 = nullptr;
+static jclass g_trajPearlCls_121 = nullptr, g_trajPotionCls_121 = nullptr, g_trajExpCls_121 = nullptr;
+static bool g_trajClassesTried_121 = false;
+static jmethodID g_trajUseTicks_121 = nullptr;
+static jmethodID g_trajEyeY_121 = nullptr;
+
+static void ClearModernTrajectory() {
+    LockGuard lk(g_modernTrajMutex);
+    g_modernTraj = ModernTrajectorySnap();
+}
+
+static void UpdateTrajectories121(JNIEnv* env, const Config& cfg) {
+    if (!env || !cfg.trajectories || !g_mcInstance || !g_playerField_121) { ClearModernTrajectory(); return; }
+    if (!g_trajClassesTried_121) {
+        g_trajClassesTried_121 = true;
+        static const char* const bow[] = { "net.minecraft.class_1753", "net.minecraft.world.item.BowItem", "net.minecraft.item.BowItem", nullptr };
+        static const char* const snow[] = { "net.minecraft.class_1823", "net.minecraft.world.item.SnowballItem", "net.minecraft.item.SnowballItem", nullptr };
+        static const char* const egg[] = { "net.minecraft.class_1771", "net.minecraft.world.item.EggItem", "net.minecraft.item.EggItem", nullptr };
+        static const char* const pearl[] = { "net.minecraft.class_1776", "net.minecraft.world.item.EnderpearlItem", "net.minecraft.item.EnderPearlItem", nullptr };
+        static const char* const potion[] = { "net.minecraft.class_4537", "net.minecraft.world.item.ThrowablePotionItem", "net.minecraft.item.ThrowablePotionItem", nullptr };
+        static const char* const exp[] = { "net.minecraft.class_1779", "net.minecraft.world.item.ExperienceBottleItem", "net.minecraft.item.ExperienceBottleItem", nullptr };
+        g_trajBowCls_121 = LoadModernClassGlobal(env, bow);
+        g_trajSnowballCls_121 = LoadModernClassGlobal(env, snow);
+        g_trajEggCls_121 = LoadModernClassGlobal(env, egg);
+        g_trajPearlCls_121 = LoadModernClassGlobal(env, pearl);
+        g_trajPotionCls_121 = LoadModernClassGlobal(env, potion);
+        g_trajExpCls_121 = LoadModernClassGlobal(env, exp);
+    }
+    if (!g_trajBowCls_121 && !g_trajSnowballCls_121) {
+        SetModuleStatus121("trajectories", "Projectile item classes did not load");
+        ClearModernTrajectory();
+        return;
+    }
+    jobject self = env->GetObjectField(g_mcInstance, g_playerField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); self = nullptr; }
+    if (!self) { ClearModernTrajectory(); return; }
+
+    jobject stack = MainHandStack121(env, self);
+    jobject item = StackGetItem121(env, stack);
+    lc::beta::ProjectileKind kind = lc::beta::PROJECTILE_NONE;
+    int useTicks = 0;
+    if (item) {
+        auto is = [&](jclass c) { return c && env->IsInstanceOf(item, c) == JNI_TRUE; };
+        if (is(g_trajBowCls_121)) {
+            kind = lc::beta::PROJECTILE_BOW;
+            if (!g_trajUseTicks_121) {
+                jclass pc = env->GetObjectClass(self);
+                static const char* const names[] = { "getItemUseTime", "getTicksUsingItem", "method_6048", nullptr };
+                static const char* const sigs[] = { "()I", nullptr };
+                g_trajUseTicks_121 = FindMethod121(env, pc, names, sigs);
+                if (pc) env->DeleteLocalRef(pc);
+            }
+            if (g_trajUseTicks_121) {
+                useTicks = env->CallIntMethod(self, g_trajUseTicks_121);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); useTicks = 0; }
+            }
+        } else if (is(g_trajSnowballCls_121) || is(g_trajEggCls_121) || is(g_trajPearlCls_121)) {
+            kind = lc::beta::PROJECTILE_THROWABLE;
+        } else if (is(g_trajPotionCls_121)) {
+            kind = lc::beta::PROJECTILE_POTION;
+        } else if (is(g_trajExpCls_121)) {
+            kind = lc::beta::PROJECTILE_EXP_BOTTLE;
+        }
+        env->DeleteLocalRef(item);
+    }
+    if (stack) env->DeleteLocalRef(stack);
+
+    ModernTrajectorySnap snap;
+    lc::beta::ProjectileParams params = lc::beta::ParamsFor(kind, useTicks);
+    if (params.valid && g_getX_121 && g_getYaw_121 && g_getPitch_121) {
+        if (!g_trajEyeY_121) {
+            jclass pc = env->GetObjectClass(self);
+            static const char* const names[] = { "getEyeY", "method_23320", nullptr };
+            static const char* const sigs[] = { "()D", nullptr };
+            g_trajEyeY_121 = FindMethod121(env, pc, names, sigs);
+            if (pc) env->DeleteLocalRef(pc);
+        }
+        const double px = CallDoubleNoArgs(env, self, g_getX_121);
+        const double pz = CallDoubleNoArgs(env, self, g_getZ_121);
+        const double eyeY = g_trajEyeY_121 ? CallDoubleNoArgs(env, self, g_trajEyeY_121)
+                                           : CallDoubleNoArgs(env, self, g_getY_121) + 1.62;
+        const float yaw = CallFloatNoArgs(env, self, g_getYaw_121);
+        const float pitch = CallFloatNoArgs(env, self, g_getPitch_121);
+        // Modern projectiles spawn at eye height - 0.1 with no sideways offset.
+        lc::beta::TrajectoryResult r = lc::beta::SimulateTrajectory(
+            px, eyeY - 0.1, pz, yaw, pitch, params,
+            [&](int bx, int by, int bz) { return IsSolidBlockAt121(env, bx + 0.5, by + 0.5, bz + 0.5); },
+            160, -64.0);
+        snap.active = r.points.size() >= 2;
+        snap.points.swap(r.points);
+        snap.hitBlock = r.hitBlock;
+        snap.impact = r.impact;
+    }
+    env->DeleteLocalRef(self);
+    SetModuleStatus121("trajectories", "");
+    LockGuard lk(g_modernTrajMutex);
+    g_modernTraj.active = snap.active;
+    g_modernTraj.points.swap(snap.points);
+    g_modernTraj.hitBlock = snap.hitBlock;
+    g_modernTraj.impact = snap.impact;
+}
+
+// ── Murder Mystery ──
+static std::vector<aoko::ui::MurderTag> g_modernMurder;
+static Mutex g_modernMurderMutex;
+static std::unordered_set<std::string> g_modernMurderers;
+static jobject g_modernMurderWorld = nullptr;
+
+static void ClearModernMurderMystery(JNIEnv* env) {
+    { LockGuard lk(g_modernMurderMutex); g_modernMurder.clear(); }
+    g_modernMurderers.clear();
+    if (env && g_modernMurderWorld) { env->DeleteGlobalRef(g_modernMurderWorld); g_modernMurderWorld = nullptr; }
+}
+
+static void UpdateMurderMystery121(JNIEnv* env, const Config& cfg) {
+    if (!env || !cfg.murderMystery || !g_mcInstance || !g_worldField_121 || !g_playerField_121) {
+        ClearModernMurderMystery(env);
+        return;
+    }
+    jobject world = env->GetObjectField(g_mcInstance, g_worldField_121);
+    jobject self = env->GetObjectField(g_mcInstance, g_playerField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); world = nullptr; self = nullptr; }
+    if (!world || !self) {
+        if (world) env->DeleteLocalRef(world);
+        if (self) env->DeleteLocalRef(self);
+        ClearModernMurderMystery(env);
+        return;
+    }
+    if (!g_modernMurderWorld || env->IsSameObject(world, g_modernMurderWorld) != JNI_TRUE) {
+        ClearModernMurderMystery(env); // new world = new round
+        g_modernMurderWorld = env->NewGlobalRef(world);
+    }
+    EnsureEntityMethods(env, self);
+    DiscoverWorldPlayersListField(env, world);
+    jobject list = g_worldPlayersListField_121 ? env->GetObjectField(world, g_worldPlayersListField_121) : nullptr;
+    if (env->ExceptionCheck()) { env->ExceptionClear(); list = nullptr; }
+    jobjectArray arr = nullptr;
+    if (list) {
+        jclass colCls = env->FindClass("java/util/Collection");
+        jmethodID toArray = colCls ? env->GetMethodID(colCls, "toArray", "()[Ljava/lang/Object;") : nullptr;
+        if (env->ExceptionCheck()) { env->ExceptionClear(); toArray = nullptr; }
+        if (colCls) env->DeleteLocalRef(colCls);
+        if (toArray) arr = (jobjectArray)env->CallObjectMethod(list, toArray);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); arr = nullptr; }
+    }
+    if (!arr || !g_getX_121) {
+        SetModuleStatus121("murdermystery", "Missing world player list mapping");
+        if (arr) env->DeleteLocalRef(arr);
+        if (list) env->DeleteLocalRef(list);
+        env->DeleteLocalRef(self);
+        env->DeleteLocalRef(world);
+        return;
+    }
+    const double sx = CallDoubleNoArgs(env, self, g_getX_121);
+    const double sy = CallDoubleNoArgs(env, self, g_getY_121);
+    const double sz = CallDoubleNoArgs(env, self, g_getZ_121);
+    const int n = (std::min)(200, (int)env->GetArrayLength(arr));
+
+    lc::target::Policy policy;
+    policy.skipTeammates = false;
+    std::vector<aoko::ui::MurderTag> local;
+    for (int i = 0; i < n; ++i) {
+        jobject ent = env->GetObjectArrayElement(arr, i);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); break; }
+        if (!ent) continue;
+        lc::target::Facts facts = BuildTargetFacts121(env, self, ent, false, true);
+        facts.healthKnown = false;
+        if (!lc::target::IsValid(facts, policy)) { env->DeleteLocalRef(ent); continue; }
+
+        jobject stack = MainHandStack121(env, ent);
+        jobject item = StackGetItem121(env, stack);
+        const std::string key = ItemTranslationKey121(env, item);
+        if (item) env->DeleteLocalRef(item);
+        if (stack) env->DeleteLocalRef(stack);
+
+        const bool known = g_modernMurderers.count(facts.stableName) != 0;
+        const lc::beta::MurderRole role = lc::beta::ClassifyMurderRole(key, known);
+        if (role == lc::beta::MM_ROLE_MURDERER) g_modernMurderers.insert(facts.stableName);
+        if (role != lc::beta::MM_ROLE_NONE) {
+            aoko::ui::MurderTag tag;
+            tag.name = facts.stableName;
+            tag.x = CallDoubleNoArgs(env, ent, g_getX_121);
+            tag.y = CallDoubleNoArgs(env, ent, g_getY_121);
+            tag.z = CallDoubleNoArgs(env, ent, g_getZ_121);
+            const double dx = tag.x - sx, dy = tag.y - sy, dz = tag.z - sz;
+            tag.dist = (float)std::sqrt(dx * dx + dy * dy + dz * dz);
+            tag.role = (int)role;
+            local.push_back(tag);
+        }
+        env->DeleteLocalRef(ent);
+    }
+    env->DeleteLocalRef(arr);
+    env->DeleteLocalRef(list);
+    env->DeleteLocalRef(self);
+    env->DeleteLocalRef(world);
+    SetModuleStatus121("murdermystery", "");
+    LockGuard lk(g_modernMurderMutex);
+    g_modernMurder.swap(local);
+}
+
+// ── Break Progress ──
+static std::vector<aoko::ui::BreakTag> g_modernBreaks;
+static Mutex g_modernBreaksMutex;
+static jfieldID g_bpWorldMapField_121 = nullptr;     // ClientLevel.destroyingBlocks (26.x)
+static jfieldID g_bpRendererField_121 = nullptr;     // Minecraft.worldRenderer / levelRenderer
+static jfieldID g_bpRendererMapField_121 = nullptr;  // WorldRenderer.blockBreakingInfos (1.21)
+static jfieldID g_bpGameModeField_121 = nullptr;
+static jfieldID g_bpSelfPosField_121 = nullptr;
+static jfieldID g_bpSelfProgressField_121 = nullptr;
+static jmethodID g_bpInfoActor_121 = nullptr, g_bpInfoPos_121 = nullptr, g_bpInfoStage_121 = nullptr;
+static jmethodID g_bpPosX_121 = nullptr, g_bpPosY_121 = nullptr, g_bpPosZ_121 = nullptr;
+static jmethodID g_bpWorldGetEntity_121 = nullptr;
+static jmethodID g_bpEntityGetId_121 = nullptr;
+static jmethodID g_bpMapValues_121 = nullptr, g_bpToArray_121 = nullptr;
+static bool g_bpResolved_121 = false;
+
+static void ResolveBreakProgress121(JNIEnv* env, jobject world, jobject self) {
+    if (g_bpResolved_121 || !env || !g_mcInstance || !world || !self) return;
+    g_bpResolved_121 = true;
+    static const char* const mapSig[] = { "Lit/unimi/dsi/fastutil/ints/Int2ObjectMap;", nullptr };
+    jclass worldCls = env->GetObjectClass(world);
+    static const char* const worldMapNames[] = { "destroyingBlocks", nullptr };
+    g_bpWorldMapField_121 = FindField121(env, worldCls, worldMapNames, mapSig);
+    static const char* const getEntNames[] = { "getEntityById", "getEntity", "method_8469", nullptr };
+    static const char* const getEntSigs[] = {
+        "(I)Lnet/minecraft/world/entity/Entity;", "(I)Lnet/minecraft/class_1297;", "(I)Lnet/minecraft/entity/Entity;", nullptr
+    };
+    g_bpWorldGetEntity_121 = FindMethod121(env, worldCls, getEntNames, getEntSigs);
+    if (worldCls) env->DeleteLocalRef(worldCls);
+
+    jclass mcCls = env->GetObjectClass(g_mcInstance);
+    if (!g_bpWorldMapField_121) {
+        static const char* const rNames[] = { "worldRenderer", "levelRenderer", "field_1769", nullptr };
+        static const char* const rSigs[] = {
+            "Lnet/minecraft/class_761;", "Lnet/minecraft/client/renderer/LevelRenderer;",
+            "Lnet/minecraft/client/render/WorldRenderer;", nullptr
+        };
+        g_bpRendererField_121 = FindField121(env, mcCls, rNames, rSigs);
+        if (g_bpRendererField_121) {
+            jobject r = env->GetObjectField(g_mcInstance, g_bpRendererField_121);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); r = nullptr; }
+            if (r) {
+                jclass rc = env->GetObjectClass(r);
+                static const char* const mNames[] = { "blockBreakingInfos", "destroyingBlocks", "field_4058", nullptr };
+                g_bpRendererMapField_121 = FindField121(env, rc, mNames, mapSig);
+                if (rc) env->DeleteLocalRef(rc);
+                env->DeleteLocalRef(r);
+            }
+        }
+    }
+    static const char* const gmNames[] = { "gameMode", "interactionManager", "field_1761", nullptr };
+    static const char* const gmSigs[] = {
+        "Lnet/minecraft/client/multiplayer/MultiPlayerGameMode;", "Lnet/minecraft/class_636;",
+        "Lnet/minecraft/client/network/ClientPlayerInteractionManager;", nullptr
+    };
+    g_bpGameModeField_121 = FindField121(env, mcCls, gmNames, gmSigs);
+    if (mcCls) env->DeleteLocalRef(mcCls);
+    if (g_bpGameModeField_121) {
+        jobject gm = env->GetObjectField(g_mcInstance, g_bpGameModeField_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); gm = nullptr; }
+        if (gm) {
+            jclass gc = env->GetObjectClass(gm);
+            static const char* const posNames[] = { "destroyBlockPos", "currentBreakingPos", "field_3714", nullptr };
+            static const char* const posSigs[] = {
+                "Lnet/minecraft/core/BlockPos;", "Lnet/minecraft/class_2338;", "Lnet/minecraft/util/math/BlockPos;", nullptr
+            };
+            g_bpSelfPosField_121 = FindField121(env, gc, posNames, posSigs);
+            static const char* const progNames[] = { "destroyProgress", "currentBreakingProgress", "field_3715", nullptr };
+            static const char* const floatSig[] = { "F", nullptr };
+            g_bpSelfProgressField_121 = FindField121(env, gc, progNames, floatSig);
+            if (gc) env->DeleteLocalRef(gc);
+            env->DeleteLocalRef(gm);
+        }
+    }
+    static const char* const posCls[] = {
+        "net.minecraft.class_2382", "net.minecraft.core.Vec3i", "net.minecraft.util.math.Vec3i", nullptr
+    };
+    jclass vec3i = LoadModernClassGlobal(env, posCls);
+    static const char* const intSig[] = { "()I", nullptr };
+    static const char* const xNames[] = { "getX", "method_10263", nullptr };
+    static const char* const yNames[] = { "getY", "method_10264", nullptr };
+    static const char* const zNames[] = { "getZ", "method_10260", nullptr };
+    g_bpPosX_121 = FindMethod121(env, vec3i, xNames, intSig);
+    g_bpPosY_121 = FindMethod121(env, vec3i, yNames, intSig);
+    g_bpPosZ_121 = FindMethod121(env, vec3i, zNames, intSig);
+    if (vec3i) env->DeleteGlobalRef(vec3i);
+    jclass selfCls = env->GetObjectClass(self);
+    static const char* const idNames[] = { "getId", "method_5628", nullptr };
+    g_bpEntityGetId_121 = FindMethod121(env, selfCls, idNames, intSig);
+    if (selfCls) env->DeleteLocalRef(selfCls);
+    jclass mapCls = env->FindClass("java/util/Map");
+    if (mapCls) { g_bpMapValues_121 = env->GetMethodID(mapCls, "values", "()Ljava/util/Collection;"); env->DeleteLocalRef(mapCls); }
+    jclass colCls = env->FindClass("java/util/Collection");
+    if (colCls) { g_bpToArray_121 = env->GetMethodID(colCls, "toArray", "()[Ljava/lang/Object;"); env->DeleteLocalRef(colCls); }
+    if (env->ExceptionCheck()) env->ExceptionClear();
+}
+
+static bool ReadBlockPos121(JNIEnv* env, jobject pos, int* x, int* y, int* z) {
+    if (!pos || !g_bpPosX_121 || !g_bpPosY_121 || !g_bpPosZ_121) return false;
+    *x = env->CallIntMethod(pos, g_bpPosX_121);
+    *y = env->CallIntMethod(pos, g_bpPosY_121);
+    *z = env->CallIntMethod(pos, g_bpPosZ_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return false; }
+    return true;
+}
+
+static void UpdateBreakProgress121(JNIEnv* env, const Config& cfg) {
+    if (!env || !cfg.breakProgress || !g_mcInstance || !g_worldField_121 || !g_playerField_121) {
+        LockGuard lk(g_modernBreaksMutex);
+        g_modernBreaks.clear();
+        return;
+    }
+    jobject world = env->GetObjectField(g_mcInstance, g_worldField_121);
+    jobject self = env->GetObjectField(g_mcInstance, g_playerField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); world = nullptr; self = nullptr; }
+    if (!world || !self) {
+        if (world) env->DeleteLocalRef(world);
+        if (self) env->DeleteLocalRef(self);
+        return;
+    }
+    ResolveBreakProgress121(env, world, self);
+    const bool othersReady = (g_bpWorldMapField_121 || (g_bpRendererField_121 && g_bpRendererMapField_121)) &&
+        g_bpMapValues_121 && g_bpToArray_121;
+    const bool selfReady = g_bpGameModeField_121 && g_bpSelfPosField_121 && g_bpSelfProgressField_121;
+    SetModuleStatus121("breakprogress", (!othersReady && !selfReady)
+        ? "Missing block-destruction and game-mode mappings"
+        : (othersReady ? "" : "Only your own mining is shown (destroyingBlocks mapping missing)"));
+
+    std::vector<aoko::ui::BreakTag> local;
+    jint selfId = -1;
+    if (g_bpEntityGetId_121) {
+        selfId = env->CallIntMethod(self, g_bpEntityGetId_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); selfId = -1; }
+    }
+    if (selfReady) {
+        jobject gm = env->GetObjectField(g_mcInstance, g_bpGameModeField_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); gm = nullptr; }
+        if (gm) {
+            float prog = env->GetFloatField(gm, g_bpSelfProgressField_121);
+            jobject pos = env->GetObjectField(gm, g_bpSelfPosField_121);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); prog = 0.0f; pos = nullptr; }
+            int bx, by, bz;
+            if (prog > 0.0f && ReadBlockPos121(env, pos, &bx, &by, &bz)) {
+                aoko::ui::BreakTag tag;
+                tag.x = bx + 0.5; tag.y = by + 0.5; tag.z = bz + 0.5;
+                tag.percent = lc::beta::BreakDamageToPercent(prog);
+                tag.self = true;
+                local.push_back(tag);
+            }
+            if (pos) env->DeleteLocalRef(pos);
+            env->DeleteLocalRef(gm);
+        }
+    }
+    if (othersReady) {
+        jobject map = nullptr;
+        if (g_bpWorldMapField_121) {
+            map = env->GetObjectField(world, g_bpWorldMapField_121);
+        } else {
+            jobject r = env->GetObjectField(g_mcInstance, g_bpRendererField_121);
+            if (r && !env->ExceptionCheck()) map = env->GetObjectField(r, g_bpRendererMapField_121);
+            if (r) env->DeleteLocalRef(r);
+        }
+        if (env->ExceptionCheck()) { env->ExceptionClear(); map = nullptr; }
+        jobject values = map ? env->CallObjectMethod(map, g_bpMapValues_121) : nullptr;
+        jobjectArray arr = values ? (jobjectArray)env->CallObjectMethod(values, g_bpToArray_121) : nullptr;
+        if (env->ExceptionCheck()) { env->ExceptionClear(); arr = nullptr; }
+        const int n = arr ? (std::min)(64, (int)env->GetArrayLength(arr)) : 0;
+        for (int i = 0; i < n; ++i) {
+            jobject info = env->GetObjectArrayElement(arr, i);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); break; }
+            if (!info) continue;
+            if (!g_bpInfoActor_121 || !g_bpInfoPos_121 || !g_bpInfoStage_121) {
+                jclass ic = env->GetObjectClass(info);
+                static const char* const intSig[] = { "()I", nullptr };
+                static const char* const actorNames[] = { "getActorId", "getId", "method_34868", nullptr };
+                static const char* const stageNames[] = { "getStage", "getProgress", "method_13988", nullptr };
+                static const char* const posNames[] = { "getPos", "method_13991", nullptr };
+                static const char* const posSigs[] = {
+                    "()Lnet/minecraft/core/BlockPos;", "()Lnet/minecraft/class_2338;", "()Lnet/minecraft/util/math/BlockPos;", nullptr
+                };
+                g_bpInfoActor_121 = FindMethod121(env, ic, actorNames, intSig);
+                g_bpInfoStage_121 = FindMethod121(env, ic, stageNames, intSig);
+                g_bpInfoPos_121 = FindMethod121(env, ic, posNames, posSigs);
+                if (ic) env->DeleteLocalRef(ic);
+            }
+            if (!g_bpInfoActor_121 || !g_bpInfoPos_121 || !g_bpInfoStage_121) { env->DeleteLocalRef(info); break; }
+            jint actor = env->CallIntMethod(info, g_bpInfoActor_121);
+            jint stage = env->CallIntMethod(info, g_bpInfoStage_121);
+            jobject pos = env->CallObjectMethod(info, g_bpInfoPos_121);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); env->DeleteLocalRef(info); continue; }
+            int bx, by, bz;
+            if (actor != selfId && stage >= 0 && ReadBlockPos121(env, pos, &bx, &by, &bz)) {
+                aoko::ui::BreakTag tag;
+                tag.x = bx + 0.5; tag.y = by + 0.5; tag.z = bz + 0.5;
+                tag.percent = lc::beta::BreakStageToPercent(stage);
+                tag.self = false;
+                if (g_bpWorldGetEntity_121) {
+                    jobject breaker = env->CallObjectMethod(world, g_bpWorldGetEntity_121, actor);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); breaker = nullptr; }
+                    if (breaker) {
+                        if (g_playerEntityClass_121 && env->IsInstanceOf(breaker, g_playerEntityClass_121) == JNI_TRUE)
+                            tag.breaker = GetStablePlayerName(env, breaker);
+                        env->DeleteLocalRef(breaker);
+                    }
+                }
+                local.push_back(tag);
+            }
+            if (pos) env->DeleteLocalRef(pos);
+            env->DeleteLocalRef(info);
+        }
+        if (arr) env->DeleteLocalRef(arr);
+        if (values) env->DeleteLocalRef(values);
+        if (map) env->DeleteLocalRef(map);
+    }
+    env->DeleteLocalRef(self);
+    env->DeleteLocalRef(world);
+    LockGuard lk(g_modernBreaksMutex);
+    g_modernBreaks.swap(local);
+}
+
+static void ClearModernBetaOverlays(JNIEnv* env) {
+    ClearModernTrajectory();
+    ClearModernMurderMystery(env);
+    { LockGuard lk(g_modernBreaksMutex); g_modernBreaks.clear(); }
+}
+
 static DWORD WINAPI FastPollThreadProc(LPVOID) {
     JNIEnv* env = nullptr;
     if (!g_jvm || g_jvm->AttachCurrentThread((void**)&env, nullptr) != JNI_OK) return 1;
@@ -17570,6 +18333,9 @@ static DWORD WINAPI FastPollThreadProc(LPVOID) {
                         UpdateAutoToolModern(env, cfg);
                     }
                     UpdateReach(env, cfg);
+                    // Before UpdateVelocity: it clears hurtTime for No Hurt Cam.
+                    if (cfg.jumpReset || g_jumpResetHolding_121 || g_jumpResetPrevHurt_121 != 0)
+                        UpdateJumpReset121(env, cfg);
                     UpdateVelocity(env, cfg);
                 }
                 // Camera validity is part of the transition readiness handshake;
@@ -17606,6 +18372,10 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
     DWORD lastWTapMs = 0;
     DWORD lastNoHurtCamMs = 0;
     DWORD lastTntScanMs = 0;
+    DWORD lastTrajectoryMs = 0;
+    DWORD lastMurderMysteryMs = 0;
+    DWORD lastBreakProgressMs = 0;
+    DWORD lastModuleStatusMs = 0;
     bool chestEspScanWasEnabled = false;
     bool entityProducerWasEnabled = false;
     // Teleport detection: track last scanned player position to catch same-world jumps
@@ -17873,6 +18643,36 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                         }
                     }
 
+                    if (lc::IsTelemetryIntervalDue(nowMs, lastModuleStatusMs, 500)) {
+                        UpdateSimpleModuleStatus121(cfg);
+                        lastModuleStatusMs = nowMs;
+                    }
+                    if (cfg.trajectories) {
+                        if (lc::IsTelemetryIntervalDue(nowMs, lastTrajectoryMs, lc::kTrajectoryIntervalMs)) {
+                            UpdateTrajectories121(env, cfg);
+                            lastTrajectoryMs = nowMs;
+                        }
+                    } else {
+                        ClearModernTrajectory();
+                    }
+                    if (cfg.murderMystery) {
+                        if (lc::IsTelemetryIntervalDue(nowMs, lastMurderMysteryMs, lc::kMurderMysteryIntervalMs)) {
+                            UpdateMurderMystery121(env, cfg);
+                            lastMurderMysteryMs = nowMs;
+                        }
+                    } else {
+                        ClearModernMurderMystery(env);
+                    }
+                    if (cfg.breakProgress) {
+                        if (lc::IsTelemetryIntervalDue(nowMs, lastBreakProgressMs, lc::kBreakProgressIntervalMs)) {
+                            UpdateBreakProgress121(env, cfg);
+                            lastBreakProgressMs = nowMs;
+                        }
+                    } else {
+                        LockGuard lkBp(g_modernBreaksMutex);
+                        g_modernBreaks.clear();
+                    }
+
                     const bool chunkScansEnabled = cfg.chestEsp || cfg.chestStealer || cfg.blockEsp || cfg.bedPlates;
                     const bool chunkScanReady = !chunkScansEnabled ||
                         (!IsWorldTransitionActive() && ProbeModernChunkObject(env));
@@ -17946,6 +18746,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                 { LockGuard lk3(g_bgCamMutex); g_bgCamState = BgCamState(); }
                 { LockGuard lk4(g_pixelPartyMutex); g_pixelPartySnap = PixelPartySnap121(); }
                 { LockGuard lkTnt(g_modernTntMutex); g_modernTntRecords.clear(); }
+                ClearModernBetaOverlays(env);
                 // Mapping-only reloads are allowed to complete in menus; genuine
                 // world transitions remain active until a world is present again.
                 TryCompleteWorldTransition(env, false);
@@ -17973,6 +18774,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
             { LockGuard lkCache(g_blockEspCacheMutex); g_blockEspChunkCache.clear(); }
             { LockGuard lk3(g_bgCamMutex); g_bgCamState = BgCamState(); }
             { LockGuard lkTnt(g_modernTntMutex); g_modernTntRecords.clear(); }
+            ClearModernBetaOverlays(env);
         }
         RecordNativePerfSince(lc::PERF_SCAN_LOOP, scanLoopPerfStarted);
         MaybeLogNativePerfDiagnostics();
@@ -17995,6 +18797,12 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                 &sleepMs, sleepNow, lastPixelPartyMs, lc::kPixelPartyIntervalMs, cfg.pixelPartyAssist);
             lc::ConsiderJobSleep(
                 &sleepMs, sleepNow, lastClosestPlayerMs, lc::kClosestPlayerIntervalMs, cfg.closestPlayer);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastTrajectoryMs, lc::kTrajectoryIntervalMs, cfg.trajectories);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastMurderMysteryMs, lc::kMurderMysteryIntervalMs, cfg.murderMystery);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastBreakProgressMs, lc::kBreakProgressIntervalMs, cfg.breakProgress);
             lc::ConsiderJobSleep(
                 &sleepMs, sleepNow, lastPlayerScanMs,
                 lc::PlayerOverlayIntervalMs(cfg.aimAssist || cfg.triggerbot),
@@ -18565,7 +19373,8 @@ static void RenderOverlayPanels(
             Matrix4x4 sharedProj = {}, sharedView = {};
             bool sharedMatsOk = false;
 
-            if (cfg.nametags || cfg.chestEsp || cfg.blockEsp || cfg.fightStatus || cfg.bedPlates || cfg.fireballWarning) {
+            if (cfg.nametags || cfg.chestEsp || cfg.blockEsp || cfg.fightStatus || cfg.bedPlates || cfg.fireballWarning ||
+                cfg.tntTimer || cfg.trajectories || cfg.murderMystery || cfg.breakProgress) {
                 BgCamState cs;
                 { LockGuard lk(g_bgCamMutex); cs = g_bgCamState; }
                 sharedCam      = { cs.camX, cs.camY, cs.camZ };
@@ -19333,6 +20142,36 @@ static void RenderOverlayPanels(
                 }
             }
 
+            // ── Beta overlays: Trajectories, Murder Mystery, Break Progress (draw-only) ──
+            if (!g_realGuiOpen && sharedCamFound && (cfg.trajectories || cfg.murderMystery || cfg.breakProgress)) {
+                const int vw = (int)io.DisplaySize.x;
+                const int vh = (int)io.DisplaySize.y;
+                auto project = [&](double x, double y, double z, float* sx, float* sy) {
+                    const LegoVec3 p = { x, y, z };
+                    return sharedMatsOk
+                        ? WorldToScreen(p, sharedCam, sharedView, sharedProj, vw, vh, sx, sy)
+                        : WorldToScreen_Angles(p, sharedCam, sharedYaw, sharedPitch, cpCamState.fov, vw, vh, sx, sy);
+                };
+                if (cfg.trajectories) {
+                    static thread_local ModernTrajectorySnap trajSnap;
+                    { LockGuard lk(g_modernTrajMutex); trajSnap = g_modernTraj; }
+                    if (trajSnap.active) {
+                        aoko::ui::DrawTrajectory(ImGui::GetBackgroundDrawList(), BuildOverlayUiTheme(overlayTheme),
+                            trajSnap.points, trajSnap.hitBlock, trajSnap.impact, project);
+                    }
+                }
+                if (cfg.murderMystery) {
+                    static thread_local std::vector<aoko::ui::MurderTag> murderSnap;
+                    { LockGuard lk(g_modernMurderMutex); murderSnap = g_modernMurder; }
+                    if (!murderSnap.empty()) aoko::ui::DrawMurderTags(fg, vw, murderSnap, project);
+                }
+                if (cfg.breakProgress) {
+                    static thread_local std::vector<aoko::ui::BreakTag> breakSnap;
+                    { LockGuard lk(g_modernBreaksMutex); breakSnap = g_modernBreaks; }
+                    if (!breakSnap.empty()) aoko::ui::DrawBreakTags(fg, breakSnap, project);
+                }
+            }
+
             bool renderGtbHelper = TRACE261_IF("renderGtbHelper", cfg.gtbHelper);
             if (renderGtbHelper) {
                 std::string hint = cfg.gtbHint;
@@ -19511,6 +20350,11 @@ static void RenderOverlayPanels(
                 if (cfg.sprint)        pushMod("Sprint");
                 if (cfg.tntTimer)      pushMod("TNT Timer");
                 if (cfg.wTap)          pushMod("WTap");
+                if (cfg.jumpReset)     pushMod("Jump Reset");
+                if (cfg.hitSelect)     pushMod("Hit Select");
+                if (cfg.trajectories)  pushMod("Trajectories");
+                if (cfg.murderMystery) pushMod("Murder Mystery");
+                if (cfg.breakProgress) pushMod("Break Progress");
                 if (cfg.hitDelayFixEnabled) pushMod("Hit Delay Fix");
 
                 std::sort(modEntries.begin(), modEntries.end(),
@@ -20130,6 +20974,8 @@ glfw_done:;
                 bool lookBlock;
                 bool lookEntity;
                 bool lookEntityLatched;
+                int lookEntityHurtTime = 0;
+                std::string moduleStatusJson;
                 bool breakBlock;
                 bool holdBlock;
                 float attackCooldown;
@@ -20149,6 +20995,7 @@ glfw_done:;
                     lookBlock = g_jniLookingAtBlock;
                     lookEntity = g_jniLookingAtEntity;
                     lookEntityLatched = g_jniLookingAtEntityLatched;
+                    lookEntityHurtTime = g_jniLookingAtEntityHurtTime;
                     breakBlock = g_jniBreakingBlock;
                     holdBlock = g_jniHoldingBlock;
                     healthVal = g_jniHealth;
@@ -20247,6 +21094,13 @@ glfw_done:;
                 state += lookEntity ? "true" : "false";
                 state += ",\"lookingAtEntityLatched\":";
                 state += lookEntityLatched ? "true" : "false";
+                state += ",\"lookingAtEntityHurtTime\":";
+                state += std::to_string(lookEntityHurtTime);
+                if (sendFullState) {
+                    moduleStatusJson = ModuleStatusJson121();
+                    state += ",\"moduleStatus\":";
+                    state += moduleStatusJson;
+                }
                 state += ",\"breakingBlock\":";
                 state += breakBlock ? "true" : "false";
                 char stateMsBuf[32];
