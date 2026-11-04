@@ -92,7 +92,9 @@ jobs:
               if ($isBeta) { $version = $version.Substring(0, $version.Length - 5) }
               $channel = if ($isBeta) { 'beta' } else { 'stable' }
               $draft = 'false'
-              $notes = ''
+              # Tag-driven releases use the annotated tag message as the body so
+              # the short bullet list travels with the tag.
+              $notes = ((& git tag -l --format='%(contents)' $tag) -join "`n").Trim()
           } else {
               $version = $env:INPUT_VERSION
               $channel = $env:INPUT_CHANNEL

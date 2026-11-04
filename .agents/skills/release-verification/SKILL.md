@@ -70,9 +70,16 @@ artifacts are built and tested on Windows.
 
 - Manual: **Actions → Build and publish release**, choose `beta` (builds `dev`)
   or `stable` (builds `main`), version, draft, and optional notes.
-- Tag: push `v<version>-beta` on `dev` or `v<version>` on `main`. The tag must
-  contain the workflow file; the script accepts detached CI tag checkouts when
-  the commit is reachable from the release branch.
+- Tag: create an **annotated** tag whose message is the release body, then push
+  it. The workflow uses the tag message as the notes; a lightweight tag falls
+  back to generated notes. Tag `v<version>-beta` on `dev` or `v<version>` on
+  `main`. The tag must contain the workflow file; the script accepts detached
+  CI tag checkouts when the commit is reachable from the release branch.
+
+  ```powershell
+  git tag -a v0.x.y-beta -F notes.md
+  git push origin v0.x.y-beta
+  ```
 - `workflow_dispatch` only appears after the workflow exists on the default
   branch. Tag pushes work from `dev` immediately.
 - Releases created with the default `GITHUB_TOKEN` do not emit a `release`
