@@ -4596,6 +4596,10 @@ static void UpdateVelocity(JNIEnv* env, const Config& cfg) {
     }
 
     g_lastHurtTime_121 = hurtTime;
+    if (cfg.noHurtCam && hurtTime > 0) {
+        env->SetIntField(selfObj, g_hurtTimeField_121, 0);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
     env->DeleteLocalRef(selfObj);
 }
 
@@ -4808,111 +4812,6 @@ static jobject GetSprintKeyBinding121(JNIEnv* env) {
     }
     env->DeleteLocalRef(opts);
     return key;
-}
-
-static void UpdateSprint121(JNIEnv* env, bool enabled, bool guiOpen, bool inWorld) {
-    if (!env) return;
-    const bool isMovingForward = (GetAsyncKeyState('W') & 0x8000) != 0;
-    if (!enabled || guiOpen || !inWorld || !isMovingForward) {
-        if (g_sprintManaging121) {
-            jobject key = GetSprintKeyBinding121(env);
-            if (key) {
-                EnsureSpeedBridgeKeyMethods(env, key);
-                if (g_speedBridgeKeySetPressed_121) {
-                    env->CallVoidMethod(key, g_speedBridgeKeySetPressed_121, JNI_FALSE);
-                    if (env->ExceptionCheck()) env->ExceptionClear();
-                }
-                env->DeleteLocalRef(key);
-            }
-            g_sprintManaging121 = false;
-        }
-        return;
-    }
-
-    jobject key = GetSprintKeyBinding121(env);
-    if (key) {
-        EnsureSpeedBridgeKeyMethods(env, key);
-        if (g_speedBridgeKeySetPressed_121) {
-            env->CallVoidMethod(key, g_speedBridgeKeySetPressed_121, JNI_TRUE);
-            if (env->ExceptionCheck()) env->ExceptionClear();
-            else g_sprintManaging121 = true;
-        }
-        env->DeleteLocalRef(key);
-    }
-}
-
-static void UpdateFastPlace121(JNIEnv* env, bool enabled, bool guiOpen, bool inWorld, jclass mcCls) {
-    if (!env || !enabled || guiOpen || !inWorld || !g_mcInstance) return;
-    if (!g_itemUseCooldownField_121 && mcCls) {
-        const char* names[] = { "itemUseCooldown", "field_1752", "f_91071_", nullptr };
-        for (int i = 0; names[i] && !g_itemUseCooldownField_121; ++i) {
-            g_itemUseCooldownField_121 = env->GetFieldID(mcCls, names[i], "I");
-            if (env->ExceptionCheck()) { env->ExceptionClear(); g_itemUseCooldownField_121 = nullptr; }
-        }
-    }
-    if (g_itemUseCooldownField_121) {
-        jint delay = env->GetIntField(g_mcInstance, g_itemUseCooldownField_121);
-        if (env->ExceptionCheck()) { env->ExceptionClear(); return; }
-        if (delay > 0) {
-            env->SetIntField(g_mcInstance, g_itemUseCooldownField_121, 0);
-            if (env->ExceptionCheck()) env->ExceptionClear();
-        }
-    }
-}
-
-static void UpdateNoHurtCam121(JNIEnv* env, bool enabled, jobject selfObj) {
-    if (!env || !enabled || !selfObj) return;
-    if (!g_hurtTimeField_121) {
-        jclass entCls = env->GetObjectClass(selfObj);
-        if (entCls) {
-            const char* names[] = { "field_6012", "hurtTime", "f_20916_", "f_19864_", nullptr };
-            for (int i = 0; names[i] && !g_hurtTimeField_121; i++) {
-                g_hurtTimeField_121 = env->GetFieldID(entCls, names[i], "I");
-                if (env->ExceptionCheck()) { env->ExceptionClear(); g_hurtTimeField_121 = nullptr; }
-            }
-            env->DeleteLocalRef(entCls);
-        }
-    }
-    if (!g_hurtTimeField_121) return;
-    jint ht = env->GetIntField(selfObj, g_hurtTimeField_121);
-    if (env->ExceptionCheck()) { env->ExceptionClear(); return; }
-    if (ht > 0) {
-        env->SetIntField(selfObj, g_hurtTimeField_121, 0);
-        if (env->ExceptionCheck()) env->ExceptionClear();
-    }
-}
-
-static void UpdateWTap121(JNIEnv* env, bool enabled, bool guiOpen, bool inWorld, jobject selfObj) {
-    if (!env || !enabled || guiOpen || !inWorld || !selfObj) return;
-    const DWORD nowMs = GetTickCount();
-    if (g_wTapInReset121) {
-        if (nowMs - g_lastWTapResetMs121 >= 60) {
-            g_wTapInReset121 = false;
-        }
-        return;
-    }
-
-    const bool isMovingForward = (GetAsyncKeyState('W') & 0x8000) != 0;
-    const bool isLmb = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
-    if (isMovingForward && isLmb && (nowMs - g_lastWTapResetMs121 >= 250)) {
-        if (!g_setSprintingMethod_121) {
-            jclass playerCls = env->GetObjectClass(selfObj);
-            if (playerCls) {
-                const char* names[] = { "setSprinting", "method_5728", "m_6858_", nullptr };
-                for (int i = 0; names[i] && !g_setSprintingMethod_121; ++i) {
-                    g_setSprintingMethod_121 = env->GetMethodID(playerCls, names[i], "(Z)V");
-                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_setSprintingMethod_121 = nullptr; }
-                }
-                env->DeleteLocalRef(playerCls);
-            }
-        }
-        if (g_setSprintingMethod_121) {
-            env->CallVoidMethod(selfObj, g_setSprintingMethod_121, JNI_FALSE);
-            if (env->ExceptionCheck()) env->ExceptionClear();
-            g_wTapInReset121 = true;
-            g_lastWTapResetMs121 = nowMs;
-        }
-    }
 }
 
 static void UpdateSpeedBridgeDirection121(double posX, double posZ) {
@@ -6784,7 +6683,6 @@ static void UpdatePlayerListOverlay(JNIEnv* env) {
         double x, y, z;
     };
     std::vector<LightweightEntity> lwList;
-    std::vector<ModernTntRecord> localTntList;
 
     for (int i = 0; i < maxPlayersToProcess; i++) {
         jobject entObj = env->GetObjectArrayElement(entArr, i);
@@ -6827,49 +6725,6 @@ static void UpdatePlayerListOverlay(JNIEnv* env) {
         double dx = ex - sx, dy = ey - sy, dz = ez - sz;
         double dist = sqrt(dx*dx + dy*dy + dz*dz);
         if (dist != dist) { env->DeleteLocalRef(entObj); continue; }
-
-        if (cfg.tntTimer) {
-            if (!g_tntClass_121) {
-                const char* cnames[] = {
-                    "net/minecraft/entity/TntEntity",
-                    "net/minecraft/class_1541",
-                    "net/minecraft/world/entity/item/PrimedTnt",
-                    nullptr
-                };
-                for (int ci = 0; cnames[ci] && !g_tntClass_121; ++ci) {
-                    jclass c = env->FindClass(cnames[ci]);
-                    if (c && !env->ExceptionCheck()) {
-                        g_tntClass_121 = (jclass)env->NewGlobalRef(c);
-                        const char* fnames[] = { "fuse", "field_7196", "f_32074_", nullptr };
-                        for (int fi = 0; fnames[fi] && !g_tntFuseField_121; ++fi) {
-                            g_tntFuseField_121 = env->GetFieldID(c, fnames[fi], "I");
-                            if (env->ExceptionCheck()) { env->ExceptionClear(); g_tntFuseField_121 = nullptr; }
-                        }
-                        const char* mnames[] = { "getFuse", "method_6968", "m_32089_", nullptr };
-                        for (int mi = 0; mnames[mi] && !g_tntGetFuse_121; ++mi) {
-                            g_tntGetFuse_121 = env->GetMethodID(c, mnames[mi], "()I");
-                            if (env->ExceptionCheck()) { env->ExceptionClear(); g_tntGetFuse_121 = nullptr; }
-                        }
-                        env->DeleteLocalRef(c);
-                    } else if (env->ExceptionCheck()) {
-                        env->ExceptionClear();
-                    }
-                }
-            }
-            if (g_tntClass_121 && env->IsInstanceOf(entObj, g_tntClass_121)) {
-                int fuse = 80;
-                if (g_tntGetFuse_121) {
-                    fuse = env->CallIntMethod(entObj, g_tntGetFuse_121);
-                    if (env->ExceptionCheck()) { env->ExceptionClear(); fuse = 80; }
-                } else if (g_tntFuseField_121) {
-                    fuse = env->GetIntField(entObj, g_tntFuseField_121);
-                    if (env->ExceptionCheck()) { env->ExceptionClear(); fuse = 80; }
-                }
-                localTntList.push_back({ ex, ey + 0.9, ez, (float)fuse / 20.0f });
-                env->DeleteLocalRef(entObj);
-                continue;
-            }
-        }
 
         lwList.push_back({entObj, dist, ex, ey, ez});
     }
@@ -7147,11 +7002,6 @@ static void UpdatePlayerListOverlay(JNIEnv* env) {
         MaybePlayFireballWarningSound121(env, holderPresent, true, now);
     }
 
-    {
-        LockGuard lk(g_modernTntMutex);
-        g_modernTntRecords.swap(localTntList);
-    }
-
     if (gameRendererForProjection) env->DeleteLocalRef(gameRendererForProjection);
 
     // Clean up local references exactly once.
@@ -7166,6 +7016,149 @@ static void UpdatePlayerListOverlay(JNIEnv* env) {
     } else if (hideVanillaTags && suppressionAttemptedThisPass && !suppressionAppliedThisPass && !g_loggedNametagSuppressionUnavailable_121) {
         g_loggedNametagSuppressionUnavailable_121 = true;
         Log("NametagHideVanilla: unable to assign players to hide team; fail-open on this runtime.");
+    }
+}
+
+static jmethodID g_clientWorldGetEntities_121 = nullptr;
+static jmethodID g_iterableIterator_121 = nullptr;
+static jmethodID g_iteratorHasNext_121 = nullptr;
+static jmethodID g_iteratorNext_121 = nullptr;
+
+static void EnsureModernTntClass(JNIEnv* env) {
+    if (!g_tntClass_121 && env && g_gameClassLoader) {
+        const char* names[] = {
+            "net.minecraft.class_1541",
+            "net.minecraft.entity.TntEntity",
+            "net.minecraft.world.entity.item.PrimedTnt",
+            nullptr
+        };
+        for (int i = 0; names[i] && !g_tntClass_121; ++i) {
+            jclass c = LoadClassWithLoader(env, g_gameClassLoader, names[i]);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); c = nullptr; }
+            if (c) {
+                g_tntClass_121 = (jclass)env->NewGlobalRef(c);
+                env->DeleteLocalRef(c);
+            }
+        }
+    }
+    if (g_tntClass_121 && !g_tntGetFuse_121) {
+        const char* mNames[] = { "method_6938", "getFuse", "m_32067_", nullptr };
+        for (int i = 0; mNames[i] && !g_tntGetFuse_121; ++i) {
+            g_tntGetFuse_121 = env->GetMethodID(g_tntClass_121, mNames[i], "()I");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_tntGetFuse_121 = nullptr; }
+        }
+    }
+    if (g_tntClass_121 && !g_tntFuseField_121) {
+        const char* fNames[] = { "field_7218", "fuse", "f_32048_", nullptr };
+        for (int i = 0; fNames[i] && !g_tntFuseField_121; ++i) {
+            g_tntFuseField_121 = env->GetFieldID(g_tntClass_121, fNames[i], "I");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_tntFuseField_121 = nullptr; }
+        }
+    }
+}
+
+static void UpdateTntScan121(JNIEnv* env, const Config& cfg) {
+    if (!env || !cfg.tntTimer || !g_mcInstance || !g_worldField_121) {
+        LockGuard lk(g_modernTntMutex);
+        g_modernTntRecords.clear();
+        return;
+    }
+    EnsureModernTntClass(env);
+    if (!g_tntClass_121 || (!g_tntGetFuse_121 && !g_tntFuseField_121)) return;
+
+    jobject world = env->GetObjectField(g_mcInstance, g_worldField_121);
+    if (!world || env->ExceptionCheck()) { env->ExceptionClear(); return; }
+
+    if (!g_clientWorldGetEntities_121) {
+        jclass worldCls = env->GetObjectClass(world);
+        if (worldCls) {
+            const char* names[] = { "method_18112", "getEntities", "entitiesForRendering", "m_104812_", nullptr };
+            for (int i = 0; names[i] && !g_clientWorldGetEntities_121; ++i) {
+                g_clientWorldGetEntities_121 = env->GetMethodID(worldCls, names[i], "()Ljava/lang/Iterable;");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_clientWorldGetEntities_121 = nullptr; }
+            }
+            env->DeleteLocalRef(worldCls);
+        }
+    }
+    if (!g_clientWorldGetEntities_121) {
+        env->DeleteLocalRef(world);
+        return;
+    }
+
+    if (!g_iterableIterator_121 || !g_iteratorHasNext_121 || !g_iteratorNext_121) {
+        jclass iterableCls = env->FindClass("java/lang/Iterable");
+        if (iterableCls) {
+            g_iterableIterator_121 = env->GetMethodID(iterableCls, "iterator", "()Ljava/util/Iterator;");
+            env->DeleteLocalRef(iterableCls);
+        }
+        jclass iterCls = env->FindClass("java/util/Iterator");
+        if (iterCls) {
+            g_iteratorHasNext_121 = env->GetMethodID(iterCls, "hasNext", "()Z");
+            g_iteratorNext_121 = env->GetMethodID(iterCls, "next", "()Ljava/lang/Object;");
+            env->DeleteLocalRef(iterCls);
+        }
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+    if (!g_iterableIterator_121 || !g_iteratorHasNext_121 || !g_iteratorNext_121) {
+        env->DeleteLocalRef(world);
+        return;
+    }
+
+    jobject iterable = env->CallObjectMethod(world, g_clientWorldGetEntities_121);
+    if (env->ExceptionCheck() || !iterable) {
+        env->ExceptionClear();
+        env->DeleteLocalRef(world);
+        return;
+    }
+
+    jobject iter = env->CallObjectMethod(iterable, g_iterableIterator_121);
+    if (env->ExceptionCheck() || !iter) {
+        env->ExceptionClear();
+        env->DeleteLocalRef(iterable);
+        env->DeleteLocalRef(world);
+        return;
+    }
+
+    std::vector<ModernTntRecord> localList;
+    int inspected = 0;
+    while (inspected < 500) {
+        jboolean hasNext = env->CallBooleanMethod(iter, g_iteratorHasNext_121);
+        if (env->ExceptionCheck() || !hasNext) { env->ExceptionClear(); break; }
+        inspected++;
+
+        jobject ent = env->CallObjectMethod(iter, g_iteratorNext_121);
+        if (env->ExceptionCheck() || !ent) { env->ExceptionClear(); continue; }
+
+        if (env->IsInstanceOf(ent, g_tntClass_121) == JNI_TRUE) {
+            int fuse = 80;
+            if (g_tntGetFuse_121) {
+                fuse = env->CallIntMethod(ent, g_tntGetFuse_121);
+            } else if (g_tntFuseField_121) {
+                fuse = env->GetIntField(ent, g_tntFuseField_121);
+            }
+            if (env->ExceptionCheck()) { env->ExceptionClear(); fuse = 80; }
+
+            double x = CallDoubleNoArgs(env, ent, g_getX_121);
+            double y = CallDoubleNoArgs(env, ent, g_getY_121);
+            double z = CallDoubleNoArgs(env, ent, g_getZ_121);
+
+            ModernTntRecord rec;
+            rec.x = x;
+            rec.y = y + 0.9;
+            rec.z = z;
+            rec.fuseSeconds = (float)fuse / 20.0f;
+            localList.push_back(rec);
+        }
+        env->DeleteLocalRef(ent);
+    }
+
+    env->DeleteLocalRef(iter);
+    env->DeleteLocalRef(iterable);
+    env->DeleteLocalRef(world);
+
+    {
+        LockGuard lk(g_modernTntMutex);
+        g_modernTntRecords.swap(localList);
     }
 }
 
@@ -13209,6 +13202,18 @@ static void ResetAutoTotemCaches(JNIEnv* env) {
     g_lastAntiDebuffTickMs = 0;
     g_nextAntiDebuffResolveMs_121 = 0;
 
+    DeleteGlobalRefSafe(env, g_tntClass_121);
+    g_tntFuseField_121 = nullptr;
+    g_tntGetFuse_121 = nullptr;
+    g_clientWorldGetEntities_121 = nullptr;
+    g_iterableIterator_121 = nullptr;
+    g_iteratorHasNext_121 = nullptr;
+    g_iteratorNext_121 = nullptr;
+    {
+        LockGuard lk(g_modernTntMutex);
+        g_modernTntRecords.clear();
+    }
+
     ResetRefillModernCaches(env);
 }
 
@@ -13258,6 +13263,7 @@ static void CleanupJniGlobals(JNIEnv* env) {
     DeleteGlobalRefSafe(env, g_abstractTeamClass_121);
     DeleteGlobalRefSafe(env, g_visibilityRuleClass_121);
     DeleteGlobalRefSafe(env, g_visibilityRuleNever_121);
+    DeleteGlobalRefSafe(env, g_tntClass_121);
     DeleteGlobalRefSafe(env, g_lastNametagSuppressionWorld_121);
     DeleteGlobalRefSafe(env, g_lastAutoTotemWorld_121);
     DeleteGlobalRefSafe(env, g_itemStackClass_121);
@@ -14982,9 +14988,6 @@ static void UpdateJniState() {
         inWorld = IsInWorldNow(env);
         if (!inWorld) lookingAtBlock = false;
 
-        UpdateFastPlace121(env, cfg.fastPlace, guiOpen, inWorld, mcCls);
-        UpdateSprint121(env, cfg.sprint, guiOpen, inWorld);
-
         EnsureCrosshairTargetField(env, mcCls);
         jfieldID hitFld = g_crosshairTargetField_121;
         TRACE261_BRANCH("crosshairFieldResolved", hitFld != nullptr);
@@ -15093,8 +15096,6 @@ static void UpdateJniState() {
         if (plFld) {
             jobject plObj = env->GetObjectField(g_mcInstance, plFld);
             if (plObj && !env->ExceptionCheck()) {
-                UpdateNoHurtCam121(env, cfg.noHurtCam, plObj);
-                UpdateWTap121(env, cfg.wTap, guiOpen, inWorld, plObj);
                 jclass plCls = env->GetObjectClass(plObj);
                 if (plCls) {
                     static jmethodID s_getHealthMethod = nullptr;
@@ -17423,6 +17424,134 @@ static void UpdateAutoToolModern(JNIEnv* env, const Config& cfg) {
     env->PopLocalFrame(nullptr);
 }
 
+static void UpdateSprint121(JNIEnv* env, bool enabled, bool guiOpen, bool inWorld) {
+    if (!env) return;
+    const bool isMovingForward = (GetAsyncKeyState('W') & 0x8000) != 0;
+    if (!enabled || guiOpen || !inWorld || !isMovingForward) {
+        if (g_sprintManaging121) {
+            jobject key = GetSprintKeyBinding121(env);
+            if (key) {
+                EnsureSpeedBridgeKeyMethods(env, key);
+                if (g_speedBridgeKeySetPressed_121) {
+                    env->CallVoidMethod(key, g_speedBridgeKeySetPressed_121, JNI_FALSE);
+                    if (env->ExceptionCheck()) env->ExceptionClear();
+                }
+                env->DeleteLocalRef(key);
+            }
+            g_sprintManaging121 = false;
+        }
+        return;
+    }
+
+    jobject key = GetSprintKeyBinding121(env);
+    if (key) {
+        EnsureSpeedBridgeKeyMethods(env, key);
+        if (g_speedBridgeKeySetPressed_121) {
+            env->CallVoidMethod(key, g_speedBridgeKeySetPressed_121, JNI_TRUE);
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            else g_sprintManaging121 = true;
+        }
+        env->DeleteLocalRef(key);
+    }
+}
+
+static void UpdateFastPlace121(JNIEnv* env, bool enabled, bool guiOpen, bool inWorld, jclass mcCls) {
+    if (!env || !enabled || guiOpen || !inWorld || !g_mcInstance) return;
+    bool kaBlocking = false;
+    { LockGuard lk(g_killAuraRenderMutex_121); kaBlocking = g_killAuraRenderSnapshot_121.blocking; }
+    if (IsAutoRodTransactionActive121() || kaBlocking) return;
+    if (!g_itemUseCooldownField_121 && mcCls) {
+        const char* names[] = { "itemUseCooldown", "field_1752", "f_91071_", nullptr };
+        for (int i = 0; names[i] && !g_itemUseCooldownField_121; ++i) {
+            g_itemUseCooldownField_121 = env->GetFieldID(mcCls, names[i], "I");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_itemUseCooldownField_121 = nullptr; }
+        }
+    }
+    if (g_itemUseCooldownField_121) {
+        jint delay = env->GetIntField(g_mcInstance, g_itemUseCooldownField_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); return; }
+        if (delay > 0) {
+            env->SetIntField(g_mcInstance, g_itemUseCooldownField_121, 0);
+            if (env->ExceptionCheck()) env->ExceptionClear();
+        }
+    }
+}
+
+static void UpdateNoHurtCam121(JNIEnv* env, bool enabled, jobject selfObj) {
+    if (!env || !enabled || !selfObj) return;
+    if (!g_hurtTimeField_121) {
+        jclass entCls = env->GetObjectClass(selfObj);
+        if (entCls) {
+            const char* names[] = { "hurtTime", "field_6235", "f_20916_", nullptr };
+            for (int i = 0; names[i] && !g_hurtTimeField_121; i++) {
+                g_hurtTimeField_121 = env->GetFieldID(entCls, names[i], "I");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_hurtTimeField_121 = nullptr; }
+            }
+            env->DeleteLocalRef(entCls);
+        }
+    }
+    if (!g_hurtTimeField_121) return;
+    jint ht = env->GetIntField(selfObj, g_hurtTimeField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return; }
+    if (ht > 0 && ht <= g_lastHurtTime_121) {
+        env->SetIntField(selfObj, g_hurtTimeField_121, 0);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+}
+
+static void UpdateWTap121(JNIEnv* env, bool enabled, bool guiOpen, bool inWorld, jobject selfObj) {
+    if (!env || !selfObj) return;
+    const DWORD nowMs = GetTickCount();
+
+    if (g_wTapInReset121) {
+        if (nowMs - g_lastWTapResetMs121 >= 60) {
+            if (!g_setSprintingMethod_121) {
+                jclass playerCls = env->GetObjectClass(selfObj);
+                if (playerCls) {
+                    const char* names[] = { "setSprinting", "method_5728", "m_6858_", nullptr };
+                    for (int i = 0; names[i] && !g_setSprintingMethod_121; ++i) {
+                        g_setSprintingMethod_121 = env->GetMethodID(playerCls, names[i], "(Z)V");
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); g_setSprintingMethod_121 = nullptr; }
+                    }
+                    env->DeleteLocalRef(playerCls);
+                }
+            }
+            const bool isMovingForward = (GetAsyncKeyState('W') & 0x8000) != 0;
+            if (g_setSprintingMethod_121 && isMovingForward && !guiOpen && inWorld) {
+                env->CallVoidMethod(selfObj, g_setSprintingMethod_121, JNI_TRUE);
+                if (env->ExceptionCheck()) env->ExceptionClear();
+            }
+            g_wTapInReset121 = false;
+        }
+        return;
+    }
+
+    if (!enabled || guiOpen || !inWorld) return;
+
+    const bool isMovingForward = (GetAsyncKeyState('W') & 0x8000) != 0;
+    const bool isLmb = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+    const bool lookingAtEntity = g_jniLookingAtEntity || g_jniLookingAtEntityLatched;
+    if (isMovingForward && isLmb && lookingAtEntity && (nowMs - g_lastWTapResetMs121 >= 250)) {
+        if (!g_setSprintingMethod_121) {
+            jclass playerCls = env->GetObjectClass(selfObj);
+            if (playerCls) {
+                const char* names[] = { "setSprinting", "method_5728", "m_6858_", nullptr };
+                for (int i = 0; names[i] && !g_setSprintingMethod_121; ++i) {
+                    g_setSprintingMethod_121 = env->GetMethodID(playerCls, names[i], "(Z)V");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_setSprintingMethod_121 = nullptr; }
+                }
+                env->DeleteLocalRef(playerCls);
+            }
+        }
+        if (g_setSprintingMethod_121) {
+            env->CallVoidMethod(selfObj, g_setSprintingMethod_121, JNI_FALSE);
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            g_wTapInReset121 = true;
+            g_lastWTapResetMs121 = nowMs;
+        }
+    }
+}
+
 static DWORD WINAPI FastPollThreadProc(LPVOID) {
     JNIEnv* env = nullptr;
     if (!g_jvm || g_jvm->AttachCurrentThread((void**)&env, nullptr) != JNI_OK) return 1;
@@ -17476,6 +17605,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
     DWORD lastSprintMs = 0;
     DWORD lastWTapMs = 0;
     DWORD lastNoHurtCamMs = 0;
+    DWORD lastTntScanMs = 0;
     bool chestEspScanWasEnabled = false;
     bool entityProducerWasEnabled = false;
     // Teleport detection: track last scanned player position to catch same-world jumps
@@ -17730,6 +17860,19 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                         }
                     }
 
+                    static bool s_tntTimerWasEnabled = false;
+                    if (cfg.tntTimer || s_tntTimerWasEnabled) {
+                        if (!cfg.tntTimer) {
+                            LockGuard lk(g_modernTntMutex);
+                            g_modernTntRecords.clear();
+                            s_tntTimerWasEnabled = false;
+                        } else if (lc::IsTelemetryIntervalDue(nowMs, lastTntScanMs, 50)) {
+                            UpdateTntScan121(env, cfg);
+                            lastTntScanMs = nowMs;
+                            s_tntTimerWasEnabled = true;
+                        }
+                    }
+
                     const bool chunkScansEnabled = cfg.chestEsp || cfg.chestStealer || cfg.blockEsp || cfg.bedPlates;
                     const bool chunkScanReady = !chunkScansEnabled ||
                         (!IsWorldTransitionActive() && ProbeModernChunkObject(env));
@@ -17802,6 +17945,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                 { LockGuard lkCache(g_blockEspCacheMutex); g_blockEspChunkCache.clear(); }
                 { LockGuard lk3(g_bgCamMutex); g_bgCamState = BgCamState(); }
                 { LockGuard lk4(g_pixelPartyMutex); g_pixelPartySnap = PixelPartySnap121(); }
+                { LockGuard lkTnt(g_modernTntMutex); g_modernTntRecords.clear(); }
                 // Mapping-only reloads are allowed to complete in menus; genuine
                 // world transitions remain active until a world is present again.
                 TryCompleteWorldTransition(env, false);
@@ -17828,6 +17972,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
             { LockGuard lkb(g_blockEspListMutex); g_blockEspList.clear(); }
             { LockGuard lkCache(g_blockEspCacheMutex); g_blockEspChunkCache.clear(); }
             { LockGuard lk3(g_bgCamMutex); g_bgCamState = BgCamState(); }
+            { LockGuard lkTnt(g_modernTntMutex); g_modernTntRecords.clear(); }
         }
         RecordNativePerfSince(lc::PERF_SCAN_LOOP, scanLoopPerfStarted);
         MaybeLogNativePerfDiagnostics();
@@ -17874,6 +18019,9 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
             lc::ConsiderJobSleep(
                 &sleepMs, sleepNow, lastNoHurtCamMs, lc::kNoHurtCamIntervalMs,
                 cfg.noHurtCam);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastTntScanMs, 50,
+                cfg.tntTimer);
         }
         if (sleepMs > 0) Sleep(sleepMs);
     }

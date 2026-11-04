@@ -184,6 +184,8 @@ static void ResetAutoRodLegacyJniCaches(JNIEnv* env);
 static void ResetAutoToolLegacyJniCaches(JNIEnv* env);
 static bool EnsureAutoRodLegacyMappings(JNIEnv* env, jobject player, bool needRodClass);
 static bool HasPendingThrowPotLegacyTransaction();
+struct Config;
+static void UpdateTntScanLegacy(JNIEnv* env, const Config& cfg);
 
 class LegacyRenderCallbackLease {
     bool active_;
@@ -709,6 +711,7 @@ static jmethodID g_displayGuiScreenMethod = nullptr;
 static jfieldID g_theWorldField = nullptr;
 static jfieldID g_playerEntitiesField = nullptr;
 static jfieldID g_loadedTileEntityListField = nullptr;
+static jfieldID g_loadedEntityListField = nullptr;
 static jmethodID g_getNameMethod = nullptr;
 static jmethodID g_getGameProfileMethod = nullptr;
 static jclass g_gameProfileClass = nullptr;
@@ -2761,6 +2764,19 @@ void TryResolveWorldMappings(JNIEnv* env) {
             }
         }
 
+        if (!g_loadedEntityListField) {
+            g_loadedEntityListField = env->GetFieldID(worldClass, "loadedEntityList", "Ljava/util/List;");
+            if (!g_loadedEntityListField) {
+                env->ExceptionClear();
+                g_loadedEntityListField = env->GetFieldID(worldClass, "field_72996_f", "Ljava/util/List;");
+            }
+            if (!g_loadedEntityListField) {
+                env->ExceptionClear();
+            } else {
+                Log("Late-bound loadedEntityList field");
+            }
+        }
+
         env->DeleteLocalRef(worldClass);
     }
     env->DeleteLocalRef(world);
@@ -4365,6 +4381,11 @@ static void UpdateVelocity(JNIEnv* env, const Config& cfg) {
     }
 
     g_lastHurtTime = hurtTime;
+
+    if (cfg.noHurtCam && hurtTime > 0) {
+        env->SetIntField(selfObj, g_hurtTimeField, 0);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
     env->DeleteLocalRef(selfObj);
 }
 
@@ -8340,6 +8361,7 @@ static void UpdateHitDelayFixLegacy(JNIEnv* env, const Config& cfg, const GameSt
 static void UpdateFastPlaceLegacy(JNIEnv* env, const Config& cfg, const GameState& state) {
     if (!env || !cfg.fastPlace || !state.mapped || state.guiOpen || !g_mcInstance || !g_rightClickDelayTimerField)
         return;
+    if (HasPendingAutoRodLegacyTransaction() || g_killAuraBlocking) return;
 
     jint delay = env->GetIntField(g_mcInstance, g_rightClickDelayTimerField);
     if (env->ExceptionCheck()) { env->ExceptionClear(); return; }
@@ -8359,7 +8381,8 @@ static void UpdateNoHurtCamLegacy(JNIEnv* env, const Config& cfg, const GameStat
 
     jint hurtTime = env->GetIntField(player, g_hurtTimeField);
     if (env->ExceptionCheck()) { env->ExceptionClear(); env->DeleteLocalRef(player); return; }
-    if (hurtTime > 0) {
+    // Only zero lingering hurtTime after velocity has processed the new hit edge
+    if (hurtTime > 0 && hurtTime <= g_lastHurtTime) {
         env->SetIntField(player, g_hurtTimeField, 0);
         if (env->ExceptionCheck()) env->ExceptionClear();
     }
@@ -8411,15 +8434,37 @@ static DWORD g_lastWTapResetMs = 0;
 static bool g_wTapInReset = false;
 
 static void UpdateWTapLegacy(JNIEnv* env, const Config& cfg, const GameState& state) {
-    if (!env || !cfg.wTap || !state.mapped || state.guiOpen || !state.inWorld || !g_mcInstance || !g_thePlayerField) return;
+    if (!env || !state.mapped || !g_mcInstance || !g_thePlayerField) return;
 
     const DWORD nowMs = GetTickCount();
     if (g_wTapInReset) {
         if (nowMs - g_lastWTapResetMs >= 60) {
+            // Restore sprinting after 60ms knockback reset window
+            jobject player = env->GetObjectField(g_mcInstance, g_thePlayerField);
+            if (player && !env->ExceptionCheck()) {
+                static jmethodID s_setSprinting = nullptr;
+                if (!s_setSprinting) {
+                    jclass playerCls = env->GetObjectClass(player);
+                    if (playerCls) {
+                        s_setSprinting = env->GetMethodID(playerCls, "setSprinting", "(Z)V");
+                        if (!s_setSprinting) { env->ExceptionClear(); s_setSprinting = env->GetMethodID(playerCls, "func_70031_b", "(Z)V"); }
+                        if (!s_setSprinting) env->ExceptionClear();
+                        env->DeleteLocalRef(playerCls);
+                    }
+                }
+                const bool isMovingForward = (GetAsyncKeyState('W') & 0x8000) != 0;
+                if (s_setSprinting && isMovingForward && !state.guiOpen && state.inWorld) {
+                    env->CallVoidMethod(player, s_setSprinting, JNI_TRUE);
+                    if (env->ExceptionCheck()) env->ExceptionClear();
+                }
+                env->DeleteLocalRef(player);
+            } else if (env->ExceptionCheck()) env->ExceptionClear();
             g_wTapInReset = false;
         }
         return;
     }
+
+    if (!cfg.wTap || state.guiOpen || !state.inWorld) return;
 
     const bool isMovingForward = (GetAsyncKeyState('W') & 0x8000) != 0;
     const bool isLmb = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
@@ -13720,6 +13765,7 @@ bool WorldToScreen(const double x, const double y, const double z, const Matrix4
 static void ClearLegacyOverlayPlayers() {
     { LockGuard lk(g_overlayPlayersMutex18); g_overlayPlayers18.clear(); }
     { LockGuard lk(g_closestPlayerMutex18); g_closestPlayerDraw18 = ClosestPlayerDrawSnapshot18(); }
+    { LockGuard lk(g_legacyTntMutex); g_legacyTntRecords.clear(); }
 }
 
 static void UpdatePlayerListOverlayLegacy(JNIEnv* env, const Config& config) {
@@ -13913,8 +13959,6 @@ static void UpdatePlayerListOverlayLegacy(JNIEnv* env, const Config& config) {
         return;
     }
 
-    std::vector<LegacyTntRecord> localTntRecords;
-
     for (int i = 0; i < size && count < entityProcessCap; i++) {
         jobject entity = env->CallObjectMethod(startList, g_listGetMethod, i);
         if (env->ExceptionCheck()) {
@@ -13940,30 +13984,6 @@ static void UpdatePlayerListOverlayLegacy(JNIEnv* env, const Config& config) {
         double dy = iY - localPY;
         double dz = iZ - localPZ;
         double dist = sqrt(dx * dx + dy * dy + dz * dz);
-
-        if (config.tntTimer) {
-            if (!g_tntPrimedClass) {
-                jobject gcl = GetGameClassLoader(env);
-                jclass c = gcl ? LoadClassWithLoader(env, gcl, "net.minecraft.entity.item.EntityTNTPrimed") : nullptr;
-                if (!c) c = env->FindClass("net/minecraft/entity/item/EntityTNTPrimed");
-                if (c && !env->ExceptionCheck()) {
-                    g_tntPrimedClass = (jclass)env->NewGlobalRef(c);
-                    g_tntFuseField = env->GetFieldID(c, "fuse", "I");
-                    if (!g_tntFuseField) { env->ExceptionClear(); g_tntFuseField = env->GetFieldID(c, "field_70516_a", "I"); }
-                    if (!g_tntFuseField) { env->ExceptionClear(); g_tntFuseField = env->GetFieldID(c, "a", "I"); }
-                    if (!g_tntFuseField) env->ExceptionClear();
-                } else if (env->ExceptionCheck()) {
-                    env->ExceptionClear();
-                }
-            }
-            if (g_tntPrimedClass && env->IsInstanceOf(entity, g_tntPrimedClass)) {
-                int fuse = g_tntFuseField ? env->GetIntField(entity, g_tntFuseField) : 80;
-                if (env->ExceptionCheck()) { env->ExceptionClear(); fuse = 80; }
-                localTntRecords.push_back({ iX, iY + 0.9, iZ, (float)fuse / 20.0f });
-                env->DeleteLocalRef(entity);
-                continue;
-            }
-        }
 
         const bool inNametagRange = lc::InChunkRange(
             (int)std::floor(iX), (int)std::floor(iZ), localPX, localPZ, nametagRange);
@@ -14080,10 +14100,6 @@ static void UpdatePlayerListOverlayLegacy(JNIEnv* env, const Config& config) {
     {
         LockGuard lk(g_overlayPlayersMutex18);
         g_overlayPlayers18.swap(localPlayers);
-    }
-    {
-        LockGuard lk(g_legacyTntMutex);
-        g_legacyTntRecords.swap(localTntRecords);
     }
     {
         LockGuard lk(g_closestPlayerMutex18);
@@ -15250,6 +15266,7 @@ static DWORD WINAPI OverlayScanThreadProc18(LPVOID) {
     DWORD lastChestEspScanMs = 0;
     DWORD lastPlayerScanMs = 0;
     DWORD lastCameraMs = 0;
+    DWORD lastTntScanMs = 0;
     bool chestEspScanWasEnabled = false;
     bool entityProducerWasEnabled = false;
     while (IsBridgeRunning()) {
@@ -15270,7 +15287,7 @@ static DWORD WINAPI OverlayScanThreadProc18(LPVOID) {
         const bool chestEspScanEnabled = cfg.chestEsp;
         const bool chunkScanEnabled = cfg.blockEsp || cfg.bedPlates;
         const bool overlayWork =
-            entityProducerEnabled || chestEspScanEnabled || chunkScanEnabled ||
+            entityProducerEnabled || chestEspScanEnabled || chunkScanEnabled || cfg.tntTimer ||
             entityProducerWasEnabled || chestEspScanWasEnabled;
         const unsigned int playerInterval = lc::PlayerOverlayIntervalMs(cfg.aimAssist);
         {
@@ -15292,6 +15309,16 @@ static DWORD WINAPI OverlayScanThreadProc18(LPVOID) {
                         ResetFightStatusState18();
                     }
                     entityProducerWasEnabled = entityProducerEnabled;
+
+                    if (cfg.tntTimer) {
+                        if (lc::IsTelemetryIntervalDue(nowMs, lastTntScanMs, 50)) {
+                            UpdateTntScanLegacy(env, cfg);
+                            lastTntScanMs = nowMs;
+                        }
+                    } else {
+                        LockGuard lk(g_legacyTntMutex);
+                        g_legacyTntRecords.clear();
+                    }
 
                     const bool chestEspScanDue =
                         !chestEspScanWasEnabled ||
@@ -15345,6 +15372,8 @@ static DWORD WINAPI OverlayScanThreadProc18(LPVOID) {
                 &sleepMs, sleepNow, g_lastBlockEspScanMs, lc::kBlockEspScanIntervalMs, cfg.blockEsp);
             lc::ConsiderJobSleep(
                 &sleepMs, sleepNow, g_lastBedPlatesScanMs, lc::kBedPlatesScanIntervalMs, cfg.bedPlates);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastTntScanMs, 50, cfg.tntTimer);
         }
         if (sleepMs > 0) Sleep(sleepMs);
     }
@@ -15635,6 +15664,111 @@ void RenderFireballWarning(int w, int h, const Config& config) {
             fg->AddTriangleFilled(tip, left, right, IM_COL32(255, 90, 65, 235));
             fg->AddTriangle(tip, left, right, IM_COL32(255, 200, 180, 255), 1.5f);
         }
+    }
+}
+
+static void UpdateTntScanLegacy(JNIEnv* env, const Config& cfg) {
+    if (!env || !cfg.tntTimer || !g_mcInstance || !g_theWorldField) {
+        LockGuard lk(g_legacyTntMutex);
+        g_legacyTntRecords.clear();
+        return;
+    }
+    jobject world = env->GetObjectField(g_mcInstance, g_theWorldField);
+    if (!world || env->ExceptionCheck()) { env->ExceptionClear(); return; }
+
+    if (!g_loadedEntityListField) {
+        jclass worldClass = env->GetObjectClass(world);
+        if (worldClass) {
+            g_loadedEntityListField = env->GetFieldID(worldClass, "loadedEntityList", "Ljava/util/List;");
+            if (!g_loadedEntityListField) {
+                env->ExceptionClear();
+                g_loadedEntityListField = env->GetFieldID(worldClass, "field_72996_f", "Ljava/util/List;");
+            }
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            env->DeleteLocalRef(worldClass);
+        }
+    }
+    if (!g_loadedEntityListField) {
+        env->DeleteLocalRef(world);
+        return;
+    }
+
+    jobject entList = env->GetObjectField(world, g_loadedEntityListField);
+    if (!entList || env->ExceptionCheck()) {
+        env->ExceptionClear();
+        env->DeleteLocalRef(world);
+        return;
+    }
+
+    if (!g_tntPrimedClass) {
+        jobject gcl = GetGameClassLoader(env);
+        jclass c = gcl ? LoadClassWithLoader(env, gcl, "net.minecraft.entity.item.EntityTNTPrimed") : nullptr;
+        if (!c) c = env->FindClass("net/minecraft/entity/item/EntityTNTPrimed");
+        if (c && !env->ExceptionCheck()) {
+            g_tntPrimedClass = (jclass)env->NewGlobalRef(c);
+            g_tntFuseField = env->GetFieldID(c, "fuse", "I");
+            if (!g_tntFuseField) { env->ExceptionClear(); g_tntFuseField = env->GetFieldID(c, "field_70516_a", "I"); }
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            env->DeleteLocalRef(c);
+        } else if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        }
+    }
+    if (!g_tntPrimedClass) {
+        env->DeleteLocalRef(entList);
+        env->DeleteLocalRef(world);
+        return;
+    }
+
+    if (!g_listSizeMethod || !g_listGetMethod) {
+        jclass listCls = env->GetObjectClass(entList);
+        if (listCls) {
+            if (!g_listSizeMethod) g_listSizeMethod = env->GetMethodID(listCls, "size", "()I");
+            if (!g_listGetMethod) g_listGetMethod = env->GetMethodID(listCls, "get", "(I)Ljava/lang/Object;");
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            env->DeleteLocalRef(listCls);
+        }
+    }
+    if (!g_listSizeMethod || !g_listGetMethod) {
+        env->DeleteLocalRef(entList);
+        env->DeleteLocalRef(world);
+        return;
+    }
+
+    jint size = env->CallIntMethod(entList, g_listSizeMethod);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); size = 0; }
+    if (size > 500) size = 500;
+
+    std::vector<LegacyTntRecord> localTnt;
+    for (jint i = 0; i < size; ++i) {
+        jobject ent = env->CallObjectMethod(entList, g_listGetMethod, i);
+        if (env->ExceptionCheck() || !ent) { env->ExceptionClear(); continue; }
+        if (env->IsInstanceOf(ent, g_tntPrimedClass) == JNI_TRUE) {
+            int fuse = g_tntFuseField ? env->GetIntField(ent, g_tntFuseField) : 80;
+            if (env->ExceptionCheck()) { env->ExceptionClear(); fuse = 80; }
+
+            double ex = env->GetDoubleField(ent, g_posXField);
+            double ey = env->GetDoubleField(ent, g_posYField);
+            double ez = env->GetDoubleField(ent, g_posZField);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); }
+            else {
+                LegacyTntRecord rec;
+                rec.x = ex;
+                rec.y = ey + 0.9;
+                rec.z = ez;
+                rec.fuseSeconds = (float)fuse / 20.0f;
+                localTnt.push_back(rec);
+            }
+        }
+        env->DeleteLocalRef(ent);
+    }
+
+    env->DeleteLocalRef(entList);
+    env->DeleteLocalRef(world);
+
+    {
+        LockGuard lk(g_legacyTntMutex);
+        g_legacyTntRecords.swap(localTnt);
     }
 }
 
@@ -16436,15 +16570,10 @@ void ParseConfig(const std::string& line) {
         g_config.fireballWarningSound = reader.GetBool("fireballWarningSound", true);
         { int v = reader.GetInt("keybindFireballWarning", -1); if (v >= 0) g_config.keybindFireballWarning = v; }
         g_config.fastPlace = reader.GetBool("fastPlace");
-        { int v = reader.GetInt("keybindFastPlace", -1); if (v >= 0) g_config.keybindFastPlace = v; }
         g_config.noHurtCam = reader.GetBool("noHurtCam");
-        { int v = reader.GetInt("keybindNoHurtCam", -1); if (v >= 0) g_config.keybindNoHurtCam = v; }
         g_config.sprint = reader.GetBool("sprint");
-        { int v = reader.GetInt("keybindSprint", -1); if (v >= 0) g_config.keybindSprint = v; }
         g_config.tntTimer = reader.GetBool("tntTimer");
-        { int v = reader.GetInt("keybindTntTimer", -1); if (v >= 0) g_config.keybindTntTimer = v; }
         g_config.wTap = reader.GetBool("wTap");
-        { int v = reader.GetInt("keybindWTap", -1); if (v >= 0) g_config.keybindWTap = v; }
         g_config.reachEnabled = reader.GetBool("reachEnabled");
         g_config.velocityEnabled = reader.GetBool("velocityEnabled");
         g_config.hitDelayFixEnabled = reader.GetBool("hitDelayFixEnabled");
@@ -16588,11 +16717,11 @@ void ParseConfig(const std::string& line) {
         { int v = reader.GetInt("keybindAutoRod", -1);       if (v >= 0) g_config.keybindAutoRod = lc::ClampInt(v, 0, 255); }
         { int v = reader.GetInt("keybindThrowpot", -1);      if (v >= 0) g_config.keybindThrowpot = lc::ClampInt(v, 0, 255); }
         { int v = reader.GetInt("keybindAutoTool", -1);      if (v >= 0) g_config.keybindAutoTool = lc::ClampInt(v, 0, 255); }
-        { int v = reader.GetInt("keybindFastPlace", -1);     if (v >= 0) g_config.keybindFastPlace = v; }
-        { int v = reader.GetInt("keybindNoHurtCam", -1);     if (v >= 0) g_config.keybindNoHurtCam = v; }
-        { int v = reader.GetInt("keybindSprint", -1);        if (v >= 0) g_config.keybindSprint = v; }
-        { int v = reader.GetInt("keybindTntTimer", -1);      if (v >= 0) g_config.keybindTntTimer = v; }
-        { int v = reader.GetInt("keybindWTap", -1);          if (v >= 0) g_config.keybindWTap = v; }
+        { int v = reader.GetInt("keybindFastPlace", -1);     if (v >= 0) g_config.keybindFastPlace = lc::ClampInt(v, 0, 255); }
+        { int v = reader.GetInt("keybindNoHurtCam", -1);     if (v >= 0) g_config.keybindNoHurtCam = lc::ClampInt(v, 0, 255); }
+        { int v = reader.GetInt("keybindSprint", -1);        if (v >= 0) g_config.keybindSprint = lc::ClampInt(v, 0, 255); }
+        { int v = reader.GetInt("keybindTntTimer", -1);      if (v >= 0) g_config.keybindTntTimer = lc::ClampInt(v, 0, 255); }
+        { int v = reader.GetInt("keybindWTap", -1);          if (v >= 0) g_config.keybindWTap = lc::ClampInt(v, 0, 255); }
 
         g_config.pixelPartyAssist = reader.GetBool("pixelPartyAssist");
         int ppRadius = reader.GetInt("pixelPartyScanRadius", g_config.pixelPartyScanRadius);
