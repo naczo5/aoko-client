@@ -13263,7 +13263,10 @@ static void ResetAutoRodModernCaches(JNIEnv* env) {
 }
 
 // Reset ALL AutoTotem cached JNI lookups and runtime state.
-// Call on world transitions so stale method/field IDs are re-resolved.
+// Call on world transitions so stale method/field IDs are re-resolved. World-change
+// callers run on the scan thread, so hold g_jniRemapMtx: the fast-poll thread reads
+// the beta/hurt-time lookups while holding that same lock and must never observe a
+// deleted class ref or a nulled method ID.
 static void ResetAutoTotemCaches(JNIEnv* env) {
     // Unbind Premotion's copy of C03/player before deleting bridge globals.
     ka_premotion::SuspendForWorldChange(env);
@@ -18549,11 +18552,18 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                             if (g_lastAutoTotemWorld_121) {
                                 ScheduleWorldTransition(env, "world-instance-changed");
                             }
-                            ResetAutoRodModernCaches(env);
-                            ResetAutoTotemCaches(env);
-                            ResetAutoToolModernCaches(env);
-                            if (g_lastAutoTotemWorld_121) env->DeleteGlobalRef(g_lastAutoTotemWorld_121);
-                            g_lastAutoTotemWorld_121 = env->NewGlobalRef(worldObj);
+                            // These lookups are also read by the fast-poll thread
+                            // (AutoTool, AutoTotem, Jump Reset/Hit Select hurt time).
+                            // Reset them under g_jniRemapMtx so a reset cannot land
+                            // between that thread's null check and its JNI call.
+                            {
+                                LockGuard remapGuard(g_jniRemapMtx);
+                                ResetAutoRodModernCaches(env);
+                                ResetAutoTotemCaches(env);
+                                ResetAutoToolModernCaches(env);
+                                if (g_lastAutoTotemWorld_121) env->DeleteGlobalRef(g_lastAutoTotemWorld_121);
+                                g_lastAutoTotemWorld_121 = env->NewGlobalRef(worldObj);
+                            }
                         }
                         env->DeleteLocalRef(worldObj);
                     }
@@ -18763,7 +18773,10 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
             } else if (g_stateJniReady && !inWorldNow) {
                 if (hadLivePlayer)
                     ScheduleWorldTransition(env, "left-world");
-                ResetAutoRodModernCaches(env);
+                {
+                    LockGuard remapGuard(g_jniRemapMtx);
+                    ResetAutoRodModernCaches(env);
+                }
                 // Left world — reset caches so next world gets fresh JNI lookups
                 lastScanPosValid = false;
                 hadLivePlayer = false;
@@ -18771,7 +18784,10 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                     env->DeleteGlobalRef(lastObservedPlayer);
                     lastObservedPlayer = nullptr;
                 }
-                ResetAutoTotemCaches(env);
+                {
+                    LockGuard remapGuard(g_jniRemapMtx);
+                    ResetAutoTotemCaches(env);
+                }
                 DeleteGlobalRefSafe(env, g_lastAutoTotemWorld_121);
                 if (g_nametagSuppressionActive_121 || !g_modifiedTeamVisibility_121.empty() || !g_lcHideTagsMembers_121.empty()) {
                     ResetNametagSuppressionCaches121(env, "left-world");

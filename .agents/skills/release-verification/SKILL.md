@@ -45,9 +45,22 @@ dotnet test .\Aoko.Tests\Aoko.Tests.csproj
 .\scripts\New-GitHubRelease.ps1 -Version 0.x.y
 ```
 
-Optional: `-Draft` for a draft release. Requires `gh` authenticated, and **must
-run on `main`**. Do not create releases from `dev`. Do not merge or push `main`
-unless the user explicitly asked.
+Optional: `-Draft` for a draft release. Requires `gh` authenticated, and a
+stable **must run on `main`**. Do not create stable releases from `dev`. Do not
+merge or push `main` unless the user explicitly asked.
+
+### Beta releases from `dev`
+
+Use `-Beta` to publish the current `dev` branch as an opt-in pre-release:
+
+```powershell
+.\scripts\New-GitHubRelease.ps1 -Version 0.x.y -Beta
+```
+
+The script requires `dev` to be clean and match `origin/dev`, tags the release
+`v0.x.y-beta`, sets the GitHub prerelease flag, and targets `dev`. The Scoop
+workflow skips prereleases, so the stable channel is unaffected. Bump `-Version`
+for each new beta; an existing tag fails the release.
 
 Do not call `build_release.bat` yourself when using this script; the script
 already invokes it.
@@ -64,4 +77,5 @@ the release.
 - [ ] `dotnet test` passes (includes `ModuleRegistrationTests`)
 - [ ] Everyday PRs: `build_dll.bat` only
 - [ ] Shipping: `New-GitHubRelease.ps1` on clean `main` matching origin
+- [ ] Beta shipping: `New-GitHubRelease.ps1 -Beta` on clean `dev` matching origin (tag `v<version>-beta`)
 - [ ] No locked `Aoko.exe` / Minecraft holding the DLLs

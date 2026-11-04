@@ -4,7 +4,11 @@ param(
     [ValidatePattern('^\d+(\.\d+){1,3}$')]
     [string]$Version,
 
-    [switch]$Draft
+    [switch]$Draft,
+
+    # Publish from dev as a GitHub pre-release (tagged v<Version>-beta). Stable
+    # releases still require main and a numeric tag.
+    [switch]$Beta
 )
 
 $ErrorActionPreference = 'Stop'
@@ -25,8 +29,9 @@ function Invoke-RequiredCommand {
     }
 }
 
-if ((& git branch --show-current).Trim() -ne 'main') {
-    throw 'GitHub releases must be created from the main branch.'
+$releaseBranch = if ($Beta) { 'dev' } else { 'main' }
+if ((& git branch --show-current).Trim() -ne $releaseBranch) {
+    throw "GitHub releases must be created from the $releaseBranch branch."
 }
 
 if (& git status --porcelain) {
@@ -34,11 +39,11 @@ if (& git status --porcelain) {
 }
 
 Invoke-RequiredCommand -FilePath 'gh' -Arguments @('auth', 'status', '--hostname', 'github.com') -FailureMessage 'GitHub CLI is not authenticated. Run "gh auth login" first.'
-Invoke-RequiredCommand -FilePath 'git' -Arguments @('fetch', 'origin', 'main', '--tags') -FailureMessage 'Could not fetch origin/main and tags.'
+Invoke-RequiredCommand -FilePath 'git' -Arguments @('fetch', 'origin', $releaseBranch, '--tags') -FailureMessage "Could not fetch origin/$releaseBranch and tags."
 
-$aheadBehind = ((& git rev-list --left-right --count 'HEAD...origin/main').Trim() -split '\s+')
+$aheadBehind = ((& git rev-list --left-right --count "HEAD...origin/$releaseBranch").Trim() -split '\s+')
 if ($aheadBehind.Count -ne 2 -or $aheadBehind[0] -ne '0' -or $aheadBehind[1] -ne '0') {
-    throw 'Local main does not exactly match origin/main. Pull or push main before creating a release.'
+    throw "Local $releaseBranch does not exactly match origin/$releaseBranch. Pull or push $releaseBranch before creating a release."
 }
 
 $repository = (& gh repo view --json nameWithOwner --jq '.nameWithOwner').Trim()
@@ -46,7 +51,8 @@ if ([string]::IsNullOrWhiteSpace($repository) -or $LASTEXITCODE -ne 0) {
     throw 'Could not resolve the GitHub repository from origin.'
 }
 
-$tag = "v$Version"
+$tag = if ($Beta) { "v$Version-beta" } else { "v$Version" }
+$title = if ($Beta) { "aoko v$Version-beta" } else { "aoko v$Version" }
 $existingReleaseTags = @(& gh release list --repo $repository --limit 100 --json tagName --jq '.[].tagName')
 if ($LASTEXITCODE -ne 0) {
     throw 'Could not list existing GitHub releases.'
@@ -84,10 +90,14 @@ if (-not (Test-Path -LiteralPath $zipPath -PathType Leaf)) {
 $releaseArguments = @(
     'release', 'create', $tag, "$zipPath#Aoko.zip",
     '--repo', $repository,
-    '--target', 'main',
-    '--title', "aoko v$Version",
+    '--target', $releaseBranch,
+    '--title', $title,
     '--generate-notes'
 )
+if ($Beta) {
+    $releaseArguments += '--prerelease'
+    $releaseArguments += '--latest=false'
+}
 if ($Draft) {
     $releaseArguments += '--draft'
 }

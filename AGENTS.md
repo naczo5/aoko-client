@@ -11,7 +11,7 @@ Operating guide for coding agents working in `aoko-client` (`legoclickerC`). Bui
    - `java-to-jni-port`: Translate in-JVM Java (event buses, Mixins, mapping wrappers) into JNI/C#; unwrap to vanilla APIs.
    - `add-client-module`: `ModuleCatalog` first, then UI / Profile / TCP / string-list capabilities / bridges.
    - `diagnose-bridge-crash`: Root-cause runbook for JVM `hs_err` crash dumps and bridge debug logs.
-   - `release-verification`: PR compile gate vs `New-GitHubRelease.ps1` on `main`.
+   - `release-verification`: PR compile gate vs `New-GitHubRelease.ps1` on `main` (stable) or `dev` with `-Beta`.
    - `gui-media-showcase`: Regenerate external GUI screenshots, smooth MP4 video tours, and animated GIFs using `scripts\New-GuiScreenshots.ps1`.
    - `write-docs`: README, website/docs site, AGENTS.md, and skills stay aligned with current modules; silent on removals.
    - `design-aesthetic`: Visual design, typography, color palettes, and UI/UX aesthetic rules across website, docs, WPF GUI, and overlays (Mahoyo / Tsukihime blue glass style).
@@ -51,7 +51,7 @@ Bridge build scripts auto-copy output to `Aoko\bin\Debug\`, `Release\`, and `pub
 - Release build: `dotnet build -c Release Aoko\Aoko.csproj`
 - Publish (self-contained single-file): `build_exe.bat`
 - Full local package (bridges + publish): `build_release.bat` (invoked by the GitHub release script; do not run it extra when publishing)
-- GitHub release: `.\scripts\New-GitHubRelease.ps1 -Version 0.x.y` from clean `main` (see `release-verification` skill)
+- GitHub release: `.\scripts\New-GitHubRelease.ps1 -Version 0.x.y` from clean `main` (see `release-verification` skill). Beta pre-release from `dev`: add `-Beta` (tag `v0.x.y-beta`, GitHub prerelease, Scoop unaffected).
 
 ### Run locally
 - Run app: `dotnet run --project Aoko\Aoko.csproj` (ensure existing `Aoko.exe` is closed).
