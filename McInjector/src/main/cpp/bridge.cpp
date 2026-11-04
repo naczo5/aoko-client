@@ -5649,18 +5649,6 @@ static void UpdateKillAuraLegacy(JNIEnv* env, const Config& cfg) {
             if (env->ExceptionCheck()) { env->ExceptionClear(); visible = JNI_FALSE; }
             if (visible != JNI_TRUE) { env->DeleteLocalRef(candidate); continue; }
         }
-        // Shared target rules (self, dead, teammate, nameless, bot) live in combat_target.h.
-        lc::target::Facts facts = BuildTargetFactsLegacy(
-            env, selfObj, candidate, cfg.killAuraTeams, cfg.killAuraBotCheck);
-        lc::target::Policy policy;
-        policy.skipTeammates = cfg.killAuraTeams;
-        policy.skipBots = cfg.killAuraBotCheck;
-        if (!lc::target::IsValid(facts, policy)) {
-            env->DeleteLocalRef(candidate);
-            continue;
-        }
-        const std::string& stableName = facts.stableName;
-        const float health = facts.health;
 
         double x = env->GetDoubleField(candidate, g_posXField);
         double y = env->GetDoubleField(candidate, g_posYField);
@@ -5680,6 +5668,19 @@ static void UpdateKillAuraLegacy(JNIEnv* env, const Config& cfg) {
                 continue;
             }
         }
+
+        // Shared target rules (self, dead, teammate, nameless, bot) live in combat_target.h.
+        lc::target::Facts facts = BuildTargetFactsLegacy(
+            env, selfObj, candidate, cfg.killAuraTeams, cfg.killAuraBotCheck);
+        lc::target::Policy policy;
+        policy.skipTeammates = cfg.killAuraTeams;
+        policy.skipBots = cfg.killAuraBotCheck;
+        if (!lc::target::IsValid(facts, policy)) {
+            env->DeleteLocalRef(candidate);
+            continue;
+        }
+        const float health = facts.health;
+        const std::string& stableName = facts.stableName;
 
         int armor = g_getTotalArmorValueMethod
             ? env->CallIntMethod(candidate, g_getTotalArmorValueMethod) : 0;

@@ -11587,17 +11587,6 @@ static void UpdateKillAura(JNIEnv* env, const Config& cfg) {
             if (env->ExceptionCheck()) { env->ExceptionClear(); visible = JNI_FALSE; }
             if (visible != JNI_TRUE) { env->DeleteLocalRef(candidate); continue; }
         }
-        // Shared target rules (self, non-player, dead, teammate, nameless, bot) live in combat_target.h.
-        lc::target::Facts facts = BuildTargetFacts121(
-            env, selfObj, candidate, cfg.killAuraTeams, cfg.killAuraBotCheck);
-        lc::target::Policy policy;
-        policy.skipTeammates = cfg.killAuraTeams;
-        policy.skipBots = cfg.killAuraBotCheck;
-        if (!lc::target::IsValid(facts, policy)) {
-            env->DeleteLocalRef(candidate);
-            continue;
-        }
-        const float health = facts.health;
 
         double x = CallDoubleNoArgs(env, candidate, g_getX_121);
         double y = CallDoubleNoArgs(env, candidate, g_getY_121);
@@ -11618,6 +11607,17 @@ static void UpdateKillAura(JNIEnv* env, const Config& cfg) {
             }
         }
 
+        // Shared target rules (self, non-player, dead, teammate, nameless, bot) live in combat_target.h.
+        lc::target::Facts facts = BuildTargetFacts121(
+            env, selfObj, candidate, cfg.killAuraTeams, cfg.killAuraBotCheck);
+        lc::target::Policy policy;
+        policy.skipTeammates = cfg.killAuraTeams;
+        policy.skipBots = cfg.killAuraBotCheck;
+        if (!lc::target::IsValid(facts, policy)) {
+            env->DeleteLocalRef(candidate);
+            continue;
+        }
+        const float health = facts.health;
         const std::string& stableName = facts.stableName;
 
         double fovScore = 0.0;
