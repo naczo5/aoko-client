@@ -103,6 +103,11 @@ public static class InputHooks
         ["antidebuff"]       = 0,
         ["hitdelayfix"]     = 0,
         ["fireballwarning"]  = 0,
+        ["fastplace"]        = 0,
+        ["nohurtcam"]        = 0,
+        ["sprint"]           = 0,
+        ["tnttimer"]         = 0,
+        ["wtap"]             = 0,
         ["panic"]            = 0,
         ["hudeditor"]        = 0,
     };
@@ -284,6 +289,11 @@ public static class InputHooks
             case "antidebuff":       c.AntiDebuffEnabled = !c.AntiDebuffEnabled; break;
             case "hitdelayfix":     c.HitDelayFixEnabled = !c.HitDelayFixEnabled; break;
             case "fireballwarning": c.FireballWarningEnabled = !c.FireballWarningEnabled; break;
+            case "fastplace":        c.FastPlaceEnabled = !c.FastPlaceEnabled; break;
+            case "nohurtcam":        c.NoHurtCamEnabled = !c.NoHurtCamEnabled; break;
+            case "sprint":           c.SprintEnabled = !c.SprintEnabled; break;
+            case "tnttimer":         c.TntTimerEnabled = !c.TntTimerEnabled; break;
+            case "wtap":             c.WTapEnabled = !c.WTapEnabled; break;
             case "hudeditor":        c.HudEditorActive = !c.HudEditorActive; break;
         }
     }

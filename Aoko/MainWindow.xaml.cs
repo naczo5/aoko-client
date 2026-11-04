@@ -101,6 +101,11 @@ public partial class MainWindow : Window
         ["antidebuff"] = "AntiDebuff",
         ["hitdelayfix"] = "Hit Delay Fix",
         ["fireballwarning"] = "Fireball Warning",
+        ["fastplace"] = "Fast Place",
+        ["nohurtcam"] = "No Hurt Cam",
+        ["sprint"] = "Sprint",
+        ["tnttimer"] = "TNT Timer",
+        ["wtap"] = "WTap",
         ["panic"] = "Panic"
     };
 
@@ -521,6 +526,11 @@ public partial class MainWindow : Window
         bool autoToolSupported = IsModuleSupported("autotool");
         bool antiDebuffSupported = IsModuleSupported("antidebuff");
         bool hitDelayFixSupported = IsModuleSupported("hitdelayfix");
+        bool fastPlaceSupported = IsModuleSupported("fastplace");
+        bool noHurtCamSupported = IsModuleSupported("nohurtcam");
+        bool sprintSupported = IsModuleSupported("sprint");
+        bool tntTimerSupported = IsModuleSupported("tnttimer");
+        bool wTapSupported = IsModuleSupported("wtap");
         bool reloadMappingsSupported = GameStateClient.Instance.SupportsSetting("reloadMappingsNonce");
 
         AimAssistCard.IsEnabled = aimAssistSupported;
@@ -540,6 +550,11 @@ public partial class MainWindow : Window
         AutoToolCard.IsEnabled = autoToolSupported;
         AntiDebuffCard.IsEnabled = antiDebuffSupported;
         HitDelayFixCard.IsEnabled = hitDelayFixSupported;
+        FastPlaceCard.IsEnabled = fastPlaceSupported;
+        NoHurtCamCard.IsEnabled = noHurtCamSupported;
+        SprintCard.IsEnabled = sprintSupported;
+        TntTimerCard.IsEnabled = tntTimerSupported;
+        WTapCard.IsEnabled = wTapSupported;
 
         if (!aimAssistSupported && clicker.AimAssistEnabled) clicker.AimAssistEnabled = false;
         if (!triggerbotSupported && clicker.TriggerbotEnabled) clicker.TriggerbotEnabled = false;
@@ -558,6 +573,11 @@ public partial class MainWindow : Window
         if (!autoToolSupported && clicker.AutoToolEnabled) clicker.AutoToolEnabled = false;
         if (!antiDebuffSupported && clicker.AntiDebuffEnabled) clicker.AntiDebuffEnabled = false;
         if (!hitDelayFixSupported && clicker.HitDelayFixEnabled) clicker.HitDelayFixEnabled = false;
+        if (!fastPlaceSupported && clicker.FastPlaceEnabled) clicker.FastPlaceEnabled = false;
+        if (!noHurtCamSupported && clicker.NoHurtCamEnabled) clicker.NoHurtCamEnabled = false;
+        if (!sprintSupported && clicker.SprintEnabled) clicker.SprintEnabled = false;
+        if (!tntTimerSupported && clicker.TntTimerEnabled) clicker.TntTimerEnabled = false;
+        if (!wTapSupported && clicker.WTapEnabled) clicker.WTapEnabled = false;
 
         // Update availability text - only show unavailable message for Triggerbot (intentionally 1.21-only)
         AimAssistAvailabilityText.Text = aimAssistSupported ? "Available" : "Unavailable on current bridge";
@@ -576,6 +596,11 @@ public partial class MainWindow : Window
         AutoToolAvailabilityText.Text = autoToolSupported ? "Available" : "Unavailable on current bridge";
         AntiDebuffAvailabilityText.Text = antiDebuffSupported ? "Available" : "Unavailable on current bridge";
         HitDelayFixAvailabilityText.Text = hitDelayFixSupported ? "Available" : "Unavailable on current bridge";
+        FastPlaceAvailabilityText.Text = fastPlaceSupported ? "Available" : "Unavailable on current bridge";
+        NoHurtCamAvailabilityText.Text = noHurtCamSupported ? "Available" : "Unavailable on current bridge";
+        SprintAvailabilityText.Text = sprintSupported ? "Available" : "Unavailable on current bridge";
+        TntTimerAvailabilityText.Text = tntTimerSupported ? "Available" : "Unavailable on current bridge";
+        WTapAvailabilityText.Text = wTapSupported ? "Available" : "Unavailable on current bridge";
         ChestStealerAvailabilityText.Text = chestStealerSupported ? "Available" : "Unavailable on current bridge";
         RefillAvailabilityText.Text = refillSupported ? "Available" : "Unavailable on current bridge";
         GtbHelperAvailabilityText.Text = gtbSupported
@@ -604,6 +629,11 @@ public partial class MainWindow : Window
         KeybindAutoToolButton.IsEnabled = autoToolSupported;
         KeybindAntiDebuffButton.IsEnabled = antiDebuffSupported;
         KeybindHitDelayFixButton.IsEnabled = hitDelayFixSupported;
+        KeybindFastPlaceButton.IsEnabled = fastPlaceSupported;
+        KeybindNoHurtCamButton.IsEnabled = noHurtCamSupported;
+        KeybindSprintButton.IsEnabled = sprintSupported;
+        KeybindTntTimerButton.IsEnabled = tntTimerSupported;
+        KeybindWTapButton.IsEnabled = wTapSupported;
         KeybindPanicButton.IsEnabled = true;
         ReloadMappingsButton.IsEnabled = reloadMappingsSupported;
         ReloadMappingsAvailabilityText.Text = reloadMappingsSupported
@@ -1716,6 +1746,11 @@ public partial class MainWindow : Window
         SetKeybindButtonContent(KeybindAntiDebuffButton, "antidebuff");
         SetKeybindButtonContent(KeybindHitDelayFixButton, "hitdelayfix");
         SetKeybindButtonContent(KeybindFireballWarningButton, "fireballwarning");
+        SetKeybindButtonContent(KeybindFastPlaceButton, "fastplace");
+        SetKeybindButtonContent(KeybindNoHurtCamButton, "nohurtcam");
+        SetKeybindButtonContent(KeybindSprintButton, "sprint");
+        SetKeybindButtonContent(KeybindTntTimerButton, "tnttimer");
+        SetKeybindButtonContent(KeybindWTapButton, "wtap");
         SetKeybindButtonContent(KeybindPanicButton, "panic");
         AutoRodActionBindButton.Content = _pendingAutoRodActionBind
             ? "Action: [Press key or mouse...]"

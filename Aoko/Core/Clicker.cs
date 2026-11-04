@@ -557,6 +557,11 @@ public class Clicker : INotifyPropertyChanged
             AntiDebuffEnabled = false;
             HitDelayFixEnabled = false;
             FireballWarningEnabled = false;
+            FastPlaceEnabled = false;
+            NoHurtCamEnabled = false;
+            SprintEnabled = false;
+            TntTimerEnabled = false;
+            WTapEnabled = false;
 
             ShowModuleList = false;
             ShowLogo = false;
@@ -2014,6 +2019,71 @@ public class Clicker : INotifyPropertyChanged
             if (_fightStatusEnabled == value) return;
             _fightStatusEnabled = value;
             OnPropertyChanged(nameof(FightStatusEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _fastPlaceEnabled = false;
+    public bool FastPlaceEnabled
+    {
+        get => _fastPlaceEnabled;
+        set
+        {
+            if (_fastPlaceEnabled == value) return;
+            _fastPlaceEnabled = value;
+            OnPropertyChanged(nameof(FastPlaceEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _noHurtCamEnabled = false;
+    public bool NoHurtCamEnabled
+    {
+        get => _noHurtCamEnabled;
+        set
+        {
+            if (_noHurtCamEnabled == value) return;
+            _noHurtCamEnabled = value;
+            OnPropertyChanged(nameof(NoHurtCamEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _sprintEnabled = false;
+    public bool SprintEnabled
+    {
+        get => _sprintEnabled;
+        set
+        {
+            if (_sprintEnabled == value) return;
+            _sprintEnabled = value;
+            OnPropertyChanged(nameof(SprintEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _tntTimerEnabled = false;
+    public bool TntTimerEnabled
+    {
+        get => _tntTimerEnabled;
+        set
+        {
+            if (_tntTimerEnabled == value) return;
+            _tntTimerEnabled = value;
+            OnPropertyChanged(nameof(TntTimerEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _wTapEnabled = false;
+    public bool WTapEnabled
+    {
+        get => _wTapEnabled;
+        set
+        {
+            if (_wTapEnabled == value) return;
+            _wTapEnabled = value;
+            OnPropertyChanged(nameof(WTapEnabled));
             StateChanged?.Invoke();
         }
     }

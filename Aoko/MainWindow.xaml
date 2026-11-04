@@ -528,6 +528,19 @@
                             </StackPanel>
                         </Border>
 
+                        <Border x:Name="WTapCard" Style="{StaticResource ControlCardStyle}" Margin="0,12,0,0">
+                            <StackPanel>
+                                <DockPanel Margin="0,0,0,10">
+                                    <Button x:Name="KeybindWTapButton" Tag="wtap" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
+                                    <TextBlock Text="WTap" Foreground="{DynamicResource TextBrush}" FontSize="16" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </DockPanel>
+                                <TextBlock x:Name="WTapAvailabilityText" Text="Available" Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,0,0,8"/>
+                                <CheckBox Content="Enable WTap" IsChecked="{Binding WTapEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                <TextBlock Text="Automatically resets sprint after landing hits to deal maximum knockback and restart combo momentum."
+                                           Foreground="{DynamicResource DimTextBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,8,0,0"/>
+                            </StackPanel>
+                        </Border>
+
                     </StackPanel>
                 </ScrollViewer>
             </TabItem>
@@ -735,6 +748,32 @@
                                            Foreground="{DynamicResource DimTextBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,8,0,0"/>
                             </StackPanel>
                         </Border>
+
+                        <Border x:Name="NoHurtCamCard" Style="{StaticResource ControlCardStyle}" Margin="0,12,0,0">
+                            <StackPanel>
+                                <DockPanel Margin="0,0,0,10">
+                                    <Button x:Name="KeybindNoHurtCamButton" Tag="nohurtcam" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
+                                    <TextBlock Text="No Hurt Cam" Foreground="{DynamicResource TextBrush}" FontSize="16" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </DockPanel>
+                                <TextBlock x:Name="NoHurtCamAvailabilityText" Text="Available" Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,0,0,8"/>
+                                <CheckBox Content="Enable No Hurt Cam" IsChecked="{Binding NoHurtCamEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                <TextBlock Text="Removes the jarring camera wobble when taking damage, keeping combat vision clear and stable."
+                                           Foreground="{DynamicResource DimTextBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,8,0,0"/>
+                            </StackPanel>
+                        </Border>
+
+                        <Border x:Name="TntTimerCard" Style="{StaticResource ControlCardStyle}" Margin="0,12,0,0">
+                            <StackPanel>
+                                <DockPanel Margin="0,0,0,10">
+                                    <Button x:Name="KeybindTntTimerButton" Tag="tnttimer" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
+                                    <TextBlock Text="TNT Timer" Foreground="{DynamicResource TextBrush}" FontSize="16" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </DockPanel>
+                                <TextBlock x:Name="TntTimerAvailabilityText" Text="Available" Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,0,0,8"/>
+                                <CheckBox Content="Enable TNT Timer" IsChecked="{Binding TntTimerEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                <TextBlock Text="Renders remaining fuse time above ignited TNT entities with color-coded countdown indicators."
+                                           Foreground="{DynamicResource DimTextBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,8,0,0"/>
+                            </StackPanel>
+                        </Border>
                     </StackPanel>
                 </ScrollViewer>
             </TabItem>
@@ -935,6 +974,32 @@
                                     <CheckBox Content="Only while sneaking" IsChecked="{Binding AutoToolOnlySneaking, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,0,14,6"/>
                                     <CheckBox Content="Bedwars mode" IsChecked="{Binding AutoToolBedwarsMode, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,0,14,6" ToolTip="Prevents swapping tools when punching chests so you can deposit resources via left click."/>
                                 </WrapPanel>
+                            </StackPanel>
+                        </Border>
+
+                        <Border x:Name="FastPlaceCard" Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
+                            <StackPanel>
+                                <DockPanel Margin="0,0,0,10">
+                                    <Button x:Name="KeybindFastPlaceButton" Tag="fastplace" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
+                                    <TextBlock Text="Fast Place" Foreground="{DynamicResource TextBrush}" FontSize="16" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </DockPanel>
+                                <TextBlock x:Name="FastPlaceAvailabilityText" Text="Available" Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,0,0,8"/>
+                                <CheckBox Content="Enable Fast Place" IsChecked="{Binding FastPlaceEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                <TextBlock Text="Removes the 4-tick right-click delay, allowing blocks and projectiles to place immediately on hold."
+                                           Foreground="{DynamicResource DimTextBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,8,0,0"/>
+                            </StackPanel>
+                        </Border>
+
+                        <Border x:Name="SprintCard" Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
+                            <StackPanel>
+                                <DockPanel Margin="0,0,0,10">
+                                    <Button x:Name="KeybindSprintButton" Tag="sprint" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
+                                    <TextBlock Text="Sprint" Foreground="{DynamicResource TextBrush}" FontSize="16" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </DockPanel>
+                                <TextBlock x:Name="SprintAvailabilityText" Text="Available" Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,0,0,8"/>
+                                <CheckBox Content="Enable Sprint" IsChecked="{Binding SprintEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                <TextBlock Text="Automatically maintains forward sprint without needing to double-tap or hold a dedicated sprint key."
+                                           Foreground="{DynamicResource DimTextBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,8,0,0"/>
                             </StackPanel>
                         </Border>
 

@@ -319,6 +319,32 @@ public class GameStateAndProfileTests
         Assert.True(roundTripped!.AntiDebuffEnabled);
     }
 
+    [Theory]
+    [InlineData("FastPlaceEnabled", "fastPlaceEnabled")]
+    [InlineData("NoHurtCamEnabled", "noHurtCamEnabled")]
+    [InlineData("SprintEnabled", "sprintEnabled")]
+    [InlineData("TntTimerEnabled", "tntTimerEnabled")]
+    [InlineData("WTapEnabled", "wTapEnabled")]
+    public void Profile_NewModules_DefaultFalseAndSerializeRoundTrip(string propertyName, string jsonKey)
+    {
+        var defaultProfile = new Profile();
+        var prop = typeof(Profile).GetProperty(propertyName);
+        Assert.NotNull(prop);
+        Assert.False((bool)prop!.GetValue(defaultProfile)!);
+
+        var enabledProfile = new Profile();
+        prop.SetValue(enabledProfile, true);
+
+        var options = new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+        string json = JsonSerializer.Serialize(enabledProfile, options);
+        JsonNode? node = JsonNode.Parse(json);
+        Profile? roundTripped = JsonSerializer.Deserialize<Profile>(json, options);
+
+        Assert.True(node![jsonKey]!.GetValue<bool>());
+        Assert.NotNull(roundTripped);
+        Assert.True((bool)prop.GetValue(roundTripped)!);
+    }
+
     [Fact]
     public void ProfileManager_UsesAokoProfileDirectory()
     {

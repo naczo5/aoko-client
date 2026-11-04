@@ -1285,6 +1285,11 @@ public class GameStateClient : INotifyPropertyChanged
                     fireballWarningBox = clicker.FireballWarningBox,
                     fireballWarningArrow = clicker.FireballWarningArrow,
                     fireballWarningSound = clicker.FireballWarningSound,
+                    fastPlace = clicker.FastPlaceEnabled,
+                    noHurtCam = clicker.NoHurtCamEnabled,
+                    sprint = clicker.SprintEnabled,
+                    tntTimer = clicker.TntTimerEnabled,
+                    wTap = clicker.WTapEnabled,
                     // Per-module keybinds
                     keybindAutoclicker   = InputHooks.GetModuleKey("autoclicker"),
                     keybindRightClick    = InputHooks.GetModuleKey("rightclick"),
@@ -1307,6 +1312,11 @@ public class GameStateClient : INotifyPropertyChanged
                     keybindAutoheal = InputHooks.GetModuleKey("autoheal"),
                     keybindAutoTool = InputHooks.GetModuleKey("autotool"),
                     keybindFireballWarning = InputHooks.GetModuleKey("fireballwarning"),
+                    keybindFastPlace = InputHooks.GetModuleKey("fastplace"),
+                    keybindNoHurtCam = InputHooks.GetModuleKey("nohurtcam"),
+                    keybindSprint = InputHooks.GetModuleKey("sprint"),
+                    keybindTntTimer = InputHooks.GetModuleKey("tnttimer"),
+                    keybindWTap = InputHooks.GetModuleKey("wtap"),
                     hudEditor = clicker.HudEditorActive,
                     hudLayout = clicker.HudLayout.ToJson()
                     };

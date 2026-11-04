@@ -119,7 +119,12 @@ public class ModuleRegistrationTests
             ["autotool"] = "autoToolEnabled",
             ["antidebuff"] = "antiDebuffEnabled",
             ["hitdelayfix"] = "hitDelayFixEnabled",
-            ["fireballwarning"] = "fireballWarning"
+            ["fireballwarning"] = "fireballWarning",
+            ["fastplace"] = "fastPlace",
+            ["nohurtcam"] = "noHurtCam",
+            ["sprint"] = "sprint",
+            ["tnttimer"] = "tntTimer",
+            ["wtap"] = "wTap"
         };
 
         var catalogIds = ModuleCatalog.Requiring(ModuleCatalog.Surfaces.OverlayList)
@@ -386,6 +391,11 @@ public class ModuleRegistrationTests
             case "antidebuff": clicker.AntiDebuffEnabled = enabled; return true;
             case "hitdelayfix": clicker.HitDelayFixEnabled = enabled; return true;
             case "fireballwarning": clicker.FireballWarningEnabled = enabled; return true;
+            case "fastplace": clicker.FastPlaceEnabled = enabled; return true;
+            case "nohurtcam": clicker.NoHurtCamEnabled = enabled; return true;
+            case "sprint": clicker.SprintEnabled = enabled; return true;
+            case "tnttimer": clicker.TntTimerEnabled = enabled; return true;
+            case "wtap": clicker.WTapEnabled = enabled; return true;
             default: return false;
         }
     }

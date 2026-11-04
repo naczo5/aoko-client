@@ -78,6 +78,11 @@ public static class ModuleCatalog
         new("antidebuff", "AntiDebuff", "cfg.antiDebuffEnabled", c => c.AntiDebuffEnabled),
         new("hitdelayfix", "Hit Delay Fix", "cfg.hitDelayFixEnabled", c => c.HitDelayFixEnabled),
         new("fireballwarning", "Fireball Warning", "cfg.fireballWarning", c => c.FireballWarningEnabled),
+        new("fastplace", "Fast Place", "cfg.fastPlace", c => c.FastPlaceEnabled),
+        new("nohurtcam", "No Hurt Cam", "cfg.noHurtCam", c => c.NoHurtCamEnabled),
+        new("sprint", "Sprint", "cfg.sprint", c => c.SprintEnabled),
+        new("tnttimer", "TNT Timer", "cfg.tntTimer", c => c.TntTimerEnabled),
+        new("wtap", "WTap", "cfg.wTap", c => c.WTapEnabled),
 
         // Keybind-only emergency action — not a toggleable feature module.
         new("panic", "Panic", "", _ => false,

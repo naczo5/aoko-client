@@ -273,6 +273,16 @@ struct Config {
     bool fireballWarningArrow = true;
     bool fireballWarningSound = true;
     int keybindFireballWarning = 0;
+    bool fastPlace = false;
+    int keybindFastPlace = 0;
+    bool noHurtCam = false;
+    int keybindNoHurtCam = 0;
+    bool sprint = false;
+    int keybindSprint = 0;
+    bool tntTimer = false;
+    int keybindTntTimer = 0;
+    bool wTap = false;
+    int keybindWTap = 0;
     std::string gtbHint;
     int gtbCount = 0;
     std::string gtbPreview;
@@ -13041,6 +13051,11 @@ void RenderHUD(
     if (cfg.antiDebuffEnabled) pushMod("AntiDebuff");
     if (cfg.bedPlates)         pushMod("BedPlates");
     if (cfg.fireballWarning)   pushMod("Fireball Warning");
+    if (cfg.fastPlace)         pushMod("Fast Place");
+    if (cfg.noHurtCam)         pushMod("No Hurt Cam");
+    if (cfg.sprint)            pushMod("Sprint");
+    if (cfg.tntTimer)          pushMod("TNT Timer");
+    if (cfg.wTap)              pushMod("WTap");
     if (cfg.hitDelayFixEnabled) pushMod("Hit Delay Fix");
 
     std::sort(modEntries.begin(), modEntries.end(),
@@ -16219,6 +16234,16 @@ void ParseConfig(const std::string& line) {
         g_config.fireballWarningArrow = reader.GetBool("fireballWarningArrow", true);
         g_config.fireballWarningSound = reader.GetBool("fireballWarningSound", true);
         { int v = reader.GetInt("keybindFireballWarning", -1); if (v >= 0) g_config.keybindFireballWarning = v; }
+        g_config.fastPlace = reader.GetBool("fastPlace");
+        { int v = reader.GetInt("keybindFastPlace", -1); if (v >= 0) g_config.keybindFastPlace = v; }
+        g_config.noHurtCam = reader.GetBool("noHurtCam");
+        { int v = reader.GetInt("keybindNoHurtCam", -1); if (v >= 0) g_config.keybindNoHurtCam = v; }
+        g_config.sprint = reader.GetBool("sprint");
+        { int v = reader.GetInt("keybindSprint", -1); if (v >= 0) g_config.keybindSprint = v; }
+        g_config.tntTimer = reader.GetBool("tntTimer");
+        { int v = reader.GetInt("keybindTntTimer", -1); if (v >= 0) g_config.keybindTntTimer = v; }
+        g_config.wTap = reader.GetBool("wTap");
+        { int v = reader.GetInt("keybindWTap", -1); if (v >= 0) g_config.keybindWTap = v; }
         g_config.reachEnabled = reader.GetBool("reachEnabled");
         g_config.velocityEnabled = reader.GetBool("velocityEnabled");
         g_config.hitDelayFixEnabled = reader.GetBool("hitDelayFixEnabled");
@@ -16362,6 +16387,11 @@ void ParseConfig(const std::string& line) {
         { int v = reader.GetInt("keybindAutoRod", -1);       if (v >= 0) g_config.keybindAutoRod = lc::ClampInt(v, 0, 255); }
         { int v = reader.GetInt("keybindThrowpot", -1);      if (v >= 0) g_config.keybindThrowpot = lc::ClampInt(v, 0, 255); }
         { int v = reader.GetInt("keybindAutoTool", -1);      if (v >= 0) g_config.keybindAutoTool = lc::ClampInt(v, 0, 255); }
+        { int v = reader.GetInt("keybindFastPlace", -1);     if (v >= 0) g_config.keybindFastPlace = v; }
+        { int v = reader.GetInt("keybindNoHurtCam", -1);     if (v >= 0) g_config.keybindNoHurtCam = v; }
+        { int v = reader.GetInt("keybindSprint", -1);        if (v >= 0) g_config.keybindSprint = v; }
+        { int v = reader.GetInt("keybindTntTimer", -1);      if (v >= 0) g_config.keybindTntTimer = v; }
+        { int v = reader.GetInt("keybindWTap", -1);          if (v >= 0) g_config.keybindWTap = v; }
 
         g_config.pixelPartyAssist = reader.GetBool("pixelPartyAssist");
         int ppRadius = reader.GetInt("pixelPartyScanRadius", g_config.pixelPartyScanRadius);

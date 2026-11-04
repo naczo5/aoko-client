@@ -49,6 +49,7 @@ export default defineConfig({
                 { label: 'Reach', slug: 'modules/combat/reach' },
                 { label: 'Velocity', slug: 'modules/combat/velocity' },
                 { label: 'AutoTotem', slug: 'modules/combat/autototem' },
+                { label: 'WTap', slug: 'modules/combat/wtap' },
               ],
             },
             {
@@ -56,6 +57,7 @@ export default defineConfig({
               items: [
                 { label: 'SpeedBridge', slug: 'modules/movement/speedbridge' },
                 { label: 'PixelParty Assist', slug: 'modules/movement/pixelparty-assist' },
+                { label: 'Sprint', slug: 'modules/movement/sprint' },
               ],
             },
             {
@@ -68,6 +70,8 @@ export default defineConfig({
                 { label: 'Block ESP', slug: 'modules/visual/block-esp' },
                 { label: 'BedPlates', slug: 'modules/visual/bedplates' },
                 { label: 'Fireball Warning', slug: 'modules/visual/fireball-warning' },
+                { label: 'TNT Timer', slug: 'modules/visual/tnt-timer' },
+                { label: 'No Hurt Cam', slug: 'modules/visual/no-hurt-cam' },
                 { label: 'Module List & Logo', slug: 'modules/visual/module-list' },
                 { label: 'HUD Editor', slug: 'modules/visual/hud-editor' },
               ],
@@ -84,6 +88,7 @@ export default defineConfig({
                 { label: 'AutoHeal', slug: 'modules/utility/autoheal' },
                 { label: 'GTB Helper', slug: 'modules/utility/gtb-helper' },
                 { label: 'AntiDebuff', slug: 'modules/utility/antidebuff' },
+                { label: 'Fast Place', slug: 'modules/utility/fast-place' },
               ],
             },
           ],

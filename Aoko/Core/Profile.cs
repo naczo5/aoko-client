@@ -213,6 +213,12 @@ public class Profile
     public bool FireballWarningArrow { get; set; } = true;
     public bool FireballWarningSound { get; set; } = true;
 
+    public bool FastPlaceEnabled { get; set; } = false;
+    public bool NoHurtCamEnabled { get; set; } = false;
+    public bool SprintEnabled { get; set; } = false;
+    public bool TntTimerEnabled { get; set; } = false;
+    public bool WTapEnabled { get; set; } = false;
+
     // Nullable so older JSON (without hudLayout) deserializes without error;
     // a null value is treated as canonical defaults in ApplyToClicker.
     public Dictionary<string, HudElementLayout>? HudLayout { get; set; }
@@ -246,6 +252,11 @@ public class Profile
         ["antidebuff"]       = 0,
         ["hitdelayfix"]     = 0,
         ["fireballwarning"]  = 0,
+        ["fastplace"]        = 0,
+        ["nohurtcam"]        = 0,
+        ["sprint"]           = 0,
+        ["tnttimer"]         = 0,
+        ["wtap"]             = 0,
         ["panic"]            = 0,
         ["hudeditor"]        = 0,
     };
@@ -683,6 +694,12 @@ public static class ProfileManager
             FireballWarningArrow = clicker.FireballWarningArrow,
             FireballWarningSound = clicker.FireballWarningSound,
 
+            FastPlaceEnabled = clicker.FastPlaceEnabled,
+            NoHurtCamEnabled = clicker.NoHurtCamEnabled,
+            SprintEnabled = clicker.SprintEnabled,
+            TntTimerEnabled = clicker.TntTimerEnabled,
+            WTapEnabled = clicker.WTapEnabled,
+
             HudLayout = BuildHudLayoutDict(clicker.HudLayout),
 
             ModuleKeys = new Dictionary<string, int>(InputHooks.ModuleKeys),
@@ -838,6 +855,12 @@ public static class ProfileManager
         clicker.FireballWarningBox = profile.FireballWarningBox;
         clicker.FireballWarningArrow = profile.FireballWarningArrow;
         clicker.FireballWarningSound = profile.FireballWarningSound;
+
+        clicker.FastPlaceEnabled = profile.FastPlaceEnabled;
+        clicker.NoHurtCamEnabled = profile.NoHurtCamEnabled;
+        clicker.SprintEnabled = profile.SprintEnabled;
+        clicker.TntTimerEnabled = profile.TntTimerEnabled;
+        clicker.WTapEnabled = profile.WTapEnabled;
 
         clicker.HudLayout = BuildHudLayout(profile.HudLayout);
 

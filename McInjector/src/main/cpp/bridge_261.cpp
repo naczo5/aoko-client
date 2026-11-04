@@ -248,6 +248,16 @@ struct Config {
     bool  fireballWarningArrow = true;
     bool  fireballWarningSound = true;
     int   keybindFireballWarning = 0;
+    bool  fastPlace = false;
+    int   keybindFastPlace = 0;
+    bool  noHurtCam = false;
+    int   keybindNoHurtCam = 0;
+    bool  sprint = false;
+    int   keybindSprint = 0;
+    bool  tntTimer = false;
+    int   keybindTntTimer = 0;
+    bool  wTap = false;
+    int   keybindWTap = 0;
     bool  showModuleList = true;
     bool  closestPlayer  = false;
     bool  fightStatus    = false;
@@ -575,6 +585,16 @@ static void ParseConfig(const std::string& line) {
     g_config.fireballWarningArrow = reader.GetBool("fireballWarningArrow", true);
     g_config.fireballWarningSound = reader.GetBool("fireballWarningSound", true);
     g_config.keybindFireballWarning = lc::ClampInt(reader.GetInt("keybindFireballWarning", g_config.keybindFireballWarning), 0, 255);
+    g_config.fastPlace = reader.GetBool("fastPlace");
+    g_config.keybindFastPlace = lc::ClampInt(reader.GetInt("keybindFastPlace", g_config.keybindFastPlace), 0, 255);
+    g_config.noHurtCam = reader.GetBool("noHurtCam");
+    g_config.keybindNoHurtCam = lc::ClampInt(reader.GetInt("keybindNoHurtCam", g_config.keybindNoHurtCam), 0, 255);
+    g_config.sprint = reader.GetBool("sprint");
+    g_config.keybindSprint = lc::ClampInt(reader.GetInt("keybindSprint", g_config.keybindSprint), 0, 255);
+    g_config.tntTimer = reader.GetBool("tntTimer");
+    g_config.keybindTntTimer = lc::ClampInt(reader.GetInt("keybindTntTimer", g_config.keybindTntTimer), 0, 255);
+    g_config.wTap = reader.GetBool("wTap");
+    g_config.keybindWTap = lc::ClampInt(reader.GetInt("keybindWTap", g_config.keybindWTap), 0, 255);
     g_config.rightClick    = reader.GetBool("right");
     g_config.rightMinCPS   = lc::ClampFloat(reader.GetFloat("rightMinCPS", g_config.rightMinCPS), 1.0f, 25.0f);
     g_config.rightMaxCPS   = lc::ClampFloat(reader.GetFloat("rightMaxCPS", g_config.rightMaxCPS), 1.0f, 25.0f);
@@ -19036,6 +19056,11 @@ static void RenderOverlayPanels(
                 if (cfg.antiDebuffEnabled) pushMod("AntiDebuff");
                 if (cfg.bedPlates)     pushMod("BedPlates");
                 if (cfg.fireballWarning) pushMod("Fireball Warning");
+                if (cfg.fastPlace)     pushMod("Fast Place");
+                if (cfg.noHurtCam)     pushMod("No Hurt Cam");
+                if (cfg.sprint)        pushMod("Sprint");
+                if (cfg.tntTimer)      pushMod("TNT Timer");
+                if (cfg.wTap)          pushMod("WTap");
                 if (cfg.hitDelayFixEnabled) pushMod("Hit Delay Fix");
 
                 std::sort(modEntries.begin(), modEntries.end(),
