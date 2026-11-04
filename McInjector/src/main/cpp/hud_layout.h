@@ -65,7 +65,6 @@ struct HudEditorState {
     ImVec2 grabOffset{0,0};
     float resizeStartMouseX = 0.0f;
     float resizeStartW = 0.0f;
-    float resizeRightEdge = 0.0f;
     bool layoutDirty = false;
 };
 

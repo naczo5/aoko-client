@@ -489,6 +489,7 @@ static bool EnsureOverlayResources(HWND hwnd) {
 static bool RenderOverlayIntoImage(HWND hwnd, uint32_t imageIndex,
                                    const VkSemaphore* appWaitSems, uint32_t appWaitCount,
                                    VkSemaphore* outSignal) {
+    if (Bridge_OverlayRenderingDisabled()) return false;
     if (!Bridge_EnsureImGuiPlatform(hwnd)) return false;
     if (!EnsureOverlayResources(hwnd)) return false;
     if (imageIndex >= g_framebuffers.size()) return false;
@@ -608,6 +609,8 @@ static VkResult VKAPI_PTR Hooked_vkQueuePresentKHR(VkQueue queue, const VkPresen
     VkRenderCallbackLease lease;
     if (!lease.Active()) return o_vkQueuePresentKHR(queue, pPresentInfo);
     if (RenderBackend_GetActiveKind() == GfxBackendKind::OpenGL || !pPresentInfo)
+        return o_vkQueuePresentKHR(queue, pPresentInfo);
+    if (Bridge_OverlayRenderingDisabled())
         return o_vkQueuePresentKHR(queue, pPresentInfo);
 
     ClaimBackend(GfxBackendKind::Vulkan);
@@ -804,6 +807,10 @@ static bool InstallHook(void* target, void* detour, void** original, int slot) {
 
 bool RenderBackend_InitHooks() {
     if (!IsVulkanHookEnabled()) return false;
+    if (Bridge_OverlayRenderingDisabled()) {
+        RbLog("Vulkan: overlay rendering disabled by AOKO_BRIDGE261_NO_OVERLAY.");
+        return false;
+    }
     if (g_hookTargets[0]) return true;
     InterlockedExchange(&g_vkRenderCleanupRequested, 0);
 

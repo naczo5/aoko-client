@@ -17699,7 +17699,6 @@ static void UpdateHudEditor(int winW, int winH) {
                 g_hudEditor.mode = lc::HudEditorState::Mode::Resize;
                 g_hudEditor.resizeStartMouseX = mouse.x;
                 g_hudEditor.resizeStartW = e.w;
-                g_hudEditor.resizeRightEdge = e.tl.x + e.w;
                 break;
             } else if (inBody) {
                 g_hudEditor.grabbedId = e.id;
@@ -17735,11 +17734,9 @@ static void UpdateHudEditor(int winW, int winH) {
                 ? g_hudEditor.resizeStartW - deltaX
                 : g_hudEditor.resizeStartW + deltaX;
             el.scale = lc::ClampHudScale(desiredW / baseW);
-            if (rightAnchored) {
-                const float appliedW = el.scale * baseW;
-                el.x = lc::ClampHudCoord(
-                    (g_hudEditor.resizeRightEdge - appliedW) / (float)winW);
-            }
+            // Do not rewrite el.x here. It is a normalized left anchor and the
+            // default right-aligned list relies on HudElementPixelPos clamping to
+            // keep its right edge steady as the content width changes.
         }
     }
 
@@ -19159,6 +19156,15 @@ static bool EnsureImGuiContextNeutral(HWND hwnd, bool forOpenGL) {
     return true;
 }
 
+bool Bridge_OverlayRenderingDisabled() {
+    static const bool disabled = []() {
+        char value[16] = {};
+        DWORD n = GetEnvironmentVariableA("AOKO_BRIDGE261_NO_OVERLAY", value, sizeof(value));
+        return n > 0 && value[0] != '0';
+    }();
+    return disabled;
+}
+
 // Renderer-neutral seams consumed by the Vulkan backend (render_backend.cpp).
 bool Bridge_EnsureImGuiPlatform(HWND hwnd) {
     return EnsureImGuiContextNeutral(hwnd, /*forOpenGL=*/false);
@@ -19172,6 +19178,7 @@ bool Bridge_IsImGuiPlatformReady() {
 // Runs platform NewFrame + ImGui::NewFrame + game-state update + panel draw + ImGui::Render().
 // Returns the finalized draw data, or nullptr when the frame should be skipped.
 ImDrawData* Bridge_BuildOverlayDrawData(int winW, int winH) {
+    if (Bridge_OverlayRenderingDisabled()) return nullptr;
     if (!g_imguiPhase1Done) return nullptr;
     if (IsWorldTransitionActive()) return nullptr;
 
@@ -19206,6 +19213,7 @@ ImDrawData* Bridge_BuildOverlayDrawData(int winW, int winH) {
 }
 
 void Bridge_BeginOverlayImGuiFrame(int winW, int winH) {
+    if (Bridge_OverlayRenderingDisabled()) return;
     PublishOverlayViewport121(winW, winH);
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplWin32_NewFrame();
@@ -19248,12 +19256,9 @@ void Bridge_EndOverlayImGuiFrame_OpenGL() {
 // Two-phase init: phase 1 = ImGui context + Win32 (no GL), phase 2 = GL backend (deferred).
 
 BOOL WINAPI hwglSwapBuffers(HDC hDc) {
-    static const bool s_overlayDisabled = []() {
-        char value[16] = {};
-        DWORD n = GetEnvironmentVariableA("AOKO_BRIDGE261_NO_OVERLAY", value, sizeof(value));
-        return n > 0 && value[0] != '0';
-    }();
-    if (s_overlayDisabled) {
+    ModernRenderCallbackLease renderLease;
+    if (!renderLease.Active()) return o_wglSwapBuffers(hDc);
+    if (Bridge_OverlayRenderingDisabled()) {
         static bool logged = false;
         if (!logged) {
             logged = true;
@@ -19261,9 +19266,6 @@ BOOL WINAPI hwglSwapBuffers(HDC hDc) {
         }
         return o_wglSwapBuffers(hDc);
     }
-
-    ModernRenderCallbackLease renderLease;
-    if (!renderLease.Active()) return o_wglSwapBuffers(hDc);
     TRACE261_PATH("enter");
     bool hasHdc = TRACE261_IF("hasHdc", hDc != nullptr);
     if (!hasHdc) return o_wglSwapBuffers(hDc);

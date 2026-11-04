@@ -29,6 +29,9 @@ void RenderBackend_NotifyOpenGlFrame(HWND hwnd);   // called from the wglSwapBuf
 // independent of the renderer (OpenGL3 vs Vulkan) that ultimately rasterizes them.
 // -----------------------------------------------------------------------------
 
+// Environment kill switch shared by the OpenGL and Vulkan overlay paths.
+bool Bridge_OverlayRenderingDisabled();
+
 // Create the ImGui context + load fonts (DPI-aware) + init the Win32 platform backend.
 // Idempotent; renderer-neutral (performs no OpenGL/Vulkan calls). Returns true when ready.
 bool Bridge_EnsureImGuiPlatform(HWND hwnd);

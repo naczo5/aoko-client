@@ -12907,7 +12907,6 @@ static void UpdateHudEditor(int winW, int winH) {
                 g_hudEditor.mode = lc::HudEditorState::Mode::Resize;
                 g_hudEditor.resizeStartMouseX = mouse.x;
                 g_hudEditor.resizeStartW = e.w;
-                g_hudEditor.resizeRightEdge = e.tl.x + e.w;
                 break;
             } else if (inBody) {
                 g_hudEditor.grabbedId = e.id;
@@ -12943,11 +12942,9 @@ static void UpdateHudEditor(int winW, int winH) {
                 ? g_hudEditor.resizeStartW - deltaX
                 : g_hudEditor.resizeStartW + deltaX;
             el.scale = lc::ClampHudScale(desiredW / baseW);
-            if (rightAnchored) {
-                const float appliedW = el.scale * baseW;
-                el.x = lc::ClampHudCoord(
-                    (g_hudEditor.resizeRightEdge - appliedW) / (float)winW);
-            }
+            // Do not rewrite el.x here. It is a normalized left anchor and the
+            // default right-aligned list relies on HudElementPixelPos clamping to
+            // keep its right edge steady as the content width changes.
         }
     }
 
@@ -15653,20 +15650,6 @@ static void ApplyLegacyClientThreadOnlyJni(JNIEnv* env, const Config& cfg) {
 
 // ===================== SWAPBUFFERS HOOK =====================
 BOOL WINAPI HookedSwapBuffers(HDC hdc) {
-    static const bool s_overlayDisabled = []() {
-        char value[16] = {};
-        DWORD n = GetEnvironmentVariableA("AOKO_BRIDGE_NO_OVERLAY", value, sizeof(value));
-        return n > 0 && value[0] != '0';
-    }();
-    if (s_overlayDisabled) {
-        static bool logged = false;
-        if (!logged) {
-            logged = true;
-            Log("AOKO_BRIDGE_NO_OVERLAY set; overlay rendering disabled.");
-        }
-        return CallOriginalSwapBuffers(hdc);
-    }
-
     LegacyRenderCallbackLease renderLease;
     if (!renderLease.Active()) return CallOriginalSwapBuffers(hdc);
     if (!hdc) return CallOriginalSwapBuffers(hdc);
@@ -15679,6 +15662,25 @@ BOOL WINAPI HookedSwapBuffers(HDC hdc) {
     HWND currentHwnd = WindowFromDC(hdc);
     if (!currentHwnd || !IsWindow(currentHwnd)) return CallOriginalSwapBuffers(hdc);
     g_gameHwnd = currentHwnd;
+
+    static const bool s_overlayDisabled = []() {
+        char value[16] = {};
+        DWORD n = GetEnvironmentVariableA("AOKO_BRIDGE_NO_OVERLAY", value, sizeof(value));
+        return n > 0 && value[0] != '0';
+    }();
+    if (s_overlayDisabled) {
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            Log("AOKO_BRIDGE_NO_OVERLAY set; overlay rendering disabled (client-thread JNI still active).");
+        }
+        Config cfg;
+        { LockGuard lk(g_configMutex); cfg = g_config; }
+        if (JNIEnv* clientEnv = TryGetLegacyClientJniEnv()) {
+            ApplyLegacyClientThreadOnlyJni(clientEnv, cfg);
+        }
+        return CallOriginalSwapBuffers(hdc);
+    }
 
     if (g_imguiPhase1Done && g_imguiHwnd && currentHwnd != g_imguiHwnd) {
         ResetImGuiBackendsForReinit("window changed");
