@@ -34,7 +34,7 @@ Do **not** run `build_release.bat` or the GitHub release script for ordinary PRs
 
 ## 2. Publish a GitHub release
 
-Use `scripts\New-GitHubRelease.ps1`. It is the only supported publish path: it
+`scripts\New-GitHubRelease.ps1` is the shared build/publish path: it
 checks the release branch is clean and matches origin, runs
 `build_release.bat` (which already builds both bridges then publishes), zips
 `Aoko_Release` as `Aoko.zip`, and creates the GitHub release with `gh`.
