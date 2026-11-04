@@ -119,7 +119,7 @@ events). Do not run bucket/manifest scripts as part of the release.
 - [ ] Native tests exit 0
 - [ ] `dotnet test` passes (includes `ModuleRegistrationTests`)
 - [ ] Everyday PRs: `build_dll.bat` only
-- [ ] Shipping: `New-GitHubRelease.ps1` on clean `main` matching origin
-- [ ] Beta shipping: `New-GitHubRelease.ps1 -Beta` on clean `dev` matching origin (tag `v<version>-beta`)
+- [ ] Shipping: `release.yml` CI workflow, or `New-GitHubRelease.ps1` on clean `main` matching origin
+- [ ] Beta shipping: `release.yml` beta/tag, or `New-GitHubRelease.ps1 -Beta` on clean `dev` matching origin (tag `v<version>-beta`)
 - [ ] Release body: short bullet list in the existing style, with Full Changelog last
 - [ ] No locked `Aoko.exe` / Minecraft holding the DLLs

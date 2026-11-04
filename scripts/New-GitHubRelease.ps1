@@ -80,6 +80,25 @@ if ($existingReleaseTags -contains $tag) {
     throw "GitHub release '$tag' already exists."
 }
 
+$notesFilePath = $null
+if (-not [string]::IsNullOrWhiteSpace($NotesFile)) {
+    if (-not (Test-Path -LiteralPath $NotesFile -PathType Leaf)) {
+        throw "Release notes file was not found: $NotesFile"
+    }
+    $notesFilePath = (Resolve-Path -LiteralPath $NotesFile).Path
+}
+
+$tagExists = $false
+& git rev-parse --verify --quiet "refs/tags/$tag" | Out-Null
+if ($LASTEXITCODE -eq 0) { $tagExists = $true }
+if ($tagExists) {
+    $tagCommit = ((& git rev-list -n 1 $tag) -join '').Trim()
+    $headCommit = ((& git rev-parse HEAD) -join '').Trim()
+    if ($tagCommit -ne $headCommit) {
+        throw "Tag $tag points to $tagCommit, not HEAD $headCommit. Check out the tagged commit or use a new version."
+    }
+}
+
 $buildScript = Join-Path $repositoryRoot 'build_release.bat'
 if (-not (Test-Path -LiteralPath $buildScript -PathType Leaf)) {
     throw "Release build script was not found: $buildScript"
@@ -103,25 +122,6 @@ if (-not (Test-Path -LiteralPath (Join-Path $releaseDirectory 'Aoko.exe') -PathT
 Compress-Archive -Path (Join-Path $releaseDirectory '*') -DestinationPath $zipPath -Force
 if (-not (Test-Path -LiteralPath $zipPath -PathType Leaf)) {
     throw "Could not create release archive: $zipPath"
-}
-
-$notesFilePath = $null
-if (-not [string]::IsNullOrWhiteSpace($NotesFile)) {
-    if (-not (Test-Path -LiteralPath $NotesFile -PathType Leaf)) {
-        throw "Release notes file was not found: $NotesFile"
-    }
-    $notesFilePath = (Resolve-Path -LiteralPath $NotesFile).Path
-}
-
-$tagExists = $false
-& git rev-parse --verify --quiet "refs/tags/$tag" | Out-Null
-if ($LASTEXITCODE -eq 0) { $tagExists = $true }
-if ($tagExists) {
-    $tagCommit = ((& git rev-list -n 1 $tag) -join '').Trim()
-    $headCommit = ((& git rev-parse HEAD) -join '').Trim()
-    if ($tagCommit -ne $headCommit) {
-        throw "Tag $tag points to $tagCommit, not HEAD $headCommit. Check out the tagged commit or use a new version."
-    }
 }
 
 $releaseArguments = @(
