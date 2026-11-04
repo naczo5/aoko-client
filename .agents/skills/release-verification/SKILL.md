@@ -88,23 +88,26 @@ artifacts are built and tested on Windows.
 
 ### Release notes style
 
-Match the existing releases: a short, user-facing bullet list, not a changelog
-dump.
+Write the diff from the previous release, not a changelog of every commit.
 
 - 4–6 bullets, one line each. No headings, tables, paragraphs, or emoji.
+- New modules go in one explicit `New modules:` bullet. Do not bury them under a tab name or describe them as "native support".
+- Do not list fixes for features that first ship in this same release. If the previous release never had the feature, its bug fixes are not user-facing.
+- Mention internal rendering/UI work when users will notice it: HUD refresh, shared renderer, font, layout, driver risk, safe mode.
+- Merge related items into one bullet instead of listing every commit.
 - Describe what changed for the user, not commit titles or internal symbols.
-- Merge related fixes into one bullet instead of listing every commit.
-- Beta builds: one bullet can say the modules are not thoroughly tested.
+- Beta builds: note that the new modules are not thoroughly tested.
 - No marketing language. Plain, factual wording.
 - End with a single `**Full Changelog**: https://github.com/naczo5/aoko-client/compare/<previous>...<tag>` line.
 
 Example:
 
 ```markdown
-- Beta tab with Jump Reset, Hit Select, Trajectories, Murder Mystery, Break Progress, and Kill Aura
-- Fast Place, No Hurt Cam, Sprint, TNT Timer, and WTap native support
-- Fixed a 1.21/26.x crash on server or dimension changes
-- Jump Reset and No Hurt Cam reliability fixes
+- New modules: Fast Place, No Hurt Cam, Sprint, TNT Timer, WTap, Jump Reset, Hit Select, Trajectories, Murder Mystery, Break Progress
+- New Beta tab for untested modules; use at your own risk. Kill Aura moved there (still requires Dev Mode)
+- HUD rendering refresh: shared ImGui layer, live latency/brand/FPS watermark, glass module rows, restyled player/GTB/Pixel Party/Block ESP/HUD editor panels, bundled Manrope font
+- HUD layout: module rows sort by full width including tags; right-anchored lists stay put when resizing
+- Overlay stability: lower driver risk and a no-overlay safe mode
 
 **Full Changelog**: https://github.com/naczo5/aoko-client/compare/v11.6...v11.7-beta
 ```

@@ -53,7 +53,7 @@ Bridge build scripts auto-copy output to `Aoko\bin\Debug\`, `Release\`, and `pub
 - Full local package (bridges + publish): `build_release.bat` (invoked by the GitHub release script; do not run it extra when publishing)
 - GitHub release: `.\scripts\New-GitHubRelease.ps1 -Version 0.x.y` from clean `main` (see `release-verification` skill). Beta pre-release from `dev`: add `-Beta` (tag `v0.x.y-beta`, GitHub prerelease, Scoop unaffected).
 - CI release: **Actions → Build and publish release** (`.github/workflows/release.yml`). Tag pushes of `v<version>` or `v<version>-beta` also trigger it.
-- Release notes: short 4–6 bullet user-facing list, Full Changelog link last (see `release-verification`).
+- Release notes: short 4–6 bullet diff from the previous release; list new modules explicitly, omit fixes for features that first ship in that release, mention HUD/renderer changes, Full Changelog last (see `release-verification`).
 
 ### Run locally
 - Run app: `dotnet run --project Aoko\Aoko.csproj` (ensure existing `Aoko.exe` is closed).
