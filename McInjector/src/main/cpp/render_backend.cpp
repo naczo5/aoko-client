@@ -195,10 +195,15 @@ static VkCommandPool                g_cmdPool = VK_NULL_HANDLE;
 static std::vector<VkCommandBuffer> g_cmdBuffers;
 static std::vector<VkFence>         g_fences;
 static std::vector<VkSemaphore>     g_renderCompleteSems;
+// Present wait semaphores cannot be safely destroyed after vkDeviceWaitIdle: presentation
+// operations are not covered by queue idle, so a pending present may still wait on them.
+// Retire them instead and let vkDestroyDevice release the handles.
+static std::vector<VkSemaphore>     g_retiredRenderSems;
 static vkoverlay::SwapchainKey      g_builtKey;
+static bool                         g_swapchainOutOfDate = false;
 
 static bool g_imguiVulkanInit = false;
-static bool g_diagPresent = false, g_diagAcquire = false, g_diagCreateSc = false, g_diagBuilt = false;
+static bool g_diagPresent = false, g_diagAcquire = false, g_diagCreateSc = false, g_diagBuilt = false, g_diagOutOfDate = false;
 
 // ============================================================================
 // Loader helpers
@@ -256,7 +261,7 @@ static void DestroySwapchainResources() {
     g_imageViews.clear();
     for (VkFence f : g_fences) if (f && p_vkDestroyFence) p_vkDestroyFence(g_device, f, nullptr);
     g_fences.clear();
-    for (VkSemaphore s : g_renderCompleteSems) if (s && p_vkDestroySemaphore) p_vkDestroySemaphore(g_device, s, nullptr);
+    for (VkSemaphore s : g_renderCompleteSems) if (s) g_retiredRenderSems.push_back(s);
     g_renderCompleteSems.clear();
     if (!g_cmdBuffers.empty() && g_cmdPool && p_vkFreeCommandBuffers)
         p_vkFreeCommandBuffers(g_device, g_cmdPool, (uint32_t)g_cmdBuffers.size(), g_cmdBuffers.data());
@@ -521,6 +526,8 @@ bool RenderBackend_IsGameWindow(HWND hwnd) {
 // Ensure overlay resources exist for the current device/swapchain. Requires device funcs,
 // queue, physical device + family, and a known format/extent. Returns true when ready.
 static bool EnsureOverlayResources(HWND hwnd) {
+    if (g_swapchainOutOfDate)
+        return false;
     if (g_device == VK_NULL_HANDLE || g_swapchain == VK_NULL_HANDLE ||
         g_queue == VK_NULL_HANDLE || g_physicalDevice == VK_NULL_HANDLE ||
         g_queueFamily == vkoverlay::kInvalidFamily || !g_deviceFuncsLoaded)
@@ -641,7 +648,12 @@ static VkResult VKAPI_PTR Hooked_vkAcquireNextImageKHR(
             RbLog(b);
         }
     }
-    return o_vkAcquireNextImageKHR(device, swapchain, timeout, semaphore, fence, pImageIndex);
+    VkResult result = o_vkAcquireNextImageKHR(device, swapchain, timeout, semaphore, fence, pImageIndex);
+    if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+        VkLockGuard lk;
+        g_swapchainOutOfDate = true;
+    }
+    return result;
 }
 
 static VkResult VKAPI_PTR Hooked_vkCreateSwapchainKHR(
@@ -661,6 +673,7 @@ static VkResult VKAPI_PTR Hooked_vkCreateSwapchainKHR(
             g_swapFormatAuthoritative = true;
             g_swapExtent = pCreateInfo->imageExtent;
             g_swapExtentKnown = true;
+            g_swapchainOutOfDate = false;
         }
         if (!g_diagCreateSc) {
             g_diagCreateSc = true;
@@ -711,13 +724,31 @@ static VkResult VKAPI_PTR Hooked_vkQueuePresentKHR(VkQueue queue, const VkPresen
         }
     }
 
+    VkResult result;
     if (overlayOk && overlaySignal != VK_NULL_HANDLE) {
         VkPresentInfoKHR present = *pPresentInfo;
         present.waitSemaphoreCount = 1;
         present.pWaitSemaphores = &overlaySignal;
-        return o_vkQueuePresentKHR(queue, &present);
+        result = o_vkQueuePresentKHR(queue, &present);
+    } else {
+        result = o_vkQueuePresentKHR(queue, pPresentInfo);
     }
-    return o_vkQueuePresentKHR(queue, pPresentInfo);
+
+    // A rejected present can leave the overlay's signal semaphore in a state that is not
+    // safe to reuse. Stop rendering until the app has created a new swapchain, which
+    // rebuilds all overlay resources. Suboptimal presents still complete normally.
+    if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+        VkLockGuard lk;
+        g_swapchainOutOfDate = true;
+        if (!g_diagOutOfDate) {
+            g_diagOutOfDate = true;
+            RbLog("Vulkan: present out of date; overlay paused until the swapchain is recreated.");
+        }
+    } else if (result == VK_SUBOPTIMAL_KHR && !g_diagOutOfDate) {
+        g_diagOutOfDate = true;
+        RbLog("Vulkan: present suboptimal; overlay continues until the app recreates the swapchain.");
+    }
+    return result;
 }
 
 static void VKAPI_PTR Hooked_vkDestroySwapchainKHR(
@@ -749,6 +780,9 @@ static void VKAPI_PTR Hooked_vkDestroyDevice(VkDevice device, const VkAllocation
             g_swapFormat = VK_FORMAT_UNDEFINED;
             g_swapFormatAuthoritative = false;
             g_swapExtentKnown = false;
+            g_swapchainOutOfDate = false;
+            // The device owns these handles now; destroying the device frees them.
+            g_retiredRenderSems.clear();
             g_device = VK_NULL_HANDLE;
             g_queue = VK_NULL_HANDLE;
             g_deviceFuncsLoaded = false;
