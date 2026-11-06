@@ -41,7 +41,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 60
     env:
-      AOKO_GXX: 'C:\mingw64\mingw64\bin\g++.exe'
+      AOKO_GXX: 'C:\mingw64\bin\g++.exe'
     steps:
       - name: Check out release commit
         uses: actions/checkout@v4
@@ -73,7 +73,9 @@ jobs:
           if (Test-Path 'C:\mingw64') { Remove-Item -Recurse -Force 'C:\mingw64' }
           $sevenZip = Join-Path $env:ProgramFiles '7-Zip\7z.exe'
           & $sevenZip x $archive -oC:\ -y | Out-Null
-          & 'C:\mingw64\mingw64\bin\g++.exe' --version | Select-Object -First 1
+          if ($LASTEXITCODE -ne 0) { throw "Could not extract MinGW archive (exit $LASTEXITCODE)." }
+          # The archive contains a top-level mingw64 directory, so g++ lands at C:\mingw64\bin.
+          & 'C:\mingw64\bin\g++.exe' --version | Select-Object -First 1
 
       - name: Resolve release metadata
         shell: pwsh
