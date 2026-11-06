@@ -124,6 +124,10 @@ jobs:
         shell: cmd
         run: .\McInjector\run_tests.bat
 
+      - name: Build native bridges
+        shell: cmd
+        run: .\build_dll.bat
+
       - name: Run C# tests
         run: dotnet test .\Aoko.Tests\Aoko.Tests.csproj -c Release
 
