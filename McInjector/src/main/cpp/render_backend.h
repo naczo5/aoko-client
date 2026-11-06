@@ -19,6 +19,16 @@ void RenderBackend_SetLogFn(RenderBackendLogFn fn);
 bool RenderBackend_InitHooks();
 void RenderBackend_Shutdown();
 
+// Game window identification. Minecraft <= 26.2 creates a GLFW window (class "GLFW30");
+// 26.3+ switched to SDL3 (class "SDL_app"). Both overlay paths use these helpers instead of
+// hard-coding a window class so a future toolkit change degrades to a process-based lookup.
+//   IsGameWindowClass: true for the known toolkit window classes.
+//   FindGameWindow:    the visible top-level game window owned by this process (cached).
+//   IsGameWindow:      true when 'hwnd' is the game window (known class, or the located window).
+bool RenderBackend_IsGameWindowClass(const char* className);
+HWND RenderBackend_FindGameWindow();
+bool RenderBackend_IsGameWindow(HWND hwnd);
+
 // Backend arbitration (first present wins for the session).
 GfxBackendKind RenderBackend_GetActiveKind();
 void RenderBackend_NotifyOpenGlFrame(HWND hwnd);   // called from the wglSwapBuffers hook

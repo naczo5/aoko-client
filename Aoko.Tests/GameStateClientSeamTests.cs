@@ -7,6 +7,8 @@ public class GameStateClientSeamTests
     [Theory]
     [InlineData("26.1", "26.1")]
     [InlineData("26.2", "26.2")]
+    [InlineData("26.3", "26.3")]
+    [InlineData("26.3.1", "26.3")]
     [InlineData("26.1.2", "26.1")]
     [InlineData("26", "26.1")]
     [InlineData("minecraft 26", "26.1")]
@@ -23,6 +25,7 @@ public class GameStateClientSeamTests
     }
 
     [Theory]
+    [InlineData("26.3", "bridge_261.dll")]
     [InlineData("26.2", "bridge_261.dll")]
     [InlineData("26.1", "bridge_261.dll")]
     [InlineData("1.21", "bridge_261.dll")]
@@ -43,6 +46,9 @@ public class GameStateClientSeamTests
     [InlineData(
         @"javaw.exe com.moonsworth.lunar.genesis.Genesis --version 26.2 --launcherVersion 3.0",
         "26.2")]
+    [InlineData(
+        @"javaw.exe com.moonsworth.lunar.genesis.Genesis --version 26.3 --launcherVersion 3.0",
+        "26.3")]
     [InlineData(
         @"javaw.exe -cp C:/versions/1.21.4/client.jar net.minecraft.client.main.Main --version 1.21.4",
         "1.21")]

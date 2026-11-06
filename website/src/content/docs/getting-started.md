@@ -20,8 +20,9 @@ aoko supports both **Lunar Client** and **standalone Minecraft instances** acros
 | **1.21.x** | `bridge_261.dll` | Standalone Fabric (Yarn Mappings) & Lunar | Supported |
 | **26.1** | `bridge_261.dll` | Standalone Fabric (Mojmap) & Lunar | Supported |
 | **26.2** | `bridge_261.dll` | Standalone Fabric (OpenGL & Vulkan auto-detect) & Lunar | Supported |
+| **26.3** | `bridge_261.dll` | Standalone Fabric (OpenGL & Vulkan auto-detect, SDL3 windowing) & Lunar | Supported |
 
-Some modules are version-gated. For example, **Triggerbot**, **AutoTotem**, and **Vulkan overlay rendering** are available on modern versions (1.21.x / 26.1 / 26.2). Each module page details its version support.
+Some modules are version-gated. For example, **Triggerbot**, **AutoTotem**, and **Vulkan overlay rendering** are available on modern versions (1.21.x / 26.1 / 26.2 / 26.3). Each module page details its version support.
 
 ## Requirements
 

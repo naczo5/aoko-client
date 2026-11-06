@@ -795,6 +795,8 @@ public class GameStateClient : INotifyPropertyChanged
         string value = raw.Trim().ToLowerInvariant();
 
         // Use token boundaries so library versions like log4j "2.26.0" do not match "26.2".
+        if (ContainsVersionToken(value, "26.3"))
+            return "26.3";
         if (ContainsVersionToken(value, "26.2"))
             return "26.2";
         if (ContainsVersionToken(value, "26.1")

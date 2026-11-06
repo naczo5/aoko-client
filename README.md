@@ -12,9 +12,9 @@ aoko client is an open-source Windows utility client and external overlay for Lu
 
 ## Current status
 
-- Supported versions: **26.2**, **26.1**, **1.21.x**, and **1.8.9**.
+- Supported versions: **26.3**, **26.2**, **26.1**, **1.21.x**, and **1.8.9**.
 - Supported environments: **Lunar Client** as well as **standalone Minecraft instances** (1.8.9 on Forge, modern versions on Fabric).
-- On **modern 26.2** the game can present via OpenGL or the new **Vulkan** renderer; `bridge_261.dll` auto-detects OpenGL vs Vulkan at runtime and renders the overlay natively on either (kill-switch: set `AOKO_BRIDGE261_VULKAN=0` to force-disable the Vulkan path).
+- On **modern 26.2+** the game can present via OpenGL or the new **Vulkan** renderer; `bridge_261.dll` auto-detects OpenGL vs Vulkan at runtime and renders the overlay natively on either (kill-switch: set `AOKO_BRIDGE261_VULKAN=0` to force-disable the Vulkan path).
 - The external GUI uses hardware rendering by default; set `AOKO_SOFTWARE_RENDERING=1` to force software rendering (e.g. broken GPU drivers or RDP capture issues).
 
 ## Features (current)
@@ -30,7 +30,7 @@ aoko client is an open-source Windows utility client and external overlay for Lu
 - Throwpot (action bind instantly throws the first healing splash potion in your hotbar and restores your slot)
 - AutoHeal (automatically throws a healing splash potion when your health drops below a configurable threshold)
 - AutoTool (weapon swap on hover, optimal tool selection, Bedwars mode)
-- AntiDebuff (hides Blindness/Nausea client-side, plus Darkness on 1.21/26.1/26.2)
+- AntiDebuff (hides Blindness/Nausea client-side, plus Darkness on 1.21/26.1/26.2/26.3)
 - Nick Hider (JVMTI-based local name spoofing)
 - Hit Delay Fix (removes 1.8.9 attack cooldown delays)
 - Beta modules (Beta tab, not thoroughly tested): Fast Place, No Hurt Cam, Sprint, TNT Timer, WTap, Jump Reset, Hit Select, Trajectories, Murder Mystery helper, Break Progress

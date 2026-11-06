@@ -3068,6 +3068,20 @@ public class Clicker : INotifyPropertyChanged
                screen.Contains("class_471", StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// Click in Chests only applies to a real chest. When any of the Chest Stealer menu checks
+    /// (title / custom items / physical chest) is enabled, the bridge must report the open
+    /// container as a physical chest; shops, kit selectors and other server menus that reuse the
+    /// chest GUI are rejected. With every check off, any chest-like GUI is allowed as before.
+    /// </summary>
+    internal static bool IsChestClickAllowed(GameState state, bool menuCheckEnabled)
+    {
+        if (!menuCheckEnabled)
+            return true;
+
+        return state.ChestStealerState is { Physical: true };
+    }
+
     private static bool IsChestGuiScreen(string screen)
     {
         return screen.Contains("GuiChest", StringComparison.OrdinalIgnoreCase) ||
@@ -3117,8 +3131,10 @@ public class Clicker : INotifyPropertyChanged
                         }
                         else if (isChest)
                         {
-                            // Block in chests UNLESS "Click In Chests" is enabled
-                            if (!ClickInChests) shouldBlock = true;
+                            // Block in chests UNLESS "Click In Chests" is enabled AND the open
+                            // container passes the shared Chest Stealer menu checks.
+                            if (!ClickInChests || !IsChestClickAllowed(state, ChestStealerMenuCheck))
+                                shouldBlock = true;
                         }
                         else
                         {
@@ -3166,7 +3182,8 @@ public class Clicker : INotifyPropertyChanged
                         state.GuiOpen &&
                         WindowDetection.IsCursorVisible() &&
                         ClickInChests &&
-                        IsChestGuiScreen(state.ScreenName);
+                        IsChestGuiScreen(state.ScreenName) &&
+                        IsChestClickAllowed(state, ChestStealerMenuCheck);
 
                     if (allowChestClicks)
                     {

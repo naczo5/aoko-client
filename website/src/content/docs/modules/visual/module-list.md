@@ -7,7 +7,7 @@ aoko draws an in-game **module list** of your active modules under a live **wate
 
 ## Version support
 
-1.8.9 · 1.21.x · 26.1 · 26.2
+1.8.9 · 1.21.x · 26.1 · 26.2 · 26.3
 
 ## Settings
 

@@ -31,6 +31,7 @@
 #include <string.h>
 #include <vector>
 #include <string>
+#include <atomic>
 
 #include "MinHook.h"
 #include "imgui.h"
@@ -439,14 +440,82 @@ static void ShutdownImGuiVulkan() {
 // GLFW window lookup + per-frame overlay render
 // ============================================================================
 
-static HWND FindGlfwGameWindow() {
-    HWND found = nullptr;
-    EnumWindows([](HWND hwnd, LPARAM lp) -> BOOL {
+// Known toolkit window classes: "GLFW30" (Minecraft <= 26.2) and "SDL_app" (26.3+, SDL3 default).
+bool RenderBackend_IsGameWindowClass(const char* className) {
+    if (!className) return false;
+    return strcmp(className, "GLFW30") == 0 || strncmp(className, "SDL_app", 7) == 0;
+}
+
+namespace {
+struct GameWindowSearch {
+    DWORD pid;
+    HWND known;          // window with a known toolkit class
+    HWND fallback;       // largest plausible top-level window of this process
+    long long fallbackArea;
+};
+
+bool IsFallbackExcludedClass(const char* cls) {
+    static const char* const kPrefixes[] = {
+        "SunAwt", "IME", "MSCTFIME", "ConsoleWindowClass", "tooltips_class", "#32770", "Shell_", nullptr
+    };
+    for (int i = 0; kPrefixes[i]; ++i)
+        if (strncmp(cls, kPrefixes[i], strlen(kPrefixes[i])) == 0) return true;
+    return false;
+}
+
+BOOL CALLBACK EnumGameWindowProc(HWND hwnd, LPARAM lp) {
+    GameWindowSearch* s = (GameWindowSearch*)lp;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (pid != s->pid || !IsWindowVisible(hwnd)) return TRUE;
+
+    char cls[256] = {};
+    if (!GetClassNameA(hwnd, cls, sizeof(cls) - 1)) return TRUE;
+    if (RenderBackend_IsGameWindowClass(cls)) { s->known = hwnd; return FALSE; }
+
+    if (GetWindow(hwnd, GW_OWNER) != nullptr || IsFallbackExcludedClass(cls)) return TRUE;
+    RECT rc = {};
+    if (!GetClientRect(hwnd, &rc)) return TRUE;
+    long long w = rc.right - rc.left, h = rc.bottom - rc.top;
+    if (w < 320 || h < 240) return TRUE;   // Minecraft's minimum window size
+    if (w * h > s->fallbackArea) { s->fallback = hwnd; s->fallbackArea = w * h; }
+    return TRUE;
+}
+} // namespace
+
+HWND RenderBackend_FindGameWindow() {
+    // Called from both the OpenGL and Vulkan present hooks, which may run on different threads.
+    static std::atomic<HWND> s_cached(nullptr);
+    static std::atomic<DWORD> s_lastScanMs(0);
+
+    HWND cached = s_cached.load();
+    if (cached && IsWindow(cached) && IsWindowVisible(cached)) return cached;
+
+    DWORD now = GetTickCount();
+    DWORD last = s_lastScanMs.load();
+    if (last != 0 && now - last < 250) return nullptr;
+    s_lastScanMs.store(now);
+
+    GameWindowSearch search = { GetCurrentProcessId(), nullptr, nullptr, 0 };
+    EnumWindows(EnumGameWindowProc, (LPARAM)&search);
+    HWND found = search.known ? search.known : search.fallback;
+    if (found && found != cached) {
         char cls[256] = {};
-        if (GetClassNameA(hwnd, cls, sizeof(cls)) && strcmp(cls, "GLFW30") == 0) { *(HWND*)lp = hwnd; return FALSE; }
-        return TRUE;
-    }, (LPARAM)&found);
+        char title[128] = {};
+        GetClassNameA(found, cls, sizeof(cls) - 1);
+        GetWindowTextA(found, title, sizeof(title) - 1);
+        RbLog(std::string("Game window located: class='") + cls + "' title='" + title + "'" +
+              (search.known ? "" : " (process-based fallback; unknown toolkit class)"));
+    }
+    s_cached.store(found);
     return found;
+}
+
+bool RenderBackend_IsGameWindow(HWND hwnd) {
+    if (!hwnd) return false;
+    char cls[256] = {};
+    if (GetClassNameA(hwnd, cls, sizeof(cls) - 1) && RenderBackend_IsGameWindowClass(cls)) return true;
+    return hwnd == RenderBackend_FindGameWindow();
 }
 
 // Ensure overlay resources exist for the current device/swapchain. Requires device funcs,
@@ -634,7 +703,7 @@ static VkResult VKAPI_PTR Hooked_vkQueuePresentKHR(VkQueue queue, const VkPresen
             }
             if (sc != VK_NULL_HANDLE) {
                 g_swapchain = sc;
-                HWND hwnd = FindGlfwGameWindow();
+                HWND hwnd = RenderBackend_FindGameWindow();
                 if (hwnd)
                     overlayOk = RenderOverlayIntoImage(hwnd, imageIndex,
                         pPresentInfo->pWaitSemaphores, pPresentInfo->waitSemaphoreCount, &overlaySignal);

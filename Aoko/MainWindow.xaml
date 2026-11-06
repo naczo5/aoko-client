@@ -246,7 +246,7 @@
         <StackPanel x:Name="LoaderPanel" VerticalAlignment="Center">
             <TextBlock Text="Injection Control" Foreground="{DynamicResource TextBrush}"
                        FontSize="16" FontWeight="Bold" Margin="0,0,0,10" HorizontalAlignment="Center"/>
-            <TextBlock Text="Supported versions: 1.8.9, 1.21.x, 26.1, and 26.2 (auto-detected)"
+            <TextBlock Text="Supported versions: 1.8.9, 1.21.x, 26.1, 26.2, and 26.3 (auto-detected)"
                         Foreground="{DynamicResource DimTextBrush}"
                         FontSize="11"
                         HorizontalAlignment="Center"
@@ -323,7 +323,7 @@
                                         ToolTip="Basic: uniform distribution | Medium: Gaussian jitter | Advanced: human-like drift, butterfly doublets, and drop-off"/>
 
                                 <WrapPanel Margin="0,10,0,0">
-                                    <CheckBox Content="Click in Chests" IsChecked="{Binding ClickInChests, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,0,14,0"/>
+                                    <CheckBox Content="Click in Chests" IsChecked="{Binding ClickInChests, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,0,14,0" ToolTip="Clicks inside real chests only. Uses the Chest Stealer title, custom item, and physical chest checks so shops and server menus stay paused."/>
                                     <CheckBox Content="Pause when breaking" IsChecked="{Binding BreakBlocksEnabled, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}"/>
                                 </WrapPanel>
                             </StackPanel>

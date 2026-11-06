@@ -9,7 +9,7 @@ description: Automatic forward sprinting without holding a sprint key.
 
 ## Version support
 
-1.8.9 · 1.21.x · 26.1 · 26.2
+1.8.9 · 1.21.x · 26.1 · 26.2 · 26.3
 
 ## Usage notes
 

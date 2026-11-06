@@ -7,7 +7,7 @@ description: Highlights player beds with in-world bounding boxes and distance in
 
 ## Version support
 
-1.8.9 · 1.21.x · 26.1 · 26.2
+1.8.9 · 1.21.x · 26.1 · 26.2 · 26.3
 
 ## Settings
 

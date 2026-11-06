@@ -13,6 +13,7 @@
  */
 #include <winsock2.h>
 #include <windows.h>
+#include <tlhelp32.h>
 #include <jni.h>
 #include <jvmti.h>
 #include <string>
@@ -1162,6 +1163,107 @@ static PFN_glfwGetKey            glfwGetKey_fn           = nullptr;
 #define GLFW_CURSOR_DISABLED   0x00034003
 #define GLFW_RAW_MOUSE_MOTION  0x00033005
 #define GLFW_PRESS             1
+
+// Minecraft 26.3 replaced GLFW with SDL3 for windowing and input. There is no glfw.dll to
+// query, and KeyMapping/InputConstants.Key values are SDL scancodes instead of GLFW key
+// codes. When true, bound-key values read over JNI are translated to Windows virtual keys.
+static bool g_sdlInputBackend = false;
+
+// True when a module whose file name contains 'needleLower' (lowercase) is loaded.
+static bool ProcessHasModuleContaining(const char* needleLower) {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetCurrentProcessId());
+    if (snap == INVALID_HANDLE_VALUE) return false;
+    MODULEENTRY32 me;
+    me.dwSize = sizeof(me);
+    bool found = false;
+    if (Module32First(snap, &me)) {
+        do {
+            std::string name = me.szModule;
+            for (char& ch : name) ch = (char)std::tolower((unsigned char)ch);
+            if (name.find(needleLower) != std::string::npos) { found = true; break; }
+        } while (Module32Next(snap, &me));
+    }
+    CloseHandle(snap);
+    return found;
+}
+
+// SDL_Scancode (USB HID usage based) -> Windows virtual-key code. 0 when unmapped.
+static int SdlScancodeToVirtualKey(int sc) {
+    if (sc >= 4 && sc <= 29)   return 'A' + (sc - 4);
+    if (sc >= 30 && sc <= 38)  return '1' + (sc - 30);
+    if (sc == 39)              return '0';
+    if (sc >= 58 && sc <= 69)  return VK_F1 + (sc - 58);
+    if (sc >= 89 && sc <= 97)  return VK_NUMPAD1 + (sc - 89);
+    if (sc >= 104 && sc <= 115) return VK_F13 + (sc - 104);
+    switch (sc) {
+        case 40:  return VK_RETURN;
+        case 41:  return VK_ESCAPE;
+        case 42:  return VK_BACK;
+        case 43:  return VK_TAB;
+        case 44:  return VK_SPACE;
+        case 45:  return VK_OEM_MINUS;
+        case 46:  return VK_OEM_PLUS;
+        case 47:  return VK_OEM_4;
+        case 48:  return VK_OEM_6;
+        case 49:  return VK_OEM_5;
+        case 51:  return VK_OEM_1;
+        case 52:  return VK_OEM_7;
+        case 53:  return VK_OEM_3;
+        case 54:  return VK_OEM_COMMA;
+        case 55:  return VK_OEM_PERIOD;
+        case 56:  return VK_OEM_2;
+        case 57:  return VK_CAPITAL;
+        case 70:  return VK_SNAPSHOT;
+        case 71:  return VK_SCROLL;
+        case 72:  return VK_PAUSE;
+        case 73:  return VK_INSERT;
+        case 74:  return VK_HOME;
+        case 75:  return VK_PRIOR;
+        case 76:  return VK_DELETE;
+        case 77:  return VK_END;
+        case 78:  return VK_NEXT;
+        case 79:  return VK_RIGHT;
+        case 80:  return VK_LEFT;
+        case 81:  return VK_DOWN;
+        case 82:  return VK_UP;
+        case 83:  return VK_NUMLOCK;
+        case 84:  return VK_DIVIDE;
+        case 85:  return VK_MULTIPLY;
+        case 86:  return VK_SUBTRACT;
+        case 87:  return VK_ADD;
+        case 88:  return VK_RETURN;
+        case 98:  return VK_NUMPAD0;
+        case 99:  return VK_DECIMAL;
+        case 100: return VK_OEM_102;
+        case 224: return VK_LCONTROL;
+        case 225: return VK_LSHIFT;
+        case 226: return VK_LMENU;
+        case 227: return VK_LWIN;
+        case 228: return VK_RCONTROL;
+        case 229: return VK_RSHIFT;
+        case 230: return VK_RMENU;
+        case 231: return VK_RWIN;
+        default:  return 0;
+    }
+}
+
+// Physical key state for a KeyMapping's bound key value on the SDL (26.3+) backend.
+// Returns 1 pressed, 0 released, -1 when the code has no Windows mapping.
+static int QuerySdlBoundKeyDown(int scancode) {
+    int vk = SdlScancodeToVirtualKey(scancode);
+    if (!vk) return -1;
+    return (GetAsyncKeyState(vk) & 0x8000) != 0 ? 1 : 0;
+}
+
+// True when the OS cursor is visible. The game hides it with SetCursor(NULL) while the
+// mouse is captured (GLFW disabled-cursor mode / SDL relative mouse mode), which leaves
+// hCursor null; CURSOR_SHOWING alone is not a reliable signal for that.
+static bool IsOsCursorVisible() {
+    CURSORINFO ci = {};
+    ci.cbSize = sizeof(ci);
+    if (!GetCursorInfo(&ci)) return false;
+    return (ci.flags & CURSOR_SHOWING) != 0 && ci.hCursor != nullptr;
+}
 
 // Cached game ClassLoader (global ref) used for safe class loads.
 static jobject g_gameClassLoader = nullptr;
@@ -4757,6 +4859,8 @@ static bool IsConfiguredSneakPhysicallyDown121(JNIEnv* env) {
     if (keyCode >= 0 && glfwGetCurrentContext_fn && glfwGetKey_fn) {
         void* win = glfwGetCurrentContext_fn();
         if (win && glfwGetKey_fn(win, keyCode) == GLFW_PRESS) return true;
+    } else if (keyCode >= 0 && g_sdlInputBackend && QuerySdlBoundKeyDown(keyCode) == 1) {
+        return true;
     }
 
     return (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
@@ -8115,6 +8219,15 @@ static bool IsModernTransitionScreenName(const std::string& screenName) {
         || screenName.find("ReceivingLevelScreen") != std::string::npos;
 }
 
+// Hopper / dispenser / dropper screens. Their block entities are not in the chest scan list
+// (that list backs Chest ESP), so the physical-chest check cannot be evaluated for them; the
+// title and custom-item checks still apply.
+static bool IsModernUntrackedContainerScreenName(const std::string& screenName) {
+    return ScreenChainContainsClass121(screenName, "HopperScreen") ||
+        ScreenChainContainsClass121(screenName, "class_488") ||
+        ScreenChainContainsClass121(screenName, "DispenserScreen");
+}
+
 static bool IsModernContainerScreenName(const std::string& screenName) {
     if (ScreenChainContainsClass121(screenName, "InventoryScreen") ||
         ScreenChainContainsClass121(screenName, "CreativeModeInventoryScreen") ||
@@ -8124,7 +8237,10 @@ static bool IsModernContainerScreenName(const std::string& screenName) {
 
     return ScreenChainContainsClass121(screenName, "ContainerScreen") ||
         ScreenChainContainsClass121(screenName, "GenericContainerScreen") ||
-        ScreenChainContainsClass121(screenName, "class_476");
+        ScreenChainContainsClass121(screenName, "class_476") ||
+        ScreenChainContainsClass121(screenName, "ShulkerBoxScreen") ||
+        ScreenChainContainsClass121(screenName, "class_495") ||
+        IsModernUntrackedContainerScreenName(screenName);
 }
 
 static std::string BuildModernChestStealerStateJson(JNIEnv* env, jobject screenObj, const std::string& screenName, bool enabled, bool titleCheck, bool customItemsCheck, bool physicalCheck) {
@@ -8245,7 +8361,8 @@ static std::string BuildModernChestStealerStateJson(JNIEnv* env, jobject screenO
 
     bool itemsAreMenu = customItemsCheck && (count > 0) && (((float)customItemCount / (float)count) > 0.5f);
     bool physicalNearby = IsModernChestStealerPhysicalContainer();
-    bool physicalCheckFailed = physicalCheck && !physicalNearby;
+    bool physicalCheckFailed = physicalCheck && !physicalNearby &&
+        !IsModernUntrackedContainerScreenName(screenName);
 
     bool blocked = titleIsMenu || itemsAreMenu || physicalCheckFailed;
     bool physical = !blocked;
@@ -15081,7 +15198,9 @@ static void UpdateJniState() {
     bool refillEnabled = false;
     {
         LockGuard lk(g_configMutex);
-        chestStealerEnabled = g_config.chestStealer;
+        // Click in Chests reuses the Chest Stealer menu/physical checks, so the container
+        // state is published for either feature.
+        chestStealerEnabled = g_config.chestStealer || g_config.clickInChests;
         chestStealerTitleCheck = g_config.chestStealerTitleCheck;
         chestStealerCustomItemsCheck = g_config.chestStealerCustomItemsCheck;
         chestStealerPhysicalCheck = g_config.chestStealerPhysicalCheck;
@@ -15576,9 +15695,7 @@ static void UpdateRealGuiState() {
     }
     if (!haveGlfwAnswer) {
         TRACE261_PATH("cursor-visibility-win32-fallback");
-        CURSORINFO ci = {};
-        ci.cbSize = sizeof(ci);
-        if (GetCursorInfo(&ci)) cursorVisible = (ci.flags & CURSOR_SHOWING) != 0;
+        cursorVisible = IsOsCursorVisible();
     }
 
     // Only report realGuiOpen when the cursor is visible and JNI reports a non-chat screen.
@@ -15619,16 +15736,23 @@ static void ReadCameraState(JNIEnv* env) {
             if (fovOpt && !env->ExceptionCheck()) {
                 jobject valObj = env->CallObjectMethod(fovOpt, g_simpleOptionGet_121);
                 if (valObj && !env->ExceptionCheck()) {
-                    jclass valCls = env->GetObjectClass(valObj);
-                    jmethodID doubleVal = env->GetMethodID(valCls, "doubleValue", "()D");
-                    if (env->ExceptionCheck()) { env->ExceptionClear(); doubleVal = env->GetMethodID(valCls, "intValue", "()I"); if (env->ExceptionCheck()) env->ExceptionClear(); }
-                    
-                    if (doubleVal) {
-                        std::string cn = GetClassNameFromClass(env, valCls);
-                        if (cn.find("Double") != std::string::npos) cs.fov = (float)env->CallDoubleMethod(valObj, doubleVal);
-                        else cs.fov = (float)env->CallIntMethod(valObj, doubleVal);
+                    // OptionInstance<Integer> (vanilla FOV slider) or <Double>: both extend
+                    // java.lang.Number, so read through Number.doubleValue() with the matching
+                    // Call*Method. (Calling an Integer's ()D method ID via CallIntMethod
+                    // returns garbage and made every FOV read look invalid.)
+                    static jmethodID s_numberDoubleValue = nullptr;  // method IDs are valid across threads
+                    jclass numberCls = env->FindClass("java/lang/Number");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); numberCls = nullptr; }
+                    if (numberCls && !s_numberDoubleValue) {
+                        s_numberDoubleValue = env->GetMethodID(numberCls, "doubleValue", "()D");
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); s_numberDoubleValue = nullptr; }
                     }
-                    env->DeleteLocalRef(valCls);
+                    if (s_numberDoubleValue && env->IsInstanceOf(valObj, numberCls)) {
+                        double v = env->CallDoubleMethod(valObj, s_numberDoubleValue);
+                        if (env->ExceptionCheck()) env->ExceptionClear();
+                        else cs.fov = (float)v;
+                    }
+                    if (numberCls) env->DeleteLocalRef(numberCls);
                     env->DeleteLocalRef(valObj);
                 }
                 env->DeleteLocalRef(fovOpt);
@@ -17741,6 +17865,17 @@ static jobject GetJumpKeyBinding121(JNIEnv* env) {
 }
 
 static bool IsJumpPhysicallyDown121(JNIEnv* env, jobject key) {
+    if (key && g_sdlInputBackend && g_speedBridgeKeyGetBoundKey_121 && g_speedBridgeInputKeyGetCode_121) {
+        jobject inputKey = env->CallObjectMethod(key, g_speedBridgeKeyGetBoundKey_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); inputKey = nullptr; }
+        if (inputKey) {
+            int code = env->CallIntMethod(inputKey, g_speedBridgeInputKeyGetCode_121);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); code = -1; }
+            env->DeleteLocalRef(inputKey);
+            int down = code >= 0 ? QuerySdlBoundKeyDown(code) : -1;
+            if (down >= 0) return down == 1;
+        }
+    }
     if (key && g_speedBridgeKeyGetBoundKey_121 && g_speedBridgeInputKeyGetCode_121 &&
         glfwGetCurrentContext_fn && glfwGetKey_fn) {
         void* win = glfwGetCurrentContext_fn();
@@ -18724,7 +18859,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                         g_modernBreaks.clear();
                     }
 
-                    const bool chunkScansEnabled = cfg.chestEsp || cfg.chestStealer || cfg.blockEsp || cfg.bedPlates;
+                    const bool chunkScansEnabled = cfg.chestEsp || cfg.chestStealer || cfg.clickInChests || cfg.blockEsp || cfg.bedPlates;
                     const bool chunkScanReady = !chunkScansEnabled ||
                         (!IsWorldTransitionActive() && ProbeModernChunkObject(env));
                     static bool s_fightStatusWasEnabled = false;
@@ -18751,7 +18886,8 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                     }
                     entityProducerWasEnabled = entityProducerEnabled;
                     const DWORD producerNowMs = GetTickCount();
-                    const bool chestEspScanEnabled = cfg.chestEsp || cfg.chestStealer;
+                    // Click in Chests reuses the physical-chest check, which reads the scanned chest list.
+                    const bool chestEspScanEnabled = cfg.chestEsp || cfg.chestStealer || cfg.clickInChests;
                     const bool chestEspScanDue =
                         !chestEspScanWasEnabled ||
                         lc::IsTelemetryIntervalDue(
@@ -18868,7 +19004,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                 cfg.fightStatus || cfg.aimAssist || cfg.triggerbot || cfg.nametagHideVanilla);
             lc::ConsiderJobSleep(
                 &sleepMs, sleepNow, lastChestEspScanMs, lc::kChestEspScanIntervalMs,
-                cfg.chestEsp || cfg.chestStealer);
+                cfg.chestEsp || cfg.chestStealer || cfg.clickInChests);
             lc::ConsiderJobSleep(
                 &sleepMs, sleepNow, lastNickHiderFallbackMs, lc::kStateReadIntervalMs,
                 cfg.nickHiderEnabled);
@@ -18927,9 +19063,7 @@ static void UpdateHudEditor(int winW, int winH) {
         // the GLFW query above yields nothing. Fall back to the OS cursor visibility, which
         // tracks whether the game has released the cursor (a GUI/chat is open) on either
         // renderer. Harmless for OpenGL: a truly captured cursor is also not "showing".
-        CURSORINFO ci = {};
-        ci.cbSize = sizeof(ci);
-        if (GetCursorInfo(&ci)) cursorAvailable = (ci.flags & CURSOR_SHOWING) != 0;
+        cursorAvailable = IsOsCursorVisible();
     }
 
     ImGuiIO& io = ImGui::GetIO();
@@ -20659,15 +20793,16 @@ BOOL WINAPI hwglSwapBuffers(HDC hDc) {
     bool hasWindow = TRACE261_IF("windowValid", (window && IsWindow(window)));
     if (!hasWindow) return o_wglSwapBuffers(hDc);
 
-    // Only run on the main GLFW game window
+    // Only run on the main game window. Minecraft <= 26.2 uses a GLFW window ("GLFW30");
+    // 26.3+ uses SDL3 ("SDL_app"). Unknown classes fall back to a process-based lookup.
     char cls[256] = {};
     bool classReadOk = TRACE261_IF("windowClassRead", GetClassNameA(window, cls, sizeof(cls)-1) != 0);
     if (!classReadOk)
         return o_wglSwapBuffers(hDc);
-    bool isGlfwGameWindow = TRACE261_IF("isGlfwGameWindow", strcmp(cls, "GLFW30") == 0);
-    if (!isGlfwGameWindow) {
-        static bool s_loggedNonGlfw = false;
-        if (!s_loggedNonGlfw) { s_loggedNonGlfw = true; Log(std::string("wglSwapBuffers: non-GLFW window class '") + cls + "'; skipping overlay."); }
+    bool isGameWindow = TRACE261_IF("isGameWindow", RenderBackend_IsGameWindow(window));
+    if (!isGameWindow) {
+        static bool s_loggedNonGameWindow = false;
+        if (!s_loggedNonGameWindow) { s_loggedNonGameWindow = true; Log(std::string("wglSwapBuffers: non-game window class '") + cls + "'; skipping overlay."); }
         return o_wglSwapBuffers(hDc);
     }
 
@@ -20896,7 +21031,16 @@ DWORD WINAPI MainThread(LPVOID) {
     }
 
     // ---- Load GLFW function pointers (no hook needed; just direct calls) ----
+    // Minecraft 26.3+ ships SDL3 instead of GLFW; detect it up front so we do not wait
+    // 15 seconds for a glfw.dll that will never load.
     for (int attempt = 0; attempt < 30; attempt++) {
+        if (!GetModuleHandleA("glfw.dll") && !GetModuleHandleA("glfw64.dll") &&
+            ProcessHasModuleContaining("sdl3")) {
+            g_sdlInputBackend = true;
+            Log("SDL3 input backend detected (Minecraft 26.3+): GLFW is not used. "
+                "Bound-key reads map SDL scancodes to Windows virtual keys; cursor state uses the OS cursor.");
+            goto glfw_done;
+        }
         const char* names[] = { "glfw.dll", "glfw64.dll", nullptr };
         for (int i = 0; names[i]; i++) {
             HMODULE hGlfw = GetModuleHandleA(names[i]);

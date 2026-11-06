@@ -7,7 +7,7 @@ description: World-space fight prediction using effective survivability and rece
 
 ## Version support
 
-1.8.9 · 1.21.x · 26.1 · 26.2
+1.8.9 · 1.21.x · 26.1 · 26.2 · 26.3
 
 ## Settings
 

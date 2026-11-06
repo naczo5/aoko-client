@@ -7,7 +7,7 @@ description: Switches to a fishing rod, uses it once, and restores the exact pre
 
 ## Version support
 
-1.8.9 · 1.21.x · 26.1 · 26.2.
+1.8.9 · 1.21.x · 26.1 · 26.2 · 26.3.
 
 ## Binds
 
@@ -41,4 +41,4 @@ The bridge changes the selected-slot field without emitting held-item or use pac
 - In `Auto`, put a fishing rod in the hotbar; the first matching slot is used.
 - In a forced mode with verification enabled, confirm that exact slot contains a fishing rod.
 - Close chat and all other Minecraft screens and keep the game focused.
-- For mapping or interaction failures, inspect `bridge_debug.log` on 1.8.9 or `bridge_261_debug.log` on 1.21.x/26.1/26.2.
+- For mapping or interaction failures, inspect `bridge_debug.log` on 1.8.9 or `bridge_261_debug.log` on 1.21.x/26.1/26.2/26.3.

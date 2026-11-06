@@ -78,6 +78,7 @@
                 <ComboBoxItem Content="1.21" Tag="1.21"/>
                 <ComboBoxItem Content="26.1" Tag="26.1"/>
                 <ComboBoxItem Content="26.2" Tag="26.2"/>
+                <ComboBoxItem Content="26.3" Tag="26.3"/>
             </ComboBox>
         </DockPanel>
 

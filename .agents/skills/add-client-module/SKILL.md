@@ -102,7 +102,7 @@ catalog `OverlayProbe`. Overlay-only modules still parse config in `ParseConfig(
 ### Layer 8 — Native bridges
 * 1.8.9: `McInjector/src/main/cpp/bridge.cpp` — `ParseConfig()`, mappings,
   tick/premotion logic or ImGui overlay.
-* 1.21 / 26.1 / 26.2: `bridge_261.cpp` — Yarn-first then Mojmap arrays.
+* 1.21 / 26.1 / 26.2 / 26.3: `bridge_261.cpp` — Yarn-first then Mojmap arrays.
 * Shared sequencing belongs in a header (`auto_rod_core.h`, `auto_tool_core.h`)
   plus `McInjector/tests`. Do not fork the lockout rules per bridge.
 * Overlay drawing is draw-only unless the module owns mutation.

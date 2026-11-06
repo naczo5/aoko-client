@@ -11166,7 +11166,9 @@ GameState ReadGameState(JNIEnv* env) {
     {
         LockGuard lk(g_configMutex);
         gtbHelperEnabled = g_config.gtbHelper;
-        chestStealerEnabled = g_config.chestStealer;
+        // Click in Chests reuses the Chest Stealer menu/physical checks, so the container
+        // state is published for either feature.
+        chestStealerEnabled = g_config.chestStealer || g_config.clickInChests;
         chestStealerTitleCheck = g_config.chestStealerTitleCheck;
         chestStealerCustomItemsCheck = g_config.chestStealerCustomItemsCheck;
         chestStealerPhysicalCheck = g_config.chestStealerPhysicalCheck;

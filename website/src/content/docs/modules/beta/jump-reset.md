@@ -9,7 +9,7 @@ description: Jumps on the first tick of a hit to take less knockback.
 
 ## Version support
 
-1.8.9 · 1.21.x · 26.1 · 26.2
+1.8.9 · 1.21.x · 26.1 · 26.2 · 26.3
 
 ## Settings
 
