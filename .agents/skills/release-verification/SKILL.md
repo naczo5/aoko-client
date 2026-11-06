@@ -74,7 +74,10 @@ artifacts are built and tested on Windows.
   it. The workflow uses the tag message as the notes; a lightweight tag falls
   back to generated notes. Tag `v<version>-beta` on `dev` or `v<version>` on
   `main`. The tag must contain the workflow file; the script accepts detached
-  CI tag checkouts when the commit is reachable from the release branch.
+  CI tag checkouts when the commit is reachable from the release branch. Tag
+  pushes publish immediately; set the repository variable
+  `RELEASE_DRAFT_OVERRIDE=true` (then delete it) to create the release as a
+  draft instead.
 
   ```powershell
   git tag -a v0.x.y-beta -F notes.md
