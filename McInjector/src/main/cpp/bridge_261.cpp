@@ -1406,6 +1406,7 @@ static jfieldID  g_chestStealerSlotYField_121 = nullptr;
 static jmethodID g_chestStealerSlotHasStackMethod_121 = nullptr;
 static jmethodID g_chestStealerSlotGetStackMethod_121 = nullptr;
 static jmethodID g_itemStackHasCustomName_121 = nullptr;
+static jmethodID g_itemStackGetCustomName_121 = nullptr;
 static DWORD     g_lastChestStealerMappingLogMs_121 = 0;
 static DWORD     g_lastChestStealerSkipLogMs_121 = 0;
 
@@ -8116,25 +8117,56 @@ static bool ResolveModernChestStealerSlotMappings(JNIEnv* env, jobject slotObj) 
         g_chestStealerSlotYField_121 && g_chestStealerSlotHasStackMethod_121;
 }
 
-static bool IsModernItemStackCustomNamed(JNIEnv* env, jobject stackObj) {
-    if (!env || !stackObj) return false;
-    if (!g_itemStackHasCustomName_121) {
-        jclass stackCls = env->GetObjectClass(stackObj);
-        if (stackCls) {
-            const char* names[] = { "hasCustomName", "method_7986", "m_41784_", nullptr };
-            for (int i = 0; names[i] && !g_itemStackHasCustomName_121; i++) {
-                g_itemStackHasCustomName_121 = env->GetMethodID(stackCls, names[i], "()Z");
-                if (env->ExceptionCheck()) { env->ExceptionClear(); g_itemStackHasCustomName_121 = nullptr; }
-            }
-            env->DeleteLocalRef(stackCls);
+static bool ResolveModernItemStackCustomNameMappings(JNIEnv* env, jclass stackCls) {
+    if (!env || !stackCls) return false;
+    if (g_itemStackGetCustomName_121 || g_itemStackHasCustomName_121) return true;
+
+    // 26.x removed ItemStack.hasCustomName(); getCustomName() returns a nullable
+    // Component instead. Try that accessor first so 26.1+ keeps the custom-item check.
+    const char* getSigs[] = {
+        "()Lnet/minecraft/network/chat/Component;",
+        "()Lnet/minecraft/text/Text;",
+        "()Lnet/minecraft/class_2561;",
+        nullptr
+    };
+    for (int i = 0; getSigs[i] && !g_itemStackGetCustomName_121; i++) {
+        g_itemStackGetCustomName_121 = env->GetMethodID(stackCls, "getCustomName", getSigs[i]);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); g_itemStackGetCustomName_121 = nullptr; }
+    }
+
+    if (!g_itemStackGetCustomName_121) {
+        const char* names[] = { "hasCustomName", "method_7986", "m_41784_", nullptr };
+        for (int i = 0; names[i] && !g_itemStackHasCustomName_121; i++) {
+            g_itemStackHasCustomName_121 = env->GetMethodID(stackCls, names[i], "()Z");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_itemStackHasCustomName_121 = nullptr; }
         }
     }
-    if (g_itemStackHasCustomName_121) {
-        bool res = env->CallBooleanMethod(stackObj, g_itemStackHasCustomName_121) == JNI_TRUE;
+
+    return g_itemStackGetCustomName_121 || g_itemStackHasCustomName_121;
+}
+
+static bool IsModernItemStackCustomNamed(JNIEnv* env, jobject stackObj, bool* mappingResolved = nullptr) {
+    if (mappingResolved) *mappingResolved = false;
+    if (!env || !stackObj) return false;
+
+    jclass stackCls = env->GetObjectClass(stackObj);
+    if (!stackCls) return false;
+    bool resolved = ResolveModernItemStackCustomNameMappings(env, stackCls);
+    env->DeleteLocalRef(stackCls);
+    if (mappingResolved) *mappingResolved = resolved;
+    if (!resolved) return false;
+
+    if (g_itemStackGetCustomName_121) {
+        jobject nameObj = env->CallObjectMethod(stackObj, g_itemStackGetCustomName_121);
         if (env->ExceptionCheck()) { env->ExceptionClear(); return false; }
+        bool res = nameObj != nullptr;
+        if (nameObj) env->DeleteLocalRef(nameObj);
         return res;
     }
-    return false;
+
+    bool res = env->CallBooleanMethod(stackObj, g_itemStackHasCustomName_121) == JNI_TRUE;
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return false; }
+    return res;
 }
 
 static std::string GetModernScreenTitle(JNIEnv* env, jobject screenObj) {
@@ -8315,6 +8347,7 @@ static std::string BuildModernChestStealerStateJson(JNIEnv* env, jobject screenO
     std::ostringstream slotsJson;
     int count = 0;
     int customItemCount = 0;
+    bool customNameCheckFailed = false;
     for (int i = 0; i < chestSlotCount; i++) {
         jobject slotObj = env->CallObjectMethod(slotsObj, getMid, i);
         if (env->ExceptionCheck()) { env->ExceptionClear(); slotObj = nullptr; }
@@ -8331,8 +8364,11 @@ static std::string BuildModernChestStealerStateJson(JNIEnv* env, jobject screenO
                 jobject stackObj = env->CallObjectMethod(slotObj, g_chestStealerSlotGetStackMethod_121);
                 if (env->ExceptionCheck()) { env->ExceptionClear(); stackObj = nullptr; }
                 if (stackObj) {
-                    if (IsModernItemStackCustomNamed(env, stackObj)) {
+                    bool nameMappingResolved = false;
+                    if (IsModernItemStackCustomNamed(env, stackObj, &nameMappingResolved)) {
                         customItemCount++;
+                    } else if (customItemsCheck && !nameMappingResolved) {
+                        customNameCheckFailed = true;
                     }
                     env->DeleteLocalRef(stackObj);
                 }
@@ -8359,7 +8395,12 @@ static std::string BuildModernChestStealerStateJson(JNIEnv* env, jobject screenO
     env->DeleteLocalRef(listAccessCls);
     env->DeleteLocalRef(slotsObj);
 
-    bool itemsAreMenu = customItemsCheck && (count > 0) && (((float)customItemCount / (float)count) > 0.5f);
+    if (customNameCheckFailed) {
+        // A safety check the user enabled must not silently pass on an unmapped runtime.
+        LogChestStealerMappingMissing121("item custom-name accessor");
+    }
+    bool itemsAreMenu = customItemsCheck && (count > 0) &&
+        ((((float)customItemCount / (float)count) > 0.5f) || customNameCheckFailed);
     bool physicalNearby = IsModernChestStealerPhysicalContainer();
     bool physicalCheckFailed = physicalCheck && !physicalNearby &&
         !IsModernUntrackedContainerScreenName(screenName);
@@ -13690,6 +13731,7 @@ static void ResetModernJniRuntimeCaches121(JNIEnv* env, const char* reason) {
     g_itemStackGetMaxDamage_121 = nullptr;
     g_chestStealerSlotGetStackMethod_121 = nullptr;
     g_itemStackHasCustomName_121 = nullptr;
+    g_itemStackGetCustomName_121 = nullptr;
     g_getGameProfile_121 = nullptr;
     g_gameProfileGetName_121 = nullptr;
     g_gameProfileNameField_121 = nullptr;
