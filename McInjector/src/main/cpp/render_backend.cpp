@@ -31,6 +31,7 @@
 #include <string.h>
 #include <vector>
 #include <string>
+#include <atomic>
 
 #include "MinHook.h"
 #include "imgui.h"
@@ -194,10 +195,15 @@ static VkCommandPool                g_cmdPool = VK_NULL_HANDLE;
 static std::vector<VkCommandBuffer> g_cmdBuffers;
 static std::vector<VkFence>         g_fences;
 static std::vector<VkSemaphore>     g_renderCompleteSems;
+// Present wait semaphores cannot be safely destroyed after vkDeviceWaitIdle: presentation
+// operations are not covered by queue idle, so a pending present may still wait on them.
+// Retire them instead and let vkDestroyDevice release the handles.
+static std::vector<VkSemaphore>     g_retiredRenderSems;
 static vkoverlay::SwapchainKey      g_builtKey;
+static bool                         g_swapchainOutOfDate = false;
 
 static bool g_imguiVulkanInit = false;
-static bool g_diagPresent = false, g_diagAcquire = false, g_diagCreateSc = false, g_diagBuilt = false;
+static bool g_diagPresent = false, g_diagAcquire = false, g_diagCreateSc = false, g_diagBuilt = false, g_diagOutOfDate = false;
 
 // ============================================================================
 // Loader helpers
@@ -255,7 +261,7 @@ static void DestroySwapchainResources() {
     g_imageViews.clear();
     for (VkFence f : g_fences) if (f && p_vkDestroyFence) p_vkDestroyFence(g_device, f, nullptr);
     g_fences.clear();
-    for (VkSemaphore s : g_renderCompleteSems) if (s && p_vkDestroySemaphore) p_vkDestroySemaphore(g_device, s, nullptr);
+    for (VkSemaphore s : g_renderCompleteSems) if (s) g_retiredRenderSems.push_back(s);
     g_renderCompleteSems.clear();
     if (!g_cmdBuffers.empty() && g_cmdPool && p_vkFreeCommandBuffers)
         p_vkFreeCommandBuffers(g_device, g_cmdPool, (uint32_t)g_cmdBuffers.size(), g_cmdBuffers.data());
@@ -439,19 +445,89 @@ static void ShutdownImGuiVulkan() {
 // GLFW window lookup + per-frame overlay render
 // ============================================================================
 
-static HWND FindGlfwGameWindow() {
-    HWND found = nullptr;
-    EnumWindows([](HWND hwnd, LPARAM lp) -> BOOL {
+// Known toolkit window classes: "GLFW30" (Minecraft <= 26.2) and "SDL_app" (26.3+, SDL3 default).
+bool RenderBackend_IsGameWindowClass(const char* className) {
+    if (!className) return false;
+    return strcmp(className, "GLFW30") == 0 || strncmp(className, "SDL_app", 7) == 0;
+}
+
+namespace {
+struct GameWindowSearch {
+    DWORD pid;
+    HWND known;          // window with a known toolkit class
+    HWND fallback;       // largest plausible top-level window of this process
+    long long fallbackArea;
+};
+
+bool IsFallbackExcludedClass(const char* cls) {
+    static const char* const kPrefixes[] = {
+        "SunAwt", "IME", "MSCTFIME", "ConsoleWindowClass", "tooltips_class", "#32770", "Shell_", nullptr
+    };
+    for (int i = 0; kPrefixes[i]; ++i)
+        if (strncmp(cls, kPrefixes[i], strlen(kPrefixes[i])) == 0) return true;
+    return false;
+}
+
+BOOL CALLBACK EnumGameWindowProc(HWND hwnd, LPARAM lp) {
+    GameWindowSearch* s = (GameWindowSearch*)lp;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (pid != s->pid || !IsWindowVisible(hwnd)) return TRUE;
+
+    char cls[256] = {};
+    if (!GetClassNameA(hwnd, cls, sizeof(cls) - 1)) return TRUE;
+    if (RenderBackend_IsGameWindowClass(cls)) { s->known = hwnd; return FALSE; }
+
+    if (GetWindow(hwnd, GW_OWNER) != nullptr || IsFallbackExcludedClass(cls)) return TRUE;
+    RECT rc = {};
+    if (!GetClientRect(hwnd, &rc)) return TRUE;
+    long long w = rc.right - rc.left, h = rc.bottom - rc.top;
+    if (w < 320 || h < 240) return TRUE;   // Minecraft's minimum window size
+    if (w * h > s->fallbackArea) { s->fallback = hwnd; s->fallbackArea = w * h; }
+    return TRUE;
+}
+} // namespace
+
+HWND RenderBackend_FindGameWindow() {
+    // Called from both the OpenGL and Vulkan present hooks, which may run on different threads.
+    static std::atomic<HWND> s_cached(nullptr);
+    static std::atomic<DWORD> s_lastScanMs(0);
+
+    HWND cached = s_cached.load();
+    if (cached && IsWindow(cached) && IsWindowVisible(cached)) return cached;
+
+    DWORD now = GetTickCount();
+    DWORD last = s_lastScanMs.load();
+    if (last != 0 && now - last < 250) return nullptr;
+    s_lastScanMs.store(now);
+
+    GameWindowSearch search = { GetCurrentProcessId(), nullptr, nullptr, 0 };
+    EnumWindows(EnumGameWindowProc, (LPARAM)&search);
+    HWND found = search.known ? search.known : search.fallback;
+    if (found && found != cached) {
         char cls[256] = {};
-        if (GetClassNameA(hwnd, cls, sizeof(cls)) && strcmp(cls, "GLFW30") == 0) { *(HWND*)lp = hwnd; return FALSE; }
-        return TRUE;
-    }, (LPARAM)&found);
+        char title[128] = {};
+        GetClassNameA(found, cls, sizeof(cls) - 1);
+        GetWindowTextA(found, title, sizeof(title) - 1);
+        RbLog(std::string("Game window located: class='") + cls + "' title='" + title + "'" +
+              (search.known ? "" : " (process-based fallback; unknown toolkit class)"));
+    }
+    s_cached.store(found);
     return found;
+}
+
+bool RenderBackend_IsGameWindow(HWND hwnd) {
+    if (!hwnd) return false;
+    char cls[256] = {};
+    if (GetClassNameA(hwnd, cls, sizeof(cls) - 1) && RenderBackend_IsGameWindowClass(cls)) return true;
+    return hwnd == RenderBackend_FindGameWindow();
 }
 
 // Ensure overlay resources exist for the current device/swapchain. Requires device funcs,
 // queue, physical device + family, and a known format/extent. Returns true when ready.
 static bool EnsureOverlayResources(HWND hwnd) {
+    if (g_swapchainOutOfDate)
+        return false;
     if (g_device == VK_NULL_HANDLE || g_swapchain == VK_NULL_HANDLE ||
         g_queue == VK_NULL_HANDLE || g_physicalDevice == VK_NULL_HANDLE ||
         g_queueFamily == vkoverlay::kInvalidFamily || !g_deviceFuncsLoaded)
@@ -489,6 +565,7 @@ static bool EnsureOverlayResources(HWND hwnd) {
 static bool RenderOverlayIntoImage(HWND hwnd, uint32_t imageIndex,
                                    const VkSemaphore* appWaitSems, uint32_t appWaitCount,
                                    VkSemaphore* outSignal) {
+    if (Bridge_OverlayRenderingDisabled()) return false;
     if (!Bridge_EnsureImGuiPlatform(hwnd)) return false;
     if (!EnsureOverlayResources(hwnd)) return false;
     if (imageIndex >= g_framebuffers.size()) return false;
@@ -571,7 +648,12 @@ static VkResult VKAPI_PTR Hooked_vkAcquireNextImageKHR(
             RbLog(b);
         }
     }
-    return o_vkAcquireNextImageKHR(device, swapchain, timeout, semaphore, fence, pImageIndex);
+    VkResult result = o_vkAcquireNextImageKHR(device, swapchain, timeout, semaphore, fence, pImageIndex);
+    if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+        VkLockGuard lk;
+        g_swapchainOutOfDate = true;
+    }
+    return result;
 }
 
 static VkResult VKAPI_PTR Hooked_vkCreateSwapchainKHR(
@@ -591,6 +673,7 @@ static VkResult VKAPI_PTR Hooked_vkCreateSwapchainKHR(
             g_swapFormatAuthoritative = true;
             g_swapExtent = pCreateInfo->imageExtent;
             g_swapExtentKnown = true;
+            g_swapchainOutOfDate = false;
         }
         if (!g_diagCreateSc) {
             g_diagCreateSc = true;
@@ -608,6 +691,8 @@ static VkResult VKAPI_PTR Hooked_vkQueuePresentKHR(VkQueue queue, const VkPresen
     VkRenderCallbackLease lease;
     if (!lease.Active()) return o_vkQueuePresentKHR(queue, pPresentInfo);
     if (RenderBackend_GetActiveKind() == GfxBackendKind::OpenGL || !pPresentInfo)
+        return o_vkQueuePresentKHR(queue, pPresentInfo);
+    if (Bridge_OverlayRenderingDisabled())
         return o_vkQueuePresentKHR(queue, pPresentInfo);
 
     ClaimBackend(GfxBackendKind::Vulkan);
@@ -631,7 +716,7 @@ static VkResult VKAPI_PTR Hooked_vkQueuePresentKHR(VkQueue queue, const VkPresen
             }
             if (sc != VK_NULL_HANDLE) {
                 g_swapchain = sc;
-                HWND hwnd = FindGlfwGameWindow();
+                HWND hwnd = RenderBackend_FindGameWindow();
                 if (hwnd)
                     overlayOk = RenderOverlayIntoImage(hwnd, imageIndex,
                         pPresentInfo->pWaitSemaphores, pPresentInfo->waitSemaphoreCount, &overlaySignal);
@@ -639,13 +724,31 @@ static VkResult VKAPI_PTR Hooked_vkQueuePresentKHR(VkQueue queue, const VkPresen
         }
     }
 
+    VkResult result;
     if (overlayOk && overlaySignal != VK_NULL_HANDLE) {
         VkPresentInfoKHR present = *pPresentInfo;
         present.waitSemaphoreCount = 1;
         present.pWaitSemaphores = &overlaySignal;
-        return o_vkQueuePresentKHR(queue, &present);
+        result = o_vkQueuePresentKHR(queue, &present);
+    } else {
+        result = o_vkQueuePresentKHR(queue, pPresentInfo);
     }
-    return o_vkQueuePresentKHR(queue, pPresentInfo);
+
+    // A rejected present can leave the overlay's signal semaphore in a state that is not
+    // safe to reuse. Stop rendering until the app has created a new swapchain, which
+    // rebuilds all overlay resources. Suboptimal presents still complete normally.
+    if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+        VkLockGuard lk;
+        g_swapchainOutOfDate = true;
+        if (!g_diagOutOfDate) {
+            g_diagOutOfDate = true;
+            RbLog("Vulkan: present out of date; overlay paused until the swapchain is recreated.");
+        }
+    } else if (result == VK_SUBOPTIMAL_KHR && !g_diagOutOfDate) {
+        g_diagOutOfDate = true;
+        RbLog("Vulkan: present suboptimal; overlay continues until the app recreates the swapchain.");
+    }
+    return result;
 }
 
 static void VKAPI_PTR Hooked_vkDestroySwapchainKHR(
@@ -677,6 +780,9 @@ static void VKAPI_PTR Hooked_vkDestroyDevice(VkDevice device, const VkAllocation
             g_swapFormat = VK_FORMAT_UNDEFINED;
             g_swapFormatAuthoritative = false;
             g_swapExtentKnown = false;
+            g_swapchainOutOfDate = false;
+            // The device owns these handles now; destroying the device frees them.
+            g_retiredRenderSems.clear();
             g_device = VK_NULL_HANDLE;
             g_queue = VK_NULL_HANDLE;
             g_deviceFuncsLoaded = false;
@@ -804,6 +910,10 @@ static bool InstallHook(void* target, void* detour, void** original, int slot) {
 
 bool RenderBackend_InitHooks() {
     if (!IsVulkanHookEnabled()) return false;
+    if (Bridge_OverlayRenderingDisabled()) {
+        RbLog("Vulkan: overlay rendering disabled by AOKO_BRIDGE261_NO_OVERLAY.");
+        return false;
+    }
     if (g_hookTargets[0]) return true;
     InterlockedExchange(&g_vkRenderCleanupRequested, 0);
 

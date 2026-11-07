@@ -13,12 +13,14 @@
  */
 #include <winsock2.h>
 #include <windows.h>
+#include <tlhelp32.h>
 #include <jni.h>
 #include <jvmti.h>
 #include <string>
 #include <vector>
 #include <algorithm>
 #include <cctype>
+#include <atomic>
 #include <unordered_map>
 #include <unordered_set>
 #include <deque>
@@ -42,6 +44,10 @@
 #include "nick_hider_jvmti.h"
 #include "anti_debuff_jvmti.h"
 #include "hud_layout.h"
+#include "overlay_ui.h"
+#include "beta_modules_core.h"
+#include "combat_target.h"
+#include "module_status.h"
 #include "block_esp_common.h"
 #include "chest_esp_common.h"
 #include "chunk_scan_common.h"
@@ -246,6 +252,27 @@ struct Config {
     bool  fireballWarningArrow = true;
     bool  fireballWarningSound = true;
     int   keybindFireballWarning = 0;
+    bool  fastPlace = false;
+    int   keybindFastPlace = 0;
+    bool  noHurtCam = false;
+    int   keybindNoHurtCam = 0;
+    bool  sprint = false;
+    int   keybindSprint = 0;
+    bool  tntTimer = false;
+    int   keybindTntTimer = 0;
+    bool  wTap = false;
+    int   keybindWTap = 0;
+    bool  jumpReset = false;
+    int   jumpResetChance = 80;
+    int   keybindJumpReset = 0;
+    bool  hitSelect = false;
+    int   keybindHitSelect = 0;
+    bool  trajectories = false;
+    int   keybindTrajectories = 0;
+    bool  murderMystery = false;
+    int   keybindMurderMystery = 0;
+    bool  breakProgress = false;
+    int   keybindBreakProgress = 0;
     bool  showModuleList = true;
     bool  closestPlayer  = false;
     bool  fightStatus    = false;
@@ -573,6 +600,27 @@ static void ParseConfig(const std::string& line) {
     g_config.fireballWarningArrow = reader.GetBool("fireballWarningArrow", true);
     g_config.fireballWarningSound = reader.GetBool("fireballWarningSound", true);
     g_config.keybindFireballWarning = lc::ClampInt(reader.GetInt("keybindFireballWarning", g_config.keybindFireballWarning), 0, 255);
+    g_config.fastPlace = reader.GetBool("fastPlace");
+    g_config.keybindFastPlace = lc::ClampInt(reader.GetInt("keybindFastPlace", g_config.keybindFastPlace), 0, 255);
+    g_config.noHurtCam = reader.GetBool("noHurtCam");
+    g_config.keybindNoHurtCam = lc::ClampInt(reader.GetInt("keybindNoHurtCam", g_config.keybindNoHurtCam), 0, 255);
+    g_config.sprint = reader.GetBool("sprint");
+    g_config.keybindSprint = lc::ClampInt(reader.GetInt("keybindSprint", g_config.keybindSprint), 0, 255);
+    g_config.tntTimer = reader.GetBool("tntTimer");
+    g_config.keybindTntTimer = lc::ClampInt(reader.GetInt("keybindTntTimer", g_config.keybindTntTimer), 0, 255);
+    g_config.wTap = reader.GetBool("wTap");
+    g_config.keybindWTap = lc::ClampInt(reader.GetInt("keybindWTap", g_config.keybindWTap), 0, 255);
+    g_config.jumpReset = reader.GetBool("jumpReset");
+    g_config.jumpResetChance = lc::ClampInt(reader.GetInt("jumpResetChance", g_config.jumpResetChance), 0, 100);
+    g_config.keybindJumpReset = lc::ClampInt(reader.GetInt("keybindJumpReset", g_config.keybindJumpReset), 0, 255);
+    g_config.hitSelect = reader.GetBool("hitSelect");
+    g_config.keybindHitSelect = lc::ClampInt(reader.GetInt("keybindHitSelect", g_config.keybindHitSelect), 0, 255);
+    g_config.trajectories = reader.GetBool("trajectories");
+    g_config.keybindTrajectories = lc::ClampInt(reader.GetInt("keybindTrajectories", g_config.keybindTrajectories), 0, 255);
+    g_config.murderMystery = reader.GetBool("murderMystery");
+    g_config.keybindMurderMystery = lc::ClampInt(reader.GetInt("keybindMurderMystery", g_config.keybindMurderMystery), 0, 255);
+    g_config.breakProgress = reader.GetBool("breakProgress");
+    g_config.keybindBreakProgress = lc::ClampInt(reader.GetInt("keybindBreakProgress", g_config.keybindBreakProgress), 0, 255);
     g_config.rightClick    = reader.GetBool("right");
     g_config.rightMinCPS   = lc::ClampFloat(reader.GetFloat("rightMinCPS", g_config.rightMinCPS), 1.0f, 25.0f);
     g_config.rightMaxCPS   = lc::ClampFloat(reader.GetFloat("rightMaxCPS", g_config.rightMaxCPS), 1.0f, 25.0f);
@@ -1006,6 +1054,25 @@ static OverlayTheme ResolveOverlayTheme(const std::string& guiTheme)
     };
 }
 
+// Shared overlay UI theme derived from the modern theme table.
+static aoko::ui::Theme BuildOverlayUiTheme(const OverlayTheme& t) {
+    aoko::ui::Theme u;
+    u.accent = t.accentPrimary;
+    u.accent2 = t.accentSecondary;
+    u.accent3 = t.accentTertiary;
+    u.text = t.moduleText;
+    u.textDim = t.moduleTagText;
+    u.textFaint = WithAlpha(t.moduleTagText, 165);
+    u.panel = aoko::ui::Mix(t.moduleBg, IM_COL32(7, 18, 31, 255), 0.18f);
+    u.panelTop = aoko::ui::Mix(t.moduleOutlinedBg, IM_COL32(255, 255, 255, 255), 0.07f);
+    u.border = aoko::ui::WithAlpha(t.moduleGlassBorder, 82);
+    u.highlight = IM_COL32(255, 255, 255, 28);
+    u.shadow = IM_COL32(0, 0, 0, 165);
+    u.gradient = t.isGradient;
+    u.triColor = t.isTriColor;
+    return u;
+}
+
 // ===================== GLOBALS =====================
 static volatile LONG g_running = 1;
 static bool IsBridgeRunning121() {
@@ -1097,6 +1164,107 @@ static PFN_glfwGetKey            glfwGetKey_fn           = nullptr;
 #define GLFW_RAW_MOUSE_MOTION  0x00033005
 #define GLFW_PRESS             1
 
+// Minecraft 26.3 replaced GLFW with SDL3 for windowing and input. There is no glfw.dll to
+// query, and KeyMapping/InputConstants.Key values are SDL scancodes instead of GLFW key
+// codes. When true, bound-key values read over JNI are translated to Windows virtual keys.
+static bool g_sdlInputBackend = false;
+
+// True when a module whose file name contains 'needleLower' (lowercase) is loaded.
+static bool ProcessHasModuleContaining(const char* needleLower) {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, GetCurrentProcessId());
+    if (snap == INVALID_HANDLE_VALUE) return false;
+    MODULEENTRY32 me;
+    me.dwSize = sizeof(me);
+    bool found = false;
+    if (Module32First(snap, &me)) {
+        do {
+            std::string name = me.szModule;
+            for (char& ch : name) ch = (char)std::tolower((unsigned char)ch);
+            if (name.find(needleLower) != std::string::npos) { found = true; break; }
+        } while (Module32Next(snap, &me));
+    }
+    CloseHandle(snap);
+    return found;
+}
+
+// SDL_Scancode (USB HID usage based) -> Windows virtual-key code. 0 when unmapped.
+static int SdlScancodeToVirtualKey(int sc) {
+    if (sc >= 4 && sc <= 29)   return 'A' + (sc - 4);
+    if (sc >= 30 && sc <= 38)  return '1' + (sc - 30);
+    if (sc == 39)              return '0';
+    if (sc >= 58 && sc <= 69)  return VK_F1 + (sc - 58);
+    if (sc >= 89 && sc <= 97)  return VK_NUMPAD1 + (sc - 89);
+    if (sc >= 104 && sc <= 115) return VK_F13 + (sc - 104);
+    switch (sc) {
+        case 40:  return VK_RETURN;
+        case 41:  return VK_ESCAPE;
+        case 42:  return VK_BACK;
+        case 43:  return VK_TAB;
+        case 44:  return VK_SPACE;
+        case 45:  return VK_OEM_MINUS;
+        case 46:  return VK_OEM_PLUS;
+        case 47:  return VK_OEM_4;
+        case 48:  return VK_OEM_6;
+        case 49:  return VK_OEM_5;
+        case 51:  return VK_OEM_1;
+        case 52:  return VK_OEM_7;
+        case 53:  return VK_OEM_3;
+        case 54:  return VK_OEM_COMMA;
+        case 55:  return VK_OEM_PERIOD;
+        case 56:  return VK_OEM_2;
+        case 57:  return VK_CAPITAL;
+        case 70:  return VK_SNAPSHOT;
+        case 71:  return VK_SCROLL;
+        case 72:  return VK_PAUSE;
+        case 73:  return VK_INSERT;
+        case 74:  return VK_HOME;
+        case 75:  return VK_PRIOR;
+        case 76:  return VK_DELETE;
+        case 77:  return VK_END;
+        case 78:  return VK_NEXT;
+        case 79:  return VK_RIGHT;
+        case 80:  return VK_LEFT;
+        case 81:  return VK_DOWN;
+        case 82:  return VK_UP;
+        case 83:  return VK_NUMLOCK;
+        case 84:  return VK_DIVIDE;
+        case 85:  return VK_MULTIPLY;
+        case 86:  return VK_SUBTRACT;
+        case 87:  return VK_ADD;
+        case 88:  return VK_RETURN;
+        case 98:  return VK_NUMPAD0;
+        case 99:  return VK_DECIMAL;
+        case 100: return VK_OEM_102;
+        case 224: return VK_LCONTROL;
+        case 225: return VK_LSHIFT;
+        case 226: return VK_LMENU;
+        case 227: return VK_LWIN;
+        case 228: return VK_RCONTROL;
+        case 229: return VK_RSHIFT;
+        case 230: return VK_RMENU;
+        case 231: return VK_RWIN;
+        default:  return 0;
+    }
+}
+
+// Physical key state for a KeyMapping's bound key value on the SDL (26.3+) backend.
+// Returns 1 pressed, 0 released, -1 when the code has no Windows mapping.
+static int QuerySdlBoundKeyDown(int scancode) {
+    int vk = SdlScancodeToVirtualKey(scancode);
+    if (!vk) return -1;
+    return (GetAsyncKeyState(vk) & 0x8000) != 0 ? 1 : 0;
+}
+
+// True when the OS cursor is visible. The game hides it with SetCursor(NULL) while the
+// mouse is captured (GLFW disabled-cursor mode / SDL relative mouse mode), which leaves
+// hCursor null; CURSOR_SHOWING alone is not a reliable signal for that.
+static bool IsOsCursorVisible() {
+    CURSORINFO ci = {};
+    ci.cbSize = sizeof(ci);
+    if (!GetCursorInfo(&ci)) return false;
+    return (ci.flags & CURSOR_SHOWING) != 0 && ci.hCursor != nullptr;
+}
+
 // Cached game ClassLoader (global ref) used for safe class loads.
 static jobject g_gameClassLoader = nullptr;
 
@@ -1122,6 +1290,10 @@ static std::string g_jniScreenName;
 static std::string g_jniActionBar;
 static bool        g_jniGuiOpen     = false;
 static bool        g_jniInWorld     = false;
+// Overlay-only telemetry sampled on the JNI worker; never sent over TCP.
+static std::atomic<int> g_overlayPingMs(-1);
+static float       g_moduleListBaseWidth121 = 220.0f;
+static float       g_moduleListBaseHeight121 = 240.0f;
 static bool        g_jniLookingAtBlock = false;
 static bool        g_jniLookingAtEntity = false;
 static bool        g_jniLookingAtEntityLatched = false;
@@ -1202,6 +1374,24 @@ static bool g_speedBridgeWasEdge_121 = false;
 static DWORD g_speedBridgeLastEdgeMs_121 = 0;
 static bool g_loggedSpeedBridgeResolveFail_121 = false;
 
+// ===================== NEW MODULES JNI GLOBALS (1.21) =====================
+static jfieldID g_itemUseCooldownField_121 = nullptr;
+static jfieldID g_sprintKeyField_121 = nullptr;
+static bool     g_sprintManaging121 = false;
+static DWORD    g_lastWTapResetMs121 = 0;
+static bool     g_wTapInReset121 = false;
+static jmethodID g_setSprintingMethod_121 = nullptr;
+
+struct ModernTntRecord {
+    double x, y, z;
+    float fuseSeconds;
+};
+static std::vector<ModernTntRecord> g_modernTntRecords;
+static Mutex g_modernTntMutex;
+static jclass g_tntClass_121 = nullptr;
+static jfieldID g_tntFuseField_121 = nullptr;
+static jmethodID g_tntGetFuse_121 = nullptr;
+
 // ===================== CHEST STEALER JNI GLOBALS =====================
 static jfieldID  g_chestStealerScreenHandlerField_121 = nullptr;
 static jfieldID  g_chestStealerScreenXField_121 = nullptr;
@@ -1216,6 +1406,7 @@ static jfieldID  g_chestStealerSlotYField_121 = nullptr;
 static jmethodID g_chestStealerSlotHasStackMethod_121 = nullptr;
 static jmethodID g_chestStealerSlotGetStackMethod_121 = nullptr;
 static jmethodID g_itemStackHasCustomName_121 = nullptr;
+static jmethodID g_itemStackGetCustomName_121 = nullptr;
 static DWORD     g_lastChestStealerMappingLogMs_121 = 0;
 static DWORD     g_lastChestStealerSkipLogMs_121 = 0;
 
@@ -1970,6 +2161,7 @@ static jmethodID g_getGameProfile_121 = nullptr;   // PlayerEntity.getGameProfil
 static jmethodID g_gameProfileGetName_121 = nullptr; // GameProfile.getName() -> String
 static jfieldID  g_gameProfileNameField_121 = nullptr;
 static jmethodID g_connGetPlayerInfoByName_121 = nullptr;
+static jmethodID g_playerInfoGetLatency_121 = nullptr;
 static jmethodID g_connGetLocalGameProfile_121 = nullptr;
 static jmethodID g_playerInfoGetProfile_121 = nullptr;
 static std::string g_nickHiderOriginalProfileName_121;
@@ -2827,6 +3019,126 @@ static std::string GetStablePlayerName(JNIEnv* env, jobject playerObj) {
     return "";
 }
 
+// Overlay-only latency probe: reads the local PlayerInfo entry once per second.
+// Runs on the JNI worker; no packet or game-state mutation.
+static int UpdateOverlayPing121(JNIEnv* env) {
+    static DWORD nextProbeMs = 0;
+    const DWORD now = GetTickCount();
+    if (now < nextProbeMs) return g_overlayPingMs;
+    nextProbeMs = now + 1000;
+
+    if (!env || !g_mcInstance || !g_playerField_121) {
+        g_overlayPingMs = -1;
+        return g_overlayPingMs;
+    }
+    if (env->PushLocalFrame(24) < 0) return g_overlayPingMs;
+
+    if (!g_getConnectionMethod_121) {
+        jclass mcCls = env->GetObjectClass(g_mcInstance);
+        if (mcCls) {
+            const char* names[] = { "getConnection", "method_1558", nullptr };
+            const char* sigs[] = {
+                "()Lnet/minecraft/client/multiplayer/ClientPacketListener;",
+                "()Lnet/minecraft/class_634;",
+                nullptr
+            };
+            for (int i = 0; names[i] && !g_getConnectionMethod_121; ++i) {
+                for (int k = 0; sigs[k] && !g_getConnectionMethod_121; ++k) {
+                    g_getConnectionMethod_121 = env->GetMethodID(mcCls, names[i], sigs[k]);
+                    if (env->ExceptionCheck()) {
+                        env->ExceptionClear();
+                        g_getConnectionMethod_121 = nullptr;
+                    }
+                }
+            }
+            env->DeleteLocalRef(mcCls);
+        }
+    }
+    if (!g_getConnectionMethod_121) {
+        env->PopLocalFrame(nullptr);
+        return g_overlayPingMs;
+    }
+
+    jobject connection = env->CallObjectMethod(g_mcInstance, g_getConnectionMethod_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); connection = nullptr; }
+    if (!connection) {
+        g_overlayPingMs = -1;
+        env->PopLocalFrame(nullptr);
+        return g_overlayPingMs;
+    }
+    EnsureModernNickHiderConnectionCaches(env, connection);
+    if (!g_connGetPlayerInfoByName_121) {
+        env->DeleteLocalRef(connection);
+        env->PopLocalFrame(nullptr);
+        return g_overlayPingMs;
+    }
+
+    jobject self = env->GetObjectField(g_mcInstance, g_playerField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); self = nullptr; }
+    if (!self) {
+        g_overlayPingMs = -1;
+        env->DeleteLocalRef(connection);
+        env->PopLocalFrame(nullptr);
+        return g_overlayPingMs;
+    }
+    const std::string stableName = GetStablePlayerName(env, self);
+    env->DeleteLocalRef(self);
+    std::vector<std::string> lookupNames;
+    if (!stableName.empty()) lookupNames.push_back(stableName);
+    {
+        LockGuard lk(g_configMutex);
+        if (g_config.nickHiderEnabled && !g_config.nickHiderAlias.empty() &&
+            g_config.nickHiderAlias != stableName) {
+            lookupNames.push_back(g_config.nickHiderAlias);
+        }
+    }
+    if (lookupNames.empty()) {
+        g_overlayPingMs = -1;
+        env->DeleteLocalRef(connection);
+        env->PopLocalFrame(nullptr);
+        return g_overlayPingMs;
+    }
+
+    jobject info = nullptr;
+    for (size_t i = 0; i < lookupNames.size() && !info; ++i) {
+        jstring jname = env->NewStringUTF(lookupNames[i].c_str());
+        info = jname
+            ? env->CallObjectMethod(connection, g_connGetPlayerInfoByName_121, jname) : nullptr;
+        if (env->ExceptionCheck()) { env->ExceptionClear(); info = nullptr; }
+        if (jname) env->DeleteLocalRef(jname);
+    }
+    env->DeleteLocalRef(connection);
+    if (!info) {
+        env->PopLocalFrame(nullptr);
+        return g_overlayPingMs;
+    }
+
+    jclass infoCls = env->GetObjectClass(info);
+    if (infoCls && !g_playerInfoGetLatency_121) {
+        const char* names[] = { "getLatency", "method_2959", "m_105295_", nullptr };
+        for (int i = 0; names[i] && !g_playerInfoGetLatency_121; ++i) {
+            g_playerInfoGetLatency_121 = env->GetMethodID(infoCls, names[i], "()I");
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+                g_playerInfoGetLatency_121 = nullptr;
+            }
+        }
+    }
+    if (infoCls) env->DeleteLocalRef(infoCls);
+
+    if (g_playerInfoGetLatency_121) {
+        jint ping = env->CallIntMethod(info, g_playerInfoGetLatency_121);
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        } else if (ping >= 0 && ping <= 9999) {
+            g_overlayPingMs = (int)ping;
+        }
+    }
+    env->DeleteLocalRef(info);
+    env->PopLocalFrame(nullptr);
+    return g_overlayPingMs;
+}
+
 // HitResult / crosshair target caches (for lookingAtBlock)
 static jfieldID g_crosshairTargetField_121 = nullptr; // MinecraftClient.<hitResult>
 static jfieldID g_missDelayField_121 = nullptr; // MinecraftClient missTime / field_1771
@@ -3597,6 +3909,7 @@ static void ResetRefillModernCaches(JNIEnv* env);
 static void ResetAutoToolModernCaches(JNIEnv* env);
 static void ExecuteAutoRodModern(JNIEnv* env);
 static void ResetModernJniRuntimeCaches121(JNIEnv* env, const char* reason);
+static void ResetBetaModuleCaches121(JNIEnv* env);
 static bool TrackSuppressionWorldContext121(JNIEnv* env, jobject worldObj);
 static bool IsWorldTransitionActive();
 static bool WorldTransitionRequiresWorld();
@@ -4412,6 +4725,10 @@ static void UpdateVelocity(JNIEnv* env, const Config& cfg) {
     }
 
     g_lastHurtTime_121 = hurtTime;
+    if (cfg.noHurtCam && hurtTime > 0) {
+        env->SetIntField(selfObj, g_hurtTimeField_121, 0);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
     env->DeleteLocalRef(selfObj);
 }
 
@@ -4543,6 +4860,8 @@ static bool IsConfiguredSneakPhysicallyDown121(JNIEnv* env) {
     if (keyCode >= 0 && glfwGetCurrentContext_fn && glfwGetKey_fn) {
         void* win = glfwGetCurrentContext_fn();
         if (win && glfwGetKey_fn(win, keyCode) == GLFW_PRESS) return true;
+    } else if (keyCode >= 0 && g_sdlInputBackend && QuerySdlBoundKeyDown(keyCode) == 1) {
+        return true;
     }
 
     return (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
@@ -4587,6 +4906,43 @@ static void ResetSpeedBridgeMovementTracking121() {
     g_speedBridgeDirZ_121 = 0;
     g_speedBridgeWasEdge_121 = false;
     g_speedBridgeLastEdgeMs_121 = 0;
+}
+
+static jobject GetSprintKeyBinding121(JNIEnv* env) {
+    if (!env || !g_mcInstance || !g_optionsField_121) return nullptr;
+    jobject opts = env->GetObjectField(g_mcInstance, g_optionsField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
+    if (!opts) return nullptr;
+
+    if (!g_sprintKeyField_121) {
+        jclass optsCls = env->GetObjectClass(opts);
+        if (optsCls) {
+            const char* names[] = { "sprintKey", "keySprint", "field_1867", "f_92083_", nullptr };
+            const char* sigs[] = {
+                "Lnet/minecraft/client/KeyMapping;",
+                "Lnet/minecraft/client/option/KeyBinding;",
+                "Lnet/minecraft/class_304;",
+                nullptr
+            };
+            for (int ni = 0; names[ni] && !g_sprintKeyField_121; ni++) {
+                for (int si = 0; sigs[si] && !g_sprintKeyField_121; si++) {
+                    g_sprintKeyField_121 = env->GetFieldID(optsCls, names[ni], sigs[si]);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_sprintKeyField_121 = nullptr; }
+                }
+            }
+            env->DeleteLocalRef(optsCls);
+        } else if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        }
+    }
+
+    jobject key = nullptr;
+    if (g_sprintKeyField_121) {
+        key = env->GetObjectField(opts, g_sprintKeyField_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); key = nullptr; }
+    }
+    env->DeleteLocalRef(opts);
+    return key;
 }
 
 static void UpdateSpeedBridgeDirection121(double posX, double posZ) {
@@ -6794,6 +7150,149 @@ static void UpdatePlayerListOverlay(JNIEnv* env) {
     }
 }
 
+static jmethodID g_clientWorldGetEntities_121 = nullptr;
+static jmethodID g_iterableIterator_121 = nullptr;
+static jmethodID g_iteratorHasNext_121 = nullptr;
+static jmethodID g_iteratorNext_121 = nullptr;
+
+static void EnsureModernTntClass(JNIEnv* env) {
+    if (!g_tntClass_121 && env && g_gameClassLoader) {
+        const char* names[] = {
+            "net.minecraft.class_1541",
+            "net.minecraft.entity.TntEntity",
+            "net.minecraft.world.entity.item.PrimedTnt",
+            nullptr
+        };
+        for (int i = 0; names[i] && !g_tntClass_121; ++i) {
+            jclass c = LoadClassWithLoader(env, g_gameClassLoader, names[i]);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); c = nullptr; }
+            if (c) {
+                g_tntClass_121 = (jclass)env->NewGlobalRef(c);
+                env->DeleteLocalRef(c);
+            }
+        }
+    }
+    if (g_tntClass_121 && !g_tntGetFuse_121) {
+        const char* mNames[] = { "method_6938", "getFuse", "m_32067_", nullptr };
+        for (int i = 0; mNames[i] && !g_tntGetFuse_121; ++i) {
+            g_tntGetFuse_121 = env->GetMethodID(g_tntClass_121, mNames[i], "()I");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_tntGetFuse_121 = nullptr; }
+        }
+    }
+    if (g_tntClass_121 && !g_tntFuseField_121) {
+        const char* fNames[] = { "field_7218", "fuse", "f_32048_", nullptr };
+        for (int i = 0; fNames[i] && !g_tntFuseField_121; ++i) {
+            g_tntFuseField_121 = env->GetFieldID(g_tntClass_121, fNames[i], "I");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_tntFuseField_121 = nullptr; }
+        }
+    }
+}
+
+static void UpdateTntScan121(JNIEnv* env, const Config& cfg) {
+    if (!env || !cfg.tntTimer || !g_mcInstance || !g_worldField_121) {
+        LockGuard lk(g_modernTntMutex);
+        g_modernTntRecords.clear();
+        return;
+    }
+    EnsureModernTntClass(env);
+    if (!g_tntClass_121 || (!g_tntGetFuse_121 && !g_tntFuseField_121)) return;
+
+    jobject world = env->GetObjectField(g_mcInstance, g_worldField_121);
+    if (!world || env->ExceptionCheck()) { env->ExceptionClear(); return; }
+
+    if (!g_clientWorldGetEntities_121) {
+        jclass worldCls = env->GetObjectClass(world);
+        if (worldCls) {
+            const char* names[] = { "method_18112", "getEntities", "entitiesForRendering", "m_104812_", nullptr };
+            for (int i = 0; names[i] && !g_clientWorldGetEntities_121; ++i) {
+                g_clientWorldGetEntities_121 = env->GetMethodID(worldCls, names[i], "()Ljava/lang/Iterable;");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_clientWorldGetEntities_121 = nullptr; }
+            }
+            env->DeleteLocalRef(worldCls);
+        }
+    }
+    if (!g_clientWorldGetEntities_121) {
+        env->DeleteLocalRef(world);
+        return;
+    }
+
+    if (!g_iterableIterator_121 || !g_iteratorHasNext_121 || !g_iteratorNext_121) {
+        jclass iterableCls = env->FindClass("java/lang/Iterable");
+        if (iterableCls) {
+            g_iterableIterator_121 = env->GetMethodID(iterableCls, "iterator", "()Ljava/util/Iterator;");
+            env->DeleteLocalRef(iterableCls);
+        }
+        jclass iterCls = env->FindClass("java/util/Iterator");
+        if (iterCls) {
+            g_iteratorHasNext_121 = env->GetMethodID(iterCls, "hasNext", "()Z");
+            g_iteratorNext_121 = env->GetMethodID(iterCls, "next", "()Ljava/lang/Object;");
+            env->DeleteLocalRef(iterCls);
+        }
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+    if (!g_iterableIterator_121 || !g_iteratorHasNext_121 || !g_iteratorNext_121) {
+        env->DeleteLocalRef(world);
+        return;
+    }
+
+    jobject iterable = env->CallObjectMethod(world, g_clientWorldGetEntities_121);
+    if (env->ExceptionCheck() || !iterable) {
+        env->ExceptionClear();
+        env->DeleteLocalRef(world);
+        return;
+    }
+
+    jobject iter = env->CallObjectMethod(iterable, g_iterableIterator_121);
+    if (env->ExceptionCheck() || !iter) {
+        env->ExceptionClear();
+        env->DeleteLocalRef(iterable);
+        env->DeleteLocalRef(world);
+        return;
+    }
+
+    std::vector<ModernTntRecord> localList;
+    int inspected = 0;
+    while (inspected < 500) {
+        jboolean hasNext = env->CallBooleanMethod(iter, g_iteratorHasNext_121);
+        if (env->ExceptionCheck() || !hasNext) { env->ExceptionClear(); break; }
+        inspected++;
+
+        jobject ent = env->CallObjectMethod(iter, g_iteratorNext_121);
+        if (env->ExceptionCheck() || !ent) { env->ExceptionClear(); continue; }
+
+        if (env->IsInstanceOf(ent, g_tntClass_121) == JNI_TRUE) {
+            int fuse = 80;
+            if (g_tntGetFuse_121) {
+                fuse = env->CallIntMethod(ent, g_tntGetFuse_121);
+            } else if (g_tntFuseField_121) {
+                fuse = env->GetIntField(ent, g_tntFuseField_121);
+            }
+            if (env->ExceptionCheck()) { env->ExceptionClear(); fuse = 80; }
+
+            double x = CallDoubleNoArgs(env, ent, g_getX_121);
+            double y = CallDoubleNoArgs(env, ent, g_getY_121);
+            double z = CallDoubleNoArgs(env, ent, g_getZ_121);
+
+            ModernTntRecord rec;
+            rec.x = x;
+            rec.y = y + 0.9;
+            rec.z = z;
+            rec.fuseSeconds = (float)fuse / 20.0f;
+            localList.push_back(rec);
+        }
+        env->DeleteLocalRef(ent);
+    }
+
+    env->DeleteLocalRef(iter);
+    env->DeleteLocalRef(iterable);
+    env->DeleteLocalRef(world);
+
+    {
+        LockGuard lk(g_modernTntMutex);
+        g_modernTntRecords.swap(localList);
+    }
+}
+
 // --- Chunk-based block entity discovery helpers (replaces flat-list approach) ---
 
 // Ensure the base BlockEntity class is cached.
@@ -7618,25 +8117,56 @@ static bool ResolveModernChestStealerSlotMappings(JNIEnv* env, jobject slotObj) 
         g_chestStealerSlotYField_121 && g_chestStealerSlotHasStackMethod_121;
 }
 
-static bool IsModernItemStackCustomNamed(JNIEnv* env, jobject stackObj) {
-    if (!env || !stackObj) return false;
-    if (!g_itemStackHasCustomName_121) {
-        jclass stackCls = env->GetObjectClass(stackObj);
-        if (stackCls) {
-            const char* names[] = { "hasCustomName", "method_7986", "m_41784_", nullptr };
-            for (int i = 0; names[i] && !g_itemStackHasCustomName_121; i++) {
-                g_itemStackHasCustomName_121 = env->GetMethodID(stackCls, names[i], "()Z");
-                if (env->ExceptionCheck()) { env->ExceptionClear(); g_itemStackHasCustomName_121 = nullptr; }
-            }
-            env->DeleteLocalRef(stackCls);
+static bool ResolveModernItemStackCustomNameMappings(JNIEnv* env, jclass stackCls) {
+    if (!env || !stackCls) return false;
+    if (g_itemStackGetCustomName_121 || g_itemStackHasCustomName_121) return true;
+
+    // 26.x removed ItemStack.hasCustomName(); getCustomName() returns a nullable
+    // Component instead. Try that accessor first so 26.1+ keeps the custom-item check.
+    const char* getSigs[] = {
+        "()Lnet/minecraft/network/chat/Component;",
+        "()Lnet/minecraft/text/Text;",
+        "()Lnet/minecraft/class_2561;",
+        nullptr
+    };
+    for (int i = 0; getSigs[i] && !g_itemStackGetCustomName_121; i++) {
+        g_itemStackGetCustomName_121 = env->GetMethodID(stackCls, "getCustomName", getSigs[i]);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); g_itemStackGetCustomName_121 = nullptr; }
+    }
+
+    if (!g_itemStackGetCustomName_121) {
+        const char* names[] = { "hasCustomName", "method_7986", "m_41784_", nullptr };
+        for (int i = 0; names[i] && !g_itemStackHasCustomName_121; i++) {
+            g_itemStackHasCustomName_121 = env->GetMethodID(stackCls, names[i], "()Z");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_itemStackHasCustomName_121 = nullptr; }
         }
     }
-    if (g_itemStackHasCustomName_121) {
-        bool res = env->CallBooleanMethod(stackObj, g_itemStackHasCustomName_121) == JNI_TRUE;
+
+    return g_itemStackGetCustomName_121 || g_itemStackHasCustomName_121;
+}
+
+static bool IsModernItemStackCustomNamed(JNIEnv* env, jobject stackObj, bool* mappingResolved = nullptr) {
+    if (mappingResolved) *mappingResolved = false;
+    if (!env || !stackObj) return false;
+
+    jclass stackCls = env->GetObjectClass(stackObj);
+    if (!stackCls) return false;
+    bool resolved = ResolveModernItemStackCustomNameMappings(env, stackCls);
+    env->DeleteLocalRef(stackCls);
+    if (mappingResolved) *mappingResolved = resolved;
+    if (!resolved) return false;
+
+    if (g_itemStackGetCustomName_121) {
+        jobject nameObj = env->CallObjectMethod(stackObj, g_itemStackGetCustomName_121);
         if (env->ExceptionCheck()) { env->ExceptionClear(); return false; }
+        bool res = nameObj != nullptr;
+        if (nameObj) env->DeleteLocalRef(nameObj);
         return res;
     }
-    return false;
+
+    bool res = env->CallBooleanMethod(stackObj, g_itemStackHasCustomName_121) == JNI_TRUE;
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return false; }
+    return res;
 }
 
 static std::string GetModernScreenTitle(JNIEnv* env, jobject screenObj) {
@@ -7721,6 +8251,15 @@ static bool IsModernTransitionScreenName(const std::string& screenName) {
         || screenName.find("ReceivingLevelScreen") != std::string::npos;
 }
 
+// Hopper / dispenser / dropper screens. Their block entities are not in the chest scan list
+// (that list backs Chest ESP), so the physical-chest check cannot be evaluated for them; the
+// title and custom-item checks still apply.
+static bool IsModernUntrackedContainerScreenName(const std::string& screenName) {
+    return ScreenChainContainsClass121(screenName, "HopperScreen") ||
+        ScreenChainContainsClass121(screenName, "class_488") ||
+        ScreenChainContainsClass121(screenName, "DispenserScreen");
+}
+
 static bool IsModernContainerScreenName(const std::string& screenName) {
     if (ScreenChainContainsClass121(screenName, "InventoryScreen") ||
         ScreenChainContainsClass121(screenName, "CreativeModeInventoryScreen") ||
@@ -7730,7 +8269,10 @@ static bool IsModernContainerScreenName(const std::string& screenName) {
 
     return ScreenChainContainsClass121(screenName, "ContainerScreen") ||
         ScreenChainContainsClass121(screenName, "GenericContainerScreen") ||
-        ScreenChainContainsClass121(screenName, "class_476");
+        ScreenChainContainsClass121(screenName, "class_476") ||
+        ScreenChainContainsClass121(screenName, "ShulkerBoxScreen") ||
+        ScreenChainContainsClass121(screenName, "class_495") ||
+        IsModernUntrackedContainerScreenName(screenName);
 }
 
 static std::string BuildModernChestStealerStateJson(JNIEnv* env, jobject screenObj, const std::string& screenName, bool enabled, bool titleCheck, bool customItemsCheck, bool physicalCheck) {
@@ -7805,6 +8347,7 @@ static std::string BuildModernChestStealerStateJson(JNIEnv* env, jobject screenO
     std::ostringstream slotsJson;
     int count = 0;
     int customItemCount = 0;
+    bool customNameCheckFailed = false;
     for (int i = 0; i < chestSlotCount; i++) {
         jobject slotObj = env->CallObjectMethod(slotsObj, getMid, i);
         if (env->ExceptionCheck()) { env->ExceptionClear(); slotObj = nullptr; }
@@ -7821,8 +8364,11 @@ static std::string BuildModernChestStealerStateJson(JNIEnv* env, jobject screenO
                 jobject stackObj = env->CallObjectMethod(slotObj, g_chestStealerSlotGetStackMethod_121);
                 if (env->ExceptionCheck()) { env->ExceptionClear(); stackObj = nullptr; }
                 if (stackObj) {
-                    if (IsModernItemStackCustomNamed(env, stackObj)) {
+                    bool nameMappingResolved = false;
+                    if (IsModernItemStackCustomNamed(env, stackObj, &nameMappingResolved)) {
                         customItemCount++;
+                    } else if (customItemsCheck && !nameMappingResolved) {
+                        customNameCheckFailed = true;
                     }
                     env->DeleteLocalRef(stackObj);
                 }
@@ -7849,9 +8395,15 @@ static std::string BuildModernChestStealerStateJson(JNIEnv* env, jobject screenO
     env->DeleteLocalRef(listAccessCls);
     env->DeleteLocalRef(slotsObj);
 
-    bool itemsAreMenu = customItemsCheck && (count > 0) && (((float)customItemCount / (float)count) > 0.5f);
+    if (customNameCheckFailed) {
+        // A safety check the user enabled must not silently pass on an unmapped runtime.
+        LogChestStealerMappingMissing121("item custom-name accessor");
+    }
+    bool itemsAreMenu = customItemsCheck && (count > 0) &&
+        ((((float)customItemCount / (float)count) > 0.5f) || customNameCheckFailed);
     bool physicalNearby = IsModernChestStealerPhysicalContainer();
-    bool physicalCheckFailed = physicalCheck && !physicalNearby;
+    bool physicalCheckFailed = physicalCheck && !physicalNearby &&
+        !IsModernUntrackedContainerScreenName(screenName);
 
     bool blocked = titleIsMenu || itemsAreMenu || physicalCheckFailed;
     bool physical = !blocked;
@@ -10046,6 +10598,117 @@ static jfieldID  g_killAuraUseKeyField_121 = nullptr;
 static jmethodID g_killAuraKeyIsDown_121 = nullptr;
 static jmethodID g_killAuraCanSeeEntity_121 = nullptr;
 static jmethodID g_killAuraIsSameTeam_121 = nullptr;
+
+static jclass LoadModernClassGlobal(JNIEnv* env, const char* const* names) {
+    if (!env || !g_gameClassLoader) return nullptr;
+    for (int i = 0; names[i]; ++i) {
+        jclass c = LoadClassWithLoader(env, g_gameClassLoader, names[i]);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); c = nullptr; }
+        if (c) {
+            jclass g = (jclass)env->NewGlobalRef(c);
+            env->DeleteLocalRef(c);
+            return g;
+        }
+    }
+    return nullptr;
+}
+
+static jmethodID FindMethod121(JNIEnv* env, jclass cls, const char* const* names, const char* const* sigs) {
+    if (!env || !cls) return nullptr;
+    for (int ni = 0; names[ni]; ++ni) {
+        for (int si = 0; sigs[si]; ++si) {
+            jmethodID m = env->GetMethodID(cls, names[ni], sigs[si]);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); m = nullptr; }
+            if (m) return m;
+        }
+    }
+    return nullptr;
+}
+
+static jfieldID FindField121(JNIEnv* env, jclass cls, const char* const* names, const char* const* sigs) {
+    if (!env || !cls) return nullptr;
+    for (int ni = 0; names[ni]; ++ni) {
+        for (int si = 0; sigs[si]; ++si) {
+            jfieldID f = env->GetFieldID(cls, names[ni], sigs[si]);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); f = nullptr; }
+            if (f) return f;
+        }
+    }
+    return nullptr;
+}
+
+static const char* const kKeyMappingSigs121[] = {
+    "Lnet/minecraft/client/KeyMapping;",
+    "Lnet/minecraft/client/option/KeyBinding;",
+    "Lnet/minecraft/class_304;",
+    nullptr
+};
+
+// Shared-check facts for a modern player candidate (KillAura, Murder Mystery).
+static lc::target::Facts BuildTargetFacts121(JNIEnv* env, jobject self, jobject candidate,
+                                             bool queryTeam, bool queryBot) {
+    lc::target::Facts f;
+    f.isSelf = self && env->IsSameObject(candidate, self) == JNI_TRUE;
+    if (f.isSelf) return f;
+    if (g_playerEntityClass_121)
+        f.isPlayer = env->IsInstanceOf(candidate, g_playerEntityClass_121) == JNI_TRUE;
+    if (queryTeam && g_killAuraIsSameTeam_121 && self) {
+        jboolean teammate = env->CallBooleanMethod(self, g_killAuraIsSameTeam_121, candidate);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); teammate = JNI_FALSE; }
+        f.teammate = teammate == JNI_TRUE;
+    }
+    if (g_getHealth_121) {
+        f.health = env->CallFloatMethod(candidate, g_getHealth_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); f.health = 0.0f; }
+    } else {
+        f.healthKnown = false;
+    }
+    f.stableName = GetStablePlayerName(env, candidate);
+    f.botLike = queryBot && !f.stableName.empty() && LooksLikeFakePlayerLine(f.stableName);
+    return f;
+}
+
+// ===================== HIT SELECT (1.21 / 26.x) =====================
+static jmethodID g_entityHitResultGetEntity_121 = nullptr;
+static jclass g_livingEntityClass_121 = nullptr;
+static bool g_hitSelectResolved_121 = false;
+static int g_jniLookingAtEntityHurtTime = 0;
+
+static int ReadCrosshairEntityHurtTime121(JNIEnv* env, jobject hitObj) {
+    if (!env || !hitObj || !g_hurtTimeField_121) return 0;
+    if (!g_hitSelectResolved_121) {
+        g_hitSelectResolved_121 = true;
+        EnsureHitResultCaches(env);
+        static const char* const names[] = { "getEntity", "method_17782", nullptr };
+        static const char* const sigs[] = {
+            "()Lnet/minecraft/world/entity/Entity;",
+            "()Lnet/minecraft/class_1297;",
+            "()Lnet/minecraft/entity/Entity;",
+            nullptr
+        };
+        g_entityHitResultGetEntity_121 = FindMethod121(env, g_entityHitResultClass_121, names, sigs);
+        static const char* const living[] = {
+            "net.minecraft.class_1309",
+            "net.minecraft.world.entity.LivingEntity",
+            "net.minecraft.entity.LivingEntity",
+            nullptr
+        };
+        g_livingEntityClass_121 = LoadModernClassGlobal(env, living);
+    }
+    if (!g_entityHitResultGetEntity_121 || !g_livingEntityClass_121) return 0;
+    if (!g_entityHitResultClass_121 || env->IsInstanceOf(hitObj, g_entityHitResultClass_121) != JNI_TRUE) return 0;
+    jobject ent = env->CallObjectMethod(hitObj, g_entityHitResultGetEntity_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return 0; }
+    if (!ent) return 0;
+    int hurt = 0;
+    if (env->IsInstanceOf(ent, g_livingEntityClass_121) == JNI_TRUE) {
+        hurt = env->GetIntField(ent, g_hurtTimeField_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); hurt = 0; }
+    }
+    env->DeleteLocalRef(ent);
+    return hurt;
+}
+
 static DWORD     g_killAuraNextPremotionRefreshMs_121 = 0;
 static killaura::AutoBlockState g_killAuraAutoBlockState_121;
 static void SetKillAuraUnavailableReason(const std::string& reason);
@@ -11083,22 +11746,6 @@ static void UpdateKillAura(JNIEnv* env, const Config& cfg) {
             if (env->ExceptionCheck()) { env->ExceptionClear(); visible = JNI_FALSE; }
             if (visible != JNI_TRUE) { env->DeleteLocalRef(candidate); continue; }
         }
-        if (cfg.killAuraTeams) {
-            jboolean teammate = env->CallBooleanMethod(selfObj, g_killAuraIsSameTeam_121, candidate);
-            if (env->ExceptionCheck()) { env->ExceptionClear(); teammate = JNI_FALSE; }
-            if (teammate == JNI_TRUE) { env->DeleteLocalRef(candidate); continue; }
-        }
-        if (g_playerEntityClass_121 && env->IsInstanceOf(candidate, g_playerEntityClass_121) != JNI_TRUE) {
-            env->DeleteLocalRef(candidate);
-            continue;
-        }
-
-        float health = env->CallFloatMethod(candidate, g_getHealth_121);
-        if (env->ExceptionCheck()) { env->ExceptionClear(); health = 0.0f; }
-        if (!std::isfinite(health) || health <= 0.1f) {
-            env->DeleteLocalRef(candidate);
-            continue;
-        }
 
         double x = CallDoubleNoArgs(env, candidate, g_getX_121);
         double y = CallDoubleNoArgs(env, candidate, g_getY_121);
@@ -11119,11 +11766,18 @@ static void UpdateKillAura(JNIEnv* env, const Config& cfg) {
             }
         }
 
-        std::string stableName = GetStablePlayerName(env, candidate);
-        if (stableName.empty() || (cfg.killAuraBotCheck && LooksLikeFakePlayerLine(stableName))) {
+        // Shared target rules (self, non-player, dead, teammate, nameless, bot) live in combat_target.h.
+        lc::target::Facts facts = BuildTargetFacts121(
+            env, selfObj, candidate, cfg.killAuraTeams, cfg.killAuraBotCheck);
+        lc::target::Policy policy;
+        policy.skipTeammates = cfg.killAuraTeams;
+        policy.skipBots = cfg.killAuraBotCheck;
+        if (!lc::target::IsValid(facts, policy)) {
             env->DeleteLocalRef(candidate);
             continue;
         }
+        const float health = facts.health;
+        const std::string& stableName = facts.stableName;
 
         double fovScore = 0.0;
         if (horiz > 1e-6) {
@@ -12767,7 +13421,10 @@ static void ResetAutoRodModernCaches(JNIEnv* env) {
 }
 
 // Reset ALL AutoTotem cached JNI lookups and runtime state.
-// Call on world transitions so stale method/field IDs are re-resolved.
+// Call on world transitions so stale method/field IDs are re-resolved. World-change
+// callers run on the scan thread, so hold g_jniRemapMtx: the fast-poll thread reads
+// the beta/hurt-time lookups while holding that same lock and must never observe a
+// deleted class ref or a nulled method ID.
 static void ResetAutoTotemCaches(JNIEnv* env) {
     // Unbind Premotion's copy of C03/player before deleting bridge globals.
     ka_premotion::SuspendForWorldChange(env);
@@ -12834,6 +13491,19 @@ static void ResetAutoTotemCaches(JNIEnv* env) {
     g_lastAntiDebuffTickMs = 0;
     g_nextAntiDebuffResolveMs_121 = 0;
 
+    DeleteGlobalRefSafe(env, g_tntClass_121);
+    ResetBetaModuleCaches121(env);
+    g_tntFuseField_121 = nullptr;
+    g_tntGetFuse_121 = nullptr;
+    g_clientWorldGetEntities_121 = nullptr;
+    g_iterableIterator_121 = nullptr;
+    g_iteratorHasNext_121 = nullptr;
+    g_iteratorNext_121 = nullptr;
+    {
+        LockGuard lk(g_modernTntMutex);
+        g_modernTntRecords.clear();
+    }
+
     ResetRefillModernCaches(env);
 }
 
@@ -12883,6 +13553,8 @@ static void CleanupJniGlobals(JNIEnv* env) {
     DeleteGlobalRefSafe(env, g_abstractTeamClass_121);
     DeleteGlobalRefSafe(env, g_visibilityRuleClass_121);
     DeleteGlobalRefSafe(env, g_visibilityRuleNever_121);
+    DeleteGlobalRefSafe(env, g_tntClass_121);
+    ResetBetaModuleCaches121(env);
     DeleteGlobalRefSafe(env, g_lastNametagSuppressionWorld_121);
     DeleteGlobalRefSafe(env, g_lastAutoTotemWorld_121);
     DeleteGlobalRefSafe(env, g_itemStackClass_121);
@@ -13059,10 +13731,12 @@ static void ResetModernJniRuntimeCaches121(JNIEnv* env, const char* reason) {
     g_itemStackGetMaxDamage_121 = nullptr;
     g_chestStealerSlotGetStackMethod_121 = nullptr;
     g_itemStackHasCustomName_121 = nullptr;
+    g_itemStackGetCustomName_121 = nullptr;
     g_getGameProfile_121 = nullptr;
     g_gameProfileGetName_121 = nullptr;
     g_gameProfileNameField_121 = nullptr;
     g_connGetPlayerInfoByName_121 = nullptr;
+    g_playerInfoGetLatency_121 = nullptr;
     g_connGetLocalGameProfile_121 = nullptr;
     g_playerInfoGetProfile_121 = nullptr;
     g_nickHiderOriginalProfileName_121.clear();
@@ -14511,9 +15185,11 @@ static void UpdateJniState() {
     JNIEnv* env = nullptr;
     bool envReady = TRACE261_IF("jniEnvReady", (g_jvm->GetEnv((void**)&env, JNI_VERSION_1_8) == JNI_OK && env));
     if (!envReady) return;
+    UpdateOverlayPing121(env);
     unsigned long long nowMs = (unsigned long long)GetTickCount64();
-    bool hitDelayFixEnabled = false;
-    { LockGuard lk(g_configMutex); hitDelayFixEnabled = g_config.hitDelayFixEnabled; }
+    Config cfg;
+    { LockGuard lk(g_configMutex); cfg = g_config; }
+    bool hitDelayFixEnabled = cfg.hitDelayFixEnabled;
 
     jobject scr = GetCurrentScreenObject(env, g_mcInstance);
     if (env->ExceptionCheck()) { env->ExceptionClear(); return; }
@@ -14564,7 +15240,9 @@ static void UpdateJniState() {
     bool refillEnabled = false;
     {
         LockGuard lk(g_configMutex);
-        chestStealerEnabled = g_config.chestStealer;
+        // Click in Chests reuses the Chest Stealer menu/physical checks, so the container
+        // state is published for either feature.
+        chestStealerEnabled = g_config.chestStealer || g_config.clickInChests;
         chestStealerTitleCheck = g_config.chestStealerTitleCheck;
         chestStealerCustomItemsCheck = g_config.chestStealerCustomItemsCheck;
         chestStealerPhysicalCheck = g_config.chestStealerPhysicalCheck;
@@ -14591,6 +15269,7 @@ static void UpdateJniState() {
     // ===== lookingAtBlock (crosshair hit = BLOCK) =====
     bool lookingAtBlock = false;
     bool lookingAtEntity = false;
+    int lookingAtEntityHurtTime = 0;
 
     // Find crosshairTarget / hitResult (field name varies across clients/mappings)
     jclass mcCls = env->GetObjectClass(g_mcInstance);
@@ -14616,6 +15295,7 @@ static void UpdateJniState() {
                     TRACE261_PATH("hitresult-ordinal-path");
                     lookingAtBlock = (hitOrd == 1);
                     lookingAtEntity = (hitOrd == 2);
+                    if (lookingAtEntity) lookingAtEntityHurtTime = ReadCrosshairEntityHurtTime121(env, hitObj);
                     UpdateHitDelayFix121(env, hitDelayFixEnabled, guiOpen, inWorld, mcCls, hitOrd);
                 }
                 env->DeleteLocalRef(hitObj);
@@ -14999,6 +15679,7 @@ static void UpdateJniState() {
             g_jniLookingAtBlock = lookingAtBlock;
             g_jniLookingAtEntity = lookingAtEntity;
             g_jniLookingAtEntityLatched = lookingAtEntityLatched;
+            g_jniLookingAtEntityHurtTime = lookingAtEntityHurtTime;
             g_jniBreakingBlock = breakingBlock;
             g_jniHoldingBlock = holdingBlock;
             g_jniHealth = healthVal;
@@ -15019,6 +15700,7 @@ static void UpdateJniState() {
         g_jniLookingAtBlock = lookingAtBlock;
         g_jniLookingAtEntity = lookingAtEntity;
         g_jniLookingAtEntityLatched = false;
+        g_jniLookingAtEntityHurtTime = 0;
         g_jniBreakingBlock = false;
         g_jniHoldingBlock = false;
         g_jniHealth = 20.0f;
@@ -15055,9 +15737,7 @@ static void UpdateRealGuiState() {
     }
     if (!haveGlfwAnswer) {
         TRACE261_PATH("cursor-visibility-win32-fallback");
-        CURSORINFO ci = {};
-        ci.cbSize = sizeof(ci);
-        if (GetCursorInfo(&ci)) cursorVisible = (ci.flags & CURSOR_SHOWING) != 0;
+        cursorVisible = IsOsCursorVisible();
     }
 
     // Only report realGuiOpen when the cursor is visible and JNI reports a non-chat screen.
@@ -15098,16 +15778,23 @@ static void ReadCameraState(JNIEnv* env) {
             if (fovOpt && !env->ExceptionCheck()) {
                 jobject valObj = env->CallObjectMethod(fovOpt, g_simpleOptionGet_121);
                 if (valObj && !env->ExceptionCheck()) {
-                    jclass valCls = env->GetObjectClass(valObj);
-                    jmethodID doubleVal = env->GetMethodID(valCls, "doubleValue", "()D");
-                    if (env->ExceptionCheck()) { env->ExceptionClear(); doubleVal = env->GetMethodID(valCls, "intValue", "()I"); if (env->ExceptionCheck()) env->ExceptionClear(); }
-                    
-                    if (doubleVal) {
-                        std::string cn = GetClassNameFromClass(env, valCls);
-                        if (cn.find("Double") != std::string::npos) cs.fov = (float)env->CallDoubleMethod(valObj, doubleVal);
-                        else cs.fov = (float)env->CallIntMethod(valObj, doubleVal);
+                    // OptionInstance<Integer> (vanilla FOV slider) or <Double>: both extend
+                    // java.lang.Number, so read through Number.doubleValue() with the matching
+                    // Call*Method. (Calling an Integer's ()D method ID via CallIntMethod
+                    // returns garbage and made every FOV read look invalid.)
+                    static jmethodID s_numberDoubleValue = nullptr;  // method IDs are valid across threads
+                    jclass numberCls = env->FindClass("java/lang/Number");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); numberCls = nullptr; }
+                    if (numberCls && !s_numberDoubleValue) {
+                        s_numberDoubleValue = env->GetMethodID(numberCls, "doubleValue", "()D");
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); s_numberDoubleValue = nullptr; }
                     }
-                    env->DeleteLocalRef(valCls);
+                    if (s_numberDoubleValue && env->IsInstanceOf(valObj, numberCls)) {
+                        double v = env->CallDoubleMethod(valObj, s_numberDoubleValue);
+                        if (env->ExceptionCheck()) env->ExceptionClear();
+                        else cs.fov = (float)v;
+                    }
+                    if (numberCls) env->DeleteLocalRef(numberCls);
                     env->DeleteLocalRef(valObj);
                 }
                 env->DeleteLocalRef(fovOpt);
@@ -17040,6 +17727,815 @@ static void UpdateAutoToolModern(JNIEnv* env, const Config& cfg) {
     env->PopLocalFrame(nullptr);
 }
 
+static void UpdateSprint121(JNIEnv* env, bool enabled, bool guiOpen, bool inWorld) {
+    if (!env) return;
+    const bool isMovingForward = (GetAsyncKeyState('W') & 0x8000) != 0;
+    if (!enabled || guiOpen || !inWorld || !isMovingForward) {
+        if (g_sprintManaging121) {
+            jobject key = GetSprintKeyBinding121(env);
+            if (key) {
+                EnsureSpeedBridgeKeyMethods(env, key);
+                if (g_speedBridgeKeySetPressed_121) {
+                    env->CallVoidMethod(key, g_speedBridgeKeySetPressed_121, JNI_FALSE);
+                    if (env->ExceptionCheck()) env->ExceptionClear();
+                }
+                env->DeleteLocalRef(key);
+            }
+            g_sprintManaging121 = false;
+        }
+        return;
+    }
+
+    jobject key = GetSprintKeyBinding121(env);
+    if (key) {
+        EnsureSpeedBridgeKeyMethods(env, key);
+        if (g_speedBridgeKeySetPressed_121) {
+            env->CallVoidMethod(key, g_speedBridgeKeySetPressed_121, JNI_TRUE);
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            else g_sprintManaging121 = true;
+        }
+        env->DeleteLocalRef(key);
+    }
+}
+
+static void UpdateFastPlace121(JNIEnv* env, bool enabled, bool guiOpen, bool inWorld, jclass mcCls) {
+    if (!env || !enabled || guiOpen || !inWorld || !g_mcInstance) return;
+    bool kaBlocking = false;
+    { LockGuard lk(g_killAuraRenderMutex_121); kaBlocking = g_killAuraRenderSnapshot_121.blocking; }
+    if (IsAutoRodTransactionActive121() || kaBlocking) return;
+    if (!g_itemUseCooldownField_121 && mcCls) {
+        const char* names[] = { "itemUseCooldown", "field_1752", "rightClickDelay", "f_91071_", nullptr };
+        for (int i = 0; names[i] && !g_itemUseCooldownField_121; ++i) {
+            g_itemUseCooldownField_121 = env->GetFieldID(mcCls, names[i], "I");
+            if (env->ExceptionCheck()) { env->ExceptionClear(); g_itemUseCooldownField_121 = nullptr; }
+        }
+    }
+    if (g_itemUseCooldownField_121) {
+        jint delay = env->GetIntField(g_mcInstance, g_itemUseCooldownField_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); return; }
+        if (delay > 0) {
+            env->SetIntField(g_mcInstance, g_itemUseCooldownField_121, 0);
+            if (env->ExceptionCheck()) env->ExceptionClear();
+        }
+    }
+}
+
+static void UpdateNoHurtCam121(JNIEnv* env, bool enabled, jobject selfObj) {
+    if (!env || !enabled || !selfObj) return;
+    if (!g_hurtTimeField_121) {
+        jclass entCls = env->GetObjectClass(selfObj);
+        if (entCls) {
+            const char* names[] = { "hurtTime", "field_6235", "f_20916_", nullptr };
+            for (int i = 0; names[i] && !g_hurtTimeField_121; i++) {
+                g_hurtTimeField_121 = env->GetFieldID(entCls, names[i], "I");
+                if (env->ExceptionCheck()) { env->ExceptionClear(); g_hurtTimeField_121 = nullptr; }
+            }
+            env->DeleteLocalRef(entCls);
+        }
+    }
+    if (!g_hurtTimeField_121) return;
+    jint ht = env->GetIntField(selfObj, g_hurtTimeField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return; }
+    if (ht > 0 && ht <= g_lastHurtTime_121) {
+        env->SetIntField(selfObj, g_hurtTimeField_121, 0);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+}
+
+static void UpdateWTap121(JNIEnv* env, bool enabled, bool guiOpen, bool inWorld, jobject selfObj) {
+    if (!env || !selfObj) return;
+    const DWORD nowMs = GetTickCount();
+
+    if (g_wTapInReset121) {
+        if (nowMs - g_lastWTapResetMs121 >= 60) {
+            if (!g_setSprintingMethod_121) {
+                jclass playerCls = env->GetObjectClass(selfObj);
+                if (playerCls) {
+                    const char* names[] = { "setSprinting", "method_5728", "m_6858_", nullptr };
+                    for (int i = 0; names[i] && !g_setSprintingMethod_121; ++i) {
+                        g_setSprintingMethod_121 = env->GetMethodID(playerCls, names[i], "(Z)V");
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); g_setSprintingMethod_121 = nullptr; }
+                    }
+                    env->DeleteLocalRef(playerCls);
+                }
+            }
+            const bool isMovingForward = (GetAsyncKeyState('W') & 0x8000) != 0;
+            if (g_setSprintingMethod_121 && isMovingForward && !guiOpen && inWorld) {
+                env->CallVoidMethod(selfObj, g_setSprintingMethod_121, JNI_TRUE);
+                if (env->ExceptionCheck()) env->ExceptionClear();
+            }
+            g_wTapInReset121 = false;
+        }
+        return;
+    }
+
+    if (!enabled || guiOpen || !inWorld) return;
+
+    const bool isMovingForward = (GetAsyncKeyState('W') & 0x8000) != 0;
+    const bool isLmb = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+    const bool lookingAtEntity = g_jniLookingAtEntity || g_jniLookingAtEntityLatched;
+    if (isMovingForward && isLmb && lookingAtEntity && (nowMs - g_lastWTapResetMs121 >= 250)) {
+        if (!g_setSprintingMethod_121) {
+            jclass playerCls = env->GetObjectClass(selfObj);
+            if (playerCls) {
+                const char* names[] = { "setSprinting", "method_5728", "m_6858_", nullptr };
+                for (int i = 0; names[i] && !g_setSprintingMethod_121; ++i) {
+                    g_setSprintingMethod_121 = env->GetMethodID(playerCls, names[i], "(Z)V");
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); g_setSprintingMethod_121 = nullptr; }
+                }
+                env->DeleteLocalRef(playerCls);
+            }
+        }
+        if (g_setSprintingMethod_121) {
+            env->CallVoidMethod(selfObj, g_setSprintingMethod_121, JNI_FALSE);
+            if (env->ExceptionCheck()) env->ExceptionClear();
+            g_wTapInReset121 = true;
+            g_lastWTapResetMs121 = nowMs;
+        }
+    }
+}
+
+// ===================== MODULE STATUS (1.21 / 26.x) =====================
+static lc::ModuleStatusMap g_moduleStatus121;
+static Mutex g_moduleStatusMutex121;
+
+static void SetModuleStatus121(const char* moduleId, const std::string& reason) {
+    LockGuard lk(g_moduleStatusMutex121);
+    g_moduleStatus121.Set(moduleId, reason);
+}
+
+static std::string ModuleStatusJson121() {
+    LockGuard lk(g_moduleStatusMutex121);
+    return g_moduleStatus121.ToJson();
+}
+
+static void UpdateSimpleModuleStatus121(const Config& cfg) {
+    SetModuleStatus121("fastplace", cfg.fastPlace && !g_itemUseCooldownField_121
+        ? "Missing Minecraft.rightClickDelay mapping" : "");
+    SetModuleStatus121("sprint", cfg.sprint && (!g_sprintKeyField_121 || !g_speedBridgeKeySetPressed_121)
+        ? "Missing sprint key mapping" : "");
+    SetModuleStatus121("nohurtcam", cfg.noHurtCam && !g_hurtTimeField_121
+        ? "Waiting for LivingEntity.hurtTime mapping" : "");
+    SetModuleStatus121("tnttimer", cfg.tntTimer && !g_tntClass_121 && g_mcInstance
+        ? "Primed TNT class did not load" : "");
+}
+
+// ===================== JUMP RESET (1.21 / 26.x) =====================
+// Runs on the fast-poll thread before UpdateVelocity, so it always samples the
+// hit edge before No Hurt Cam clears hurtTime.
+static jfieldID g_jumpKeyField_121 = nullptr;
+static jmethodID g_jumpResetOnGround_121 = nullptr;
+static bool g_jumpResetHolding_121 = false;
+static DWORD g_jumpResetPressMs_121 = 0;
+static int g_jumpResetPrevHurt_121 = 0;
+
+static jobject GetJumpKeyBinding121(JNIEnv* env) {
+    if (!env || !g_mcInstance || !g_optionsField_121) return nullptr;
+    jobject opts = env->GetObjectField(g_mcInstance, g_optionsField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
+    if (!opts) return nullptr;
+    if (!g_jumpKeyField_121) {
+        jclass optsCls = env->GetObjectClass(opts);
+        static const char* const names[] = { "jumpKey", "keyJump", "field_1903", nullptr };
+        g_jumpKeyField_121 = FindField121(env, optsCls, names, kKeyMappingSigs121);
+        if (optsCls) env->DeleteLocalRef(optsCls);
+    }
+    jobject key = g_jumpKeyField_121 ? env->GetObjectField(opts, g_jumpKeyField_121) : nullptr;
+    if (env->ExceptionCheck()) { env->ExceptionClear(); key = nullptr; }
+    env->DeleteLocalRef(opts);
+    return key;
+}
+
+static bool IsJumpPhysicallyDown121(JNIEnv* env, jobject key) {
+    if (key && g_sdlInputBackend && g_speedBridgeKeyGetBoundKey_121 && g_speedBridgeInputKeyGetCode_121) {
+        jobject inputKey = env->CallObjectMethod(key, g_speedBridgeKeyGetBoundKey_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); inputKey = nullptr; }
+        if (inputKey) {
+            int code = env->CallIntMethod(inputKey, g_speedBridgeInputKeyGetCode_121);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); code = -1; }
+            env->DeleteLocalRef(inputKey);
+            int down = code >= 0 ? QuerySdlBoundKeyDown(code) : -1;
+            if (down >= 0) return down == 1;
+        }
+    }
+    if (key && g_speedBridgeKeyGetBoundKey_121 && g_speedBridgeInputKeyGetCode_121 &&
+        glfwGetCurrentContext_fn && glfwGetKey_fn) {
+        void* win = glfwGetCurrentContext_fn();
+        if (win) {
+            jobject inputKey = env->CallObjectMethod(key, g_speedBridgeKeyGetBoundKey_121);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); inputKey = nullptr; }
+            if (inputKey) {
+                int code = env->CallIntMethod(inputKey, g_speedBridgeInputKeyGetCode_121);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); code = -1; }
+                env->DeleteLocalRef(inputKey);
+                if (code >= 0) return glfwGetKey_fn(win, code) == GLFW_PRESS;
+            }
+        }
+    }
+    return (GetAsyncKeyState(VK_SPACE) & 0x8000) != 0;
+}
+
+static bool SetJumpKey121(JNIEnv* env, bool pressed) {
+    jobject key = GetJumpKeyBinding121(env);
+    if (!key) return false;
+    EnsureSpeedBridgeKeyMethods(env, key);
+    bool ok = false;
+    if (g_speedBridgeKeySetPressed_121) {
+        if (pressed || !IsJumpPhysicallyDown121(env, key)) {
+            env->CallVoidMethod(key, g_speedBridgeKeySetPressed_121, pressed ? JNI_TRUE : JNI_FALSE);
+            ok = !env->ExceptionCheck();
+            if (!ok) env->ExceptionClear();
+        } else {
+            ok = true; // user holds jump; keep it down
+        }
+    }
+    env->DeleteLocalRef(key);
+    return ok;
+}
+
+static void UpdateJumpReset121(JNIEnv* env, const Config& cfg) {
+    if (!env) return;
+    const DWORD nowMs = GetTickCount();
+    if (g_jumpResetHolding_121 && nowMs - g_jumpResetPressMs_121 >= lc::beta::kJumpResetHoldMs) {
+        if (SetJumpKey121(env, false) || nowMs - g_jumpResetPressMs_121 >= lc::beta::kJumpResetReleaseGiveUpMs)
+            g_jumpResetHolding_121 = false;
+    }
+    if (!cfg.jumpReset) SetModuleStatus121("jumpreset", "");
+    bool guiOpen = false, inWorld = false;
+    { LockGuard lk(g_jniStateMtx); guiOpen = g_jniGuiOpen; inWorld = g_jniInWorld; }
+    if (!cfg.jumpReset || !inWorld || !g_mcInstance || !g_playerField_121 || IsWorldTransitionActive()) {
+        g_jumpResetPrevHurt_121 = 0;
+        return;
+    }
+    jobject self = env->GetObjectField(g_mcInstance, g_playerField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); self = nullptr; }
+    if (!self) { g_jumpResetPrevHurt_121 = 0; return; }
+
+    EnsureVelocityJni(env, self);
+    if (!g_jumpResetOnGround_121) {
+        jclass pc = env->GetObjectClass(self);
+        static const char* const names[] = { "onGround", "isOnGround", "method_24828", nullptr };
+        static const char* const sigs[] = { "()Z", nullptr };
+        g_jumpResetOnGround_121 = FindMethod121(env, pc, names, sigs);
+        if (pc) env->DeleteLocalRef(pc);
+    }
+    if (!g_hurtTimeField_121 || !g_jumpResetOnGround_121) {
+        SetModuleStatus121("jumpreset", "Missing hurtTime or onGround mapping");
+        env->DeleteLocalRef(self);
+        return;
+    }
+    jint hurtTime = env->GetIntField(self, g_hurtTimeField_121);
+    jboolean onGround = env->CallBooleanMethod(self, g_jumpResetOnGround_121);
+    env->DeleteLocalRef(self);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return; }
+
+    lc::beta::JumpResetInput in;
+    in.hurtTime = hurtTime;
+    in.prevHurtTime = g_jumpResetPrevHurt_121;
+    in.onGround = onGround == JNI_TRUE;
+    in.movingForward = (GetAsyncKeyState('W') & 0x8000) != 0;
+    in.guiOpen = guiOpen;
+    in.chance = cfg.jumpResetChance;
+    in.roll = rand() % 100;
+    if (lc::beta::ShouldJumpReset(in)) {
+        if (SetJumpKey121(env, true)) {
+            g_jumpResetHolding_121 = true;
+            g_jumpResetPressMs_121 = nowMs;
+            SetModuleStatus121("jumpreset", "");
+        } else {
+            SetModuleStatus121("jumpreset", "Missing jump key mapping");
+        }
+    }
+    g_jumpResetPrevHurt_121 = hurtTime;
+}
+
+// ===================== BETA OVERLAY SCANS (1.21 / 26.x) =====================
+static jmethodID g_betaStackGetItem_121 = nullptr;
+static jmethodID g_betaItemTranslationKey_121 = nullptr;
+
+static jobject StackGetItem121(JNIEnv* env, jobject stack) {
+    if (!env || !stack) return nullptr;
+    if (!g_betaStackGetItem_121) {
+        jclass sc = env->GetObjectClass(stack);
+        static const char* const names[] = { "getItem", "method_7909", "m_41720_", nullptr };
+        static const char* const sigs[] = {
+            "()Lnet/minecraft/world/item/Item;",
+            "()Lnet/minecraft/class_1792;",
+            "()Lnet/minecraft/item/Item;",
+            nullptr
+        };
+        g_betaStackGetItem_121 = FindMethod121(env, sc, names, sigs);
+        if (sc) env->DeleteLocalRef(sc);
+    }
+    if (!g_betaStackGetItem_121) return nullptr;
+    jobject item = env->CallObjectMethod(stack, g_betaStackGetItem_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
+    return item;
+}
+
+static std::string ItemTranslationKey121(JNIEnv* env, jobject item) {
+    if (!env || !item) return "";
+    if (!g_betaItemTranslationKey_121) {
+        static const char* const itemNames[] = {
+            "net.minecraft.class_1792", "net.minecraft.world.item.Item", "net.minecraft.item.Item", nullptr
+        };
+        jclass itemCls = LoadModernClassGlobal(env, itemNames);
+        static const char* const names[] = { "getDescriptionId", "getTranslationKey", "method_7876", nullptr };
+        static const char* const sigs[] = { "()Ljava/lang/String;", nullptr };
+        g_betaItemTranslationKey_121 = FindMethod121(env, itemCls, names, sigs);
+        if (itemCls) env->DeleteGlobalRef(itemCls);
+    }
+    if (!g_betaItemTranslationKey_121) return "";
+    jstring js = (jstring)env->CallObjectMethod(item, g_betaItemTranslationKey_121);
+    if (env->ExceptionCheck() || !js) { env->ExceptionClear(); return ""; }
+    const char* utf = env->GetStringUTFChars(js, nullptr);
+    std::string out = utf ? utf : "";
+    if (utf) env->ReleaseStringUTFChars(js, utf);
+    env->DeleteLocalRef(js);
+    return out;
+}
+
+static jobject MainHandStack121(JNIEnv* env, jobject entity) {
+    if (!env || !entity) return nullptr;
+    EnsureEntityMethods(env, entity);
+    if (!g_getMainHandStack_121) return nullptr;
+    jobject stack = env->CallObjectMethod(entity, g_getMainHandStack_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
+    return stack;
+}
+
+// ── Trajectories ──
+struct ModernTrajectorySnap {
+    bool active = false;
+    std::vector<lc::beta::TrajPoint> points;
+    bool hitBlock = false;
+    lc::beta::TrajPoint impact = { 0, 0, 0 };
+};
+static ModernTrajectorySnap g_modernTraj;
+static Mutex g_modernTrajMutex;
+static jclass g_trajBowCls_121 = nullptr, g_trajSnowballCls_121 = nullptr, g_trajEggCls_121 = nullptr;
+static jclass g_trajPearlCls_121 = nullptr, g_trajPotionCls_121 = nullptr, g_trajExpCls_121 = nullptr;
+static bool g_trajClassesTried_121 = false;
+static jmethodID g_trajUseTicks_121 = nullptr;
+static jmethodID g_trajEyeY_121 = nullptr;
+
+static void ClearModernTrajectory() {
+    LockGuard lk(g_modernTrajMutex);
+    g_modernTraj = ModernTrajectorySnap();
+}
+
+static void UpdateTrajectories121(JNIEnv* env, const Config& cfg) {
+    if (!cfg.trajectories) SetModuleStatus121("trajectories", "");
+    if (!env || !cfg.trajectories || !g_mcInstance || !g_playerField_121) { ClearModernTrajectory(); return; }
+    if (!g_trajClassesTried_121) {
+        g_trajClassesTried_121 = true;
+        static const char* const bow[] = { "net.minecraft.class_1753", "net.minecraft.world.item.BowItem", "net.minecraft.item.BowItem", nullptr };
+        static const char* const snow[] = { "net.minecraft.class_1823", "net.minecraft.world.item.SnowballItem", "net.minecraft.item.SnowballItem", nullptr };
+        static const char* const egg[] = { "net.minecraft.class_1771", "net.minecraft.world.item.EggItem", "net.minecraft.item.EggItem", nullptr };
+        static const char* const pearl[] = { "net.minecraft.class_1776", "net.minecraft.world.item.EnderpearlItem", "net.minecraft.item.EnderPearlItem", nullptr };
+        static const char* const potion[] = { "net.minecraft.class_4537", "net.minecraft.world.item.ThrowablePotionItem", "net.minecraft.item.ThrowablePotionItem", nullptr };
+        static const char* const exp[] = { "net.minecraft.class_1779", "net.minecraft.world.item.ExperienceBottleItem", "net.minecraft.item.ExperienceBottleItem", nullptr };
+        g_trajBowCls_121 = LoadModernClassGlobal(env, bow);
+        g_trajSnowballCls_121 = LoadModernClassGlobal(env, snow);
+        g_trajEggCls_121 = LoadModernClassGlobal(env, egg);
+        g_trajPearlCls_121 = LoadModernClassGlobal(env, pearl);
+        g_trajPotionCls_121 = LoadModernClassGlobal(env, potion);
+        g_trajExpCls_121 = LoadModernClassGlobal(env, exp);
+    }
+    if (!g_trajBowCls_121 && !g_trajSnowballCls_121) {
+        SetModuleStatus121("trajectories", "Projectile item classes did not load");
+        ClearModernTrajectory();
+        return;
+    }
+    jobject self = env->GetObjectField(g_mcInstance, g_playerField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); self = nullptr; }
+    if (!self) { ClearModernTrajectory(); return; }
+
+    jobject stack = MainHandStack121(env, self);
+    jobject item = StackGetItem121(env, stack);
+    lc::beta::ProjectileKind kind = lc::beta::PROJECTILE_NONE;
+    int useTicks = 0;
+    if (item) {
+        auto is = [&](jclass c) { return c && env->IsInstanceOf(item, c) == JNI_TRUE; };
+        if (is(g_trajBowCls_121)) {
+            kind = lc::beta::PROJECTILE_BOW;
+            if (!g_trajUseTicks_121) {
+                jclass pc = env->GetObjectClass(self);
+                static const char* const names[] = { "getItemUseTime", "getTicksUsingItem", "method_6048", nullptr };
+                static const char* const sigs[] = { "()I", nullptr };
+                g_trajUseTicks_121 = FindMethod121(env, pc, names, sigs);
+                if (pc) env->DeleteLocalRef(pc);
+            }
+            if (g_trajUseTicks_121) {
+                useTicks = env->CallIntMethod(self, g_trajUseTicks_121);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); useTicks = 0; }
+            }
+        } else if (is(g_trajSnowballCls_121) || is(g_trajEggCls_121) || is(g_trajPearlCls_121)) {
+            kind = lc::beta::PROJECTILE_THROWABLE;
+        } else if (is(g_trajPotionCls_121)) {
+            kind = lc::beta::PROJECTILE_POTION;
+        } else if (is(g_trajExpCls_121)) {
+            kind = lc::beta::PROJECTILE_EXP_BOTTLE;
+        }
+        env->DeleteLocalRef(item);
+    }
+    if (stack) env->DeleteLocalRef(stack);
+
+    ModernTrajectorySnap snap;
+    lc::beta::ProjectileParams params = lc::beta::ParamsFor(kind, useTicks);
+    if (params.valid && g_getX_121 && g_getYaw_121 && g_getPitch_121) {
+        if (!g_trajEyeY_121) {
+            jclass pc = env->GetObjectClass(self);
+            static const char* const names[] = { "getEyeY", "method_23320", nullptr };
+            static const char* const sigs[] = { "()D", nullptr };
+            g_trajEyeY_121 = FindMethod121(env, pc, names, sigs);
+            if (pc) env->DeleteLocalRef(pc);
+        }
+        const double px = CallDoubleNoArgs(env, self, g_getX_121);
+        const double pz = CallDoubleNoArgs(env, self, g_getZ_121);
+        const double eyeY = g_trajEyeY_121 ? CallDoubleNoArgs(env, self, g_trajEyeY_121)
+                                           : CallDoubleNoArgs(env, self, g_getY_121) + 1.62;
+        const float yaw = CallFloatNoArgs(env, self, g_getYaw_121);
+        const float pitch = CallFloatNoArgs(env, self, g_getPitch_121);
+        // Modern projectiles spawn at eye height - 0.1 with no sideways offset.
+        lc::beta::TrajectoryResult r = lc::beta::SimulateTrajectory(
+            px, eyeY - 0.1, pz, yaw, pitch, params,
+            [&](int bx, int by, int bz) { return IsSolidBlockAt121(env, bx + 0.5, by + 0.5, bz + 0.5); },
+            160, -64.0);
+        snap.active = r.points.size() >= 2;
+        snap.points.swap(r.points);
+        snap.hitBlock = r.hitBlock;
+        snap.impact = r.impact;
+    }
+    env->DeleteLocalRef(self);
+    SetModuleStatus121("trajectories", "");
+    LockGuard lk(g_modernTrajMutex);
+    g_modernTraj.active = snap.active;
+    g_modernTraj.points.swap(snap.points);
+    g_modernTraj.hitBlock = snap.hitBlock;
+    g_modernTraj.impact = snap.impact;
+}
+
+// ── Murder Mystery ──
+static std::vector<aoko::ui::MurderTag> g_modernMurder;
+static Mutex g_modernMurderMutex;
+static std::unordered_set<std::string> g_modernMurderers;
+static jobject g_modernMurderWorld = nullptr;
+
+static void ClearModernMurderMystery(JNIEnv* env) {
+    { LockGuard lk(g_modernMurderMutex); g_modernMurder.clear(); }
+    g_modernMurderers.clear();
+    if (env && g_modernMurderWorld) { env->DeleteGlobalRef(g_modernMurderWorld); g_modernMurderWorld = nullptr; }
+}
+
+static void UpdateMurderMystery121(JNIEnv* env, const Config& cfg) {
+    if (!cfg.murderMystery) SetModuleStatus121("murdermystery", "");
+    if (!env || !cfg.murderMystery || !g_mcInstance || !g_worldField_121 || !g_playerField_121) {
+        ClearModernMurderMystery(env);
+        return;
+    }
+    jobject world = env->GetObjectField(g_mcInstance, g_worldField_121);
+    jobject self = env->GetObjectField(g_mcInstance, g_playerField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); world = nullptr; self = nullptr; }
+    if (!world || !self) {
+        if (world) env->DeleteLocalRef(world);
+        if (self) env->DeleteLocalRef(self);
+        ClearModernMurderMystery(env);
+        return;
+    }
+    if (!g_modernMurderWorld || env->IsSameObject(world, g_modernMurderWorld) != JNI_TRUE) {
+        ClearModernMurderMystery(env); // new world = new round
+        g_modernMurderWorld = env->NewGlobalRef(world);
+    }
+    EnsureEntityMethods(env, self);
+    DiscoverWorldPlayersListField(env, world);
+    jobject list = g_worldPlayersListField_121 ? env->GetObjectField(world, g_worldPlayersListField_121) : nullptr;
+    if (env->ExceptionCheck()) { env->ExceptionClear(); list = nullptr; }
+    jobjectArray arr = nullptr;
+    if (list) {
+        jclass colCls = env->FindClass("java/util/Collection");
+        jmethodID toArray = colCls ? env->GetMethodID(colCls, "toArray", "()[Ljava/lang/Object;") : nullptr;
+        if (env->ExceptionCheck()) { env->ExceptionClear(); toArray = nullptr; }
+        if (colCls) env->DeleteLocalRef(colCls);
+        if (toArray) arr = (jobjectArray)env->CallObjectMethod(list, toArray);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); arr = nullptr; }
+    }
+    if (!arr || !g_getX_121) {
+        SetModuleStatus121("murdermystery", "Missing world player list mapping");
+        if (arr) env->DeleteLocalRef(arr);
+        if (list) env->DeleteLocalRef(list);
+        env->DeleteLocalRef(self);
+        env->DeleteLocalRef(world);
+        return;
+    }
+    const double sx = CallDoubleNoArgs(env, self, g_getX_121);
+    const double sy = CallDoubleNoArgs(env, self, g_getY_121);
+    const double sz = CallDoubleNoArgs(env, self, g_getZ_121);
+    const int n = (std::min)(200, (int)env->GetArrayLength(arr));
+
+    lc::target::Policy policy;
+    policy.skipTeammates = false;
+    std::vector<aoko::ui::MurderTag> local;
+    for (int i = 0; i < n; ++i) {
+        jobject ent = env->GetObjectArrayElement(arr, i);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); break; }
+        if (!ent) continue;
+        lc::target::Facts facts = BuildTargetFacts121(env, self, ent, false, true);
+        facts.healthKnown = false;
+        if (!lc::target::IsValid(facts, policy)) { env->DeleteLocalRef(ent); continue; }
+
+        jobject stack = MainHandStack121(env, ent);
+        jobject item = StackGetItem121(env, stack);
+        const std::string key = ItemTranslationKey121(env, item);
+        if (item) env->DeleteLocalRef(item);
+        if (stack) env->DeleteLocalRef(stack);
+
+        const bool known = g_modernMurderers.count(facts.stableName) != 0;
+        const lc::beta::MurderRole role = lc::beta::ClassifyMurderRole(key, known);
+        if (role == lc::beta::MM_ROLE_MURDERER) g_modernMurderers.insert(facts.stableName);
+        if (role != lc::beta::MM_ROLE_NONE) {
+            aoko::ui::MurderTag tag;
+            tag.name = facts.stableName;
+            tag.x = CallDoubleNoArgs(env, ent, g_getX_121);
+            tag.y = CallDoubleNoArgs(env, ent, g_getY_121);
+            tag.z = CallDoubleNoArgs(env, ent, g_getZ_121);
+            const double dx = tag.x - sx, dy = tag.y - sy, dz = tag.z - sz;
+            tag.dist = (float)std::sqrt(dx * dx + dy * dy + dz * dz);
+            tag.role = (int)role;
+            local.push_back(tag);
+        }
+        env->DeleteLocalRef(ent);
+    }
+    env->DeleteLocalRef(arr);
+    env->DeleteLocalRef(list);
+    env->DeleteLocalRef(self);
+    env->DeleteLocalRef(world);
+    SetModuleStatus121("murdermystery", "");
+    LockGuard lk(g_modernMurderMutex);
+    g_modernMurder.swap(local);
+}
+
+// ── Break Progress ──
+static std::vector<aoko::ui::BreakTag> g_modernBreaks;
+static Mutex g_modernBreaksMutex;
+static jfieldID g_bpWorldMapField_121 = nullptr;     // ClientLevel.destroyingBlocks (26.x)
+static jfieldID g_bpRendererField_121 = nullptr;     // Minecraft.worldRenderer / levelRenderer
+static jfieldID g_bpRendererMapField_121 = nullptr;  // WorldRenderer.blockBreakingInfos (1.21)
+static jfieldID g_bpGameModeField_121 = nullptr;
+static jfieldID g_bpSelfPosField_121 = nullptr;
+static jfieldID g_bpSelfProgressField_121 = nullptr;
+static jmethodID g_bpInfoActor_121 = nullptr, g_bpInfoPos_121 = nullptr, g_bpInfoStage_121 = nullptr;
+static jmethodID g_bpPosX_121 = nullptr, g_bpPosY_121 = nullptr, g_bpPosZ_121 = nullptr;
+static jmethodID g_bpWorldGetEntity_121 = nullptr;
+static jmethodID g_bpEntityGetId_121 = nullptr;
+static jmethodID g_bpMapValues_121 = nullptr, g_bpToArray_121 = nullptr;
+static bool g_bpResolved_121 = false;
+
+static void ResolveBreakProgress121(JNIEnv* env, jobject world, jobject self) {
+    if (g_bpResolved_121 || !env || !g_mcInstance || !world || !self) return;
+    g_bpResolved_121 = true;
+    static const char* const mapSig[] = { "Lit/unimi/dsi/fastutil/ints/Int2ObjectMap;", nullptr };
+    jclass worldCls = env->GetObjectClass(world);
+    static const char* const worldMapNames[] = { "destroyingBlocks", nullptr };
+    g_bpWorldMapField_121 = FindField121(env, worldCls, worldMapNames, mapSig);
+    static const char* const getEntNames[] = { "getEntityById", "getEntity", "method_8469", nullptr };
+    static const char* const getEntSigs[] = {
+        "(I)Lnet/minecraft/world/entity/Entity;", "(I)Lnet/minecraft/class_1297;", "(I)Lnet/minecraft/entity/Entity;", nullptr
+    };
+    g_bpWorldGetEntity_121 = FindMethod121(env, worldCls, getEntNames, getEntSigs);
+    if (worldCls) env->DeleteLocalRef(worldCls);
+
+    jclass mcCls = env->GetObjectClass(g_mcInstance);
+    if (!g_bpWorldMapField_121) {
+        static const char* const rNames[] = { "worldRenderer", "levelRenderer", "field_1769", nullptr };
+        static const char* const rSigs[] = {
+            "Lnet/minecraft/class_761;", "Lnet/minecraft/client/renderer/LevelRenderer;",
+            "Lnet/minecraft/client/render/WorldRenderer;", nullptr
+        };
+        g_bpRendererField_121 = FindField121(env, mcCls, rNames, rSigs);
+        if (g_bpRendererField_121) {
+            jobject r = env->GetObjectField(g_mcInstance, g_bpRendererField_121);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); r = nullptr; }
+            if (r) {
+                jclass rc = env->GetObjectClass(r);
+                static const char* const mNames[] = { "blockBreakingInfos", "destroyingBlocks", "field_4058", nullptr };
+                g_bpRendererMapField_121 = FindField121(env, rc, mNames, mapSig);
+                if (rc) env->DeleteLocalRef(rc);
+                env->DeleteLocalRef(r);
+            }
+        }
+    }
+    static const char* const gmNames[] = { "gameMode", "interactionManager", "field_1761", nullptr };
+    static const char* const gmSigs[] = {
+        "Lnet/minecraft/client/multiplayer/MultiPlayerGameMode;", "Lnet/minecraft/class_636;",
+        "Lnet/minecraft/client/network/ClientPlayerInteractionManager;", nullptr
+    };
+    g_bpGameModeField_121 = FindField121(env, mcCls, gmNames, gmSigs);
+    if (mcCls) env->DeleteLocalRef(mcCls);
+    if (g_bpGameModeField_121) {
+        jobject gm = env->GetObjectField(g_mcInstance, g_bpGameModeField_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); gm = nullptr; }
+        if (gm) {
+            jclass gc = env->GetObjectClass(gm);
+            static const char* const posNames[] = { "destroyBlockPos", "currentBreakingPos", "field_3714", nullptr };
+            static const char* const posSigs[] = {
+                "Lnet/minecraft/core/BlockPos;", "Lnet/minecraft/class_2338;", "Lnet/minecraft/util/math/BlockPos;", nullptr
+            };
+            g_bpSelfPosField_121 = FindField121(env, gc, posNames, posSigs);
+            static const char* const progNames[] = { "destroyProgress", "currentBreakingProgress", "field_3715", nullptr };
+            static const char* const floatSig[] = { "F", nullptr };
+            g_bpSelfProgressField_121 = FindField121(env, gc, progNames, floatSig);
+            if (gc) env->DeleteLocalRef(gc);
+            env->DeleteLocalRef(gm);
+        }
+    }
+    static const char* const posCls[] = {
+        "net.minecraft.class_2382", "net.minecraft.core.Vec3i", "net.minecraft.util.math.Vec3i", nullptr
+    };
+    jclass vec3i = LoadModernClassGlobal(env, posCls);
+    static const char* const intSig[] = { "()I", nullptr };
+    static const char* const xNames[] = { "getX", "method_10263", nullptr };
+    static const char* const yNames[] = { "getY", "method_10264", nullptr };
+    static const char* const zNames[] = { "getZ", "method_10260", nullptr };
+    g_bpPosX_121 = FindMethod121(env, vec3i, xNames, intSig);
+    g_bpPosY_121 = FindMethod121(env, vec3i, yNames, intSig);
+    g_bpPosZ_121 = FindMethod121(env, vec3i, zNames, intSig);
+    if (vec3i) env->DeleteGlobalRef(vec3i);
+    jclass selfCls = env->GetObjectClass(self);
+    static const char* const idNames[] = { "getId", "method_5628", nullptr };
+    g_bpEntityGetId_121 = FindMethod121(env, selfCls, idNames, intSig);
+    if (selfCls) env->DeleteLocalRef(selfCls);
+    jclass mapCls = env->FindClass("java/util/Map");
+    if (mapCls) { g_bpMapValues_121 = env->GetMethodID(mapCls, "values", "()Ljava/util/Collection;"); env->DeleteLocalRef(mapCls); }
+    jclass colCls = env->FindClass("java/util/Collection");
+    if (colCls) { g_bpToArray_121 = env->GetMethodID(colCls, "toArray", "()[Ljava/lang/Object;"); env->DeleteLocalRef(colCls); }
+    if (env->ExceptionCheck()) env->ExceptionClear();
+}
+
+static bool ReadBlockPos121(JNIEnv* env, jobject pos, int* x, int* y, int* z) {
+    if (!pos || !g_bpPosX_121 || !g_bpPosY_121 || !g_bpPosZ_121) return false;
+    *x = env->CallIntMethod(pos, g_bpPosX_121);
+    *y = env->CallIntMethod(pos, g_bpPosY_121);
+    *z = env->CallIntMethod(pos, g_bpPosZ_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return false; }
+    return true;
+}
+
+static void UpdateBreakProgress121(JNIEnv* env, const Config& cfg) {
+    if (!cfg.breakProgress) SetModuleStatus121("breakprogress", "");
+    if (!env || !cfg.breakProgress || !g_mcInstance || !g_worldField_121 || !g_playerField_121) {
+        LockGuard lk(g_modernBreaksMutex);
+        g_modernBreaks.clear();
+        return;
+    }
+    jobject world = env->GetObjectField(g_mcInstance, g_worldField_121);
+    jobject self = env->GetObjectField(g_mcInstance, g_playerField_121);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); world = nullptr; self = nullptr; }
+    if (!world || !self) {
+        if (world) env->DeleteLocalRef(world);
+        if (self) env->DeleteLocalRef(self);
+        return;
+    }
+    ResolveBreakProgress121(env, world, self);
+    const bool othersReady = (g_bpWorldMapField_121 || (g_bpRendererField_121 && g_bpRendererMapField_121)) &&
+        g_bpMapValues_121 && g_bpToArray_121;
+    const bool selfReady = g_bpGameModeField_121 && g_bpSelfPosField_121 && g_bpSelfProgressField_121;
+    SetModuleStatus121("breakprogress", (!othersReady && !selfReady)
+        ? "Missing block-destruction and game-mode mappings"
+        : (othersReady ? "" : "Only your own mining is shown (destroyingBlocks mapping missing)"));
+
+    std::vector<aoko::ui::BreakTag> local;
+    jint selfId = -1;
+    if (g_bpEntityGetId_121) {
+        selfId = env->CallIntMethod(self, g_bpEntityGetId_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); selfId = -1; }
+    }
+    if (selfReady) {
+        jobject gm = env->GetObjectField(g_mcInstance, g_bpGameModeField_121);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); gm = nullptr; }
+        if (gm) {
+            float prog = env->GetFloatField(gm, g_bpSelfProgressField_121);
+            jobject pos = env->GetObjectField(gm, g_bpSelfPosField_121);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); prog = 0.0f; pos = nullptr; }
+            int bx, by, bz;
+            if (prog > 0.0f && ReadBlockPos121(env, pos, &bx, &by, &bz)) {
+                aoko::ui::BreakTag tag;
+                tag.x = bx + 0.5; tag.y = by + 0.5; tag.z = bz + 0.5;
+                tag.percent = lc::beta::BreakDamageToPercent(prog);
+                tag.self = true;
+                local.push_back(tag);
+            }
+            if (pos) env->DeleteLocalRef(pos);
+            env->DeleteLocalRef(gm);
+        }
+    }
+    if (othersReady) {
+        jobject map = nullptr;
+        if (g_bpWorldMapField_121) {
+            map = env->GetObjectField(world, g_bpWorldMapField_121);
+        } else {
+            jobject r = env->GetObjectField(g_mcInstance, g_bpRendererField_121);
+            if (r && !env->ExceptionCheck()) map = env->GetObjectField(r, g_bpRendererMapField_121);
+            if (r) env->DeleteLocalRef(r);
+        }
+        if (env->ExceptionCheck()) { env->ExceptionClear(); map = nullptr; }
+        jobject values = map ? env->CallObjectMethod(map, g_bpMapValues_121) : nullptr;
+        jobjectArray arr = values ? (jobjectArray)env->CallObjectMethod(values, g_bpToArray_121) : nullptr;
+        if (env->ExceptionCheck()) { env->ExceptionClear(); arr = nullptr; }
+        const int n = arr ? (std::min)(64, (int)env->GetArrayLength(arr)) : 0;
+        for (int i = 0; i < n; ++i) {
+            jobject info = env->GetObjectArrayElement(arr, i);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); break; }
+            if (!info) continue;
+            if (!g_bpInfoActor_121 || !g_bpInfoPos_121 || !g_bpInfoStage_121) {
+                jclass ic = env->GetObjectClass(info);
+                static const char* const intSig[] = { "()I", nullptr };
+                static const char* const actorNames[] = { "getActorId", "getId", "method_34868", nullptr };
+                static const char* const stageNames[] = { "getStage", "getProgress", "method_13988", nullptr };
+                static const char* const posNames[] = { "getPos", "method_13991", nullptr };
+                static const char* const posSigs[] = {
+                    "()Lnet/minecraft/core/BlockPos;", "()Lnet/minecraft/class_2338;", "()Lnet/minecraft/util/math/BlockPos;", nullptr
+                };
+                g_bpInfoActor_121 = FindMethod121(env, ic, actorNames, intSig);
+                g_bpInfoStage_121 = FindMethod121(env, ic, stageNames, intSig);
+                g_bpInfoPos_121 = FindMethod121(env, ic, posNames, posSigs);
+                if (ic) env->DeleteLocalRef(ic);
+            }
+            if (!g_bpInfoActor_121 || !g_bpInfoPos_121 || !g_bpInfoStage_121) { env->DeleteLocalRef(info); break; }
+            jint actor = env->CallIntMethod(info, g_bpInfoActor_121);
+            jint stage = env->CallIntMethod(info, g_bpInfoStage_121);
+            jobject pos = env->CallObjectMethod(info, g_bpInfoPos_121);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); env->DeleteLocalRef(info); continue; }
+            int bx, by, bz;
+            if (actor != selfId && stage >= 0 && ReadBlockPos121(env, pos, &bx, &by, &bz)) {
+                aoko::ui::BreakTag tag;
+                tag.x = bx + 0.5; tag.y = by + 0.5; tag.z = bz + 0.5;
+                tag.percent = lc::beta::BreakStageToPercent(stage);
+                tag.self = false;
+                if (g_bpWorldGetEntity_121) {
+                    jobject breaker = env->CallObjectMethod(world, g_bpWorldGetEntity_121, actor);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); breaker = nullptr; }
+                    if (breaker) {
+                        if (g_playerEntityClass_121 && env->IsInstanceOf(breaker, g_playerEntityClass_121) == JNI_TRUE)
+                            tag.breaker = GetStablePlayerName(env, breaker);
+                        env->DeleteLocalRef(breaker);
+                    }
+                }
+                local.push_back(tag);
+            }
+            if (pos) env->DeleteLocalRef(pos);
+            env->DeleteLocalRef(info);
+        }
+        if (arr) env->DeleteLocalRef(arr);
+        if (values) env->DeleteLocalRef(values);
+        if (map) env->DeleteLocalRef(map);
+    }
+    env->DeleteLocalRef(self);
+    env->DeleteLocalRef(world);
+    LockGuard lk(g_modernBreaksMutex);
+    g_modernBreaks.swap(local);
+}
+
+static void ClearModernBetaOverlays(JNIEnv* env) {
+    ClearModernTrajectory();
+    ClearModernMurderMystery(env);
+    { LockGuard lk(g_modernBreaksMutex); g_modernBreaks.clear(); }
+}
+
+// Re-arms the Beta modules' resolve-once latches and releases their class refs.
+// Called from the mapping reload path and from CleanupJniGlobals.
+static void ResetBetaModuleCaches121(JNIEnv* env) {
+    DeleteGlobalRefSafe(env, g_livingEntityClass_121);
+    g_entityHitResultGetEntity_121 = nullptr;
+    g_hitSelectResolved_121 = false;
+    DeleteGlobalRefSafe(env, g_trajBowCls_121);
+    DeleteGlobalRefSafe(env, g_trajSnowballCls_121);
+    DeleteGlobalRefSafe(env, g_trajEggCls_121);
+    DeleteGlobalRefSafe(env, g_trajPearlCls_121);
+    DeleteGlobalRefSafe(env, g_trajPotionCls_121);
+    DeleteGlobalRefSafe(env, g_trajExpCls_121);
+    g_trajClassesTried_121 = false;
+    g_trajUseTicks_121 = nullptr;
+    g_trajEyeY_121 = nullptr;
+    g_betaStackGetItem_121 = nullptr;
+    g_betaItemTranslationKey_121 = nullptr;
+    g_bpWorldMapField_121 = nullptr;
+    g_bpRendererField_121 = nullptr;
+    g_bpRendererMapField_121 = nullptr;
+    g_bpGameModeField_121 = nullptr;
+    g_bpSelfPosField_121 = nullptr;
+    g_bpSelfProgressField_121 = nullptr;
+    g_bpInfoActor_121 = g_bpInfoPos_121 = g_bpInfoStage_121 = nullptr;
+    g_bpPosX_121 = g_bpPosY_121 = g_bpPosZ_121 = nullptr;
+    g_bpWorldGetEntity_121 = nullptr;
+    g_bpEntityGetId_121 = nullptr;
+    g_bpResolved_121 = false;
+    g_jumpKeyField_121 = nullptr;
+    g_jumpResetOnGround_121 = nullptr;
+    DeleteGlobalRefSafe(env, g_modernMurderWorld);
+    g_modernMurderers.clear();
+}
+
 static DWORD WINAPI FastPollThreadProc(LPVOID) {
     JNIEnv* env = nullptr;
     if (!g_jvm || g_jvm->AttachCurrentThread((void**)&env, nullptr) != JNI_OK) return 1;
@@ -17058,6 +18554,9 @@ static DWORD WINAPI FastPollThreadProc(LPVOID) {
                         UpdateAutoToolModern(env, cfg);
                     }
                     UpdateReach(env, cfg);
+                    // Before UpdateVelocity: it clears hurtTime for No Hurt Cam.
+                    if (cfg.jumpReset || g_jumpResetHolding_121 || g_jumpResetPrevHurt_121 != 0)
+                        UpdateJumpReset121(env, cfg);
                     UpdateVelocity(env, cfg);
                 }
                 // Camera validity is part of the transition readiness handshake;
@@ -17089,6 +18588,15 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
     DWORD lastPixelPartyMs = 0;
     DWORD lastClosestPlayerMs = 0;
     DWORD lastNickHiderFallbackMs = 0;
+    DWORD lastFastPlaceMs = 0;
+    DWORD lastSprintMs = 0;
+    DWORD lastWTapMs = 0;
+    DWORD lastNoHurtCamMs = 0;
+    DWORD lastTntScanMs = 0;
+    DWORD lastTrajectoryMs = 0;
+    DWORD lastMurderMysteryMs = 0;
+    DWORD lastBreakProgressMs = 0;
+    DWORD lastModuleStatusMs = 0;
     bool chestEspScanWasEnabled = false;
     bool entityProducerWasEnabled = false;
     // Teleport detection: track last scanned player position to catch same-world jumps
@@ -17221,11 +18729,18 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                             if (g_lastAutoTotemWorld_121) {
                                 ScheduleWorldTransition(env, "world-instance-changed");
                             }
-                            ResetAutoRodModernCaches(env);
-                            ResetAutoTotemCaches(env);
-                            ResetAutoToolModernCaches(env);
-                            if (g_lastAutoTotemWorld_121) env->DeleteGlobalRef(g_lastAutoTotemWorld_121);
-                            g_lastAutoTotemWorld_121 = env->NewGlobalRef(worldObj);
+                            // These lookups are also read by the fast-poll thread
+                            // (AutoTool, AutoTotem, Jump Reset/Hit Select hurt time).
+                            // Reset them under g_jniRemapMtx so a reset cannot land
+                            // between that thread's null check and its JNI call.
+                            {
+                                LockGuard remapGuard(g_jniRemapMtx);
+                                ResetAutoRodModernCaches(env);
+                                ResetAutoTotemCaches(env);
+                                ResetAutoToolModernCaches(env);
+                                if (g_lastAutoTotemWorld_121) env->DeleteGlobalRef(g_lastAutoTotemWorld_121);
+                                g_lastAutoTotemWorld_121 = env->NewGlobalRef(worldObj);
+                            }
                         }
                         env->DeleteLocalRef(worldObj);
                     }
@@ -17303,7 +18818,90 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                             lastPixelPartyMs = nowMs;
                         }
                     }
-                    const bool chunkScansEnabled = cfg.chestEsp || cfg.chestStealer || cfg.blockEsp || cfg.bedPlates;
+
+                    static bool s_fastPlaceWasEnabled = false;
+                    if (cfg.fastPlace || s_fastPlaceWasEnabled) {
+                        if (!cfg.fastPlace || lc::IsTelemetryIntervalDue(nowMs, lastFastPlaceMs, lc::kFastPlaceIntervalMs)) {
+                            jclass mcCls = env->GetObjectClass(g_mcInstance);
+                            UpdateFastPlace121(env, cfg.fastPlace, g_realGuiOpen, inWorldNow, mcCls);
+                            if (mcCls) env->DeleteLocalRef(mcCls);
+                            lastFastPlaceMs = nowMs;
+                            s_fastPlaceWasEnabled = cfg.fastPlace;
+                        }
+                    }
+
+                    static bool s_sprintWasEnabled = false;
+                    if (cfg.sprint || s_sprintWasEnabled || g_sprintManaging121) {
+                        if (lc::IsTelemetryIntervalDue(nowMs, lastSprintMs, lc::kSprintIntervalMs) ||
+                            (!cfg.sprint && s_sprintWasEnabled)) {
+                            UpdateSprint121(env, cfg.sprint, g_realGuiOpen, inWorldNow);
+                            lastSprintMs = nowMs;
+                            s_sprintWasEnabled = cfg.sprint;
+                        }
+                    }
+
+                    static bool s_wTapWasEnabled = false;
+                    if (cfg.wTap || s_wTapWasEnabled) {
+                        if (!cfg.wTap || lc::IsTelemetryIntervalDue(nowMs, lastWTapMs, lc::kWTapIntervalMs)) {
+                            UpdateWTap121(env, cfg.wTap, g_realGuiOpen, inWorldNow, lastObservedPlayer);
+                            lastWTapMs = nowMs;
+                            s_wTapWasEnabled = cfg.wTap;
+                        }
+                    }
+
+                    static bool s_noHurtCamWasEnabled = false;
+                    if (cfg.noHurtCam || s_noHurtCamWasEnabled) {
+                        if (!cfg.noHurtCam || lc::IsTelemetryIntervalDue(nowMs, lastNoHurtCamMs, lc::kNoHurtCamIntervalMs)) {
+                            UpdateNoHurtCam121(env, cfg.noHurtCam, lastObservedPlayer);
+                            lastNoHurtCamMs = nowMs;
+                            s_noHurtCamWasEnabled = cfg.noHurtCam;
+                        }
+                    }
+
+                    static bool s_tntTimerWasEnabled = false;
+                    if (cfg.tntTimer || s_tntTimerWasEnabled) {
+                        if (!cfg.tntTimer) {
+                            LockGuard lk(g_modernTntMutex);
+                            g_modernTntRecords.clear();
+                            s_tntTimerWasEnabled = false;
+                        } else if (lc::IsTelemetryIntervalDue(nowMs, lastTntScanMs, 50)) {
+                            UpdateTntScan121(env, cfg);
+                            lastTntScanMs = nowMs;
+                            s_tntTimerWasEnabled = true;
+                        }
+                    }
+
+                    if (lc::IsTelemetryIntervalDue(nowMs, lastModuleStatusMs, 500)) {
+                        UpdateSimpleModuleStatus121(cfg);
+                        lastModuleStatusMs = nowMs;
+                    }
+                    if (cfg.trajectories) {
+                        if (lc::IsTelemetryIntervalDue(nowMs, lastTrajectoryMs, lc::kTrajectoryIntervalMs)) {
+                            UpdateTrajectories121(env, cfg);
+                            lastTrajectoryMs = nowMs;
+                        }
+                    } else {
+                        ClearModernTrajectory();
+                    }
+                    if (cfg.murderMystery) {
+                        if (lc::IsTelemetryIntervalDue(nowMs, lastMurderMysteryMs, lc::kMurderMysteryIntervalMs)) {
+                            UpdateMurderMystery121(env, cfg);
+                            lastMurderMysteryMs = nowMs;
+                        }
+                    } else {
+                        ClearModernMurderMystery(env);
+                    }
+                    if (cfg.breakProgress) {
+                        if (lc::IsTelemetryIntervalDue(nowMs, lastBreakProgressMs, lc::kBreakProgressIntervalMs)) {
+                            UpdateBreakProgress121(env, cfg);
+                            lastBreakProgressMs = nowMs;
+                        }
+                    } else {
+                        LockGuard lkBp(g_modernBreaksMutex);
+                        g_modernBreaks.clear();
+                    }
+
+                    const bool chunkScansEnabled = cfg.chestEsp || cfg.chestStealer || cfg.clickInChests || cfg.blockEsp || cfg.bedPlates;
                     const bool chunkScanReady = !chunkScansEnabled ||
                         (!IsWorldTransitionActive() && ProbeModernChunkObject(env));
                     static bool s_fightStatusWasEnabled = false;
@@ -17312,7 +18910,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                     const bool entityProducerEnabled =
                         cfg.nametags || cfg.nickHiderEnabled || cfg.closestPlayer ||
                         cfg.fightStatus || cfg.aimAssist || cfg.triggerbot ||
-                        cfg.fireballWarning ||
+                        cfg.fireballWarning || cfg.tntTimer ||
                         cfg.nametagHideVanilla || g_nametagSuppressionActive_121;
                     const unsigned int playerInterval = lc::PlayerOverlayIntervalMs(
                         cfg.aimAssist || cfg.triggerbot);
@@ -17330,7 +18928,8 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                     }
                     entityProducerWasEnabled = entityProducerEnabled;
                     const DWORD producerNowMs = GetTickCount();
-                    const bool chestEspScanEnabled = cfg.chestEsp || cfg.chestStealer;
+                    // Click in Chests reuses the physical-chest check, which reads the scanned chest list.
+                    const bool chestEspScanEnabled = cfg.chestEsp || cfg.chestStealer || cfg.clickInChests;
                     const bool chestEspScanDue =
                         !chestEspScanWasEnabled ||
                         lc::IsTelemetryIntervalDue(
@@ -17352,7 +18951,10 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
             } else if (g_stateJniReady && !inWorldNow) {
                 if (hadLivePlayer)
                     ScheduleWorldTransition(env, "left-world");
-                ResetAutoRodModernCaches(env);
+                {
+                    LockGuard remapGuard(g_jniRemapMtx);
+                    ResetAutoRodModernCaches(env);
+                }
                 // Left world — reset caches so next world gets fresh JNI lookups
                 lastScanPosValid = false;
                 hadLivePlayer = false;
@@ -17360,7 +18962,10 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                     env->DeleteGlobalRef(lastObservedPlayer);
                     lastObservedPlayer = nullptr;
                 }
-                ResetAutoTotemCaches(env);
+                {
+                    LockGuard remapGuard(g_jniRemapMtx);
+                    ResetAutoTotemCaches(env);
+                }
                 DeleteGlobalRefSafe(env, g_lastAutoTotemWorld_121);
                 if (g_nametagSuppressionActive_121 || !g_modifiedTeamVisibility_121.empty() || !g_lcHideTagsMembers_121.empty()) {
                     ResetNametagSuppressionCaches121(env, "left-world");
@@ -17375,6 +18980,8 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
                 { LockGuard lkCache(g_blockEspCacheMutex); g_blockEspChunkCache.clear(); }
                 { LockGuard lk3(g_bgCamMutex); g_bgCamState = BgCamState(); }
                 { LockGuard lk4(g_pixelPartyMutex); g_pixelPartySnap = PixelPartySnap121(); }
+                { LockGuard lkTnt(g_modernTntMutex); g_modernTntRecords.clear(); }
+                ClearModernBetaOverlays(env);
                 // Mapping-only reloads are allowed to complete in menus; genuine
                 // world transitions remain active until a world is present again.
                 TryCompleteWorldTransition(env, false);
@@ -17401,6 +19008,8 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
             { LockGuard lkb(g_blockEspListMutex); g_blockEspList.clear(); }
             { LockGuard lkCache(g_blockEspCacheMutex); g_blockEspChunkCache.clear(); }
             { LockGuard lk3(g_bgCamMutex); g_bgCamState = BgCamState(); }
+            { LockGuard lkTnt(g_modernTntMutex); g_modernTntRecords.clear(); }
+            ClearModernBetaOverlays(env);
         }
         RecordNativePerfSince(lc::PERF_SCAN_LOOP, scanLoopPerfStarted);
         MaybeLogNativePerfDiagnostics();
@@ -17424,17 +19033,38 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
             lc::ConsiderJobSleep(
                 &sleepMs, sleepNow, lastClosestPlayerMs, lc::kClosestPlayerIntervalMs, cfg.closestPlayer);
             lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastTrajectoryMs, lc::kTrajectoryIntervalMs, cfg.trajectories);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastMurderMysteryMs, lc::kMurderMysteryIntervalMs, cfg.murderMystery);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastBreakProgressMs, lc::kBreakProgressIntervalMs, cfg.breakProgress);
+            lc::ConsiderJobSleep(
                 &sleepMs, sleepNow, lastPlayerScanMs,
                 lc::PlayerOverlayIntervalMs(cfg.aimAssist || cfg.triggerbot),
                 cfg.nametags || cfg.nickHiderEnabled || cfg.closestPlayer ||
-                cfg.fireballWarning ||
+                cfg.fireballWarning || cfg.tntTimer ||
                 cfg.fightStatus || cfg.aimAssist || cfg.triggerbot || cfg.nametagHideVanilla);
             lc::ConsiderJobSleep(
                 &sleepMs, sleepNow, lastChestEspScanMs, lc::kChestEspScanIntervalMs,
-                cfg.chestEsp || cfg.chestStealer);
+                cfg.chestEsp || cfg.chestStealer || cfg.clickInChests);
             lc::ConsiderJobSleep(
                 &sleepMs, sleepNow, lastNickHiderFallbackMs, lc::kStateReadIntervalMs,
                 cfg.nickHiderEnabled);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastFastPlaceMs, lc::kFastPlaceIntervalMs,
+                cfg.fastPlace);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastSprintMs, lc::kSprintIntervalMs,
+                cfg.sprint || g_sprintManaging121);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastWTapMs, lc::kWTapIntervalMs,
+                cfg.wTap);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastNoHurtCamMs, lc::kNoHurtCamIntervalMs,
+                cfg.noHurtCam);
+            lc::ConsiderJobSleep(
+                &sleepMs, sleepNow, lastTntScanMs, 50,
+                cfg.tntTimer);
         }
         if (sleepMs > 0) Sleep(sleepMs);
     }
@@ -17475,9 +19105,7 @@ static void UpdateHudEditor(int winW, int winH) {
         // the GLFW query above yields nothing. Fall back to the OS cursor visibility, which
         // tracks whether the game has released the cursor (a GUI/chat is open) on either
         // renderer. Harmless for OpenGL: a truly captured cursor is also not "showing".
-        CURSORINFO ci = {};
-        ci.cbSize = sizeof(ci);
-        if (GetCursorInfo(&ci)) cursorAvailable = (ci.flags & CURSOR_SHOWING) != 0;
+        cursorAvailable = IsOsCursorVisible();
     }
 
     ImGuiIO& io = ImGui::GetIO();
@@ -17522,6 +19150,10 @@ static void UpdateHudEditor(int winW, int winH) {
         lc::HudElementLayout el = layoutSnap.Resolve(baseSizes[i].id);
         float sw = baseSizes[i].w * el.scale;
         float sh = baseSizes[i].h * el.scale;
+        if (std::strcmp(baseSizes[i].id, lc::ELEM_MODULELIST) == 0) {
+            sw = g_moduleListBaseWidth121 * el.scale;
+            sh = g_moduleListBaseHeight121 * el.scale;
+        }
         ImVec2 tl = lc::HudElementPixelPos(el, sw, sh, winW, winH);
         elems.push_back({ baseSizes[i].id, tl, sw, sh });
     }
@@ -17545,6 +19177,8 @@ static void UpdateHudEditor(int winW, int winH) {
             if (inGrip) {
                 g_hudEditor.grabbedId = e.id;
                 g_hudEditor.mode = lc::HudEditorState::Mode::Resize;
+                g_hudEditor.resizeStartMouseX = mouse.x;
+                g_hudEditor.resizeStartW = e.w;
                 break;
             } else if (inBody) {
                 g_hudEditor.grabbedId = e.id;
@@ -17571,9 +19205,18 @@ static void UpdateHudEditor(int winW, int winH) {
             for (int i = 0; bs[i].id; ++i) {
                 if (g_hudEditor.grabbedId == bs[i].id) { baseW = bs[i].w; break; }
             }
-            float anchorPx = el.x * (float)winW;
-            float desiredW = mouse.x - anchorPx;
+            if (g_hudEditor.grabbedId == lc::ELEM_MODULELIST && g_moduleListBaseWidth121 > 1.0f) {
+                baseW = g_moduleListBaseWidth121;
+            }
+            const bool rightAnchored = (g_hudEditor.grabbedId == lc::ELEM_MODULELIST);
+            const float deltaX = mouse.x - g_hudEditor.resizeStartMouseX;
+            const float desiredW = rightAnchored
+                ? g_hudEditor.resizeStartW - deltaX
+                : g_hudEditor.resizeStartW + deltaX;
             el.scale = lc::ClampHudScale(desiredW / baseW);
+            // Do not rewrite el.x here. It is a normalized left anchor and the
+            // default right-aligned list relies on HudElementPixelPos clamping to
+            // keep its right edge steady as the content width changes.
         }
     }
 
@@ -17590,24 +19233,16 @@ static void UpdateHudEditor(int winW, int winH) {
     grabbedIdForDraw = g_hudEditor.grabbedId;
     }
     ImDrawList* fg = ImGui::GetForegroundDrawList();
+    const float editorScale = (std::max)(0.75f, ImGui::GetFontSize() / 16.0f);
     for (const auto& e : elems) {
         lc::HudElementLayout el = layoutDraw.Resolve(e.id);
-        float sw = e.w; // already scaled
-        float sh = e.h;
+        const float sw = e.w; // already scaled
+        const float sh = e.h;
         ImVec2 tl = lc::HudElementPixelPos(el, sw, sh, winW, winH);
         ImVec2 br(tl.x + sw, tl.y + sh);
-
-        bool grabbed = (grabbedIdForDraw == e.id);
-        ImU32 boxCol = grabbed ? IM_COL32(255, 200, 50, 200) : IM_COL32(80, 180, 255, 140);
-        fg->AddRect(tl, br, boxCol, 4.0f, 0, grabbed ? 2.0f : 1.5f);
-
-        // Label
-        fg->AddText(ImVec2(tl.x + 4, tl.y + 3), IM_COL32(255, 255, 255, 200), e.id.c_str());
-
-        // Corner resize grip
-        const float gripSz = 12.0f;
-        ImVec2 gripTL(br.x - gripSz, br.y - gripSz);
-        fg->AddRectFilled(gripTL, br, boxCol, 2.0f);
+        const bool grabbed = (grabbedIdForDraw == e.id);
+        aoko::ui::EditorOutline(fg, tl, br, IM_COL32(127, 158, 255, 255),
+                                aoko::ui::PrettyElementId(e.id.c_str()), grabbed, editorScale);
     }
 }
 
@@ -17699,58 +19334,119 @@ static void RenderOverlayPanels(
                     statsRow += cp.heldItem;
                 }
 
-                // Layout
-                ImVec2 nameSz  = ImGui::CalcTextSize(nameRow);
-                ImVec2 statsSz = statsRow.empty() ? ImVec2{0,0} : ImGui::CalcTextSize(statsRow.c_str());
+                lc::HudElementLayout cpLayout = hudLayout.Resolve(lc::ELEM_CLOSESTPLAYER);
+                const float cpScale = cpLayout.scale;
+                const float cpFont = fontSz * cpScale;
+                const float cpSmall = cpFont * 0.80f;
+                const float cpMicro = cpFont * 0.50f;
+                const float cpPadX = 9.0f * cpScale;
+                const float cpPadY = 7.0f * cpScale;
+                const float cpHpBarH = 5.0f * cpScale;
+                const float cpGap = 3.0f * cpScale;
 
-                float contentW = std::max({boxW, nameSz.x + padX * 2, statsSz.x + padX * 2});
-                float contentH = padY + fontSz + gapRow;
-                contentH += hpBarH + gapRow;
-                if (!statsRow.empty()) contentH += smallSz + gapRow;
-                contentH += padY;
+                ImVec2 nameSz = ImGui::CalcTextSize(cp.name.c_str());
+                nameSz.x *= cpScale;
+                ImVec2 statsSz = statsRow.empty() ? ImVec2(0, 0) : ImGui::CalcTextSize(statsRow.c_str());
+                statsSz.x *= cpScale;
+                statsSz.y *= cpScale;
 
-                lc::HudElementLayout cpLayout;
-                cpLayout = hudLayout.Resolve(lc::ELEM_CLOSESTPLAYER);
-                contentW *= cpLayout.scale;
-                contentH *= cpLayout.scale;
+                float contentW = (std::max)(220.0f * cpScale,
+                    nameSz.x + 28.0f * cpScale + cpPadX * 2.0f);
+                contentW = (std::max)(contentW, statsSz.x + cpPadX * 2.0f);
+                float contentH = cpPadY + cpMicro + cpGap + cpFont + cpGap * 1.5f +
+                    cpHpBarH + cpGap;
+                if (!statsRow.empty()) contentH += statsSz.y + cpGap;
+                contentH += cpPadY;
 
                 ImVec2 cpTL = lc::HudElementPixelPos(cpLayout, contentW, contentH, winW, winH);
-                float rx = cpTL.x;
-                float ry = cpTL.y;
-                float cx = rx + contentW * 0.5f;
+                const float rx = cpTL.x;
+                const float ry = cpTL.y;
+                const float rxe = rx + contentW;
+                const float rye = ry + contentH;
 
-                ImVec2 pMin(rx, ry);
-                ImVec2 pMax(rx + contentW, ry + contentH);
+                const aoko::ui::Theme cpUi = BuildOverlayUiTheme(overlayTheme);
+                const float cpHealth = std::isfinite(cp.hp) ? (float)cp.hp : 20.0f;
+                const float hpPct = std::max(0.0f, std::min(cpHealth / 20.0f, 1.0f));
+                const float lowPulse = cpHealth <= 6.0f
+                    ? 0.55f + 0.45f * (0.5f + 0.5f * std::sin((float)ImGui::GetTime() * 6.2f))
+                    : 0.0f;
+                aoko::ui::Panel(fg, cpUi, ImVec2(rx, ry), ImVec2(rxe, rye), 7.0f * cpScale,
+                                2.0f + lowPulse * 7.0f, true);
+                fg->AddRectFilled(ImVec2(rx + 1.0f, ry + 6.0f * cpScale),
+                                  ImVec2(rx + 3.2f * cpScale, rye - 6.0f * cpScale),
+                                  aoko::ui::WithAlpha(cpUi.accent, (int)(170 + lowPulse * 60.0f)),
+                                  1.0f * cpScale);
 
-                // Background + outline + left accent bar
-                fg->AddRectFilled(pMin, pMax, overlayTheme.moduleBg, 6.0f);
-                fg->AddRect(pMin, pMax, overlayTheme.moduleGlassBorder, 6.0f, 0, 1.0f);
-                fg->AddRectFilled(ImVec2(rx, ry), ImVec2(rx + 3.0f * cpLayout.scale, ry + contentH), overlayTheme.accentPrimary, 3.0f);
+                float curY = ry + cpPadY;
 
-                float curY = ry + padY;
+                aoko::ui::TrackedText(fg, ImVec2(rx + cpPadX, curY), "CLOSEST", cpMicro,
+                                      cpUi.accent, 1.3f * cpScale);
+                char distBuf[24];
+                snprintf(distBuf, sizeof(distBuf), "%.0fm", cp.dist);
+                const float distW = aoko::ui::TextWidth(distBuf, cpSmall * 0.92f);
+                const float chipW = 7.0f * cpScale + 3.5f * cpScale + 4.0f * cpScale +
+                    distW + 7.0f * cpScale;
+                const float chipH = cpMicro + 6.0f * cpScale;
+                ImVec2 chipA(rxe - cpPadX - chipW, curY - 1.0f * cpScale);
+                ImVec2 chipB(rxe - cpPadX, chipA.y + chipH);
+                fg->AddRectFilled(chipA, chipB, aoko::ui::WithAlpha(cpUi.accent, 24), 2.0f * cpScale);
+                fg->AddRect(chipA, chipB, aoko::ui::WithAlpha(cpUi.accent, 62),
+                            2.0f * cpScale, 0, 1.0f);
+                aoko::ui::Chevron(fg, ImVec2(chipA.x + 6.5f * cpScale,
+                                             (chipA.y + chipB.y) * 0.5f),
+                                  dirArrow, 3.0f * cpScale, cpUi.accent);
+                aoko::ui::Text(fg, ImVec2(chipA.x + 12.0f * cpScale, chipA.y + 2.5f * cpScale),
+                               distBuf, cpSmall * 0.92f, cpUi.textDim);
 
-                // Name + distance row (white)
-                float ntx = std::floor(cx - nameSz.x * 0.5f);
-                fg->AddText(ImVec2(ntx + 1, curY + 1), overlayTheme.moduleTextShadow, nameRow);
-                fg->AddText(ImVec2(ntx, curY), overlayTheme.moduleText, nameRow);
-                curY += fontSz + gapRow;
+                curY += cpMicro + cpGap;
 
-                // HP bar
-                float hpPct = std::max(0.0f, std::min((float)cp.hp / 20.0f, 1.0f));
-                float barX0 = rx + padX;
-                float barX1 = rx + contentW - padX;
-                float barFill = barX0 + (barX1 - barX0) * hpPct;
-                ImU32 barCol = IM_COL32((int)(255*(1.0f-hpPct)), (int)(220*hpPct+35), 60, 255);
-                fg->AddRectFilled(ImVec2(barX0, curY), ImVec2(barX1, curY + hpBarH), IM_COL32(20, 24, 32, 200), 2.0f);
-                fg->AddRectFilled(ImVec2(barX0, curY), ImVec2(barFill, curY + hpBarH), barCol, 2.0f);
-                curY += hpBarH + gapRow;
+                const float avatarR = 7.0f * cpScale;
+                ImVec2 avatarC(rx + cpPadX + avatarR, curY + cpFont * 0.5f);
+                fg->AddCircleFilled(avatarC, avatarR, aoko::ui::WithAlpha(cpUi.accent, 30), 18);
+                fg->AddCircle(avatarC, avatarR, aoko::ui::WithAlpha(cpUi.accent, 95), 18, 1.0f);
+                char initial[2] = { 0, 0 };
+                for (size_t i = 0; i < cp.name.size(); ++i) {
+                    if (std::isalnum((unsigned char)cp.name[i])) {
+                        initial[0] = (char)std::toupper((unsigned char)cp.name[i]);
+                        break;
+                    }
+                }
+                if (!initial[0]) initial[0] = '?';
+                aoko::ui::TextCentered(fg, avatarC.x, avatarC.y - cpSmall * 0.5f, initial,
+                                       cpSmall * 0.92f, cpUi.text);
 
-                // Stats row (smaller, soft colour)
+                aoko::ui::TextShadowed(fg, ImVec2(avatarC.x + avatarR + 6.0f * cpScale, curY),
+                                       cp.name.c_str(), cpFont, cpUi.text,
+                                       aoko::ui::WithAlpha(cpUi.shadow, 120),
+                                       (std::max)(1.0f, cpScale));
+                curY += cpFont + cpGap * 1.5f;
+
+                const float barX0 = rx + cpPadX;
+                const float barX1 = rxe - cpPadX;
+                const float barFill = barX0 + (barX1 - barX0) * hpPct;
+                fg->AddRectFilled(ImVec2(barX0, curY), ImVec2(barX1, curY + cpHpBarH),
+                                  IM_COL32(8, 14, 22, 190), 2.0f * cpScale);
+                if (hpPct > 0.0f) {
+                    const ImU32 hpCol = aoko::ui::HealthColor(hpPct);
+                    fg->AddRectFilledMultiColor(
+                        ImVec2(barX0, curY), ImVec2(barFill, curY + cpHpBarH),
+                        aoko::ui::WithAlpha(hpCol, 235), aoko::ui::WithAlpha(hpCol, 235),
+                        aoko::ui::WithAlpha(aoko::ui::Mix(hpCol, IM_COL32(0, 0, 0, 255), 0.24f), 235),
+                        aoko::ui::WithAlpha(aoko::ui::Mix(hpCol, IM_COL32(0, 0, 0, 255), 0.24f), 235));
+                    fg->AddRectFilled(ImVec2(barX0, curY + 0.5f * cpScale),
+                                      ImVec2(barFill, curY + 1.2f * cpScale),
+                                      IM_COL32(255, 255, 255, 70), 1.0f * cpScale);
+                }
+                fg->AddLine(ImVec2(barX0 + (barX1 - barX0) * 0.5f, curY + 0.5f * cpScale),
+                            ImVec2(barX0 + (barX1 - barX0) * 0.5f, curY + cpHpBarH - 0.5f * cpScale),
+                            IM_COL32(0, 0, 0, 55), 1.0f);
+                curY += cpHpBarH + cpGap;
+
                 if (!statsRow.empty()) {
-                    float stx = std::floor(cx - statsSz.x * 0.5f);
-                    fg->AddText(ImGui::GetFont(), smallSz, ImVec2(stx + 1, curY + 1), overlayTheme.moduleTextShadow, statsRow.c_str());
-                    ImU32 sCol = cp.hp <= 6.0f ? IM_COL32(255, 100, 100, 240) : overlayTheme.moduleTagText;
-                    fg->AddText(ImGui::GetFont(), smallSz, ImVec2(stx, curY), sCol, statsRow.c_str());
+                    aoko::ui::TextShadowed(fg, ImVec2(rx + cpPadX, curY), statsRow.c_str(),
+                                           cpSmall,
+                                           cpHealth <= 6.0f ? aoko::ui::SemanticBad() : cpUi.textDim,
+                                           aoko::ui::WithAlpha(cpUi.shadow, 110), 1.0f);
                 }
             }
 
@@ -17760,16 +19456,11 @@ static void RenderOverlayPanels(
                 PixelPartySnap121 ppSnap;
                 { LockGuard lk(g_pixelPartyMutex); ppSnap = g_pixelPartySnap; }
 
-                const float fontSz = ImGui::GetFontSize();
-                const float smallSz = std::floor(fontSz * 0.82f);
-                const float padX = 10.0f;
-                const float padY = 6.0f;
-                const float gapRow = 3.0f;
-                const float boxW = 240.0f;
-
-                char mainRow[128];
+                const float baseFont = ImGui::GetFontSize();
                 char dirArrow = '^';
                 bool dirResolved = false;
+                const ImU32 partyCol = ppSnap.targetFound
+                    ? aoko::ui::PartyColor(ppSnap.colorLabel) : overlayTheme.accentPrimary;
 
                 if (ppSnap.targetFound && cpCamState.camFound) {
                     LegoVec3 camPos = { cpCamState.camX, cpCamState.camY, cpCamState.camZ };
@@ -17792,7 +19483,7 @@ static void RenderOverlayPanels(
                         fg->AddLine(
                             ImVec2(io.DisplaySize.x * 0.5f, io.DisplaySize.y * 0.5f),
                             ImVec2(sx, sy),
-                            WithAlpha(overlayTheme.accentPrimary, 120), 1.5f);
+                            aoko::ui::WithAlpha(partyCol, 110), 1.4f);
                     }
                 }
 
@@ -17806,61 +19497,105 @@ static void RenderOverlayPanels(
                     else dirArrow = (delta < 0.0f) ? '<' : '>';
                 }
 
-                const char* colorName = ppSnap.colorLabel.empty() ? "?" : ppSnap.colorLabel.c_str();
+                std::string mainText;
                 if (ppSnap.targetFound) {
-                    snprintf(mainRow, sizeof(mainRow), "%c %s  %.0fm", dirArrow, colorName, ppSnap.dist);
+                    mainText = ppSnap.colorLabel.empty() ? "Target" : ppSnap.colorLabel;
                 } else if (!ppSnap.holdingValid) {
-                    snprintf(mainRow, sizeof(mainRow), "Hold terracotta");
+                    mainText = "Hold terracotta";
                 } else {
-                    snprintf(mainRow, sizeof(mainRow), "%s", ppSnap.status.empty() ? "No match" : ppSnap.status.c_str());
+                    mainText = ppSnap.status.empty() ? "No match" : ppSnap.status;
                 }
-
-                std::string titleRow = "Pixel Party";
-                std::string subRow;
-                if (!ppSnap.status.empty() && ppSnap.targetFound)
-                    subRow = ppSnap.status;
+                std::string statusText;
+                if (!ppSnap.status.empty() && ppSnap.targetFound) statusText = ppSnap.status;
                 else if (ppSnap.holdingValid && !ppSnap.targetFound && !ppSnap.status.empty())
-                    subRow = ppSnap.status;
+                    statusText = ppSnap.status;
 
-                ImVec2 titleSz = ImGui::CalcTextSize(titleRow.c_str());
-                ImVec2 mainSz = ImGui::CalcTextSize(mainRow);
-                ImVec2 subSz = subRow.empty() ? ImVec2{0,0} : ImGui::CalcTextSize(subRow.c_str());
+                lc::HudElementLayout ppLayout = hudLayout.Resolve(lc::ELEM_PIXELPARTY);
+                const float ppScale = ppLayout.scale;
+                const float fontSz = baseFont * ppScale;
+                const float smallSz = fontSz * 0.80f;
+                const float microSz = fontSz * 0.50f;
+                const float padX = 10.0f * ppScale;
+                const float padY = 7.0f * ppScale;
+                const float gapRow = 3.5f * ppScale;
+                const float minW = 216.0f * ppScale;
 
-                float contentW = std::max({boxW, titleSz.x + padX * 2, mainSz.x + padX * 2, subSz.x + padX * 2});
-                float contentH = padY + smallSz + gapRow + fontSz + gapRow;
-                if (!subRow.empty()) contentH += smallSz + gapRow;
+                const ImVec2 mainSz = ImGui::CalcTextSize(mainText.c_str());
+                const ImVec2 statusSz = statusText.empty() ? ImVec2(0, 0)
+                    : ImGui::CalcTextSize(statusText.c_str());
+                float contentW = (std::max)(minW, (mainSz.x + 42.0f) * ppScale);
+                if (!statusText.empty())
+                    contentW = (std::max)(contentW, statusSz.x * ppScale + padX * 2.0f);
+                float contentH = padY + microSz + gapRow + fontSz + gapRow;
+                if (!statusText.empty()) contentH += smallSz + gapRow;
                 contentH += padY;
 
-                lc::HudElementLayout ppLayout;
-                ppLayout = hudLayout.Resolve(lc::ELEM_PIXELPARTY);
-                contentW *= ppLayout.scale;
-                contentH *= ppLayout.scale;
-
                 ImVec2 ppTL = lc::HudElementPixelPos(ppLayout, contentW, contentH, winW, winH);
-                float rx = ppTL.x;
-                float ry = ppTL.y;
-                float cx = rx + contentW * 0.5f;
-                ImVec2 pMin(rx, ry);
-                ImVec2 pMax(rx + contentW, ry + contentH);
+                const float rx = ppTL.x;
+                const float ry = ppTL.y;
+                const float rxe = rx + contentW;
+                const float rye = ry + contentH;
 
-                fg->AddRectFilled(pMin, pMax, overlayTheme.moduleBg, 6.0f);
-                fg->AddRect(pMin, pMax, overlayTheme.moduleGlassBorder, 6.0f, 0, 1.0f);
+                const float pulse = ppSnap.targetFound
+                    ? 0.60f + 0.40f * (0.5f + 0.5f * std::sin((float)ImGui::GetTime() * 4.4f))
+                    : 0.0f;
+                const aoko::ui::Theme ppUi = BuildOverlayUiTheme(overlayTheme);
+                aoko::ui::Panel(fg, ppUi, ImVec2(rx, ry), ImVec2(rxe, rye), 7.0f * ppScale,
+                                2.0f + pulse * 8.0f, true);
+                fg->AddRectFilled(ImVec2(rx + 1.0f, ry + 6.0f * ppScale),
+                                  ImVec2(rx + 3.2f * ppScale, rye - 6.0f * ppScale),
+                                  aoko::ui::WithAlpha(partyCol, (int)(160 + pulse * 70.0f)),
+                                  1.0f * ppScale);
 
                 float curY = ry + padY;
-                float ttx = std::floor(cx - titleSz.x * 0.5f);
-                fg->AddText(ImGui::GetFont(), smallSz, ImVec2(ttx + 1, curY + 1), overlayTheme.moduleTextShadow, titleRow.c_str());
-                fg->AddText(ImGui::GetFont(), smallSz, ImVec2(ttx, curY), overlayTheme.accentPrimary, titleRow.c_str());
-                curY += smallSz + gapRow;
 
-                float mtx = std::floor(cx - mainSz.x * 0.5f);
-                fg->AddText(ImVec2(mtx + 1, curY + 1), overlayTheme.moduleTextShadow, mainRow);
-                fg->AddText(ImVec2(mtx, curY), overlayTheme.moduleText, mainRow);
+                aoko::ui::TrackedText(fg, ImVec2(rx + padX, curY), "PIXEL PARTY", microSz,
+                                      ppUi.accent, 1.3f * ppScale);
+                char stateBuf[24];
+                if (ppSnap.targetFound) snprintf(stateBuf, sizeof(stateBuf), "LOCK");
+                else if (ppSnap.holdingValid) snprintf(stateBuf, sizeof(stateBuf), "SEARCH");
+                else snprintf(stateBuf, sizeof(stateBuf), "IDLE");
+                const float stateW = aoko::ui::TextWidth(stateBuf, microSz * 0.96f) + 10.0f * ppScale;
+                ImVec2 chipA(rxe - padX - stateW, curY - 1.0f * ppScale);
+                ImVec2 chipB(rxe - padX, chipA.y + microSz + 5.0f * ppScale);
+                fg->AddRectFilled(chipA, chipB,
+                                  aoko::ui::WithAlpha(partyCol, ppSnap.targetFound ? 34 : 18),
+                                  2.0f * ppScale);
+                fg->AddRect(chipA, chipB, aoko::ui::WithAlpha(partyCol, 70),
+                            2.0f * ppScale, 0, 1.0f);
+                aoko::ui::TextCentered(fg, (chipA.x + chipB.x) * 0.5f, chipA.y + 2.0f * ppScale,
+                                       stateBuf, microSz * 0.96f,
+                                       ppSnap.targetFound ? partyCol : ppUi.textDim);
+
+                curY += microSz + gapRow;
+
+                const float dotR = 4.0f * ppScale;
+                ImVec2 dotC(rx + padX + dotR + 0.5f * ppScale, curY + fontSz * 0.5f);
+                fg->AddCircleFilled(dotC, dotR + 1.6f * ppScale,
+                                    aoko::ui::WithAlpha(partyCol, 32), 16);
+                fg->AddCircleFilled(dotC, dotR, partyCol, 16);
+                aoko::ui::TextShadowed(fg, ImVec2(dotC.x + dotR + 7.0f * ppScale, curY),
+                                       mainText.c_str(), fontSz, ppUi.text,
+                                       aoko::ui::WithAlpha(ppUi.shadow, 120),
+                                       (std::max)(1.0f, ppScale));
+
+                if (ppSnap.targetFound) {
+                    char distBuf[24];
+                    snprintf(distBuf, sizeof(distBuf), "%.0fm", (float)ppSnap.dist);
+                    const float distW = aoko::ui::TextWidth(distBuf, fontSz * 0.92f);
+                    aoko::ui::Chevron(fg, ImVec2(rxe - padX - distW - 9.0f * ppScale,
+                                                 curY + fontSz * 0.5f),
+                                      dirArrow, 3.6f * ppScale, partyCol);
+                    aoko::ui::TextRight(fg, ImVec2(rxe - padX, curY + 1.0f * ppScale), distBuf,
+                                        fontSz * 0.92f,
+                                        aoko::ui::Mix(partyCol, ppUi.text, 0.35f));
+                }
                 curY += fontSz + gapRow;
 
-                if (!subRow.empty()) {
-                    float stx = std::floor(cx - subSz.x * 0.5f);
-                    fg->AddText(ImGui::GetFont(), smallSz, ImVec2(stx + 1, curY + 1), overlayTheme.moduleTextShadow, subRow.c_str());
-                    fg->AddText(ImGui::GetFont(), smallSz, ImVec2(stx, curY), overlayTheme.moduleTagText, subRow.c_str());
+                if (!statusText.empty()) {
+                    aoko::ui::TextShadowed(fg, ImVec2(rx + padX, curY), statusText.c_str(),
+                                           smallSz, ppUi.textDim,
+                                           aoko::ui::WithAlpha(ppUi.shadow, 105), 1.0f);
                 }
             }
 
@@ -17871,7 +19606,8 @@ static void RenderOverlayPanels(
             Matrix4x4 sharedProj = {}, sharedView = {};
             bool sharedMatsOk = false;
 
-            if (cfg.nametags || cfg.chestEsp || cfg.blockEsp || cfg.fightStatus || cfg.bedPlates || cfg.fireballWarning) {
+            if (cfg.nametags || cfg.chestEsp || cfg.blockEsp || cfg.fightStatus || cfg.bedPlates || cfg.fireballWarning ||
+                cfg.tntTimer || cfg.trajectories || cfg.murderMystery || cfg.breakProgress) {
                 BgCamState cs;
                 { LockGuard lk(g_bgCamMutex); cs = g_bgCamState; }
                 sharedCam      = { cs.camX, cs.camY, cs.camZ };
@@ -18442,19 +20178,32 @@ static void RenderOverlayPanels(
                     ImVec2 beTL = lc::HudElementPixelPos(beLayout, contentW, contentH, winW, winH);
                     ImVec2 pMin(beTL.x, beTL.y);
                     ImVec2 pMax(beTL.x + contentW, beTL.y + contentH);
-                    fg->AddRectFilled(pMin, pMax, overlayTheme.moduleBg, 6.0f);
-                    fg->AddRect(pMin, pMax, overlayTheme.moduleGlassBorder, 6.0f, 0, 1.0f);
+                    const aoko::ui::Theme beUi = BuildOverlayUiTheme(overlayTheme);
+                    aoko::ui::Panel(fg, beUi, pMin, pMax, 6.0f, 5.0f, true);
+                    fg->AddRectFilled(ImVec2(beTL.x + 1.0f, beTL.y + 6.0f),
+                                      ImVec2(beTL.x + 3.2f, pMax.y - 6.0f),
+                                      aoko::ui::WithAlpha(beUi.accent, 175), 1.0f);
 
                     float curY = beTL.y + padY;
-                    fg->AddText(ImVec2(beTL.x + padX + 1, curY + 1), overlayTheme.moduleTextShadow, title.c_str());
-                    fg->AddText(ImVec2(beTL.x + padX, curY), overlayTheme.accentPrimary, title.c_str());
+                    aoko::ui::TrackedText(fg, ImVec2(beTL.x + padX, curY),
+                                          "BLOCK ESP", ImGui::GetFontSize() * 0.52f,
+                                          beUi.accent, 1.25f);
+                    char beCount[16];
+                    snprintf(beCount, sizeof(beCount), "%d", (int)rows.size());
+                    aoko::ui::TextRight(fg, ImVec2(pMax.x - padX, curY),
+                                        beCount, ImGui::GetFontSize() * 0.58f,
+                                        beUi.textFaint);
                     curY += rowH;
 
                     for (size_t i = 0; i < rows.size(); i++) {
                         float swY = curY + (rowH - sw) * 0.5f;
-                        fg->AddRectFilled(ImVec2(beTL.x + padX, swY), ImVec2(beTL.x + padX + sw, swY + sw), rowColors[i], 2.0f);
-                        fg->AddText(ImVec2(beTL.x + padX + sw + 6.0f + 1, curY + 1), overlayTheme.moduleTextShadow, rows[i].c_str());
-                        fg->AddText(ImVec2(beTL.x + padX + sw + 6.0f, curY), overlayTheme.moduleText, rows[i].c_str());
+                        fg->AddRectFilled(ImVec2(beTL.x + padX, swY),
+                                          ImVec2(beTL.x + padX + sw, swY + sw),
+                                          rowColors[i], 2.0f);
+                        aoko::ui::TextShadowed(
+                            fg, ImVec2(beTL.x + padX + sw + 6.0f, curY),
+                            rows[i].c_str(), ImGui::GetFontSize() * 0.94f, beUi.text,
+                            aoko::ui::WithAlpha(beUi.shadow, 150), 1.0f);
                         curY += rowH;
                     }
                 }
@@ -18595,6 +20344,67 @@ static void RenderOverlayPanels(
                 }
             }
 
+            if (!g_realGuiOpen && cfg.tntTimer && sharedCamFound) {
+                const int winW = (int)io.DisplaySize.x;
+                const int winH = (int)io.DisplaySize.y;
+                std::vector<ModernTntRecord> tntSnap;
+                {
+                    LockGuard lk(g_modernTntMutex);
+                    tntSnap = g_modernTntRecords;
+                }
+                ImDrawList* dl = ImGui::GetBackgroundDrawList();
+                for (const auto& t : tntSnap) {
+                    LegoVec3 pos = { (float)t.x, (float)t.y, (float)t.z };
+                    float sx = 0, sy = 0;
+                    bool projected = sharedMatsOk
+                        ? WorldToScreen(pos, sharedCam, sharedView, sharedProj, winW, winH, &sx, &sy)
+                        : WorldToScreen_Angles(pos, sharedCam, sharedYaw, sharedPitch, cpCamState.fov, winW, winH, &sx, &sy);
+                    if (projected && sx >= -50.0f && sx <= (float)winW + 50.0f && sy >= -50.0f && sy <= (float)winH + 50.0f) {
+                        char buf[32];
+                        snprintf(buf, sizeof(buf), "%.1fs", t.fuseSeconds);
+                        ImVec2 tsz = ImGui::CalcTextSize(buf);
+                        ImVec2 pMin(sx - tsz.x * 0.5f - 5.0f, sy - tsz.y * 0.5f - 3.0f);
+                        ImVec2 pMax(sx + tsz.x * 0.5f + 5.0f, sy + tsz.y * 0.5f + 3.0f);
+                        dl->AddRectFilled(pMin, pMax, IM_COL32(10, 15, 24, 210), 4.0f);
+                        dl->AddRect(pMin, pMax, IM_COL32(50, 180, 240, 180), 4.0f);
+                        ImU32 col = t.fuseSeconds > 2.0f ? IM_COL32(80, 255, 120, 255)
+                                  : t.fuseSeconds > 1.0f ? IM_COL32(255, 200, 60, 255)
+                                  : IM_COL32(255, 70, 70, 255);
+                        dl->AddText(ImVec2(sx - tsz.x * 0.5f, sy - tsz.y * 0.5f), col, buf);
+                    }
+                }
+            }
+
+            // ── Beta overlays: Trajectories, Murder Mystery, Break Progress (draw-only) ──
+            if (!g_realGuiOpen && sharedCamFound && (cfg.trajectories || cfg.murderMystery || cfg.breakProgress)) {
+                const int vw = (int)io.DisplaySize.x;
+                const int vh = (int)io.DisplaySize.y;
+                auto project = [&](double x, double y, double z, float* sx, float* sy) {
+                    const LegoVec3 p = { x, y, z };
+                    return sharedMatsOk
+                        ? WorldToScreen(p, sharedCam, sharedView, sharedProj, vw, vh, sx, sy)
+                        : WorldToScreen_Angles(p, sharedCam, sharedYaw, sharedPitch, cpCamState.fov, vw, vh, sx, sy);
+                };
+                if (cfg.trajectories) {
+                    static thread_local ModernTrajectorySnap trajSnap;
+                    { LockGuard lk(g_modernTrajMutex); trajSnap = g_modernTraj; }
+                    if (trajSnap.active) {
+                        aoko::ui::DrawTrajectory(ImGui::GetBackgroundDrawList(), BuildOverlayUiTheme(overlayTheme),
+                            trajSnap.points, trajSnap.hitBlock, trajSnap.impact, project);
+                    }
+                }
+                if (cfg.murderMystery) {
+                    static thread_local std::vector<aoko::ui::MurderTag> murderSnap;
+                    { LockGuard lk(g_modernMurderMutex); murderSnap = g_modernMurder; }
+                    if (!murderSnap.empty()) aoko::ui::DrawMurderTags(fg, vw, murderSnap, project);
+                }
+                if (cfg.breakProgress) {
+                    static thread_local std::vector<aoko::ui::BreakTag> breakSnap;
+                    { LockGuard lk(g_modernBreaksMutex); breakSnap = g_modernBreaks; }
+                    if (!breakSnap.empty()) aoko::ui::DrawBreakTags(fg, breakSnap, project);
+                }
+            }
+
             bool renderGtbHelper = TRACE261_IF("renderGtbHelper", cfg.gtbHelper);
             if (renderGtbHelper) {
                 std::string hint = cfg.gtbHint;
@@ -18653,13 +20463,49 @@ static void RenderOverlayPanels(
                 const float x0 = (std::max)(10.0f, x1 - panelW);
                 const float y0 = (std::max)(10.0f, y1 - panelH);
 
-                fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleBg, 5.0f);
-                fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.gtbBorder, 5.0f, 0, 1.2f);
+                aoko::ui::Theme gtbUi = BuildOverlayUiTheme(overlayTheme);
+                aoko::ui::Panel(fg, gtbUi, ImVec2(x0, y0), ImVec2(x1, y1), 6.0f, 8.0f);
+                const float gtbHeadH = 25.0f;
+                fg->AddRectFilledMultiColor(
+                    ImVec2(x0 + 1.0f, y0 + 1.0f), ImVec2(x1 - 1.0f, y0 + gtbHeadH),
+                    WithAlpha(gtbUi.accent, 30), WithAlpha(gtbUi.accent, 12),
+                    WithAlpha(gtbUi.panel, 0), WithAlpha(gtbUi.panel, 0));
+                fg->AddLine(ImVec2(x0 + 6.0f, y0 + gtbHeadH), ImVec2(x1 - 6.0f, y0 + gtbHeadH),
+                            gtbUi.border, 1.0f);
+                fg->AddRectFilled(ImVec2(x0 + 1.0f, y0 + 7.0f), ImVec2(x0 + 3.5f, y1 - 7.0f),
+                                  gtbUi.accent, 1.0f);
 
-                char hintBuf[320];
-                snprintf(hintBuf, sizeof(hintBuf), "GTB: %s (%d)", hint.c_str(), (std::max)(0, cfg.gtbCount));
-                fg->AddText(ImVec2(x0 + 9.0f, y0 + 8.0f), overlayTheme.gtbTitle, hintBuf);
+                const float gtbPad = 9.0f;
+                char countBuf[24];
+                snprintf(countBuf, sizeof(countBuf), "%d", (std::max)(0, cfg.gtbCount));
+                const float countW = aoko::ui::TextWidth(countBuf, 10.0f) + 12.0f;
+                ImVec2 chipA(x1 - gtbPad - countW, y0 + 5.0f);
+                ImVec2 chipB(x1 - gtbPad, y0 + gtbHeadH - 4.0f);
+                fg->AddRectFilled(chipA, chipB, WithAlpha(gtbUi.accent, 30), 2.0f);
+                fg->AddRect(chipA, chipB, WithAlpha(gtbUi.accent, 90), 2.0f, 0, 1.0f);
+                aoko::ui::TextCentered(fg, (chipA.x + chipB.x) * 0.5f, chipA.y + 2.0f,
+                                       countBuf, 10.0f, gtbUi.text);
 
+                aoko::ui::TrackedText(fg, ImVec2(x0 + gtbPad, y0 + 8.0f), "GTB", 9.0f,
+                                      gtbUi.accent, 1.5f);
+                const float gtbTitleW = aoko::ui::TrackedWidth("GTB", 9.0f, 1.5f);
+                float hintMax = (chipA.x - 7.0f) - (x0 + gtbPad + gtbTitleW + 8.0f);
+                std::string hintShown = hint;
+                while (!hintShown.empty() && aoko::ui::TextWidth(hintShown.c_str(), 10.0f) > hintMax)
+                    hintShown.erase(hintShown.size() - 1);
+                if (hintShown.size() < hint.size() && hintShown.size() > 2) {
+                    hintShown.erase(hintShown.size() - 2);
+                    hintShown += "..";
+                }
+                aoko::ui::TextShadowed(fg, ImVec2(x0 + gtbPad + gtbTitleW + 8.0f, y0 + 8.0f),
+                                       hintShown.c_str(), 10.0f, gtbUi.textDim,
+                                       WithAlpha(gtbUi.shadow, 150), 1.0f);
+
+                for (size_t col = 1; col < numCols; col++) {
+                    const float vx = x0 + padX + (colW + colPad) * (float)col - colPad * 0.5f;
+                    aoko::ui::VerticalRule(fg, vx, y0 + gtbHeadH + 6.0f, y1 - 8.0f,
+                                           WithAlpha(gtbUi.text, 18));
+                }
                 size_t visiblePerCol = linesPerCol;
                 if (visiblePerCol < 1) visiblePerCol = 1;
                 for (size_t col = 0; col < numCols; col++) {
@@ -18671,8 +20517,11 @@ static void RenderOverlayPanels(
                     float yy = y0 + 8.0f + lineH + 6.0f;
 
                     for (size_t i = startIdx; i < endIdx; i++) {
-                        std::string row = "- " + lines[i];
-                        fg->AddText(ImVec2(cx, yy), overlayTheme.gtbRow, row.c_str());
+                        aoko::ui::Diamond(fg, ImVec2(cx + 1.0f, yy + lineH * 0.5f), 1.4f,
+                                          WithAlpha(gtbUi.accent, 170));
+                        aoko::ui::TextShadowed(fg, ImVec2(cx + 8.0f, yy), lines[i].c_str(),
+                                               ImGui::GetFontSize() * 0.94f, gtbUi.text,
+                                               WithAlpha(gtbUi.shadow, 150), 1.0f);
                         yy += lineH;
                     }
                 }
@@ -18680,24 +20529,17 @@ static void RenderOverlayPanels(
 
             bool renderModuleList = TRACE261_IF("renderModuleList", cfg.showModuleList);
             if (renderModuleList) {
-                // Module list (top-right)
-                struct ModLine {
-                    std::string name;
-                    std::string tag;
-                    ImU32 accent;
-                    float width;
-                    float nameWidth;
-                    float tagWidth;
-                };
-                ModLine mods[32];
-                int modCount = 0;
+                static thread_local std::vector<aoko::ui::ModuleEntry> modEntries;
+                modEntries.clear();
+                if (modEntries.capacity() < 32) modEntries.reserve(32);
 
                 auto pushMod = [&](const std::string& name, const std::string& tag = "") {
                     if (name.empty()) return;
-                    if (modCount >= (int)(sizeof(mods) / sizeof(mods[0]))) return;
-                    float nw = ImGui::CalcTextSize(name.c_str()).x;
-                    float tw = tag.empty() ? 0.0f : ImGui::CalcTextSize((" " + tag).c_str()).x;
-                    mods[modCount++] = { name, tag, 0, nw + tw, nw, tw };
+                    modEntries.push_back(aoko::ui::ModuleEntry(name, tag, 0));
+                    aoko::ui::ModuleEntry& e = modEntries.back();
+                    e.nameW = ImGui::CalcTextSize(name.c_str()).x;
+                    e.tagW = tag.empty() ? 0.0f : ImGui::CalcTextSize(tag.c_str()).x;
+                    e.sortW = e.nameW + (tag.empty() ? 0.0f : e.tagW * 0.82f + 14.0f);
                 };
 
                 if (cfg.armed) {
@@ -18710,7 +20552,7 @@ static void RenderOverlayPanels(
                 }
                 if (cfg.clickInChests) pushMod("Click in Chests");
                 if (cfg.closestPlayer) pushMod("Closest Player");
-                if (cfg.fightStatus) pushMod("Fight Status");
+                if (cfg.fightStatus)   pushMod("Fight Status");
                 if (cfg.rightClick)    pushMod("Rightclick");
                 if (cfg.aimAssist)     pushMod("Aim Assist");
                 if (cfg.triggerbot)    pushMod("Triggerbot");
@@ -18736,275 +20578,51 @@ static void RenderOverlayPanels(
                 if (cfg.antiDebuffEnabled) pushMod("AntiDebuff");
                 if (cfg.bedPlates)     pushMod("BedPlates");
                 if (cfg.fireballWarning) pushMod("Fireball Warning");
+                if (cfg.fastPlace)     pushMod("Fast Place");
+                if (cfg.noHurtCam)     pushMod("No Hurt Cam");
+                if (cfg.sprint)        pushMod("Sprint");
+                if (cfg.tntTimer)      pushMod("TNT Timer");
+                if (cfg.wTap)          pushMod("WTap");
+                if (cfg.jumpReset)     pushMod("Jump Reset");
+                if (cfg.hitSelect)     pushMod("Hit Select");
+                if (cfg.trajectories)  pushMod("Trajectories");
+                if (cfg.murderMystery) pushMod("Murder Mystery");
+                if (cfg.breakProgress) pushMod("Break Progress");
                 if (cfg.hitDelayFixEnabled) pushMod("Hit Delay Fix");
 
-                // Sort by width descending (staggered original look)
-                for (int a = 0; a < modCount; a++) {
-                    for (int b = a + 1; b < modCount; b++) {
-                        if (mods[b].width > mods[a].width) {
-                            ModLine tmp = mods[a]; mods[a] = mods[b]; mods[b] = tmp;
-                        }
-                    }
+                std::sort(modEntries.begin(), modEntries.end(),
+                    [](const aoko::ui::ModuleEntry& a, const aoko::ui::ModuleEntry& b) {
+                        if (a.sortW != b.sortW) return a.sortW > b.sortW;
+                        return a.name < b.name;
+                    });
+                aoko::ui::Theme accentTheme = BuildOverlayUiTheme(overlayTheme);
+                for (size_t i = 0; i < modEntries.size(); ++i) {
+                    const float t = modEntries.size() > 1
+                        ? (float)i / (float)(modEntries.size() - 1) : 0.0f;
+                    modEntries[i].accent = accentTheme.AccentAt(t);
                 }
 
-                for (int i = 0; i < modCount; i++) {
-                    if (overlayTheme.isGradient) {
-                        float t = modCount > 1 ? (float)i / (float)(modCount - 1) : 0.0f;
-                        mods[i].accent = overlayTheme.isTriColor
-                            ? LerpImU32Tri(overlayTheme.accentPrimary, overlayTheme.accentSecondary, overlayTheme.accentTertiary, t)
-                            : LerpImU32(overlayTheme.accentPrimary, overlayTheme.accentSecondary, t);
-                    } else {
-                        mods[i].accent = overlayTheme.accentPrimary;
-                    }
-                }
-
-                // Honor the HUD layout anchor + scale so the module list can be
-                // moved/resized in the HUD editor like the other screen-anchored panels.
                 lc::HudElementLayout mlLayout = hudLayout.Resolve(lc::ELEM_MODULELIST);
-                const float scale = mlLayout.scale;
-
-                const float padX      = 8.0f * scale;
-                const float padY      = 3.0f * scale;
-                const float barW      = 3.0f * scale;
-                const float gapY      = 2.0f * scale;
-                const float fontH     = ImGui::GetFontSize() * scale;
-                const float shadowOff = (std::max)(1.0f, scale);
-                const float rightInset = 6.0f * scale;
                 const int style = (std::max)(0, (std::min)(6, cfg.moduleListStyle));
-                ImFont* font = ImGui::GetFont();
 
-                const char* logoPart1 = "aoko";
-                const char* logoPart2 = " client";
-                const float logoP1W = ImGui::CalcTextSize(logoPart1).x * scale;
-                const float logoP2W = ImGui::CalcTextSize(logoPart2).x * scale;
-                const float logoW   = (logoP1W + logoP2W);
-                const float logoH   = fontH;
-                const float logoGap = 8.0f * scale;
-                const float boxH    = padY + fontH + padY;
-
-                // ── Measuring pass: compute the block bounds (right-aligned bars). ──
-                float blockW = 0.0f;
-                float blockH = 0.0f;
-                if (cfg.showLogo) {
-                    float logoBoxW = (style == 0 || style == 2 || style == 3 || style == 4)
-                        ? (barW + padX + logoW + padX)
-                        : (logoW + 6.0f * scale);
-                    blockW  = (std::max)(blockW, logoBoxW + rightInset);
-                    blockH += (style == 0 || style == 2 || style == 3 || style == 4) ? (boxH + logoGap) : (logoH + logoGap);
-                }
-                for (int i = 0; i < modCount; i++) {
-                    float textW = mods[i].width * scale;
-                    float boxW  = (style == 1 || style == 5 || style == 6)
-                        ? (textW + 6.0f * scale)
-                        : (barW + padX + textW + padX);
-                    blockW = (std::max)(blockW, boxW + rightInset);
-                    blockH += boxH;
-                    if (i + 1 < modCount) blockH += gapY;
-                }
-
-                if (modCount > 0 || cfg.showLogo) {
-                    ImVec2 tl = lc::HudElementPixelPos(mlLayout, blockW, blockH, winW, winH);
-                    const float x1 = tl.x + blockW - rightInset; // right edge of bars
-                    float y = tl.y;
-
-                    if (cfg.showLogo) {
-                        if (style == 0) {
-                            // Default: Dark panel card with left accent bar
-                            float boxW = barW + padX + logoW + padX;
-                            float x0 = x1 - boxW;
-                            fg->AddRectFilled(ImVec2(x0, y), ImVec2(x1, y + boxH), overlayTheme.moduleBg);
-                            fg->AddRectFilled(ImVec2(x0, y), ImVec2(x0 + barW, y + boxH), overlayTheme.accentPrimary);
-                            fg->AddRect(ImVec2(x0, y), ImVec2(x1, y + boxH), overlayTheme.moduleBorder);
-                            ImVec2 tx(x0 + barW + padX, y + padY);
-                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.logoShadow, logoPart1);
-                            fg->AddText(font, fontH, tx, overlayTheme.accentPrimary, logoPart1);
-                            fg->AddText(font, fontH, ImVec2(tx.x + logoP1W + shadowOff, tx.y + shadowOff), overlayTheme.logoShadow, logoPart2);
-                            fg->AddText(font, fontH, ImVec2(tx.x + logoP1W, tx.y), overlayTheme.moduleText, logoPart2);
-                            y += boxH + logoGap;
-                        } else if (style == 1) {
-                            // Minimal: Right-aligned text with right bar
-                            float logoX = x1 - logoW - 4.0f * scale;
-                            fg->AddRectFilled(ImVec2(x1 - 2.5f * scale, y), ImVec2(x1, y + logoH), overlayTheme.accentPrimary);
-                            fg->AddText(font, fontH, ImVec2(logoX + shadowOff, y + shadowOff), overlayTheme.logoShadow, logoPart1);
-                            fg->AddText(font, fontH, ImVec2(logoX, y), overlayTheme.accentPrimary, logoPart1);
-                            fg->AddText(font, fontH, ImVec2(logoX + logoP1W + shadowOff, y + shadowOff), overlayTheme.logoShadow, logoPart2);
-                            fg->AddText(font, fontH, ImVec2(logoX + logoP1W, y), overlayTheme.moduleText, logoPart2);
-                            y += logoH + logoGap;
-                        } else if (style == 2) {
-                            // Outlined: Outlined badge
-                            float boxW = barW + padX + logoW + padX;
-                            float x0 = x1 - boxW;
-                            fg->AddRectFilled(ImVec2(x0, y), ImVec2(x1, y + boxH), overlayTheme.moduleOutlinedBg);
-                            fg->AddRect(ImVec2(x0, y), ImVec2(x1, y + boxH), overlayTheme.accentPrimary, 4.0f, 0, 1.5f);
-                            ImVec2 tx(x0 + barW + padX, y + padY);
-                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.logoShadow, logoPart1);
-                            fg->AddText(font, fontH, tx, overlayTheme.accentPrimary, logoPart1);
-                            fg->AddText(font, fontH, ImVec2(tx.x + logoP1W + shadowOff, tx.y + shadowOff), overlayTheme.logoShadow, logoPart2);
-                            fg->AddText(font, fontH, ImVec2(tx.x + logoP1W, tx.y), overlayTheme.moduleText, logoPart2);
-                            y += boxH + logoGap;
-                        } else if (style == 3) {
-                            // Glass: Glass badge
-                            float boxW = barW + padX + logoW + padX;
-                            float x0 = x1 - boxW;
-                            fg->AddRectFilled(ImVec2(x0, y), ImVec2(x1, y + boxH), overlayTheme.moduleMinimalBg, 4.0f);
-                            fg->AddRect(ImVec2(x0, y), ImVec2(x1, y + boxH), overlayTheme.moduleGlassBorder, 4.0f, 0, 1.0f);
-                            fg->AddRectFilled(ImVec2(x0 + 1.0f * scale, y + 1.0f * scale), ImVec2(x0 + barW + 1.0f * scale, y + boxH - 1.0f * scale), overlayTheme.accentPrimary);
-                            ImVec2 tx(x0 + barW + padX, y + padY);
-                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.logoShadow, logoPart1);
-                            fg->AddText(font, fontH, tx, overlayTheme.accentPrimary, logoPart1);
-                            fg->AddText(font, fontH, ImVec2(tx.x + logoP1W + shadowOff, tx.y + shadowOff), overlayTheme.logoShadow, logoPart2);
-                            fg->AddText(font, fontH, ImVec2(tx.x + logoP1W, tx.y), overlayTheme.moduleText, logoPart2);
-                            y += boxH + logoGap;
-                        } else if (style == 4) {
-                            // Bold: Solid accent pill
-                            float boxW = barW + padX + logoW + padX;
-                            float x0 = x1 - boxW;
-                            fg->AddRectFilled(ImVec2(x0, y), ImVec2(x1, y + boxH), overlayTheme.accentPrimary, 4.0f);
-                            fg->AddRect(ImVec2(x0, y), ImVec2(x1, y + boxH), overlayTheme.moduleBorder, 4.0f, 0, 1.0f);
-                            ImVec2 tx(x0 + barW + padX, y + padY);
-                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.logoShadow, logoPart1);
-                            fg->AddText(font, fontH, tx, overlayTheme.moduleBoldText, logoPart1);
-                            fg->AddText(font, fontH, ImVec2(tx.x + logoP1W + shadowOff, tx.y + shadowOff), overlayTheme.logoShadow, logoPart2);
-                            fg->AddText(font, fontH, ImVec2(tx.x + logoP1W, tx.y), overlayTheme.moduleBoldText, logoPart2);
-                            y += boxH + logoGap;
-                        } else if (style == 5) {
-                            // Classic: Minecraft-style right-aligned header with right bar
-                            const char* cP1 = "Aoko";
-                            const char* cP2 = " Client";
-                            float cP1W = ImGui::CalcTextSize(cP1).x * scale;
-                            float logoX = x1 - logoW - 4.0f * scale;
-                            fg->AddRectFilled(ImVec2(x1 - 2.5f * scale, y), ImVec2(x1, y + logoH), overlayTheme.accentPrimary);
-                            fg->AddText(font, fontH, ImVec2(logoX + shadowOff, y + shadowOff), overlayTheme.logoShadow, cP1);
-                            fg->AddText(font, fontH, ImVec2(logoX, y), overlayTheme.accentPrimary, cP1);
-                            fg->AddText(font, fontH, ImVec2(logoX + cP1W + shadowOff, y + shadowOff), overlayTheme.logoShadow, cP2);
-                            fg->AddText(font, fontH, ImVec2(logoX + cP1W, y), overlayTheme.moduleText, cP2);
-                            y += logoH + logoGap;
-                        } else {
-                            // Modern: Clean lowercase pill with right bar
-                            float logoX = x1 - logoW - 5.0f * scale;
-                            fg->AddRectFilled(ImVec2(logoX - 3.0f * scale, y - 1.0f * scale), ImVec2(x1, y + logoH + 1.0f * scale), overlayTheme.moduleMinimalBg, 2.0f);
-                            fg->AddRectFilled(ImVec2(x1 - 2.0f * scale, y - 1.0f * scale), ImVec2(x1, y + logoH + 1.0f * scale), overlayTheme.accentPrimary);
-                            fg->AddText(font, fontH, ImVec2(logoX + shadowOff, y + shadowOff), overlayTheme.logoShadow, logoPart1);
-                            fg->AddText(font, fontH, ImVec2(logoX, y), overlayTheme.accentPrimary, logoPart1);
-                            fg->AddText(font, fontH, ImVec2(logoX + logoP1W + shadowOff, y + shadowOff), overlayTheme.logoShadow, logoPart2);
-                            fg->AddText(font, fontH, ImVec2(logoX + logoP1W, y), overlayTheme.moduleTagText, logoPart2);
-                            y += logoH + logoGap;
-                        }
-                    }
-
-                    for (int i = 0; i < modCount; i++) {
-                        const ModLine& m = mods[i];
-                        float textW = m.width * scale;
-                        float nameW = m.nameWidth * scale;
-                        float boxW  = barW + padX + textW + padX;
-                        float x0 = x1 - boxW;
-                        float y0 = y;
-                        float y1 = y + boxH;
-
-                        if (style == 0) {
-                            // Default: Left bar + text + dim tag
-                            fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleBg);
-                            fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + barW, y1), m.accent);
-                            fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleBorder);
-                            ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
-                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.moduleTextShadow, m.name.c_str());
-                            fg->AddText(font, fontH, tx, overlayTheme.moduleText, m.name.c_str());
-                            if (!m.tag.empty()) {
-                                std::string tagStr = " " + m.tag;
-                                ImVec2 tagTx(tx.x + nameW, tx.y);
-                                fg->AddText(font, fontH, ImVec2(tagTx.x + shadowOff, tagTx.y + shadowOff), overlayTheme.moduleTextShadow, tagStr.c_str());
-                                fg->AddText(font, fontH, tagTx, overlayTheme.moduleTagText, tagStr.c_str());
-                            }
-                        } else if (style == 1) {
-                            // Minimal: Right bar + colored name + dim tag
-                            float minX0 = x1 - textW - 6.0f * scale;
-                            fg->AddRectFilled(ImVec2(minX0, y0), ImVec2(x1, y1), overlayTheme.moduleMinimalBg);
-                            fg->AddRectFilled(ImVec2(x1 - 2.0f * scale, y0), ImVec2(x1, y1), m.accent);
-                            ImVec2 tx = ImVec2(minX0 + 2.0f * scale, y0 + padY);
-                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.moduleTextShadow, m.name.c_str());
-                            fg->AddText(font, fontH, tx, m.accent, m.name.c_str());
-                            if (!m.tag.empty()) {
-                                std::string tagStr = " " + m.tag;
-                                ImVec2 tagTx(tx.x + nameW, tx.y);
-                                fg->AddText(font, fontH, ImVec2(tagTx.x + shadowOff, tagTx.y + shadowOff), overlayTheme.moduleTextShadow, tagStr.c_str());
-                                fg->AddText(font, fontH, tagTx, overlayTheme.moduleTagText, tagStr.c_str());
-                            }
-                        } else if (style == 2) {
-                            // Outlined: Border with accent + colored name + dim tag
-                            fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleOutlinedBg);
-                            fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), m.accent, 4.0f, 0, 1.5f);
-                            ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
-                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.moduleTextShadow, m.name.c_str());
-                            fg->AddText(font, fontH, tx, m.accent, m.name.c_str());
-                            if (!m.tag.empty()) {
-                                std::string tagStr = " " + m.tag;
-                                ImVec2 tagTx(tx.x + nameW, tx.y);
-                                fg->AddText(font, fontH, ImVec2(tagTx.x + shadowOff, tagTx.y + shadowOff), overlayTheme.moduleTextShadow, tagStr.c_str());
-                                fg->AddText(font, fontH, tagTx, overlayTheme.moduleTagText, tagStr.c_str());
-                            }
-                        } else if (style == 3) {
-                            // Glass: Frosted glass panel with specular border and left pip
-                            fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleMinimalBg, 4.0f);
-                            fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleGlassBorder, 4.0f, 0, 1.0f);
-                            fg->AddRectFilled(ImVec2(x0 + 1.0f * scale, y0 + 1.0f * scale), ImVec2(x0 + barW + 1.0f * scale, y1 - 1.0f * scale), m.accent);
-                            ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
-                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.moduleTextShadow, m.name.c_str());
-                            fg->AddText(font, fontH, tx, overlayTheme.moduleText, m.name.c_str());
-                            if (!m.tag.empty()) {
-                                std::string tagStr = " " + m.tag;
-                                ImVec2 tagTx(tx.x + nameW, tx.y);
-                                fg->AddText(font, fontH, ImVec2(tagTx.x + shadowOff, tagTx.y + shadowOff), overlayTheme.moduleTextShadow, tagStr.c_str());
-                                fg->AddText(font, fontH, tagTx, overlayTheme.moduleTagText, tagStr.c_str());
-                            }
-                        } else if (style == 4) {
-                            // Bold: Solid accent block fill
-                            fg->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), m.accent, 4.0f);
-                            fg->AddRect(ImVec2(x0, y0), ImVec2(x1, y1), overlayTheme.moduleBorder, 4.0f, 0, 1.0f);
-                            ImVec2 tx = ImVec2(x0 + barW + padX, y0 + padY);
-                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.moduleTextShadow, m.name.c_str());
-                            fg->AddText(font, fontH, tx, overlayTheme.moduleBoldText, m.name.c_str());
-                            if (!m.tag.empty()) {
-                                std::string tagStr = " " + m.tag;
-                                ImVec2 tagTx(tx.x + nameW, tx.y);
-                                fg->AddText(font, fontH, ImVec2(tagTx.x + shadowOff, tagTx.y + shadowOff), overlayTheme.moduleTextShadow, tagStr.c_str());
-                                fg->AddText(font, fontH, tagTx, overlayTheme.moduleBoldText, tagStr.c_str());
-                            }
-                        } else if (style == 5) {
-                            // Classic: Minecraft-style right-side bar with shadow and colored name + dim tag
-                            float minX0 = x1 - textW - 6.0f * scale;
-                            fg->AddRectFilled(ImVec2(minX0, y0), ImVec2(x1, y1), overlayTheme.moduleMinimalBg);
-                            fg->AddRectFilled(ImVec2(x1 - 2.5f * scale, y0), ImVec2(x1, y1), m.accent);
-                            ImVec2 tx = ImVec2(minX0 + 2.0f * scale, y0 + padY);
-                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.moduleTextShadow, m.name.c_str());
-                            fg->AddText(font, fontH, tx, m.accent, m.name.c_str());
-                            if (!m.tag.empty()) {
-                                std::string tagStr = " " + m.tag;
-                                ImVec2 tagTx(tx.x + nameW, tx.y);
-                                fg->AddText(font, fontH, ImVec2(tagTx.x + shadowOff, tagTx.y + shadowOff), overlayTheme.moduleTextShadow, tagStr.c_str());
-                                fg->AddText(font, fontH, tagTx, overlayTheme.moduleTagText, tagStr.c_str());
-                            }
-                        } else {
-                            // Modern: Clean lowercase with right bar and subtle background
-                            std::string lowName = ToLowerAscii(m.name);
-                            std::string lowTag = ToLowerAscii(m.tag);
-                            float minX0 = x1 - textW - 6.0f * scale;
-                            fg->AddRectFilled(ImVec2(minX0, y0), ImVec2(x1, y1), overlayTheme.moduleMinimalBg, 2.0f);
-                            fg->AddRectFilled(ImVec2(x1 - 2.0f * scale, y0), ImVec2(x1, y1), m.accent);
-                            ImVec2 tx = ImVec2(minX0 + 2.0f * scale, y0 + padY);
-                            fg->AddText(font, fontH, ImVec2(tx.x + shadowOff, tx.y + shadowOff), overlayTheme.moduleTextShadow, lowName.c_str());
-                            fg->AddText(font, fontH, tx, m.accent, lowName.c_str());
-                            if (!lowTag.empty()) {
-                                std::string tagStr = " " + lowTag;
-                                ImVec2 tagTx(tx.x + nameW, tx.y);
-                                fg->AddText(font, fontH, ImVec2(tagTx.x + shadowOff, tagTx.y + shadowOff), overlayTheme.moduleTextShadow, tagStr.c_str());
-                                fg->AddText(font, fontH, tagTx, overlayTheme.moduleTagText, tagStr.c_str());
-                            }
-                        }
-
-                        y += boxH + gapY;
-                    }
+                static thread_local aoko::ui::ModuleList moduleList;
+                ImVec2 blockSize = moduleList.Update(
+                    modEntries, mlLayout.scale, cfg.showLogo, style, io.DeltaTime);
+                if (blockSize.x > 0.0f && blockSize.y > 0.0f) {
+                    g_moduleListBaseWidth121 = blockSize.x /
+                        (mlLayout.scale > 0.001f ? mlLayout.scale : 1.0f);
+                    g_moduleListBaseHeight121 = blockSize.y /
+                        (mlLayout.scale > 0.001f ? mlLayout.scale : 1.0f);
+                    ImVec2 tl = lc::HudElementPixelPos(
+                        mlLayout, blockSize.x, blockSize.y, winW, winH);
+                    aoko::ui::Theme uiTheme = BuildOverlayUiTheme(overlayTheme);
+                    aoko::ui::Telemetry telemetry;
+                    telemetry.pingMs = g_overlayPingMs;
+                    telemetry.fps = (int)(io.Framerate + 0.5f);
+                    moduleList.Draw(fg, tl, uiTheme, telemetry, (float)ImGui::GetTime());
                 }
             }
+
 }
 
 // ── Renderer-neutral ImGui init ──────────────────────────────────────────────
@@ -19047,7 +20665,13 @@ static bool EnsureImGuiContextNeutral(HWND hwnd, bool forOpenGL) {
     fontCfg.PixelSnapH = true;
     ImFont* loadedFont = nullptr;
     std::string bridgeDir = GetBridgeDir();
+    // Prefer the Aoko overlay face (Manrope Medium, OFL); Minecraftia remains
+    // the compatibility fallback for older installs that do not ship Data\.
     std::vector<std::string> fontCandidates = {
+        bridgeDir + "\\Manrope-Medium.ttf",
+        bridgeDir + "\\manrope-medium.ttf",
+        bridgeDir + "\\Data\\Manrope-Medium.ttf",
+        bridgeDir + "\\Data\\manrope-medium.ttf",
         bridgeDir + "\\minecraftia.ttf",
         bridgeDir + "\\Minecraftia.ttf",
         bridgeDir + "\\Data\\minecraftia.ttf",
@@ -19069,7 +20693,7 @@ static bool EnsureImGuiContextNeutral(HWND hwnd, bool forOpenGL) {
     }
     if (!loadedFont) {
         io.Fonts->AddFontDefault(&fontCfg);
-        Log("Minecraftia not found, using default ImGui font.");
+        Log("No overlay font found (Manrope/Minecraftia), using default ImGui font.");
     }
     io.FontGlobalScale = 1.0f;
     ImGuiStyle& st = ImGui::GetStyle();
@@ -19082,6 +20706,15 @@ static bool EnsureImGuiContextNeutral(HWND hwnd, bool forOpenGL) {
     Log(std::string("ImGui context + Win32 platform initialized (neutral, ") +
         (forOpenGL ? "OpenGL" : "Vulkan") + " variant).");
     return true;
+}
+
+bool Bridge_OverlayRenderingDisabled() {
+    static const bool disabled = []() {
+        char value[16] = {};
+        DWORD n = GetEnvironmentVariableA("AOKO_BRIDGE261_NO_OVERLAY", value, sizeof(value));
+        return n > 0 && value[0] != '0';
+    }();
+    return disabled;
 }
 
 // Renderer-neutral seams consumed by the Vulkan backend (render_backend.cpp).
@@ -19097,6 +20730,7 @@ bool Bridge_IsImGuiPlatformReady() {
 // Runs platform NewFrame + ImGui::NewFrame + game-state update + panel draw + ImGui::Render().
 // Returns the finalized draw data, or nullptr when the frame should be skipped.
 ImDrawData* Bridge_BuildOverlayDrawData(int winW, int winH) {
+    if (Bridge_OverlayRenderingDisabled()) return nullptr;
     if (!g_imguiPhase1Done) return nullptr;
     if (IsWorldTransitionActive()) return nullptr;
 
@@ -19131,6 +20765,7 @@ ImDrawData* Bridge_BuildOverlayDrawData(int winW, int winH) {
 }
 
 void Bridge_BeginOverlayImGuiFrame(int winW, int winH) {
+    if (Bridge_OverlayRenderingDisabled()) return;
     PublishOverlayViewport121(winW, winH);
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplWin32_NewFrame();
@@ -19175,6 +20810,14 @@ void Bridge_EndOverlayImGuiFrame_OpenGL() {
 BOOL WINAPI hwglSwapBuffers(HDC hDc) {
     ModernRenderCallbackLease renderLease;
     if (!renderLease.Active()) return o_wglSwapBuffers(hDc);
+    if (Bridge_OverlayRenderingDisabled()) {
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            Log("AOKO_BRIDGE261_NO_OVERLAY set; overlay rendering disabled.");
+        }
+        return o_wglSwapBuffers(hDc);
+    }
     TRACE261_PATH("enter");
     bool hasHdc = TRACE261_IF("hasHdc", hDc != nullptr);
     if (!hasHdc) return o_wglSwapBuffers(hDc);
@@ -19192,15 +20835,16 @@ BOOL WINAPI hwglSwapBuffers(HDC hDc) {
     bool hasWindow = TRACE261_IF("windowValid", (window && IsWindow(window)));
     if (!hasWindow) return o_wglSwapBuffers(hDc);
 
-    // Only run on the main GLFW game window
+    // Only run on the main game window. Minecraft <= 26.2 uses a GLFW window ("GLFW30");
+    // 26.3+ uses SDL3 ("SDL_app"). Unknown classes fall back to a process-based lookup.
     char cls[256] = {};
     bool classReadOk = TRACE261_IF("windowClassRead", GetClassNameA(window, cls, sizeof(cls)-1) != 0);
     if (!classReadOk)
         return o_wglSwapBuffers(hDc);
-    bool isGlfwGameWindow = TRACE261_IF("isGlfwGameWindow", strcmp(cls, "GLFW30") == 0);
-    if (!isGlfwGameWindow) {
-        static bool s_loggedNonGlfw = false;
-        if (!s_loggedNonGlfw) { s_loggedNonGlfw = true; Log(std::string("wglSwapBuffers: non-GLFW window class '") + cls + "'; skipping overlay."); }
+    bool isGameWindow = TRACE261_IF("isGameWindow", RenderBackend_IsGameWindow(window));
+    if (!isGameWindow) {
+        static bool s_loggedNonGameWindow = false;
+        if (!s_loggedNonGameWindow) { s_loggedNonGameWindow = true; Log(std::string("wglSwapBuffers: non-game window class '") + cls + "'; skipping overlay."); }
         return o_wglSwapBuffers(hDc);
     }
 
@@ -19429,7 +21073,16 @@ DWORD WINAPI MainThread(LPVOID) {
     }
 
     // ---- Load GLFW function pointers (no hook needed; just direct calls) ----
+    // Minecraft 26.3+ ships SDL3 instead of GLFW; detect it up front so we do not wait
+    // 15 seconds for a glfw.dll that will never load.
     for (int attempt = 0; attempt < 30; attempt++) {
+        if (!GetModuleHandleA("glfw.dll") && !GetModuleHandleA("glfw64.dll") &&
+            ProcessHasModuleContaining("sdl3")) {
+            g_sdlInputBackend = true;
+            Log("SDL3 input backend detected (Minecraft 26.3+): GLFW is not used. "
+                "Bound-key reads map SDL scancodes to Windows virtual keys; cursor state uses the OS cursor.");
+            goto glfw_done;
+        }
         const char* names[] = { "glfw.dll", "glfw64.dll", nullptr };
         for (int i = 0; names[i]; i++) {
             HMODULE hGlfw = GetModuleHandleA(names[i]);
@@ -19564,6 +21217,8 @@ glfw_done:;
                 bool lookBlock;
                 bool lookEntity;
                 bool lookEntityLatched;
+                int lookEntityHurtTime = 0;
+                std::string moduleStatusJson;
                 bool breakBlock;
                 bool holdBlock;
                 float attackCooldown;
@@ -19583,6 +21238,7 @@ glfw_done:;
                     lookBlock = g_jniLookingAtBlock;
                     lookEntity = g_jniLookingAtEntity;
                     lookEntityLatched = g_jniLookingAtEntityLatched;
+                    lookEntityHurtTime = g_jniLookingAtEntityHurtTime;
                     breakBlock = g_jniBreakingBlock;
                     holdBlock = g_jniHoldingBlock;
                     healthVal = g_jniHealth;
@@ -19681,6 +21337,13 @@ glfw_done:;
                 state += lookEntity ? "true" : "false";
                 state += ",\"lookingAtEntityLatched\":";
                 state += lookEntityLatched ? "true" : "false";
+                state += ",\"lookingAtEntityHurtTime\":";
+                state += std::to_string(lookEntityHurtTime);
+                if (sendFullState) {
+                    moduleStatusJson = ModuleStatusJson121();
+                    state += ",\"moduleStatus\":";
+                    state += moduleStatusJson;
+                }
                 state += ",\"breakingBlock\":";
                 state += breakBlock ? "true" : "false";
                 char stateMsBuf[32];

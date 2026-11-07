@@ -45,24 +45,19 @@ public class FightStatusWiringTests
     }
 
     [Fact]
-    public void LocalAndBridgeToggles_UpdateFightStatus()
+    public void LocalToggle_UpdatesFightStatus()
     {
         Clicker clicker = Clicker.Instance;
         bool original = clicker.FightStatusEnabled;
         MethodInfo? localToggle = typeof(InputHooks).GetMethod("ToggleModule", BindingFlags.NonPublic | BindingFlags.Static);
-        MethodInfo? bridgeCommand = typeof(GameStateClient).GetMethod("HandleBridgeCommand", BindingFlags.NonPublic | BindingFlags.Instance);
 
         Assert.NotNull(localToggle);
-        Assert.NotNull(bridgeCommand);
 
         try
         {
             clicker.FightStatusEnabled = false;
             localToggle!.Invoke(null, new object[] { "fightstatus" });
             Assert.True(clicker.FightStatusEnabled);
-
-            bridgeCommand!.Invoke(GameStateClient.Instance, new object[] { "{\"action\":\"toggleFightStatus\"}" });
-            Assert.False(clicker.FightStatusEnabled);
         }
         finally
         {

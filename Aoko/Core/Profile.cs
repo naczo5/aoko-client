@@ -213,6 +213,18 @@ public class Profile
     public bool FireballWarningArrow { get; set; } = true;
     public bool FireballWarningSound { get; set; } = true;
 
+    public bool FastPlaceEnabled { get; set; } = false;
+    public bool NoHurtCamEnabled { get; set; } = false;
+    public bool SprintEnabled { get; set; } = false;
+    public bool TntTimerEnabled { get; set; } = false;
+    public bool WTapEnabled { get; set; } = false;
+    public bool JumpResetEnabled { get; set; } = false;
+    public bool HitSelectEnabled { get; set; } = false;
+    public bool TrajectoriesEnabled { get; set; } = false;
+    public bool MurderMysteryEnabled { get; set; } = false;
+    public bool BreakProgressEnabled { get; set; } = false;
+    public int JumpResetChance { get; set; } = 80;
+
     // Nullable so older JSON (without hudLayout) deserializes without error;
     // a null value is treated as canonical defaults in ApplyToClicker.
     public Dictionary<string, HudElementLayout>? HudLayout { get; set; }
@@ -246,6 +258,16 @@ public class Profile
         ["antidebuff"]       = 0,
         ["hitdelayfix"]     = 0,
         ["fireballwarning"]  = 0,
+        ["fastplace"]        = 0,
+        ["nohurtcam"]        = 0,
+        ["sprint"]           = 0,
+        ["tnttimer"]         = 0,
+        ["wtap"]             = 0,
+        ["jumpreset"]        = 0,
+        ["hitselect"]        = 0,
+        ["trajectories"]     = 0,
+        ["murdermystery"]    = 0,
+        ["breakprogress"]    = 0,
         ["panic"]            = 0,
         ["hudeditor"]        = 0,
     };
@@ -683,6 +705,18 @@ public static class ProfileManager
             FireballWarningArrow = clicker.FireballWarningArrow,
             FireballWarningSound = clicker.FireballWarningSound,
 
+            FastPlaceEnabled = clicker.FastPlaceEnabled,
+            NoHurtCamEnabled = clicker.NoHurtCamEnabled,
+            SprintEnabled = clicker.SprintEnabled,
+            TntTimerEnabled = clicker.TntTimerEnabled,
+            WTapEnabled = clicker.WTapEnabled,
+            JumpResetEnabled = clicker.JumpResetEnabled,
+            HitSelectEnabled = clicker.HitSelectEnabled,
+            TrajectoriesEnabled = clicker.TrajectoriesEnabled,
+            MurderMysteryEnabled = clicker.MurderMysteryEnabled,
+            BreakProgressEnabled = clicker.BreakProgressEnabled,
+            JumpResetChance = clicker.JumpResetChance,
+
             HudLayout = BuildHudLayoutDict(clicker.HudLayout),
 
             ModuleKeys = new Dictionary<string, int>(InputHooks.ModuleKeys),
@@ -838,6 +872,18 @@ public static class ProfileManager
         clicker.FireballWarningBox = profile.FireballWarningBox;
         clicker.FireballWarningArrow = profile.FireballWarningArrow;
         clicker.FireballWarningSound = profile.FireballWarningSound;
+
+        clicker.FastPlaceEnabled = profile.FastPlaceEnabled;
+        clicker.NoHurtCamEnabled = profile.NoHurtCamEnabled;
+        clicker.SprintEnabled = profile.SprintEnabled;
+        clicker.TntTimerEnabled = profile.TntTimerEnabled;
+        clicker.WTapEnabled = profile.WTapEnabled;
+        clicker.JumpResetEnabled = profile.JumpResetEnabled;
+        clicker.HitSelectEnabled = profile.HitSelectEnabled;
+        clicker.TrajectoriesEnabled = profile.TrajectoriesEnabled;
+        clicker.MurderMysteryEnabled = profile.MurderMysteryEnabled;
+        clicker.BreakProgressEnabled = profile.BreakProgressEnabled;
+        clicker.JumpResetChance = profile.JumpResetChance;
 
         clicker.HudLayout = BuildHudLayout(profile.HudLayout);
 

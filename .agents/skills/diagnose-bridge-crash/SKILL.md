@@ -20,7 +20,7 @@ signature. Mapping misses must fail open; they are not crashes.
 Written next to the loaded DLL (`Aoko\bin\Debug\net8.0-windows\` or publish root):
 
 * `bridge_debug.log` — 1.8.9
-* `bridge_261_debug.log` — 1.21 / 26.1 / 26.2
+* `bridge_261_debug.log` — 1.21 / 26.1 / 26.2 / 26.3
 * `loader_ui_debug.log` — C# UI lifecycle
 
 ```powershell
@@ -82,11 +82,16 @@ Do not run packet dispatch or gameplay mutation on `wglSwapBuffers` /
 `vkQueuePresentKHR`. Cache IDs there; mutate on tick / attached workers.
 See packet-and-call-hygiene.
 
-### D. Vulkan vs OpenGL (Lunar 26.2)
+### D. Vulkan vs OpenGL (Lunar 26.2+)
 
 Both present paths must not initialize ImGui. `RenderBackend_GetActiveKind()`
 in `render_backend.cpp`; first present wins. Kill-switch:
 `AOKO_BRIDGE261_VULKAN=0`.
+
+Minecraft 26.3 replaced GLFW with SDL3 (window class `SDL_app`, not `GLFW30`). The
+overlay locates the game window via `RenderBackend_FindGameWindow()`; a log line
+`Game window located: class=...` confirms it. If it never appears, the overlay
+has no window and nothing renders.
 
 ### E. Mapping / Yarn-Mojmap miss (not a crash)
 

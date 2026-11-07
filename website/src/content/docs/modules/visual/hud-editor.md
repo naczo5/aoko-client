@@ -7,7 +7,7 @@ The *HUD Editor* lets you reposition and scale aoko's on-screen overlay elements
 
 ## Version support
 
-1.8.9 · 1.21.x · 26.1 · 26.2
+1.8.9 · 1.21.x · 26.1 · 26.2 · 26.3
 
 ## Settings
 
@@ -15,7 +15,7 @@ When the HUD Editor is active you can move and scale these elements:
 
 | Element | Module |
 | ------- | ------ |
-| Module list | [Module List & Logo](/aoko-client/modules/visual/module-list/) |
+| Module list | [Module List & Watermark](/aoko-client/modules/visual/module-list/) |
 | Closest player panel | [Closest Player](/aoko-client/modules/visual/closest-player/) |
 | PixelParty panel | [PixelParty Assist](/aoko-client/modules/movement/pixelparty-assist/) |
 | Chest ESP list | [Chest ESP](/aoko-client/modules/visual/chest-esp/) |

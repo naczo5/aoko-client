@@ -11,7 +11,7 @@ Operating guide for coding agents working in `aoko-client` (`legoclickerC`). Bui
    - `java-to-jni-port`: Translate in-JVM Java (event buses, Mixins, mapping wrappers) into JNI/C#; unwrap to vanilla APIs.
    - `add-client-module`: `ModuleCatalog` first, then UI / Profile / TCP / string-list capabilities / bridges.
    - `diagnose-bridge-crash`: Root-cause runbook for JVM `hs_err` crash dumps and bridge debug logs.
-   - `release-verification`: PR compile gate vs `New-GitHubRelease.ps1` on `main`.
+   - `release-verification`: PR compile gate vs `New-GitHubRelease.ps1` on `main` (stable) or `dev` with `-Beta`.
    - `gui-media-showcase`: Regenerate external GUI screenshots, smooth MP4 video tours, and animated GIFs using `scripts\New-GuiScreenshots.ps1`.
    - `write-docs`: README, website/docs site, AGENTS.md, and skills stay aligned with current modules; silent on removals.
    - `design-aesthetic`: Visual design, typography, color palettes, and UI/UX aesthetic rules across website, docs, WPF GUI, and overlays (Mahoyo / Tsukihime blue glass style).
@@ -23,16 +23,17 @@ Operating guide for coding agents working in `aoko-client` (`legoclickerC`). Bui
 
 - `Aoko/`: .NET 8 WPF loader + external GUI (publishes as `Aoko.exe`).
 - `Aoko/Core/`: clicker engine, input hooks, profile persistence, TCP client, GTB solver.
-- `McInjector/`: native bridge DLLs (`bridge.dll` for 1.8.9, `bridge_261.dll` for 26.1 / 26.2 / 1.21.x).
+- `McInjector/`: native bridge DLLs (`bridge.dll` for 1.8.9, `bridge_261.dll` for 26.1 / 26.2 / 26.3 / 1.21.x).
 - `McInjector/src/main/cpp/`: JNI/Win32/OpenGL/Vulkan/ImGui/MinHook bridge sources.
+  - `overlay_ui.h`: header-only shared HUD layer (theme tokens, watermark, module list, cards, HUD-editor outline). Both bridges include it; keep new overlay drawing here so the two versions stay visually in sync.
 - `McInjector/src/main/java/`: Unused/obsolete Java agent code (ignore). Bridges perform all JNI, rendering, and TCP duties themselves.
 
 ## Required Toolchain
 
 - Windows 10/11 x64.
 - .NET SDK 8.x.
-- MinGW-w64 at `C:\mingw64\mingw64\bin\g++.exe`.
-- JDK 17 headers at `C:\Program Files\Java\jdk-17\include`.
+- MinGW-w64 at `C:\mingw64\mingw64\bin\g++.exe` (override with `AOKO_GXX`).
+- JDK 17 headers at `C:\Program Files\Java\jdk-17\include` (override with `JAVA_HOME`).
 
 ## Build Commands
 
@@ -50,7 +51,9 @@ Bridge build scripts auto-copy output to `Aoko\bin\Debug\`, `Release\`, and `pub
 - Release build: `dotnet build -c Release Aoko\Aoko.csproj`
 - Publish (self-contained single-file): `build_exe.bat`
 - Full local package (bridges + publish): `build_release.bat` (invoked by the GitHub release script; do not run it extra when publishing)
-- GitHub release: `.\scripts\New-GitHubRelease.ps1 -Version 0.x.y` from clean `main` (see `release-verification` skill)
+- GitHub release: `.\scripts\New-GitHubRelease.ps1 -Version 0.x.y` from clean `main` (see `release-verification` skill). Beta pre-release from `dev`: add `-Beta` (tag `v0.x.y-beta`, GitHub prerelease, Scoop unaffected).
+- CI release: **Actions → Build and publish release** (`.github/workflows/release.yml`). Tag pushes of `v<version>` or `v<version>-beta` also trigger it.
+- Release notes: short 4–6 bullet diff from the previous release; list new modules explicitly, omit fixes for features that first ship in that release, mention HUD/renderer changes, Full Changelog last (see `release-verification`).
 
 ### Run locally
 - Run app: `dotnet run --project Aoko\Aoko.csproj` (ensure existing `Aoko.exe` is closed).

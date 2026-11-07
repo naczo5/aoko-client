@@ -7,7 +7,7 @@ description: Quickly transfers items out of an open chest using the external cur
 
 ## Version support
 
-1.8.9 · 1.21.x · 26.1 · 26.2
+1.8.9 · 1.21.x · 26.1 · 26.2 · 26.3
 
 ## Settings
 
@@ -25,6 +25,7 @@ description: Quickly transfers items out of an open chest using the external cur
   - **Title check** filters out GUIs whose title contains common shop or lobby keywords.
   - **Custom item check** detects GUIs using renamed items as clickable icons or buttons.
   - **Physical chest check** verifies that an actual chest block exists within 6.5 blocks. Disable this if playing on servers that open virtual storage via commands.
+- The same three checks gate the autoclicker's **Click in chests** option, so shop menus, kit selectors, and other server GUIs are not clicked. With all three checks off, any chest-like GUI is allowed. On 1.21.x / 26.x the checks cover chests, ender chests, barrels, shulker boxes, hoppers, and dispensers/droppers; hoppers and dispensers/droppers skip the physical chest check because they are not tracked as chest blocks.
 - A higher **Delay** is slower but looks more human and is more reliable on laggy servers; a lower delay is faster but more obvious.
 - Because it uses the real cursor, keep the Minecraft window focused and the chest GUI open while it runs.
 

@@ -7,9 +7,9 @@ description: Hides screen-obscuring potion effects client-side.
 
 ## Version support
 
-1.8.9 · 1.21.x · 26.1 · 26.2
+1.8.9 · 1.21.x · 26.1 · 26.2 · 26.3
 
-| Effect hidden | 1.8.9 | 1.21.x / 26.1 / 26.2 |
+| Effect hidden | 1.8.9 | 1.21.x / 26.1 / 26.2 / 26.3 |
 | ------------- | :---: | :------------------: |
 | Blindness     | ✅ | ✅ |
 | Nausea        | ✅ | ✅ |
@@ -21,7 +21,7 @@ This module is a single toggle.
 
 ## Usage notes
 
-- Removes the Blindness fog and Nausea (warping) overlay client-side; on 1.21.x / 26.1 / 26.2 it also suppresses Darkness.
+- Removes the Blindness fog and Nausea (warping) overlay client-side; on 1.21.x / 26.1 / 26.2 / 26.3 it also suppresses Darkness.
 - This is purely a visual and client-side change. It does not remove the effect on the server.
 
 :::tip

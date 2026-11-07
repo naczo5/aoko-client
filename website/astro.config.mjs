@@ -63,7 +63,6 @@ export default defineConfig({
             {
               label: 'Combat',
               items: [
-                { label: 'Kill Aura', slug: 'modules/combat/killaura' },
                 { label: 'Autoclicker', slug: 'modules/combat/autoclicker' },
                 { label: 'Aim Assist', slug: 'modules/combat/aim-assist' },
                 { label: 'Triggerbot', slug: 'modules/combat/triggerbot' },
@@ -106,6 +105,22 @@ export default defineConfig({
                 { label: 'AutoHeal', slug: 'modules/utility/autoheal' },
                 { label: 'GTB Helper', slug: 'modules/utility/gtb-helper' },
                 { label: 'AntiDebuff', slug: 'modules/utility/antidebuff' },
+              ],
+            },
+            {
+              label: 'Beta',
+              items: [
+                { label: 'Kill Aura', slug: 'modules/combat/killaura' },
+                { label: 'Jump Reset', slug: 'modules/beta/jump-reset' },
+                { label: 'Hit Select', slug: 'modules/beta/hit-select' },
+                { label: 'WTap', slug: 'modules/combat/wtap' },
+                { label: 'Trajectories', slug: 'modules/beta/trajectories' },
+                { label: 'Murder Mystery', slug: 'modules/beta/murder-mystery' },
+                { label: 'Break Progress', slug: 'modules/beta/break-progress' },
+                { label: 'No Hurt Cam', slug: 'modules/visual/no-hurt-cam' },
+                { label: 'TNT Timer', slug: 'modules/visual/tnt-timer' },
+                { label: 'Fast Place', slug: 'modules/utility/fast-place' },
+                { label: 'Sprint', slug: 'modules/movement/sprint' },
               ],
             },
           ],

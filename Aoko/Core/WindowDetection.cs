@@ -303,7 +303,9 @@ public static class WindowDetection
 
         if (GetCursorInfo(ref pci))
         {
-            return (pci.flags & CURSOR_SHOWING) != 0;
+            // The game hides the cursor with SetCursor(NULL) while the mouse is captured
+            // (GLFW disabled cursor / SDL relative mouse mode in 26.3+), which leaves hCursor null.
+            return (pci.flags & CURSOR_SHOWING) != 0 && pci.hCursor != IntPtr.Zero;
         }
 
         return false;

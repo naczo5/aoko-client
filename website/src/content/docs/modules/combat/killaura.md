@@ -3,6 +3,8 @@ title: Kill Aura
 description: Automated target selection, rotation calculation, auto-blocking, and attack execution.
 ---
 
+> **Beta.** This module lives in the Beta tab of the external GUI. It was not thoroughly tested; use it at your own risk.
+
 Kill Aura automatically detects, tracks, and attacks valid targets within a configurable range and Field of View (FOV).
 
 ## Features

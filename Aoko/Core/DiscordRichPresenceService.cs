@@ -346,8 +346,6 @@ public sealed class DiscordRichPresenceService
             return "Anvil";
         if (v.Contains("craft"))
             return "Crafting";
-        if (v.Contains("clickgui"))
-            return "Click GUI";
 
         return "Open";
     }

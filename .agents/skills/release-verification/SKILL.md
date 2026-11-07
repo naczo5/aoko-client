@@ -34,10 +34,10 @@ Do **not** run `build_release.bat` or the GitHub release script for ordinary PRs
 
 ## 2. Publish a GitHub release
 
-Use `scripts\New-GitHubRelease.ps1`. It is the only supported publish path: it
-checks `main` is clean and matches `origin/main`, runs `build_release.bat`
-(which already builds both bridges then publishes), zips `Aoko_Release` as
-`Aoko.zip`, and creates the GitHub release with `gh`.
+`scripts\New-GitHubRelease.ps1` is the shared build/publish path: it
+checks the release branch is clean and matches origin, runs
+`build_release.bat` (which already builds both bridges then publishes), zips
+`Aoko_Release` as `Aoko.zip`, and creates the GitHub release with `gh`.
 
 ```powershell
 .\McInjector\run_tests.bat
@@ -45,16 +45,85 @@ dotnet test .\Aoko.Tests\Aoko.Tests.csproj
 .\scripts\New-GitHubRelease.ps1 -Version 0.x.y
 ```
 
-Optional: `-Draft` for a draft release. Requires `gh` authenticated, and **must
-run on `main`**. Do not create releases from `dev`. Do not merge or push `main`
-unless the user explicitly asked.
+Optional: `-Draft` for a draft release. Requires `gh` authenticated, and a
+stable **must run on `main`**. Do not create stable releases from `dev`. Do not
+merge or push `main` unless the user explicitly asked.
+
+### Beta releases from `dev`
+
+Use `-Beta` to publish the current `dev` branch as an opt-in pre-release:
+
+```powershell
+.\scripts\New-GitHubRelease.ps1 -Version 0.x.y -Beta
+```
+
+The script requires `dev` to be clean and match `origin/dev`, tags the release
+`v0.x.y-beta`, sets the GitHub prerelease flag, and targets `dev`. The Scoop
+workflow skips prereleases, so the stable channel is unaffected. Bump `-Version`
+for each new beta; an existing tag fails the release.
+
+### CI release workflow
+
+`.github/workflows/release.yml` builds on `windows-latest`, runs the native and
+C# tests, then calls `New-GitHubRelease.ps1`. Prefer it for releases so the
+artifacts are built and tested on Windows.
+
+- Manual: **Actions → Build and publish release**, choose `beta` (builds `dev`)
+  or `stable` (builds `main`), version, draft, and optional notes.
+- Tag: create an **annotated** tag whose message is the release body, then push
+  it. The workflow uses the tag message as the notes; a lightweight tag falls
+  back to generated notes. Tag `v<version>-beta` on `dev` or `v<version>` on
+  `main`. The tag must contain the workflow file; the script accepts detached
+  CI tag checkouts when the commit is reachable from the release branch. Tag
+  pushes publish immediately; set the repository variable
+  `RELEASE_DRAFT_OVERRIDE=true` (then delete it) to create the release as a
+  draft instead.
+
+  ```powershell
+  git tag -a v0.x.y-beta -F notes.md
+  git push origin v0.x.y-beta
+  ```
+- `workflow_dispatch` only appears after the workflow exists on the default
+  branch. Tag pushes work from `dev` immediately.
+- Releases created with the default `GITHUB_TOKEN` do not emit a `release`
+  event, so the workflow explicitly dispatches `docs.yml` and `scoop.yml` after
+  publishing. Scoop skips prereleases.
+
+### Release notes style
+
+Write the diff from the previous release, not a changelog of every commit.
+
+- 4–6 bullets, one line each. No headings, tables, paragraphs, or emoji.
+- New modules go in one explicit `New modules:` bullet. Do not bury them under a tab name or describe them as "native support".
+- Do not list fixes for features that first ship in this same release. If the previous release never had the feature, its bug fixes are not user-facing.
+- Mention internal rendering/UI work when users will notice it: HUD refresh, shared renderer, font, layout, driver risk, safe mode.
+- Merge related items into one bullet instead of listing every commit.
+- Describe what changed for the user, not commit titles or internal symbols.
+- Beta builds: note that the new modules are not thoroughly tested.
+- No marketing language. Plain, factual wording.
+- End with a single `**Full Changelog**: https://github.com/naczo5/aoko-client/compare/<previous>...<tag>` line.
+
+Example:
+
+```markdown
+- New modules: Fast Place, No Hurt Cam, Sprint, TNT Timer, WTap, Jump Reset, Hit Select, Trajectories, Murder Mystery, Break Progress
+- New Beta tab for untested modules; use at your own risk. Kill Aura moved there (still requires Dev Mode)
+- HUD rendering refresh: shared ImGui layer, live latency/brand/FPS watermark, glass module rows, restyled player/GTB/Pixel Party/Block ESP/HUD editor panels, bundled Manrope font
+- HUD layout: module rows sort by full width including tags; right-anchored lists stay put when resizing
+- Overlay stability: lower driver risk and a no-overlay safe mode
+
+**Full Changelog**: https://github.com/naczo5/aoko-client/compare/v11.6...v11.7-beta
+```
+
+Pass notes to the script with `-NotesFile <path>`; otherwise GitHub generates
+them.
 
 Do not call `build_release.bat` yourself when using this script; the script
 already invokes it.
 
-The published `Aoko.zip` is enough. A GitHub Action updates the install
-manifest on `release: published`. Do not run bucket/manifest scripts as part of
-the release.
+The published `Aoko.zip` is enough. The release workflow dispatches the docs
+and Scoop workflows after publishing (bot-created releases do not emit release
+events). Do not run bucket/manifest scripts as part of the release.
 
 ---
 
@@ -63,5 +132,7 @@ the release.
 - [ ] Native tests exit 0
 - [ ] `dotnet test` passes (includes `ModuleRegistrationTests`)
 - [ ] Everyday PRs: `build_dll.bat` only
-- [ ] Shipping: `New-GitHubRelease.ps1` on clean `main` matching origin
+- [ ] Shipping: `release.yml` CI workflow, or `New-GitHubRelease.ps1` on clean `main` matching origin
+- [ ] Beta shipping: `release.yml` beta/tag, or `New-GitHubRelease.ps1 -Beta` on clean `dev` matching origin (tag `v<version>-beta`)
+- [ ] Release body: short bullet list in the existing style, with Full Changelog last
 - [ ] No locked `Aoko.exe` / Minecraft holding the DLLs

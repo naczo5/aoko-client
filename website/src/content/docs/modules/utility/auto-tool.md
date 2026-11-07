@@ -7,7 +7,7 @@ description: Automatically selects the best weapon on hover and optimal tool whi
 
 ## Version support
 
-1.8.9 · 1.21.x · 26.1 · 26.2
+1.8.9 · 1.21.x · 26.1 · 26.2 · 26.3
 
 ## Settings
 

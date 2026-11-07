@@ -1,0 +1,161 @@
+name: Build and publish release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version without the v prefix (for example 11.8)'
+        required: true
+        type: string
+      channel:
+        description: 'Release channel'
+        required: true
+        type: choice
+        options:
+          - beta
+          - stable
+        default: beta
+      draft:
+        description: 'Create as a draft'
+        required: false
+        type: boolean
+        default: false
+      notes:
+        description: 'Short bullet-list release notes. Leave blank for generated notes.'
+        required: false
+        type: string
+  push:
+    tags:
+      - 'v[0-9]*'
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      AOKO_GXX: 'C:\mingw64\bin\g++.exe'
+    steps:
+      - name: Check out release commit
+        uses: actions/checkout@v4
+        with:
+          # Tag pushes build the tagged commit; manual runs build dev for beta
+          # and main for stable.
+          ref: ${{ github.event_name == 'push' && github.ref || (inputs.channel == 'beta' && 'dev' || 'main') }}
+          fetch-depth: 0
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up MinGW-w64
+        shell: pwsh
+        run: |
+          # Match the toolchain used by existing releases: GCC 13.2.0,
+          # win32 threads (no libwinpthread dependency), UCRT runtime.
+          $url = 'https://github.com/niXman/mingw-builds-binaries/releases/download/13.2.0-rt_v11-rev1/x86_64-13.2.0-release-win32-seh-ucrt-rt_v11-rev1.7z'
+          $archive = Join-Path $env:RUNNER_TEMP 'mingw.7z'
+          curl.exe -fL --retry 3 -o $archive $url
+          if (Test-Path 'C:\mingw64') { Remove-Item -Recurse -Force 'C:\mingw64' }
+          $sevenZip = Join-Path $env:ProgramFiles '7-Zip\7z.exe'
+          & $sevenZip x $archive -oC:\ -y | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "Could not extract MinGW archive (exit $LASTEXITCODE)." }
+          # The archive contains a top-level mingw64 directory, so g++ lands at C:\mingw64\bin.
+          & 'C:\mingw64\bin\g++.exe' --version | Select-Object -First 1
+
+      - name: Resolve release metadata
+        shell: pwsh
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_CHANNEL: ${{ inputs.channel }}
+          INPUT_DRAFT: ${{ inputs.draft }}
+          INPUT_NOTES: ${{ inputs.notes }}
+          TAG_NAME: ${{ github.ref_name }}
+          RELEASE_DRAFT_OVERRIDE: ${{ vars.RELEASE_DRAFT_OVERRIDE }}
+        run: |
+          if ($env:EVENT_NAME -eq 'push') {
+              $tag = $env:TAG_NAME
+              $isBeta = $tag.EndsWith('-beta')
+              $version = $tag.Substring(1)
+              if ($isBeta) { $version = $version.Substring(0, $version.Length - 5) }
+              $channel = if ($isBeta) { 'beta' } else { 'stable' }
+              # Tag pushes publish immediately unless the repository variable is
+              # set, which is useful for reviewing a release before it goes live.
+              $draft = if ($env:RELEASE_DRAFT_OVERRIDE -eq 'true') { 'true' } else { 'false' }
+              # Tag-driven releases use the annotated tag message as the body so
+              # the short bullet list travels with the tag.
+              $notes = ((& git tag -l --format='%(contents)' $tag) -join "`n").Trim()
+          } else {
+              $version = $env:INPUT_VERSION
+              $channel = $env:INPUT_CHANNEL
+              $draft = $env:INPUT_DRAFT
+              $notes = $env:INPUT_NOTES
+          }
+
+          if ($version -notmatch '^\d+(\.\d+){1,3}$') {
+              throw "Invalid release version '$version'."
+          }
+
+          "RELEASE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "RELEASE_CHANNEL=$channel" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "RELEASE_DRAFT=$draft" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          if (-not [string]::IsNullOrWhiteSpace($notes)) {
+              $notesPath = Join-Path $env:RUNNER_TEMP 'release-notes.md'
+              Set-Content -LiteralPath $notesPath -Value $notes -Encoding utf8
+              "RELEASE_NOTES_FILE=$notesPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          }
+
+      - name: Run native tests
+        shell: cmd
+        run: .\McInjector\run_tests.bat
+
+      - name: Build native bridges
+        shell: cmd
+        run: .\build_dll.bat
+
+      - name: Run C# tests
+        run: dotnet test .\Aoko.Tests\Aoko.Tests.csproj -c Release
+
+      - name: Build and publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $params = @{ Version = $env:RELEASE_VERSION }
+          if ($env:RELEASE_CHANNEL -eq 'beta') { $params.Beta = $true }
+          if ($env:RELEASE_DRAFT -eq 'true') { $params.Draft = $true }
+          if (-not [string]::IsNullOrWhiteSpace($env:RELEASE_NOTES_FILE)) {
+              $params.NotesFile = $env:RELEASE_NOTES_FILE
+          }
+          .\scripts\New-GitHubRelease.ps1 @params
+
+      - name: Refresh docs and Scoop manifest
+        if: env.RELEASE_DRAFT != 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "v$env:RELEASE_VERSION"
+          if ($env:RELEASE_CHANNEL -eq 'beta') { $tag += '-beta' }
+
+          # Releases created with GITHUB_TOKEN do not emit a release event, so
+          # start the dependent workflows explicitly. Scoop only tracks stable.
+          gh workflow run docs.yml --ref main
+          if ($env:RELEASE_CHANNEL -ne 'beta') {
+              gh workflow run scoop.yml --ref main -f "tag=$tag"
+          }

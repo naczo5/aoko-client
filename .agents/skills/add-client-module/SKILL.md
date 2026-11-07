@@ -102,7 +102,7 @@ catalog `OverlayProbe`. Overlay-only modules still parse config in `ParseConfig(
 ### Layer 8 — Native bridges
 * 1.8.9: `McInjector/src/main/cpp/bridge.cpp` — `ParseConfig()`, mappings,
   tick/premotion logic or ImGui overlay.
-* 1.21 / 26.1 / 26.2: `bridge_261.cpp` — Yarn-first then Mojmap arrays.
+* 1.21 / 26.1 / 26.2 / 26.3: `bridge_261.cpp` — Yarn-first then Mojmap arrays.
 * Shared sequencing belongs in a header (`auto_rod_core.h`, `auto_tool_core.h`)
   plus `McInjector/tests`. Do not fork the lockout rules per bridge.
 * Overlay drawing is draw-only unless the module owns mutation.
@@ -127,7 +127,7 @@ old mentions instead of documenting removals).
 | Kind | Typical work | Extra skill |
 | :--- | :--- | :--- |
 | Overlay / ESP / HUD | ParseConfig + ImGui + WorldToScreen | none |
-| C# input (clicker, aim, SpeedBridge) | Clicker loop + config so ClickGUI matches | none unless it also swaps items |
+| C# input (clicker, aim, SpeedBridge) | Clicker loop + config so the external GUI matches | none unless it also swaps items |
 | Native JNI / packets / hotbar | Both bridges + exclusive-resource lockout | **packet-and-call-hygiene** |
 | Port from in-JVM Java | Unwrap to vanilla APIs, then pick a row above | **java-to-jni-port** |
 

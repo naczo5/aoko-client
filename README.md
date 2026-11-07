@@ -14,14 +14,14 @@ aoko client is an open-source Windows utility client and external overlay for Lu
 
 ## Current status
 
-- Supported versions: **26.2**, **26.1**, **1.21.x**, and **1.8.9**.
+- Supported versions: **26.3**, **26.2**, **26.1**, **1.21.x**, and **1.8.9**.
 - Supported environments: **Lunar Client** as well as **standalone Minecraft instances** (1.8.9 on Forge, modern versions on Fabric).
-- On **modern 26.2** the game can present via OpenGL or the new **Vulkan** renderer; `bridge_261.dll` auto-detects OpenGL vs Vulkan at runtime and renders the overlay natively on either (kill-switch: set `AOKO_BRIDGE261_VULKAN=0` to force-disable the Vulkan path).
+- On **modern 26.2+** the game can present via OpenGL or the new **Vulkan** renderer; `bridge_261.dll` auto-detects OpenGL vs Vulkan at runtime and renders the overlay natively on either (kill-switch: set `AOKO_BRIDGE261_VULKAN=0` to force-disable the Vulkan path).
 - The external GUI uses hardware rendering by default; set `AOKO_SOFTWARE_RENDERING=1` to force software rendering (e.g. broken GPU drivers or RDP capture issues).
 
 ## Features (current)
 
-- Kill Aura (configurable CPS, attack/swing ranges, FOV, auto-block, smooth rotations)
+- Kill Aura (Beta; configurable CPS, attack/swing ranges, FOV, auto-block, smooth rotations)
 - Autoclicker (left/right, CPS range, jitter, block-only options)
 - Aim Assist
 - Triggerbot
@@ -32,18 +32,19 @@ aoko client is an open-source Windows utility client and external overlay for Lu
 - Throwpot (action bind instantly throws the first healing splash potion in your hotbar and restores your slot)
 - AutoHeal (automatically throws a healing splash potion when your health drops below a configurable threshold)
 - AutoTool (weapon swap on hover, optimal tool selection, Bedwars mode)
-- AntiDebuff (hides Blindness/Nausea client-side, plus Darkness on 1.21/26.1/26.2)
+- AntiDebuff (hides Blindness/Nausea client-side, plus Darkness on 1.21/26.1/26.2/26.3)
 - Nick Hider (JVMTI-based local name spoofing)
 - Hit Delay Fix (removes 1.8.9 attack cooldown delays)
+- Beta modules (Beta tab, not thoroughly tested): Fast Place, No Hurt Cam, Sprint, TNT Timer, WTap, Jump Reset, Hit Select, Trajectories, Murder Mystery helper, Break Progress
 - Chest Stealer (external cursor-based with menu check)
 - Refill (shift-clicks Instant Health/Regen pots and golden apples into empty hotbar slots while your inventory is open)
 - GTB Helper & Pixel Party Assist
 - Discord Rich Presence
 - Nametags, Closest Player panel, Fight Status, Chest ESP, Block ESP, BedPlates, Fireball Warning
 - In-game HUD Editor & module list styling
-- Per-module keybinds (all unbound by default, configurable in WPF & ClickGUI)
+- Per-module keybinds (all unbound by default, configurable in the external GUI)
 - Profiles saved in `%AppData%\Aoko\profiles\`
-- GUI customization (slate palettes, module list style, show logo)
+- GUI customization (slate palettes, module list style, client watermark)
 
 ## Screenshots
 
@@ -151,3 +152,7 @@ Pull requests are welcome for bug fixes and new modules.
 ## Support
 
 ETH - `0x04166c3bec4e2e28799AdFa0b336b0159d90c699`
+
+## Third-party assets
+
+- Manrope font (`Aoko/Data/Manrope-Medium.ttf`), SIL Open Font License 1.1. The license text is bundled at `Aoko/Data/Manrope-OFL.md`.

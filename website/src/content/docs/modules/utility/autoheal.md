@@ -9,7 +9,7 @@ Two safety rules decide when a throw is allowed: you must already be **looking s
 
 ## Version support
 
-1.8.9 · 1.21.x · 26.1 · 26.2
+1.8.9 · 1.21.x · 26.1 · 26.2 · 26.3
 
 ## Settings
 

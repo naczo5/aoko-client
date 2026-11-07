@@ -7,7 +7,7 @@ description: Attacks automatically when an entity is under your crosshair and th
 
 ## Version support
 
-1.21.x · 26.1 · 26.2. Not available on 1.8.9.
+1.21.x · 26.1 · 26.2 · 26.3. Not available on 1.8.9.
 
 ## Settings
 

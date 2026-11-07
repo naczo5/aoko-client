@@ -7,7 +7,7 @@ The *Autoclicker* fires the left and/or right mouse button at a randomized rate 
 
 ## Version support
 
-1.8.9 · 1.21.x · 26.1 · 26.2
+1.8.9 · 1.21.x · 26.1 · 26.2 · 26.3
 
 ## Settings
 
@@ -20,12 +20,12 @@ The *Autoclicker* fires the left and/or right mouse button at a randomized rate 
 | Randomization | Randomization mode: **Basic** (uniform distribution), **Medium** (Gaussian jitter), or **Advanced** (humanized drift, butterfly clicking doublets, and stamina drop-off). | `Basic` / `Medium` / `Advanced` (`Medium`) |
 | Right only when holding block | Right-click only fires while you are holding a placeable block. | Off |
 | Break blocks | Treats held left-click as mining intent and pauses clicking while breaking a block. | Off |
-| Click in chests | Allows clicking inside chest/container GUIs (otherwise paused there). | Off |
+| Click in chests | Allows clicking inside real chest GUIs (otherwise paused there). Uses the Chest Stealer title, custom item, and physical chest checks, so shop and menu GUIs stay paused. | Off |
 
 ## Usage notes
 
 - The left autoclicker only runs when the module is **Armed**; the right autoclicker is independent so it can be used on its own.
-- Clicking automatically pauses in inventories, crafting/anvil/furnace screens, and (unless **Click in chests** is on) chest GUIs. It also pauses when the system cursor is visible.
+- Clicking automatically pauses in inventories, crafting/anvil/furnace screens, and (unless **Click in chests** is on and the open container passes the Chest Stealer checks) chest GUIs. It also pauses when the system cursor is visible.
 - **Randomization modes**:
   - **Basic**: Flat uniform random selection within the configured Min/Max CPS window.
   - **Medium**: Gaussian distribution clustered around mid CPS, touching window edges naturally.
