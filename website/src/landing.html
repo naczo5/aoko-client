@@ -155,14 +155,14 @@
   <section id="registry" class="section">
     <div class="section-head">
       <h2><span class="eyebrow">01 / modules</span> Everything in one place</h2>
-      <p>Every module aoko ships, grouped by subsystem. Expand a row for details.</p>
+      <p>Every module aoko ships, grouped by subsystem. Beta modules live in the Beta tab. Expand a row for details.</p>
     </div>
 
     <div class="reg-group" data-group="combat">
-      <div class="reg-label">combat<span class="reg-count">10</span></div>
+      <div class="reg-label">combat<span class="reg-count">13</span></div>
       <div class="reg-rows">
         <details class="mod">
-          <summary><span class="mod-i">▸</span><span class="mod-name">killaura</span><span class="mod-tag">combat</span></summary>
+          <summary><span class="mod-i">▸</span><span class="mod-name">killaura</span><span class="mod-tag">beta</span></summary>
           <p>Automated targeting with configurable CPS, swing & attack ranges, FOV, auto-block, and smooth rotation noise.</p>
         </details>
         <details class="mod">
@@ -176,6 +176,18 @@
         <details class="mod">
           <summary><span class="mod-i">▸</span><span class="mod-name">triggerbot</span><span class="mod-tag">aim</span></summary>
           <p>Crosshair-gated firing with a cooldown threshold and hit-chance controls.</p>
+        </details>
+        <details class="mod">
+          <summary><span class="mod-i">▸</span><span class="mod-name">hit select</span><span class="mod-tag">beta</span></summary>
+          <p>Holds AutoClicker clicks while the crosshair target is still in its hurt window.</p>
+        </details>
+        <details class="mod">
+          <summary><span class="mod-i">▸</span><span class="mod-name">wtap</span><span class="mod-tag">beta</span></summary>
+          <p>Sprint-resets on hit to maximize dealt knockback and hold combo spacing.</p>
+        </details>
+        <details class="mod">
+          <summary><span class="mod-i">▸</span><span class="mod-name">jump reset</span><span class="mod-tag">beta</span></summary>
+          <p>Jumps on the first tick of a hit to cancel part of the incoming knockback.</p>
         </details>
         <details class="mod">
           <summary><span class="mod-i">▸</span><span class="mod-name">auto rod</span><span class="mod-tag">combat</span></summary>
@@ -205,11 +217,15 @@
     </div>
 
     <div class="reg-group" data-group="movement">
-      <div class="reg-label">movement<span class="reg-count">2</span></div>
+      <div class="reg-label">movement<span class="reg-count">3</span></div>
       <div class="reg-rows">
         <details class="mod">
           <summary><span class="mod-i">▸</span><span class="mod-name">speedbridge</span><span class="mod-tag">assist</span></summary>
           <p>Edge sneak assist with block-only, hold-sneak, looking-down, and safety timing controls.</p>
+        </details>
+        <details class="mod">
+          <summary><span class="mod-i">▸</span><span class="mod-name">sprint</span><span class="mod-tag">beta</span></summary>
+          <p>Keeps you sprinting while moving forward without holding a sprint key.</p>
         </details>
         <details class="mod">
           <summary><span class="mod-i">▸</span><span class="mod-name">pixel party assist</span><span class="mod-tag">assist</span></summary>
@@ -219,7 +235,7 @@
     </div>
 
     <div class="reg-group" data-group="visual">
-      <div class="reg-label">visual<span class="reg-count">8</span></div>
+      <div class="reg-label">visual<span class="reg-count">12</span></div>
       <div class="reg-rows">
         <details class="mod">
           <summary><span class="mod-i">▸</span><span class="mod-name">nametags</span><span class="mod-tag">esp</span></summary>
@@ -250,6 +266,22 @@
           <p>Read-only box, arrow, and sound alerts when a nearby player holds a fireball or fire charge.</p>
         </details>
         <details class="mod">
+          <summary><span class="mod-i">▸</span><span class="mod-name">trajectories</span><span class="mod-tag">beta</span></summary>
+          <p>Draws the predicted arc and landing spot for the projectile in your hand.</p>
+        </details>
+        <details class="mod">
+          <summary><span class="mod-i">▸</span><span class="mod-name">tnt timer</span><span class="mod-tag">beta</span></summary>
+          <p>Shows the remaining fuse time above primed TNT.</p>
+        </details>
+        <details class="mod">
+          <summary><span class="mod-i">▸</span><span class="mod-name">no hurt cam</span><span class="mod-tag">beta</span></summary>
+          <p>Removes the hurt-camera shake and tilt for a steady view during fights.</p>
+        </details>
+        <details class="mod">
+          <summary><span class="mod-i">▸</span><span class="mod-name">break progress</span><span class="mod-tag">beta</span></summary>
+          <p>Shows mining progress over blocks you or other players are breaking.</p>
+        </details>
+        <details class="mod">
           <summary><span class="mod-i">▸</span><span class="mod-name">module list &amp; hud editor</span><span class="mod-tag">hud</span></summary>
           <p>Configurable in-game module list (default, minimal, outlined, glass, bold), live latency/brand/FPS watermark, and in-game HUD positioning editor.</p>
         </details>
@@ -257,7 +289,7 @@
     </div>
 
     <div class="reg-group" data-group="utility">
-      <div class="reg-label">utility<span class="reg-count">8</span></div>
+      <div class="reg-label">utility<span class="reg-count">10</span></div>
       <div class="reg-rows">
         <details class="mod">
           <summary><span class="mod-i">▸</span><span class="mod-name">refill</span><span class="mod-tag">inventory</span></summary>
@@ -270,6 +302,10 @@
         <details class="mod">
           <summary><span class="mod-i">▸</span><span class="mod-name">chest stealer</span><span class="mod-tag">inventory</span></summary>
           <p>External cursor-based stealer with menu checks that empties containers fast.</p>
+        </details>
+        <details class="mod">
+          <summary><span class="mod-i">▸</span><span class="mod-name">fast place</span><span class="mod-tag">beta</span></summary>
+          <p>Removes the client-side right-click delay for rapid block and projectile placement.</p>
         </details>
         <details class="mod">
           <summary><span class="mod-i">▸</span><span class="mod-name">antidebuff</span><span class="mod-tag">survival</span></summary>
@@ -286,6 +322,10 @@
         <details class="mod">
           <summary><span class="mod-i">▸</span><span class="mod-name">gtb helper</span><span class="mod-tag">overlay</span></summary>
           <p>Reads Guess-The-Build hints and lists candidate words in an overlay.</p>
+        </details>
+        <details class="mod">
+          <summary><span class="mod-i">▸</span><span class="mod-name">murder mystery</span><span class="mod-tag">beta</span></summary>
+          <p>Tags players holding a murder weapon or bow in Hypixel Murder Mystery.</p>
         </details>
         <details class="mod">
           <summary><span class="mod-i">▸</span><span class="mod-name">discord rpc</span><span class="mod-tag">integration</span></summary>
