@@ -78,6 +78,13 @@ public class GameState
     [JsonPropertyName("killAuraBlocking")]
     public bool KillAuraBlocking { get; set; }
 
+    /// <summary>Last moduleAction request the bridge accepted, for action acknowledgement.</summary>
+    [JsonPropertyName("lastActionId")]
+    public int LastActionId { get; set; }
+
+    [JsonPropertyName("lastActionResult")]
+    public string LastActionResult { get; set; } = "";
+
     [JsonPropertyName("stateMs")]
     public ulong StateMs { get; set; }
 

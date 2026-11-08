@@ -64,6 +64,8 @@ internal static class GameStatePatchMerger
             KillAuraUnavailableReason = previous.KillAuraUnavailableReason,
             KillAuraHasTarget = previous.KillAuraHasTarget,
             KillAuraBlocking = previous.KillAuraBlocking,
+            LastActionId = previous.LastActionId,
+            LastActionResult = previous.LastActionResult,
             StateMs = previous.StateMs,
             PosX = previous.PosX,
             PosY = previous.PosY,
@@ -111,6 +113,8 @@ internal static class GameStatePatchMerger
                 case "killAuraUnavailableReason": TryRead<string>(value, v => merged.KillAuraUnavailableReason = v); break;
                 case "killAuraHasTarget": TryRead<bool>(value, v => merged.KillAuraHasTarget = v); break;
                 case "killAuraBlocking": TryRead<bool>(value, v => merged.KillAuraBlocking = v); break;
+                case "lastActionId": TryRead<int>(value, v => merged.LastActionId = v); break;
+                case "lastActionResult": TryRead<string>(value, v => merged.LastActionResult = v); break;
                 case "stateMs": TryRead<ulong>(value, v => merged.StateMs = v); break;
                 case "posX": TryRead<double>(value, v => merged.PosX = v); break;
                 case "posY": TryRead<double>(value, v => merged.PosY = v); break;

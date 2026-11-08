@@ -47,6 +47,12 @@ public class GameStateClient : INotifyPropertyChanged
     private int _injectionProgress;
     private bool _isInjectionInProgress;
     private long _lastUiActionBarDispatchTicks;
+    private static int _nextActionRequestId;
+    // Diagnostic tracker for the latest module action only. Overlapping actions
+    // intentionally collapse to the newest request instead of queueing acks.
+    private int _pendingActionRequestId;
+    private long _pendingActionSentAt;
+    private int _pendingActionTimeoutLogged;
     private int _reloadMappingsNonce;
     private IntPtr _targetHwnd;
     private volatile bool _suppressConfigPush = false;
@@ -90,6 +96,36 @@ public class GameStateClient : INotifyPropertyChanged
         _transportDiagnostics.RecordStateNotification();
         OnPropertyChanged(nameof(CurrentState));
         StateUpdated?.Invoke();
+    }
+
+    private void TrackActionAcknowledgement(GameState state)
+    {
+        int pending = Volatile.Read(ref _pendingActionRequestId);
+        if (pending == 0)
+            return;
+
+        if (state.LastActionId >= pending)
+        {
+            Volatile.Write(ref _pendingActionRequestId, 0);
+            if (!string.IsNullOrEmpty(state.LastActionResult) &&
+                state.LastActionResult is not ("received" or "queued" or "started"))
+            {
+                Debug.WriteLine(
+                    $"[GameStateClient] Action {pending} was {state.LastActionResult} by the bridge.");
+            }
+            return;
+        }
+
+        long sentAt = Volatile.Read(ref _pendingActionSentAt);
+        if (sentAt == 0 || Environment.TickCount64 - sentAt < 1500)
+            return;
+
+        if (Interlocked.CompareExchange(ref _pendingActionTimeoutLogged, 1, 0) == 0)
+        {
+            Debug.WriteLine(
+                $"[GameStateClient] Action {pending} was not acknowledged within 1500 ms; " +
+                $"last bridge id={state.LastActionId} result='{state.LastActionResult}'.");
+        }
     }
 
     public bool IsConnected
@@ -402,6 +438,7 @@ public class GameStateClient : INotifyPropertyChanged
 
     public async Task ConnectAsync(int maxAttempts = 20, Action<int, int>? onAttempt = null, bool reportFailure = true)
     {
+        Volatile.Write(ref _pendingActionRequestId, 0);
         var previousCts = Interlocked.Exchange(ref _cts, null);
         var previousConfigTask = _configSenderTask;
         var previousReadTask = _readTask;
@@ -525,6 +562,7 @@ public class GameStateClient : INotifyPropertyChanged
                         state.IsConnected = true;
                         state.LastUpdate = DateTime.Now;
                         CurrentState = state;
+                        TrackActionAcknowledgement(state);
                         if (Capabilities.SupportsStateField("actionBar"))
                             QueueActionBarUpdate(state.ActionBar);
                     }
@@ -660,6 +698,7 @@ public class GameStateClient : INotifyPropertyChanged
         }
         _client?.Dispose();
         _client = null;
+        Volatile.Write(ref _pendingActionRequestId, 0);
         IsConnected = false;
         IsInjected = false;
         IsInjectionInProgress = false;
@@ -888,13 +927,15 @@ public class GameStateClient : INotifyPropertyChanged
     }
 
     internal static string BuildAutoRodActionMessage(
-        int slotMode, bool verifyForcedSlot, int extensionTicks, bool holdToExtend)
+        int slotMode, bool verifyForcedSlot, int extensionTicks, bool holdToExtend,
+        int requestId = 0)
         => JsonSerializer.Serialize(new
         {
             type = "moduleAction",
             action = "autoRod",
             phase = "press",
             enabled = true,
+            requestId,
             slotMode = Math.Clamp(slotMode, 0, 9),
             verifyForcedSlot,
             extensionTicks = Math.Clamp(extensionTicks, 1, 40),
@@ -915,17 +956,26 @@ public class GameStateClient : INotifyPropertyChanged
         if (!clicker.AutoRodEnabled)
             return false;
 
+        int requestId = Interlocked.Increment(ref _nextActionRequestId);
         string message = BuildAutoRodActionMessage(
             clicker.AutoRodSlotMode,
             clicker.AutoRodVerifyForcedSlot,
             clicker.AutoRodExtensionTicks,
-            clicker.AutoRodHoldToExtend);
+            clicker.AutoRodHoldToExtend,
+            requestId);
         try
         {
-            return await SendMessageAsync(
+            bool sent = await SendMessageAsync(
                 message,
                 token,
                 () => Clicker.Instance.AutoRodEnabled).ConfigureAwait(false);
+            if (sent)
+            {
+                Volatile.Write(ref _pendingActionRequestId, requestId);
+                Volatile.Write(ref _pendingActionSentAt, Environment.TickCount64);
+                Interlocked.Exchange(ref _pendingActionTimeoutLogged, 0);
+            }
+            return sent;
         }
         catch (Exception ex) when (ex is IOException or InvalidOperationException or ObjectDisposedException or SocketException or OperationCanceledException)
         {
@@ -947,13 +997,14 @@ public class GameStateClient : INotifyPropertyChanged
         }
     }
 
-    internal static string BuildThrowPotActionMessage()
+    internal static string BuildThrowPotActionMessage(int requestId = 0)
         => JsonSerializer.Serialize(new
         {
             type = "moduleAction",
             action = "throwPot",
             phase = "press",
-            enabled = true
+            enabled = true,
+            requestId
         }) + "\n";
 
     public async Task<bool> SendThrowPotActionAsync(CancellationToken token = default)
@@ -962,12 +1013,20 @@ public class GameStateClient : INotifyPropertyChanged
         if (!clicker.ThrowpotEnabled)
             return false;
 
+        int requestId = Interlocked.Increment(ref _nextActionRequestId);
         try
         {
-            return await SendMessageAsync(
-                BuildThrowPotActionMessage(),
+            bool sent = await SendMessageAsync(
+                BuildThrowPotActionMessage(requestId),
                 token,
                 () => Clicker.Instance.ThrowpotEnabled).ConfigureAwait(false);
+            if (sent)
+            {
+                Volatile.Write(ref _pendingActionRequestId, requestId);
+                Volatile.Write(ref _pendingActionSentAt, Environment.TickCount64);
+                Interlocked.Exchange(ref _pendingActionTimeoutLogged, 0);
+            }
+            return sent;
         }
         catch (Exception ex) when (ex is IOException or InvalidOperationException or ObjectDisposedException or SocketException or OperationCanceledException)
         {

@@ -93,9 +93,16 @@ public class Clicker : INotifyPropertyChanged
     private static readonly int KeyboardInputSize = Marshal.SizeOf<INPUT_KEY>();
     
     // State
+    private enum ClickerActivity
+    {
+        None = 0,
+        Left = 1,
+        Right = 2
+    }
+
+    private readonly object _stateLock = new();
+    private int _activity; // ClickerActivity, accessed through Volatile
     private bool _isArmed;
-    private bool _isClicking;
-    private bool _useLeftButton = true;
     private CancellationTokenSource? _clickCts;
     private Task? _clickTask;
     private readonly AimAssistMotionController _aimAssistMotionController = new();
@@ -222,34 +229,31 @@ public class Clicker : INotifyPropertyChanged
         }
     }
 
+    private ClickerActivity Activity => (ClickerActivity)Volatile.Read(ref _activity);
+
     public bool IsArmed
     {
-        get => _isArmed;
+        get => Volatile.Read(ref _isArmed);
         private set
         {
-            if (_isArmed != value)
-            {
-                _isArmed = value;
-                OnPropertyChanged(nameof(IsArmed));
-                OnPropertyChanged(nameof(StatusText));
-                StateChanged?.Invoke();
-            }
+            if (IsArmed == value) return;
+            Volatile.Write(ref _isArmed, value);
+            OnPropertyChanged(nameof(IsArmed));
+            OnPropertyChanged(nameof(StatusText));
+            StateChanged?.Invoke();
         }
     }
-    
-    public bool IsClicking
+
+    public bool IsClicking => Activity != ClickerActivity.None;
+
+    public bool IsUsingLeftButton => Activity == ClickerActivity.Left;
+
+    private void NotifyClickingChanged()
     {
-        get => _isClicking;
-        private set
-        {
-            if (_isClicking != value)
-            {
-                _isClicking = value;
-                OnPropertyChanged(nameof(IsClicking));
-                OnPropertyChanged(nameof(StatusText));
-                StateChanged?.Invoke();
-            }
-        }
+        OnPropertyChanged(nameof(IsClicking));
+        OnPropertyChanged(nameof(IsUsingLeftButton));
+        OnPropertyChanged(nameof(StatusText));
+        StateChanged?.Invoke();
     }
     
     public float MinCPS
@@ -457,38 +461,54 @@ public class Clicker : INotifyPropertyChanged
     
     public void StartClicking(bool leftButton)
     {
-        if (leftButton)
+        lock (_stateLock)
         {
-            if (!IsArmed || !LeftClickEnabled) return;
+            if (Activity != ClickerActivity.None) return;
+
+            if (leftButton)
+            {
+                if (!IsArmed || !LeftClickEnabled) return;
+            }
+            else
+            {
+                // Right-click autoclick is intentionally independent from "Armed"
+                // so it can work when left autoclicker is disabled.
+                if (!RightClickEnabled) return;
+            }
+
+            Volatile.Write(ref _activity, (int)(leftButton ? ClickerActivity.Left : ClickerActivity.Right));
+            var cts = new CancellationTokenSource();
+            _clickCts = cts;
+            _clickTask = Task.Run(() => ClickLoop(cts.Token, leftButton));
         }
-        else
-        {
-            // Right-click autoclick is intentionally independent from "Armed"
-            // so it can work when left autoclicker is disabled.
-            if (!RightClickEnabled) return;
-        }
-        if (IsClicking) return;
-        
-        _useLeftButton = leftButton;
-        IsClicking = true;
-        
-        var cts = new CancellationTokenSource();
-        _clickCts = cts;
-        _clickTask = Task.Run(() => ClickLoop(cts.Token));
+
+        NotifyClickingChanged();
     }
-    
+
     public void StopClicking()
     {
-        var cts = _clickCts;
-        var task = _clickTask;
-        _clickCts = null;
-        _clickTask = null;
-        if (cts != null)
+        CancellationTokenSource? cts;
+        Task? task;
+        bool wasClicking;
+
+        lock (_stateLock)
         {
-            cts.Cancel();
-            _ = DisposeCtsWhenDoneAsync(cts, task);
+            wasClicking = Activity != ClickerActivity.None;
+            Volatile.Write(ref _activity, (int)ClickerActivity.None);
+            cts = _clickCts;
+            task = _clickTask;
+            _clickCts = null;
+            _clickTask = null;
+            // Cancel while the start path is still excluded so a new stream
+            // cannot begin before the old token observes the stop.
+            cts?.Cancel();
         }
-        IsClicking = false;
+
+        if (cts != null)
+            _ = DisposeCtsWhenDoneAsync(cts, task);
+
+        if (wasClicking)
+            NotifyClickingChanged();
     }
     
     public void Stop()
@@ -701,8 +721,6 @@ public class Clicker : INotifyPropertyChanged
         _aimAssistMotionController.Reset();
         _aimAssistLoop.Stop();
     }
-
-    public bool IsUsingLeftButton => _useLeftButton;
 
     private void StartTriggerbotLoop()
     {
@@ -2684,7 +2702,7 @@ public class Clicker : INotifyPropertyChanged
                 }
 
                 bool leftHeld = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
-                bool autoLeftClicking = IsClicking && _useLeftButton;
+                bool autoLeftClicking = IsUsingLeftButton;
                 if (leftHeld || autoLeftClicking)
                     TryApplyAimAssist(state);
                 else
@@ -3096,7 +3114,7 @@ public class Clicker : INotifyPropertyChanged
                screen.Contains("class_465", StringComparison.OrdinalIgnoreCase);
     }
 
-    private async Task ClickLoop(CancellationToken token)
+    private async Task ClickLoop(CancellationToken token, bool leftButton)
     {
         long nextClickDeadline = 0;
         
@@ -3162,7 +3180,7 @@ public class Clicker : INotifyPropertyChanged
             }
             
             // Right Click Logic: "Only hold block" check
-            if (!_useLeftButton && RightClickOnlyBlock)
+            if (!leftButton && RightClickOnlyBlock)
             {
                 // When injected, require confirmed block holding; fail-open only when not injected at all.
                 if (GameStateClient.Instance.IsInjected && (!GameStateClient.Instance.IsConnected || !GameStateClient.Instance.CurrentState.HoldingBlock))
@@ -3173,7 +3191,7 @@ public class Clicker : INotifyPropertyChanged
             }
             
             // Break Blocks Logic: 
-            if (_useLeftButton && BreakBlocksEnabled)
+            if (leftButton && BreakBlocksEnabled)
             {
                 if (GameStateClient.Instance.IsConnected)
                 {
@@ -3201,7 +3219,7 @@ public class Clicker : INotifyPropertyChanged
             // Hit Select: skip left clicks while the crosshair target is still inside its
             // hurt window, where the server ignores the hit. Bridges that do not report
             // lookingAtEntityHurtTime leave it at 0, so this fails open.
-            if (_useLeftButton && HitSelectEnabled && GameStateClient.Instance.IsConnected)
+            if (leftButton && HitSelectEnabled && GameStateClient.Instance.IsConnected)
             {
                 var state = GameStateClient.Instance.CurrentState;
                 if (ShouldHitSelectSkip(state.LookingAtEntity, state.LookingAtEntityHurtTime))
@@ -3211,8 +3229,8 @@ public class Clicker : INotifyPropertyChanged
                 }
             }
 
-            float minCps = _useLeftButton ? MinCPS : RightMinCPS;
-            float maxCps = _useLeftButton ? MaxCPS : RightMaxCPS;
+            float minCps = leftButton ? MinCPS : RightMinCPS;
+            float maxCps = leftButton ? MaxCPS : RightMaxCPS;
             if (minCps > maxCps) minCps = maxCps;
             
             // Calculate CPS and target interval according to configured RandomizationMode
@@ -3239,7 +3257,7 @@ public class Clicker : INotifyPropertyChanged
                 case ClickRandomizationMode.Advanced:
                 default:
                 {
-                    var timingState = _useLeftButton ? _leftTimingState : _rightTimingState;
+                    var timingState = leftButton ? _leftTimingState : _rightTimingState;
                     targetInterval = timingState.CalculateNextDelay(minCps, maxCps);
                     cps = (float)(1000.0 / Math.Max(1.0, targetInterval));
                     break;
@@ -3247,8 +3265,10 @@ public class Clicker : INotifyPropertyChanged
             }
 
             // Perform click
-            StatsTracker.Instance.RecordClick(cps, _useLeftButton);
-            PerformClick(_useLeftButton);
+            if (token.IsCancellationRequested)
+                break;
+            StatsTracker.Instance.RecordClick(cps, leftButton);
+            PerformClick(leftButton);
 
             ClickSchedule schedule = ClickDeadlineScheduler.ScheduleNext(
                 nextClickDeadline,

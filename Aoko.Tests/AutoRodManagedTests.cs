@@ -186,7 +186,7 @@ public class AutoRodManagedTests
     [Fact]
     public void ActionMessage_IsNewlineDelimitedAndHasExactContract()
     {
-        string message = GameStateClient.BuildAutoRodActionMessage(12, true, 99, true);
+        string message = GameStateClient.BuildAutoRodActionMessage(12, true, 99, true, 42);
         Assert.EndsWith("\n", message, StringComparison.Ordinal);
 
         JsonNode? node = JsonNode.Parse(message);
@@ -194,6 +194,7 @@ public class AutoRodManagedTests
         Assert.Equal("autoRod", node["action"]!.GetValue<string>());
         Assert.Equal("press", node["phase"]!.GetValue<string>());
         Assert.True(node["enabled"]!.GetValue<bool>());
+        Assert.Equal(42, node["requestId"]!.GetValue<int>());
         Assert.Equal(9, node["slotMode"]!.GetValue<int>());
         Assert.True(node["verifyForcedSlot"]!.GetValue<bool>());
         Assert.Equal(40, node["extensionTicks"]!.GetValue<int>());

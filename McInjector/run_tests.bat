@@ -67,6 +67,14 @@ echo [NativeTests] Running mapping_probe_gate_tests.exe...
 tests\mapping_probe_gate_tests.exe
 if %errorlevel% neq 0 exit /b %errorlevel%
 
+echo [NativeTests] Building exclusive_resource_arbiter_tests.exe...
+"%GPP%" -m64 -std=c++11 -O2 -static-libgcc -static-libstdc++ -o tests\exclusive_resource_arbiter_tests.exe tests\exclusive_resource_arbiter_tests.cpp
+if %errorlevel% neq 0 exit /b %errorlevel%
+
+echo [NativeTests] Running exclusive_resource_arbiter_tests.exe...
+tests\exclusive_resource_arbiter_tests.exe
+if %errorlevel% neq 0 exit /b %errorlevel%
+
 echo [NativeTests] Building chunk_scan_tests.exe...
 "%GPP%" -m64 -std=c++11 -O2 -static-libgcc -static-libstdc++ -o tests\chunk_scan_tests.exe tests\chunk_scan_tests.cpp
 if %errorlevel% neq 0 exit /b %errorlevel%

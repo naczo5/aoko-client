@@ -131,9 +131,10 @@ internal sealed class ChestStealerController
             _task = null;
         }
 
-        if (cts == null) return;
-        cts.Cancel();
+        cts?.Cancel();
+        // Retry a failed release even if the worker already stopped.
         ReleaseSyntheticShift();
+        if (cts == null) return;
         _ = DisposeCtsWhenDoneAsync(cts, task);
     }
 
@@ -352,8 +353,8 @@ internal sealed class ChestStealerController
             return;
         }
 
-        SendInput(1, _shiftDown, Marshal.SizeOf<INPUT>());
-        _syntheticShiftHeld = true;
+        if (SendInput(1, _shiftDown, Marshal.SizeOf<INPUT>()) == 1)
+            _syntheticShiftHeld = true;
     }
 
     private void ReleaseSyntheticShift()
@@ -361,8 +362,10 @@ internal sealed class ChestStealerController
         if (!_syntheticShiftHeld)
             return;
 
-        SendInput(1, _shiftUp, Marshal.SizeOf<INPUT>());
-        _syntheticShiftHeld = false;
+        // Keep ownership until the release is accepted; clearing the flag after
+        // a failed SendInput would leave a synthetic shift held with no retry.
+        if (SendInput(1, _shiftUp, Marshal.SizeOf<INPUT>()) == 1)
+            _syntheticShiftHeld = false;
     }
 
     private int NextIntervalMs(int configuredDelayMs, double nextDistancePx)
