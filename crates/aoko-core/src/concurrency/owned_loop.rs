@@ -86,6 +86,12 @@ struct Inner {
     join_finished: parking_lot::Condvar,
     unexpected_completions: AtomicU32,
     restarts: AtomicU32,
+    /// Worker handles `stop_and_join` has actually joined.
+    ///
+    /// A join that finds nothing to wait for is not counted, which is what makes
+    /// "the handle was kept" observable from a test: if `complete` detached the
+    /// handle, the joiner takes `None` and this counter does not move.
+    joined_workers: AtomicU32,
     generation: AtomicU64,
 }
 
@@ -147,6 +153,7 @@ impl OwnedLoop {
                 join_finished: parking_lot::Condvar::new(),
                 unexpected_completions: AtomicU32::new(0),
                 restarts: AtomicU32::new(0),
+                joined_workers: AtomicU32::new(0),
                 generation: AtomicU64::new(0),
             }),
         }
@@ -232,6 +239,7 @@ impl OwnedLoop {
             {
                 let mut state = self.inner.state.lock();
                 state.worker_checked_out = false;
+                self.inner.joined_workers.fetch_add(1, Ordering::AcqRel);
                 self.inner.join_finished.notify_all();
             }
 
@@ -291,6 +299,18 @@ impl OwnedLoop {
     #[must_use]
     pub fn is_joining_worker(&self) -> bool {
         self.inner.state.lock().worker_checked_out
+    }
+
+    /// How many worker handles [`Self::stop_and_join`] has joined.
+    ///
+    /// Every call that found a handle counts, including a handle whose thread had
+    /// already completed. A call that found nothing does not, so this is the direct
+    /// check on the handoff invariant `complete` has to honour: the completed
+    /// worker's handle stays in place, because it is the only way another thread can
+    /// wait for that worker.
+    #[must_use]
+    pub fn joined_workers(&self) -> u32 {
+        self.inner.joined_workers.load(Ordering::Acquire)
     }
 
     /// Unexpected exits observed while the loop was requested.
@@ -451,6 +471,8 @@ impl Inner {
 
         // A completion while a join is in progress is relaunched by that joiner's
         // tail, once the seal count reaches zero and no one is waiting any more.
+        // `a_completed_worker_is_still_joinable` fails if the handle is detached
+        // here again.
         if state.joiners == 0 && state.requested && !state.disposed && state.body.is_some() {
             if unexpected {
                 self.unexpected_completions.fetch_add(1, Ordering::AcqRel);
@@ -810,6 +832,70 @@ mod tests {
 
         assert!(!loop_.is_running());
         assert_eq!(loop_.joiners(), 0);
+    }
+
+    /// The second half of the `stop_and_join` fix: a completed worker keeps its
+    /// handle, because that handle is the only way another thread can wait for that
+    /// worker and the worker cannot join itself.
+    ///
+    /// The body returns on its own (it never consults the token) after `stop` has
+    /// already withdrawn the request, so `complete` runs with no joiner yet and
+    /// nothing relaunches over the handle. The joiner arrives afterwards, which is
+    /// the only ordering that can observe the handoff: a joiner already inside
+    /// `join` holds the handle itself and would not notice it being detached.
+    #[test]
+    fn a_completed_worker_is_still_joinable() {
+        let loop_ = OwnedLoop::new("completed-worker");
+        let (entered_tx, entered_rx) = mpsc::channel::<()>();
+        let gate = Arc::new((Mutex::new(false), parking_lot::Condvar::new()));
+
+        let body: LoopBody = {
+            let gate = Arc::clone(&gate);
+            Arc::new(move |_cancel: &CancelToken| {
+                let _ = entered_tx.send(());
+                let (lock, cvar) = &*gate;
+                let mut released = lock.lock();
+                while !*released {
+                    cvar.wait(&mut released);
+                }
+                // Returns on its own: no cancellation check, no loop condition.
+                Ok(())
+            })
+        };
+
+        assert!(loop_.start(Arc::clone(&body)));
+        entered_rx
+            .recv_timeout(SIGNAL_TIMEOUT)
+            .expect("generation 1 entered its body");
+
+        // Withdraw the request before the body returns, so this is not an
+        // unexpected completion and no restart overwrites the handle.
+        loop_.stop();
+        {
+            let (lock, cvar) = &*gate;
+            *lock.lock() = true;
+            cvar.notify_all();
+        }
+        spin_until(|| !loop_.is_running(), "the worker never completed");
+
+        assert_eq!(loop_.restart_count(), 0);
+        assert_eq!(loop_.unexpected_completion_count(), 0);
+        assert_eq!(loop_.joined_workers(), 0);
+
+        // No joiner was present while `complete` ran, so the handle has to have
+        // survived it; otherwise this call finds nothing and joins nothing.
+        loop_.stop_and_join();
+        assert_eq!(
+            loop_.joined_workers(),
+            1,
+            "stop_and_join must join the completed worker instead of taking `None`"
+        );
+        assert_eq!(loop_.joiners(), 0);
+        assert!(!loop_.is_sealed());
+
+        // The handle is consumed exactly once, never resurrected.
+        loop_.stop_and_join();
+        assert_eq!(loop_.joined_workers(), 1);
     }
 
     #[test]

@@ -137,13 +137,16 @@ pub struct UiSnapshot {
     pub modules_on: usize,
     /// Whether the platform can drive clicks at all.
     pub can_click: bool,
-    /// Whether the platform can observe the physical buttons and keys at all.
+    /// Whether the platform can sample current pointer and key state, i.e.
+    /// [`CapabilityReport::pointer_state_sampling`].
     ///
-    /// `false` is why the hold guards park instead of acting: on such a session
-    /// the clicker cannot tell a held button from a free one, so automated action
-    /// that needs that proof stays off. The UI shows this next to `can_click` so an
-    /// inactive session is explainable rather than mysterious.
-    pub input_observable: bool,
+    /// Deliberately *not* [`CapabilityReport::input_observation`]: events can be
+    /// delivered while sampling is unavailable (Wayland with readable evdev), and
+    /// the hold guards park on the sampling answer, so this is the flag the UI must
+    /// show next to `can_click` to explain an inactive session. `input_observation`
+    /// stays reachable through [`AppController::capabilities`] for the "events are
+    /// being delivered" line, which is a different claim.
+    pub pointer_state_sampling: bool,
     /// Whether the bridge transport is usable.
     pub bridge_usable: bool,
     /// Short reasons a control is disabled, for the UI's tooltip.
@@ -302,7 +305,7 @@ impl AppController {
             screen_name: state.as_ref().map(|state| state.screen_name.clone()),
             modules_on: self.count_enabled_modules(),
             can_click: self.capabilities.input_synthesis,
-            input_observable: self.capabilities.input_observation,
+            pointer_state_sampling: self.capabilities.pointer_state_sampling,
             bridge_usable: self.capabilities.bridge.is_usable(),
             notes: self.capabilities.notes.clone(),
         }
@@ -531,16 +534,28 @@ mod tests {
         assert!(snapshot.can_click);
         assert!(!snapshot.bridge_usable);
         assert!(!snapshot.notes.is_empty());
-        // `transport_only` cannot observe input, so an unobservable session is
+        // `transport_only` cannot sample input, so an unobservable session is
         // explainable from the snapshot instead of looking like a stuck clicker.
-        assert!(!snapshot.input_observable);
+        assert!(!snapshot.pointer_state_sampling);
 
-        let mut observable = transport_only();
-        observable.input_observation = true;
+        // Events delivered without sampling: the Wayland-with-evdev case. The
+        // snapshot must follow `pointer_state_sampling`, not `input_observation`,
+        // because that is what the hold guards actually consult.
+        let mut events_only = transport_only();
+        events_only.input_observation = true;
         assert!(
-            AppController::new(observable)
+            !AppController::new(events_only)
                 .ui_snapshot(Instant::now())
-                .input_observable
+                .pointer_state_sampling
+        );
+
+        let mut sampling = transport_only();
+        sampling.input_observation = true;
+        sampling.pointer_state_sampling = true;
+        assert!(
+            AppController::new(sampling)
+                .ui_snapshot(Instant::now())
+                .pointer_state_sampling
         );
 
         assert!(bridge_supported(BridgeSupport::Supported));

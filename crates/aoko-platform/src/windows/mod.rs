@@ -49,6 +49,9 @@ pub fn probe_capabilities() -> CapabilityReport {
         process_inspection: true,
         window_inspection: true,
         input_observation: true,
+        // `GetAsyncKeyState` always has an answer, so sampling is part of the same
+        // claim on Windows.
+        pointer_state_sampling: true,
         input_synthesis: true,
         discord_rpc: discord_pipes > 0,
         srv_resolution: true,
@@ -82,6 +85,7 @@ mod tests {
         assert!(report.process_inspection);
         assert!(report.window_inspection);
         assert!(report.input_observation);
+        assert!(report.pointer_state_sampling);
         assert!(report.input_synthesis);
         assert!(report.bridge.is_usable());
     }

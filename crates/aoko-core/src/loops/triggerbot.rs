@@ -264,8 +264,9 @@ pub fn run(
         // reason. C# only had the always-answering `GetAsyncKeyState`, so the
         // unknown state is a new-platform decision rather than a parity difference.
         // The UI explains the inactivity from
-        // `CapabilityReport::input_observation`; do not rewrite this as
-        // `unwrap_or(false)`.
+        // `CapabilityReport::pointer_state_sampling` - the flag that agrees with
+        // `probe_mouse_state`, not `input_observation`, which only says events are
+        // delivered. Do not rewrite this as `unwrap_or(false)`.
         let left_held = input.probe_mouse_state().map(|mouse| mouse.left_down);
         if config.require_click && left_held != Some(true) {
             timing.had_target = false;

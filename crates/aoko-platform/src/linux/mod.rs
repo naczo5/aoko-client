@@ -45,6 +45,11 @@ pub struct Detected {
     pub discord_sockets: usize,
     /// Resolvers configured in `/etc/resolv.conf`.
     pub dns_servers: usize,
+    /// An X11 connection exists *and* `XQueryPointer` answered, which is exactly what
+    /// [`crate::InputBackend::probe_mouse_state`] gates on. This is deliberately not
+    /// the same question as `evdev_devices > 0`: a Wayland session can deliver
+    /// global events through evdev while no pointer state can be sampled.
+    pub pointer_state: bool,
 }
 
 impl Detected {
@@ -52,13 +57,18 @@ impl Detected {
     /// compositor forgot to accept.
     #[must_use]
     pub fn probe() -> Self {
-        let x11 = x11::X11::connect().is_ok();
+        let connection = x11::X11::connect();
+        let pointer_state = connection
+            .as_ref()
+            .is_ok_and(|connection| connection.pointer().is_some());
+        let x11 = connection.is_ok();
         let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|value| !value.is_empty())
             || std::env::var("XDG_SESSION_TYPE")
                 .is_ok_and(|value| value.eq_ignore_ascii_case("wayland"));
 
         Self {
             x11,
+            pointer_state,
             wayland,
             procfs: std::path::Path::new("/proc/self/cmdline").exists(),
             evdev_devices: evdev::enumerate_devices().len(),
@@ -103,6 +113,13 @@ impl Detected {
                  to the 'input' group and re-login"
                     .to_string(),
             );
+        } else if !self.pointer_state {
+            notes.push(
+                "input events are observed through /dev/input, but held-button state needs an \
+                 X11 display: without one the automation loops cannot tell a held button from \
+                 a released one"
+                    .to_string(),
+            );
         }
         if !self.uinput && !self.x11 {
             notes.push(
@@ -129,7 +146,12 @@ impl Detected {
             session,
             process_inspection: self.procfs,
             window_inspection: self.x11,
+            // Events and sampling are different questions: evdev reports whether the
+            // event stream can be read, `pointer_state` whether the loops can sample a
+            // held button. Conflating them is how a UI ends up claiming it can see a
+            // mouse the clicker refuses to trust.
             input_observation: self.evdev_devices > 0,
+            pointer_state_sampling: self.pointer_state,
             input_synthesis: self.x11 || self.uinput,
             discord_rpc: self.discord_sockets > 0,
             // UDP DNS needs no session at all, so a host with no display and no
@@ -175,6 +197,7 @@ mod tests {
             uinput: false,
             discord_sockets: 1,
             dns_servers: 1,
+            pointer_state: true,
         }
         .report();
 
@@ -182,6 +205,7 @@ mod tests {
         assert!(report.process_inspection);
         assert!(report.window_inspection);
         assert!(report.input_observation);
+        assert!(report.pointer_state_sampling);
         assert!(report.input_synthesis);
         assert!(report.discord_rpc);
         assert_eq!(report.bridge, BridgeSupport::UnsupportedOnLinuxYet);
@@ -190,6 +214,38 @@ mod tests {
             .notes
             .iter()
             .any(|note| note.contains("native bridge")));
+    }
+
+    #[test]
+    fn a_wayland_session_with_readable_evdev_reports_events_without_sampling() {
+        // The case that made one boolean a lie: evdev needs no display, so the event
+        // stream works, while `XQueryPointer` needs X11, so a held button cannot be
+        // sampled. The two flags must disagree here, deliberately.
+        let report = Detected {
+            x11: false,
+            wayland: true,
+            procfs: true,
+            evdev_devices: 3,
+            uinput: true,
+            discord_sockets: 1,
+            dns_servers: 1,
+            pointer_state: false,
+        }
+        .report();
+
+        assert_eq!(report.session, SessionKind::Wayland);
+        assert!(
+            report.input_observation,
+            "evdev delivers events without a display"
+        );
+        assert!(
+            !report.pointer_state_sampling,
+            "and nothing can be sampled, which is what the probes answer"
+        );
+        assert!(report
+            .notes
+            .iter()
+            .any(|note| note.contains("held-button state needs an X11 display")));
     }
 
     #[test]
@@ -202,6 +258,7 @@ mod tests {
             uinput: false,
             discord_sockets: 0,
             dns_servers: 0,
+            pointer_state: false,
         }
         .report();
 
@@ -209,6 +266,7 @@ mod tests {
         assert!(report.process_inspection);
         assert!(!report.window_inspection);
         assert!(!report.input_observation);
+        assert!(!report.pointer_state_sampling);
         assert!(!report.input_synthesis);
         assert!(!report.discord_rpc);
         assert!(report
@@ -277,6 +335,28 @@ mod tests {
         }
         if report.session == SessionKind::Windows {
             panic!("a Linux build must not report a Windows session");
+        }
+    }
+
+    #[test]
+    fn a_sampling_claim_is_backed_by_the_sampler_itself() {
+        use crate::InputBackend as _;
+
+        // The report and the backend are built independently; if the report says a
+        // held button is visible, `probe_mouse_state` must agree rather than deny it.
+        let report = Detected::probe().report();
+        let backend = LinuxInputBackend::new();
+        if report.pointer_state_sampling {
+            assert!(
+                backend.probe_mouse_state().is_some(),
+                "the report claimed sampling while the sampler answered None"
+            );
+        }
+        if backend.probe_mouse_state().is_none() {
+            assert!(
+                !report.pointer_state_sampling,
+                "the sampler answered None while the report claimed sampling"
+            );
         }
     }
 

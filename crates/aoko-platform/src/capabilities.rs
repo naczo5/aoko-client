@@ -41,8 +41,25 @@ pub struct CapabilityReport {
     pub process_inspection: bool,
     /// Window enumeration, including foreground and client bounds.
     pub window_inspection: bool,
-    /// Global keyboard/mouse state and hook events.
+    /// Global input **events** are delivered: a low-level hook is attached, or the
+    /// evdev reader can open the input nodes.
+    ///
+    /// This is about the event stream only. It does **not** imply that current
+    /// pointer and key state can be sampled - see
+    /// [`CapabilityReport::pointer_state_sampling`], which is the flag that answers
+    /// that question and the only one `probe_mouse_state`/`probe_key_state` agree
+    /// with. On Wayland with readable `/dev/input` this is `true` while sampling is
+    /// unavailable, because evdev needs no display but `XQueryPointer` does.
     pub input_observation: bool,
+    /// The automation loops can sample current pointer and key state, i.e.
+    /// [`crate::InputBackend::probe_mouse_state`] and
+    /// [`crate::InputBackend::probe_key_state`] return `Some` rather than `None`.
+    ///
+    /// This is the flag a hold guard should consult. On Linux it needs an X11
+    /// display; a Wayland-only session reports `false` even when
+    /// [`CapabilityReport::input_observation`] is `true`, so the UI must not claim it
+    /// can see a held button when the loops cannot.
+    pub pointer_state_sampling: bool,
     /// Synthetic clicks, key presses and relative mouse movement.
     pub input_synthesis: bool,
     /// Discord IPC reachability.
@@ -64,6 +81,7 @@ impl CapabilityReport {
             process_inspection: false,
             window_inspection: false,
             input_observation: false,
+            pointer_state_sampling: false,
             input_synthesis: false,
             discord_rpc: false,
             srv_resolution: true,
@@ -93,6 +111,7 @@ mod tests {
         let report = CapabilityReport::transport_only(SessionKind::Wayland);
         assert_eq!(report.session, SessionKind::Wayland);
         assert!(!report.input_synthesis);
+        assert!(!report.pointer_state_sampling);
         assert!(report.srv_resolution, "UDP needs no OS service");
         assert!(!report.bridge.is_usable());
         assert!(!report.notes.is_empty());
