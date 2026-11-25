@@ -11,7 +11,10 @@ pub enum PlatformError {
     /// The target disappeared between enumeration and use.
     NotFound { detail: String },
     /// A Win32 / X11 / socket call failed.
-    Os { operation: &'static str, detail: String },
+    Os {
+        operation: &'static str,
+        detail: String,
+    },
 }
 
 impl PlatformError {
@@ -73,7 +76,10 @@ mod tests {
     #[test]
     fn permission_denied_is_actionable() {
         let err = PlatformError::permission_denied("uinput needs group input");
-        assert_eq!(err.user_facing(), "Permission denied: uinput needs group input");
+        assert_eq!(
+            err.user_facing(),
+            "Permission denied: uinput needs group input"
+        );
     }
 
     #[test]

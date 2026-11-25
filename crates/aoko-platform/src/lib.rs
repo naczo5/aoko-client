@@ -15,15 +15,52 @@ mod capabilities;
 mod discord;
 mod error;
 mod input;
+mod netstat;
 mod process;
+mod tcp;
+mod version;
 mod window;
 
+#[cfg(target_os = "linux")]
+mod evdev_table;
+
+#[cfg(windows)]
+mod windows;
+
+#[cfg(target_os = "linux")]
+mod linux;
+
 pub use capabilities::{BridgeSupport, CapabilityReport, SessionKind};
-pub use discord::{DiscordFrame, DiscordRpcTransport, DiscordTransportError};
+pub use discord::{
+    handshake_payload, op, read_frame_from, write_frame_to, DiscordFrame, DiscordRpcTransport,
+    DiscordTransportError, StreamDiscordTransport, FRAME_HEADER_LEN, MAX_FRAME_PAYLOAD,
+};
 pub use error::PlatformError;
 pub use input::{InputBackend, InputEvent, Key, MouseButton, MouseState};
-pub use process::{InstanceCandidate, ProcessInfo, ProcessInspector};
-pub use window::{Rect, WindowHandle, WindowInfo, WindowInspector};
+pub use netstat::{protocol_listener_pid, NetstatLineParser, TcpPortProbe};
+pub use process::{
+    compare_ignore_case, describe_target, is_java_process_name, select_best_window, sort_targets,
+    ClientType, DiscoveryTarget, InstanceCandidate, ProcessInfo, ProcessInspector,
+};
+pub use tcp::{TcpBridgeTransport, BRIDGE_ADDRESS, SEND_TIMEOUT};
+pub use version::{normalize_detected_version, resolve_bridge_dll_name, try_parse_version};
+pub use window::{sort_windows, Rect, WindowHandle, WindowInfo, WindowInspector};
+
+#[cfg(target_os = "linux")]
+pub use evdev_table::{code_for_key, key_from_code};
+
+#[cfg(windows)]
+pub use windows::{
+    install_hooks, process_image_name, read_command_line, uninstall_hooks, window_title,
+    WindowsBridgeInjector, WindowsDiscordTransport, WindowsInputBackend, WindowsProcessInspector,
+    WindowsWindowInspector,
+};
+
+#[cfg(target_os = "linux")]
+pub use linux::{
+    parse_proc_cmdline, Detected, LinuxBridgeInjector, LinuxDiscordTransport, LinuxInputBackend,
+    LinuxProcessInspector, LinuxWindowInspector,
+};
 
 /// Which desktop backend a Linux session is actually using.
 ///
@@ -96,6 +133,173 @@ pub struct PlatformServices {
     pub capabilities: CapabilityReport,
 }
 
+/// Probes what this session can actually do.
+///
+/// Constructing a service set calls this, so a UI never has to guess why a
+/// control is disabled.
+#[must_use]
+pub fn probe_capabilities() -> CapabilityReport {
+    #[cfg(windows)]
+    {
+        windows::probe_capabilities()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux::probe_capabilities()
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        CapabilityReport::transport_only(SessionKind::None)
+    }
+}
+
+/// Full service set for this OS: processes, windows, input, injector, Discord.
+#[must_use]
+pub fn default_services() -> PlatformServices {
+    #[cfg(windows)]
+    {
+        windows::services()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        linux::services()
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        // Unsupported targets keep the transport and report every OS service off,
+        // so cross-compiles of the workspace still link.
+        PlatformServices {
+            processes: Box::new(UnsupportedProcesses),
+            windows: Box::new(UnsupportedWindows),
+            input: Box::new(UnsupportedInput),
+            injector: Box::new(UnsupportedInjector),
+            discord: Box::new(UnsupportedDiscord),
+            capabilities: probe_capabilities(),
+        }
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+struct UnsupportedProcesses;
+
+#[cfg(not(any(windows, target_os = "linux")))]
+impl ProcessInspector for UnsupportedProcesses {
+    fn list_processes(&self) -> Result<Vec<ProcessInfo>, PlatformError> {
+        Err(PlatformError::unsupported(
+            "no process backend for this target",
+        ))
+    }
+
+    fn command_line(&self, _pid: u32) -> Result<String, PlatformError> {
+        Err(PlatformError::unsupported(
+            "no process backend for this target",
+        ))
+    }
+
+    fn discover_instances(&self) -> Result<Vec<InstanceCandidate>, PlatformError> {
+        Err(PlatformError::unsupported(
+            "no process backend for this target",
+        ))
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+struct UnsupportedWindows;
+
+#[cfg(not(any(windows, target_os = "linux")))]
+impl WindowInspector for UnsupportedWindows {
+    fn enumerate(&self) -> Result<Vec<WindowInfo>, PlatformError> {
+        Err(PlatformError::unsupported(
+            "no window backend for this target",
+        ))
+    }
+
+    fn foreground(&self) -> Result<Option<WindowInfo>, PlatformError> {
+        Err(PlatformError::unsupported(
+            "no window backend for this target",
+        ))
+    }
+
+    fn client_bounds(&self, _handle: WindowHandle) -> Result<Rect, PlatformError> {
+        Err(PlatformError::unsupported(
+            "no window backend for this target",
+        ))
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+struct UnsupportedInput;
+
+#[cfg(not(any(windows, target_os = "linux")))]
+impl InputBackend for UnsupportedInput {
+    fn mouse_state(&self) -> MouseState {
+        MouseState::default()
+    }
+
+    fn key_state(&self, _key: Key) -> bool {
+        false
+    }
+
+    fn click(&self, _button: MouseButton) -> Result<(), PlatformError> {
+        Err(PlatformError::unsupported(
+            "no input backend for this target",
+        ))
+    }
+
+    fn move_relative(&self, _dx: i32, _dy: i32) -> Result<(), PlatformError> {
+        Err(PlatformError::unsupported(
+            "no input backend for this target",
+        ))
+    }
+
+    fn key_press(&self, _key: Key) -> Result<(), PlatformError> {
+        Err(PlatformError::unsupported(
+            "no input backend for this target",
+        ))
+    }
+
+    fn poll_events(&self, _out: &mut Vec<InputEvent>) -> Result<(), PlatformError> {
+        Err(PlatformError::unsupported(
+            "no input backend for this target",
+        ))
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+struct UnsupportedInjector;
+
+#[cfg(not(any(windows, target_os = "linux")))]
+impl NativeBridgeInjector for UnsupportedInjector {
+    fn inject(&self, _pid: u32, _library: &Path) -> Result<InjectionReport, PlatformError> {
+        Err(PlatformError::unsupported("no injector for this target"))
+    }
+
+    fn support(&self) -> BridgeSupport {
+        BridgeSupport::UnsupportedOnLinuxYet
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+struct UnsupportedDiscord;
+
+#[cfg(not(any(windows, target_os = "linux")))]
+impl DiscordRpcTransport for UnsupportedDiscord {
+    fn connect(&mut self, _app_id: &str) -> Result<(), DiscordTransportError> {
+        Err(DiscordTransportError::NotRunning)
+    }
+
+    fn write_frame(&mut self, _opcode: u32, _payload: &[u8]) -> Result<(), DiscordTransportError> {
+        Err(DiscordTransportError::NotRunning)
+    }
+
+    fn read_frame(
+        &mut self,
+        _out: &mut Vec<u8>,
+    ) -> Result<Option<DiscordFrame>, DiscordTransportError> {
+        Err(DiscordTransportError::NotRunning)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,5 +325,19 @@ mod tests {
             report.to_string(),
             "injected bridge.dll into pid 7 at 0x10000"
         );
+    }
+
+    #[test]
+    fn the_compiled_platform_matches_the_target() {
+        #[cfg(target_os = "linux")]
+        assert_eq!(compiled_platform(), Platform::LinuxX11);
+        #[cfg(windows)]
+        assert_eq!(compiled_platform(), Platform::Windows);
+    }
+
+    #[test]
+    fn default_services_are_consistent_with_the_probe() {
+        let services = default_services();
+        assert_eq!(services.capabilities.session, probe_capabilities().session);
     }
 }

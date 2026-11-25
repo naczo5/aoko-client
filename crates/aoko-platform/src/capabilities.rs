@@ -19,10 +19,7 @@ pub enum BridgeSupport {
 impl BridgeSupport {
     #[must_use]
     pub fn is_usable(&self) -> bool {
-        matches!(
-            self,
-            Self::Supported | Self::SupportedWithLibrary { .. }
-        )
+        matches!(self, Self::Supported | Self::SupportedWithLibrary { .. })
     }
 }
 
@@ -80,7 +77,10 @@ mod tests {
     #[test]
     fn only_supported_variants_are_usable() {
         assert!(BridgeSupport::Supported.is_usable());
-        assert!(BridgeSupport::SupportedWithLibrary { path: "b.so".into() }.is_usable());
+        assert!(BridgeSupport::SupportedWithLibrary {
+            path: "b.so".into()
+        }
+        .is_usable());
         assert!(!BridgeSupport::UnsupportedOnLinuxYet.is_usable());
         assert!(!BridgeSupport::Blocked { detail: "x".into() }.is_usable());
     }

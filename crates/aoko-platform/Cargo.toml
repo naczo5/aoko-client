@@ -11,15 +11,15 @@ description = "OS abstraction layer: process/window inspection, input, native br
 aoko-protocol = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-x11rb = { workspace = true }
+x11rb = { workspace = true, features = ["xtest"] }
 libc = { workspace = true }
+crossbeam-channel = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

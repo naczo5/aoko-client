@@ -1,0 +1,458 @@
+//! Global input on Linux: XTest for synthesis and state, evdev for observation.
+//!
+//! Synthesis prefers X11 XTest because it needs no privileges and reaches every
+//! X11/XWayland client. When there is no display (a pure Wayland session) it
+//! falls back to `/dev/uinput`, which is what the compositor itself uses. When
+//! neither is available, every synthesis call returns an actionable
+//! [`PlatformError`]; nothing silently no-ops.
+//!
+//! State sampling uses `XQueryKeymap`/`XQueryPointer`, which are round trips but
+//! cheap, and are what the managed host's `GetAsyncKeyState` equivalent costs.
+
+use std::sync::Mutex;
+
+use x11rb::connection::{Connection as _, RequestConnection as _};
+use x11rb::protocol::xtest::ConnectionExt as _;
+
+use crate::error::PlatformError;
+use crate::input::{InputBackend, InputEvent, Key, MouseButton, MouseState};
+
+use crate::evdev_table::{all_letter_codes, code_for_key};
+
+use super::evdev::EvdevObserver;
+use super::uinput::{self, UinputDevice};
+use super::x11::X11;
+
+/// X11 keysyms this backend can name.
+const XK_BACKSPACE: u32 = 0xff08;
+const XK_TAB: u32 = 0xff09;
+const XK_RETURN: u32 = 0xff0d;
+const XK_ESCAPE: u32 = 0xff1b;
+const XK_SPACE: u32 = 0x0020;
+const XK_UP: u32 = 0xff52;
+const XK_DOWN: u32 = 0xff54;
+const XK_LEFT: u32 = 0xff51;
+const XK_RIGHT: u32 = 0xff53;
+const XK_SHIFT_L: u32 = 0xffe1;
+const XK_CONTROL_L: u32 = 0xffe3;
+const XK_ALT_L: u32 = 0xffe9;
+const XK_F1: u32 = 0xffbe;
+
+/// XTest event types, from `X11/extensions/XTest.h`.
+const XTEST_KEY_PRESS: u8 = 2;
+const XTEST_KEY_RELEASE: u8 = 3;
+const XTEST_BUTTON_PRESS: u8 = 4;
+const XTEST_BUTTON_RELEASE: u8 = 5;
+const XTEST_MOTION: u8 = 6;
+/// `detail == 1` on a motion event means "relative to the current position".
+const XTEST_MOTION_RELATIVE: u8 = 1;
+
+/// X11 button numbers.
+const BUTTON_LEFT: u8 = 1;
+const BUTTON_MIDDLE: u8 = 2;
+const BUTTON_RIGHT: u8 = 3;
+
+/// Keycodes the virtual uinput device declares up front: every letter, digit and
+/// named key this backend can synthesize.
+fn uinput_keys() -> Vec<u16> {
+    let mut keys: Vec<u16> = all_letter_codes().collect();
+    keys.extend_from_slice(&[
+        crate::evdev_table::KEY_ESC,
+        crate::evdev_table::KEY_BACKSPACE,
+        crate::evdev_table::KEY_TAB,
+        crate::evdev_table::KEY_ENTER,
+        crate::evdev_table::KEY_LEFTCTRL,
+        crate::evdev_table::KEY_RIGHTCTRL,
+        crate::evdev_table::KEY_LEFTSHIFT,
+        crate::evdev_table::KEY_RIGHTSHIFT,
+        crate::evdev_table::KEY_LEFTALT,
+        crate::evdev_table::KEY_RIGHTALT,
+        crate::evdev_table::KEY_SPACE,
+    ]);
+    for number in 1..=12u16 {
+        keys.push(crate::evdev_table::KEY_F1 + number - 1);
+    }
+    keys.extend_from_slice(&[
+        crate::evdev_table::KEY_UP,
+        crate::evdev_table::KEY_LEFT,
+        crate::evdev_table::KEY_RIGHT,
+        crate::evdev_table::KEY_DOWN,
+    ]);
+    keys.sort_unstable();
+    keys.dedup();
+    keys
+}
+
+pub struct LinuxInputBackend {
+    /// Present when a display was reachable; also provides state sampling.
+    x11: Option<X11>,
+    /// `(keysym, keycode)` for the user's layout, so a logical key resolves
+    /// against the real keyboard rather than a hard-coded US keycode.
+    keymap: Vec<(u32, u8)>,
+    /// Whether the display offers the XTest extension, resolved once.
+    xtest: bool,
+    /// Created lazily, on the first synthesis call that needs it.
+    uinput: Mutex<Option<UinputDevice>>,
+    uinput_error: Mutex<Option<String>>,
+    observer: Option<EvdevObserver>,
+    observer_error: Option<PlatformError>,
+}
+
+impl LinuxInputBackend {
+    /// Builds a backend from whatever the session offers. Never fails: the
+    /// capability report and per-call errors carry the gaps.
+    #[must_use]
+    pub fn new() -> Self {
+        let x11 = X11::connect().ok();
+        let keymap = x11.as_ref().map(X11::keysym_table).unwrap_or_default();
+        let xtest = x11.as_ref().is_some_and(|connection| {
+            connection
+                .conn
+                .extension_information(x11rb::protocol::xtest::X11_EXTENSION_NAME)
+                .ok()
+                .flatten()
+                .is_some()
+        });
+
+        let (observer, observer_error) = match EvdevObserver::start(x11.as_ref()) {
+            Ok(observer) => (Some(observer), None),
+            Err(err) => (None, Some(err)),
+        };
+
+        Self {
+            x11,
+            keymap,
+            xtest,
+            uinput: Mutex::new(None),
+            uinput_error: Mutex::new(None),
+            observer,
+            observer_error,
+        }
+    }
+
+    /// Why global observation is unavailable, if it is.
+    #[must_use]
+    pub fn observation_error(&self) -> Option<&PlatformError> {
+        self.observer_error.as_ref()
+    }
+
+    /// Whether synthesis goes through XTest rather than `/dev/uinput`.
+    #[must_use]
+    pub fn has_xtest(&self) -> bool {
+        self.xtest
+    }
+
+    #[must_use]
+    pub fn has_uinput(&self) -> bool {
+        uinput::is_available()
+    }
+
+    fn require_x11(&self) -> Result<&X11, PlatformError> {
+        self.x11.as_ref().ok_or_else(|| {
+            PlatformError::unsupported(
+                "no X11 display: synthesis falls back to /dev/uinput, which is also unavailable",
+            )
+        })
+    }
+
+    fn keycode(&self, key: Key) -> Option<u8> {
+        let keysym = keysym_for(key)?;
+        self.keymap
+            .iter()
+            .find(|(mapped, _)| *mapped == keysym)
+            .map(|(_, code)| *code)
+    }
+
+    fn xtest(&self, type_: u8, detail: u8, dx: i16, dy: i16) -> Result<(), PlatformError> {
+        let x11 = self.require_x11()?;
+        x11.conn
+            .xtest_fake_input(type_, detail, 0, x11.root, dx, dy, 0)
+            .map_err(|err| PlatformError::os("XTestFakeInput", err.to_string()))?;
+        x11.conn
+            .flush()
+            .map_err(|err| PlatformError::os("XFlush", err.to_string()))
+    }
+
+    /// Lazily creates the virtual device; records why it failed so the error is
+    /// reported once with the actionable text rather than per call.
+    fn with_uinput<T>(
+        &self,
+        operation: impl FnOnce(&mut UinputDevice) -> Result<T, PlatformError>,
+    ) -> Result<T, PlatformError> {
+        let mut guard = self
+            .uinput
+            .lock()
+            .map_err(|_| PlatformError::os("uinput mutex", "poisoned"))?;
+
+        if guard.is_none() {
+            if let Ok(mut error) = self.uinput_error.lock() {
+                if let Some(detail) = error.take() {
+                    return Err(PlatformError::permission_denied(detail));
+                }
+            }
+            let keys = uinput_keys();
+            let device = UinputDevice::create(
+                "aoko virtual input",
+                &keys,
+                &[
+                    super::uinput::BTN_LEFT,
+                    super::uinput::BTN_RIGHT,
+                    super::uinput::BTN_MIDDLE,
+                ],
+            );
+            match device {
+                Ok(device) => *guard = Some(device),
+                Err(err) => {
+                    let detail = err.user_facing();
+                    if let Ok(mut error) = self.uinput_error.lock() {
+                        *error = Some(detail.clone());
+                    }
+                    return Err(err);
+                }
+            }
+        }
+
+        let Some(device) = guard.as_mut() else {
+            return Err(PlatformError::os("uinput", "device disappeared"));
+        };
+        operation(device)
+    }
+
+    fn synthesize_key(&self, key: Key, pressed: bool) -> Result<(), PlatformError> {
+        if self.has_xtest() {
+            let code = self.keycode(key).ok_or_else(|| {
+                PlatformError::unsupported(format!("{key:?} has no keycode in the current layout"))
+            })?;
+            let type_ = if pressed {
+                XTEST_KEY_PRESS
+            } else {
+                XTEST_KEY_RELEASE
+            };
+            return self.xtest(type_, code, 0, 0);
+        }
+
+        let code = code_for_key(key).ok_or_else(|| {
+            PlatformError::unsupported(format!("no input-event code for {key:?}"))
+        })?;
+        self.with_uinput(|device| device.emit_key(code, pressed))
+    }
+
+    fn synthesize_button(&self, button: MouseButton, pressed: bool) -> Result<(), PlatformError> {
+        if self.has_xtest() {
+            let detail = match button {
+                MouseButton::Left => BUTTON_LEFT,
+                MouseButton::Middle => BUTTON_MIDDLE,
+                MouseButton::Right => BUTTON_RIGHT,
+            };
+            let type_ = if pressed {
+                XTEST_BUTTON_PRESS
+            } else {
+                XTEST_BUTTON_RELEASE
+            };
+            return self.xtest(type_, detail, 0, 0);
+        }
+
+        let code = match button {
+            MouseButton::Left => super::uinput::BTN_LEFT,
+            MouseButton::Right => super::uinput::BTN_RIGHT,
+            MouseButton::Middle => super::uinput::BTN_MIDDLE,
+        };
+        self.with_uinput(|device| device.emit_key(code, pressed))
+    }
+}
+
+impl Default for LinuxInputBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl InputBackend for LinuxInputBackend {
+    fn mouse_state(&self) -> MouseState {
+        let Some(x11) = self.x11.as_ref() else {
+            return MouseState::default();
+        };
+        let Some((_, _, mask)) = x11.pointer() else {
+            return MouseState::default();
+        };
+        MouseState {
+            left_down: mask & 0x0100 != 0,
+            right_down: mask & 0x0400 != 0,
+        }
+    }
+
+    fn key_state(&self, key: Key) -> bool {
+        let Some(x11) = self.x11.as_ref() else {
+            return false;
+        };
+        let Some(code) = self.keycode(key) else {
+            return false;
+        };
+        let Some(keymap) = x11.keymap() else {
+            return false;
+        };
+        let index = usize::from(code) / 8;
+        let bit = 1u8 << (code % 8);
+        keymap.get(index).is_some_and(|byte| *byte & bit != 0)
+    }
+
+    fn click(&self, button: MouseButton) -> Result<(), PlatformError> {
+        self.synthesize_button(button, true)?;
+        self.synthesize_button(button, false)
+    }
+
+    fn button_down(&self, button: MouseButton) -> Result<(), PlatformError> {
+        self.synthesize_button(button, true)
+    }
+
+    fn button_up(&self, button: MouseButton) -> Result<(), PlatformError> {
+        self.synthesize_button(button, false)
+    }
+
+    fn move_relative(&self, dx: i32, dy: i32) -> Result<(), PlatformError> {
+        if (dx, dy) == (0, 0) {
+            return Ok(());
+        }
+        if self.has_xtest() {
+            let dx = i16::try_from(dx.clamp(i32::from(i16::MIN), i32::from(i16::MAX)))
+                .map_err(|_| PlatformError::os("move_relative", "delta out of range"))?;
+            let dy = i16::try_from(dy.clamp(i32::from(i16::MIN), i32::from(i16::MAX)))
+                .map_err(|_| PlatformError::os("move_relative", "delta out of range"))?;
+            return self.xtest(XTEST_MOTION, XTEST_MOTION_RELATIVE, dx, dy);
+        }
+        self.with_uinput(|device| device.emit_relative(dx, dy))
+    }
+
+    fn key_press(&self, key: Key) -> Result<(), PlatformError> {
+        self.synthesize_key(key, true)?;
+        self.synthesize_key(key, false)
+    }
+
+    fn key_down(&self, key: Key) -> Result<(), PlatformError> {
+        self.synthesize_key(key, true)
+    }
+
+    fn key_up(&self, key: Key) -> Result<(), PlatformError> {
+        self.synthesize_key(key, false)
+    }
+
+    fn poll_events(&self, out: &mut Vec<InputEvent>) -> Result<(), PlatformError> {
+        match self.observer.as_ref() {
+            Some(observer) => {
+                observer.drain_into(out);
+                Ok(())
+            }
+            None => Err(self
+                .observer_error
+                .as_ref()
+                .map_or_else(|| PlatformError::unsupported("no evdev observer"), describe)),
+        }
+    }
+
+    fn mouse_position(&self) -> Option<(i32, i32)> {
+        self.x11
+            .as_ref()
+            .and_then(X11::pointer)
+            .map(|(x, y, _)| (x, y))
+    }
+}
+
+fn describe(err: &PlatformError) -> PlatformError {
+    PlatformError::permission_denied(err.user_facing())
+}
+
+/// Logical key to X11 keysym.
+fn keysym_for(key: Key) -> Option<u32> {
+    match key {
+        Key::Char(character) => {
+            let character = character.to_ascii_lowercase();
+            if character.is_ascii_alphanumeric() {
+                Some(u32::from(character))
+            } else {
+                None
+            }
+        }
+        Key::Space => Some(XK_SPACE),
+        Key::Enter => Some(XK_RETURN),
+        Key::Escape => Some(XK_ESCAPE),
+        Key::Tab => Some(XK_TAB),
+        Key::Backspace => Some(XK_BACKSPACE),
+        Key::Shift => Some(XK_SHIFT_L),
+        Key::Control => Some(XK_CONTROL_L),
+        Key::Alt => Some(XK_ALT_L),
+        Key::Left => Some(XK_LEFT),
+        Key::Right => Some(XK_RIGHT),
+        Key::Up => Some(XK_UP),
+        Key::Down => Some(XK_DOWN),
+        Key::F(number) if (1..=12).contains(&number) => Some(XK_F1 + u32::from(number) - 1),
+        Key::F(_) => None,
+        Key::Other(code) => Some(code),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keysym_mapping_covers_the_documented_keys() {
+        assert_eq!(keysym_for(Key::Char('a')), Some(0x61));
+        assert_eq!(keysym_for(Key::Char('A')), Some(0x61));
+        assert_eq!(keysym_for(Key::Char('7')), Some(0x37));
+        assert_eq!(keysym_for(Key::Space), Some(XK_SPACE));
+        assert_eq!(keysym_for(Key::Enter), Some(XK_RETURN));
+        assert_eq!(keysym_for(Key::F(1)), Some(XK_F1));
+        assert_eq!(keysym_for(Key::F(12)), Some(XK_F1 + 11));
+        assert_eq!(keysym_for(Key::F(13)), None);
+        assert_eq!(keysym_for(Key::Char('!')), None);
+    }
+
+    #[test]
+    fn the_uinput_device_declares_every_synthesizable_key() {
+        let keys = uinput_keys();
+        assert!(keys.len() > 40);
+        assert!(
+            keys.windows(2).all(|pair| pair[0] < pair[1]),
+            "sorted and deduped"
+        );
+        assert!(keys.contains(&30), "letter codes are declared");
+        assert!(keys.contains(&59), "F1 is declared");
+    }
+
+    #[test]
+    fn unsupported_keys_report_instead_of_guessing() {
+        assert!(code_for_key(Key::Char('!')).is_none());
+        assert!(code_for_key(Key::Other(0x1_0000)).is_none());
+    }
+
+    #[test]
+    fn a_backend_constructs_without_a_display_or_input_permissions() {
+        let backend = LinuxInputBackend::new();
+        // Sampling must not panic and must report a definite answer.
+        let _ = backend.mouse_state();
+        let _ = backend.key_state(Key::Char('a'));
+        let _ = backend.mouse_position();
+
+        if !backend.has_xtest() {
+            // Without XTest every synthesis call must be a typed error or a
+            // successful uinput write; never a panic.
+            match backend.click(MouseButton::Left) {
+                Ok(()) => assert!(backend.has_uinput()),
+                Err(err) => assert!(!err.user_facing().is_empty()),
+            }
+        }
+    }
+
+    #[test]
+    fn poll_events_reports_the_observation_gap() {
+        let backend = LinuxInputBackend::new();
+        let mut events = Vec::new();
+        match backend.poll_events(&mut events) {
+            Ok(()) => assert!(backend.observation_error().is_none()),
+            Err(err) => {
+                assert!(backend.observation_error().is_some());
+                assert!(!err.user_facing().is_empty());
+            }
+        }
+    }
+}

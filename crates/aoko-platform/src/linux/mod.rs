@@ -1,0 +1,278 @@
+//! Linux platform implementation.
+//!
+//! Every capability is native: `/proc` for processes, X11 EWMH for windows,
+//! evdev/uinput plus XTest for input and a unix socket for Discord. The native
+//! bridge is the one thing that does not exist yet, and it says so through
+//! [`BridgeSupport::UnsupportedOnLinuxYet`].
+//!
+//! Wayland is handled honestly rather than optimistically: an XWayland session
+//! gets the X11 paths, and a Wayland-only session reports the capabilities it
+//! cannot provide instead of returning empty results that look like "no game
+//! running".
+
+mod discord;
+mod evdev;
+mod injector;
+mod input;
+mod process;
+mod uinput;
+mod window;
+mod x11;
+
+pub use discord::LinuxDiscordTransport;
+pub use injector::LinuxBridgeInjector;
+pub use input::LinuxInputBackend;
+pub use process::{parse_proc_cmdline, LinuxProcessInspector};
+pub use window::LinuxWindowInspector;
+
+use crate::capabilities::{BridgeSupport, CapabilityReport, SessionKind};
+
+/// Facts about the session, gathered once so the report is pure and testable.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Detected {
+    /// `DISPLAY` resolved and an X11 connection was established.
+    pub x11: bool,
+    /// A Wayland session is advertised (`WAYLAND_DISPLAY` or `XDG_SESSION_TYPE`).
+    pub wayland: bool,
+    /// procfs is mounted.
+    pub procfs: bool,
+    /// Readable input nodes that carry keys or relative motion.
+    pub evdev_devices: usize,
+    /// `/dev/uinput` is writable.
+    pub uinput: bool,
+    /// Discord IPC sockets that exist right now.
+    pub discord_sockets: usize,
+}
+
+impl Detected {
+    /// Probes the live session. Never panics and never blocks on a socket that a
+    /// compositor forgot to accept.
+    #[must_use]
+    pub fn probe() -> Self {
+        let x11 = x11::X11::connect().is_ok();
+        let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|value| !value.is_empty())
+            || std::env::var("XDG_SESSION_TYPE")
+                .is_ok_and(|value| value.eq_ignore_ascii_case("wayland"));
+
+        Self {
+            x11,
+            wayland,
+            procfs: std::path::Path::new("/proc/self/cmdline").exists(),
+            evdev_devices: evdev::enumerate_devices().len(),
+            uinput: uinput::is_available(),
+            discord_sockets: LinuxDiscordTransport::available_socket_count(),
+        }
+    }
+
+    /// Turns the probes into the report the UI renders banners from.
+    #[must_use]
+    pub fn report(&self) -> CapabilityReport {
+        let session = if self.x11 {
+            SessionKind::X11
+        } else if self.wayland {
+            SessionKind::Wayland
+        } else {
+            SessionKind::None
+        };
+
+        let mut notes = Vec::new();
+        if !self.procfs {
+            notes.push("/proc is not mounted, so process inspection is unavailable".to_string());
+        }
+        if !self.x11 {
+            if self.wayland {
+                notes.push(
+                    "Wayland session without XWayland: window enumeration and client bounds need \
+                     a compositor-specific IPC that GNOME and KDE do not offer"
+                        .to_string(),
+                );
+            } else {
+                notes.push(
+                    "no X11 display found: set DISPLAY, or run inside a graphical session"
+                        .to_string(),
+                );
+            }
+        }
+        if self.evdev_devices == 0 {
+            notes.push(
+                "global input observation needs read access to /dev/input/event*: add your user \
+                 to the 'input' group and re-login"
+                    .to_string(),
+            );
+        }
+        if !self.uinput && !self.x11 {
+            notes.push(
+                "input synthesis needs either X11 (XTest) or write access to /dev/uinput"
+                    .to_string(),
+            );
+        }
+        if self.discord_sockets == 0 {
+            notes.push("no Discord IPC socket found; Discord is probably not running".to_string());
+        }
+        notes.push(
+            "native bridge injection is unavailable on Linux: the shipped bridges are Windows DLLs"
+                .to_string(),
+        );
+
+        CapabilityReport {
+            session,
+            process_inspection: self.procfs,
+            window_inspection: self.x11,
+            input_observation: self.evdev_devices > 0,
+            input_synthesis: self.x11 || self.uinput,
+            discord_rpc: self.discord_sockets > 0,
+            bridge: BridgeSupport::UnsupportedOnLinuxYet,
+            notes,
+        }
+    }
+}
+
+/// The live session's capability report.
+#[must_use]
+pub fn probe_capabilities() -> CapabilityReport {
+    Detected::probe().report()
+}
+
+/// Full service set for this OS.
+#[must_use]
+pub fn services() -> crate::PlatformServices {
+    crate::PlatformServices {
+        processes: Box::new(LinuxProcessInspector::new()),
+        windows: Box::new(LinuxWindowInspector::new()),
+        input: Box::new(LinuxInputBackend::new()),
+        injector: Box::new(LinuxBridgeInjector::new()),
+        discord: Box::new(LinuxDiscordTransport::new()),
+        capabilities: probe_capabilities(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_x11_session_reports_view_and_input_capabilities() {
+        let report = Detected {
+            x11: true,
+            wayland: false,
+            procfs: true,
+            evdev_devices: 3,
+            uinput: false,
+            discord_sockets: 1,
+        }
+        .report();
+
+        assert_eq!(report.session, SessionKind::X11);
+        assert!(report.process_inspection);
+        assert!(report.window_inspection);
+        assert!(report.input_observation);
+        assert!(report.input_synthesis);
+        assert!(report.discord_rpc);
+        assert_eq!(report.bridge, BridgeSupport::UnsupportedOnLinuxYet);
+        // The bridge note is always present so the UI can explain the gap.
+        assert!(report
+            .notes
+            .iter()
+            .any(|note| note.contains("native bridge")));
+    }
+
+    #[test]
+    fn a_wayland_only_session_reports_what_it_cannot_do() {
+        let report = Detected {
+            x11: false,
+            wayland: true,
+            procfs: true,
+            evdev_devices: 0,
+            uinput: false,
+            discord_sockets: 0,
+        }
+        .report();
+
+        assert_eq!(report.session, SessionKind::Wayland);
+        assert!(report.process_inspection);
+        assert!(!report.window_inspection);
+        assert!(!report.input_observation);
+        assert!(!report.input_synthesis);
+        assert!(!report.discord_rpc);
+        assert!(report
+            .notes
+            .iter()
+            .any(|note| note.contains("Wayland session without XWayland")));
+        assert!(report
+            .notes
+            .iter()
+            .any(|note| note.contains("/dev/input/event*")));
+        assert!(report.notes.iter().any(|note| note.contains("/dev/uinput")));
+    }
+
+    #[test]
+    fn a_headless_session_reports_nothing_but_procfs() {
+        let report = Detected {
+            procfs: true,
+            ..Detected::default()
+        }
+        .report();
+
+        assert_eq!(report.session, SessionKind::None);
+        assert!(report.process_inspection);
+        assert!(!report.window_inspection);
+        assert!(!report.input_synthesis);
+        assert!(report.notes.iter().any(|note| note.contains("DISPLAY")));
+    }
+
+    #[test]
+    fn uinput_alone_still_enables_synthesis() {
+        let report = Detected {
+            wayland: true,
+            procfs: true,
+            uinput: true,
+            ..Detected::default()
+        }
+        .report();
+
+        assert!(report.input_synthesis);
+        assert!(!report
+            .notes
+            .iter()
+            .any(|note| note.contains("input synthesis needs")));
+    }
+
+    #[test]
+    fn xwayland_prefers_the_x11_backend() {
+        let report = Detected {
+            x11: true,
+            wayland: true,
+            procfs: true,
+            ..Detected::default()
+        }
+        .report();
+        assert_eq!(report.session, SessionKind::X11);
+        assert!(report.window_inspection);
+    }
+
+    #[test]
+    fn the_live_report_is_self_consistent() {
+        let report = probe_capabilities();
+        // No capability may be claimed without the note that explains its absence.
+        assert!(!report.notes.is_empty());
+        if !report.window_inspection {
+            assert!(report.session != SessionKind::X11);
+        }
+        if report.session == SessionKind::Windows {
+            panic!("a Linux build must not report a Windows session");
+        }
+    }
+
+    #[test]
+    fn services_expose_every_trait_object() {
+        let mut services = services();
+        // Building the service set must not panic and must be internally
+        // consistent with a fresh probe.
+        assert_eq!(services.capabilities.session, probe_capabilities().session);
+        let _ = services.processes.list_processes();
+        let _ = services.windows.enumerate();
+        let _ = services.input.mouse_state();
+        let _ = services.discord.write_frame(0, b"{}");
+        assert!(!services.injector.support().is_usable());
+    }
+}
