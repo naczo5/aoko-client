@@ -32,8 +32,11 @@ the source it says `unknown` rather than guessing.
 | `aoko-core` | Headless behaviour with injected time/IO: controllers, schedulers, stores, services, search ranking |
 | `aoko-app` | GPUI surfaces: windows, tabs, cards, styles, palettes, view models, XAML-shaped glue |
 
-Crate descriptions are from `crates/*/Cargo.toml`; all four are still skeletons (`src/lib.rs` /
-`src/main.rs` only).
+Crate descriptions are from `crates/*/Cargo.toml`. Placement of any file that straddles two
+crates follows the placement rule in `MIGRATION_ARCHITECTURE.md`: `aoko-protocol` may compute,
+parse and persist but may not open a socket, spawn a process or call the OS. At the time of
+writing the trait seams exist (`aoko-protocol::transport`, the `aoko-platform` traits and
+capability report); the ports themselves are Phase 1.
 
 ---
 
@@ -314,7 +317,7 @@ checkbox is always `<Module>Enabled` TwoWay, default false.
 
 | Module | Controls | Notes |
 | --- | --- | --- |
-| killaura | `KillAuraCard` — `Visibility` bound to `DevMode` through `BooleanToVisibilityConverter`; `KeybindKillAuraButton`; CheckBox "Kill Aura" → `KillAuraEnabled`; `KillAuraAvailabilityText`; warning `Border` (`#33E0533D` fill, `#E0533D` border); four `Expander`s (see sub-table) | DevOnly: hidden unless `Clicker.DevMode`; card also force-disabled when the bridge does not support it |
+| killaura | `KillAuraCard` — `Visibility` bound to `DevMode` through `BooleanToVisibilityConverter`; `KeybindKillAuraButton`; CheckBox "Kill Aura" → `KillAuraEnabled`; `KillAuraAvailabilityText`; warning `Border` (`#33E0533D` fill, `#E0533D` border); five `Expander`s (see sub-table) | DevOnly: hidden unless `Clicker.DevMode`; card also force-disabled when the bridge does not support it |
 | jumpreset | `JumpResetCard`; `KeybindJumpResetButton`; CheckBox → `JumpResetEnabled`; `JumpResetAvailabilityText`; Slider snap 0–100 → `JumpResetChance` (default 80) | — |
 | hitselect | `HitSelectCard`; `KeybindHitSelectButton`; CheckBox → `HitSelectEnabled`; `HitSelectAvailabilityText` | no numeric settings |
 | wtap | `WTapCard`; `KeybindWTapButton`; CheckBox → `WTapEnabled`; `WTapAvailabilityText` | — |
@@ -530,7 +533,7 @@ column is derived from the subject the file exercises.
 | `AutoRodManagedTests.cs` | 10 | Model/profile defaults, clamps and the verification override; profile round-trip preserves settings + action bind; bind conflicts rejected in both directions; a profile conflict keeps the general bind and clears the action bind | `aoko-protocol` |
 | `AutoToolManagedTests.cs` | 5 | Defaults and clamps, `Profile` create/apply round-trip, capability lists include AutoTool on every supported version, both bridges contain the native wiring, the XAML card is configured | `aoko-protocol` |
 | `BlockEspTests.cs` | 12 | `NormalizeId` reduces to a path token, `NormalizeColor` yields six-digit hex or the default, serialisation includes only enabled entries and dedupes by normalised id | `aoko-protocol` |
-| `BoundedLineReaderTests.cs` | 5 | CRLF and unterminated final line, line exactly at the limit accepted, oversized line discarded and reading continues, oversized-at-EOF reported once | `aoko-platform` |
+| `BoundedLineReaderTests.cs` | 5 | CRLF and unterminated final line, line exactly at the limit accepted, oversized line discarded and reading continues, oversized-at-EOF reported once | `aoko-protocol` |
 | `BridgeCapabilitiesActionsTests.cs` | 12 | The `actions` array is its own list (never modules/settings/state); case-insensitive parse; only advertised actions honoured; a missing array inherits the fallback; an empty document still returns the fallback | `aoko-protocol` |
 | `BridgeCapabilitiesTests.cs` | 12 | Modern fallback exposes 26.2 features; legacy fallback exposes Pixel Party Assist, Kill Aura (but not silent aura), Chest Stealer, AutoRod, AntiDebuff, Fight Status; legacy has no Triggerbot; payload merge/normalise and fallback when arrays are missing | `aoko-protocol` |
 | `BridgeCommandDispatcherTests.cs` | 13 | `requestId` correlation: reply matching, reply without action keeps the requested action, not-connected fails without sending, refused send reported, timeout, connection-drop failure, cancellation — all through injected send/connected seams | `aoko-core` |
@@ -554,7 +557,7 @@ column is derived from the subject the file exercises.
 | `KillAuraSettingsTests.cs` | 5 | Defaults match OpenMyau-Plus `fc7c95d`, `Profile` round-trip preserves nested settings, `Clone` is independent and retains conditional state, Grok rotation is accepted and exposes the skew property | `aoko-protocol` |
 | `LegacyRenderOptimizationTests.cs` | 7 | **Source-text assertions on `McInjector/` C++**: menu close does not destroy valid renderer resources, the closest-player renderer consumes a prepared snapshot without JNI, the render entry captures config + HUD layout together, Chest ESP sorts by distance and uses chunk range, nametags use chunk range instead of a count cap, section scans share one chunk visitor, the held-item nametag setting is parsed and applied | `none` — the native bridge stays as-is; keep it as a C++ gate |
 | `MainWindowStartupTests.cs` | 1 | `MainWindow` can be constructed and closed (STA) — the only end-to-end WPF smoke test | `aoko-app` |
-| `ManagedTransportDiagnosticsTests.cs` | 11 | Diagnostics flag reflects config; config send policy (revision or heartbeat); serialisation reuses unchanged payloads; change tracking covers properties, nested settings and keybinds; the flag is carried to both native bridges; modern fast-state uses an explicit partial envelope; the entity producer clears its snapshot when consumers turn off; native float config uses validated defaults; disabled diagnostics produce no snapshots; a snapshot atomically reports and resets; log lines carry rates but no payload content | `aoko-platform` |
+| `ManagedTransportDiagnosticsTests.cs` | 11 | Diagnostics flag reflects config; config send policy (revision or heartbeat); serialisation reuses unchanged payloads; change tracking covers properties, nested settings and keybinds; the flag is carried to both native bridges; modern fast-state uses an explicit partial envelope; the entity producer clears its snapshot when consumers turn off; native float config uses validated defaults; disabled diagnostics produce no snapshots; a snapshot atomically reports and resets; log lines carry rates but no payload content | `aoko-protocol` |
 | `ModuleRegistrationTests.cs` | 19 | Catalog ids unique; capability modules match modern bridge capabilities and the native modern capabilities JSON; stable managed fields advertised; and every catalog surface is satisfied: keybind GUI buttons/handlers, keybind maps, Discord RPC counting, overlay list probes, `SettingSpec` ↔ `Profile` ↔ TCP config payload ↔ capability lists ↔ both bridges' `ParseConfig` | `aoko-protocol` |
 | `ModuleSearchIndexTests.cs` | 18 | Ranking: empty query returns every entry in catalog order, no-results returns empty, prefix > word-prefix > substring > subsequence tiers; every catalog GUI module has a search row whose tab, card `x:Name` and toggle property exist in `MainWindow.xaml` | `aoko-core` |
 | `NickHiderConfigTests.cs` | 4 | `NormalizeAlias` trims plain text, `NormalizeInput` keeps typing whitespace until send, invalid text rejected, `Profile.NickHider` round-trip | `aoko-protocol` |
@@ -562,14 +565,14 @@ column is derived from the subject the file exercises.
 | `PaletteContrastTests.cs` | 5 | Contrast measured on the real palette tables: primary labels pass AA on the background brush, chip labels pass AA on their tint layers, status tones pass AA on the tab background, card edge/wash values meet recorded lower bounds | `aoko-app` |
 | `ProtocolCompatibilityTests.cs` | 5 | Captured V1 messages from both bridge families deserialise; the modern fixture ignores unknown future fields; loader-newer/bridge-older absent optionals use safe defaults; bridge-newer/loader-older unknown capability entries are tolerated; capability fallbacks expose the published state and held-item settings | `aoko-protocol` |
 | `ServerAddressTests.cs` | 15 | Accepted forms, rejected forms, a trailing colon keeps a bare host, the 256-character cap, `DefaultPort = 25565` | `aoko-core` |
-| `ServerPingTests.cs` | 15 | `ParseStatus` reads players and version, survives a minimal response, labels fall back to the error, `FlattenMotd` joins components and strips colour codes | `aoko-core` |
+| `ServerPingTests.cs` | 15 | `ParseStatus` reads players and version, survives a minimal response, labels fall back to the error, `FlattenMotd` joins components and strips colour codes | `aoko-platform` |
 | `ServerStoreTests.cs` | 12 | Store path under `%AppData%\Aoko`, `Add` dedupes by parsed host+port, camelCase indented atomic write, load restores entries and join stamps, `Remove` reports whether it removed | `aoko-core` |
 | `ServersViewTests.cs` | 31 | `ServersViewLogic` / `SavedServerRow`: sort order (most recent join first, never-joined last, then `AddedAt`, then name), selection index retention and neighbour fallback, chip wording/tone thresholds (<100 ms accent, ≤300 warn, else critical), join gate states, pings allowed alongside the exclusive lock, MOTD trimming, error-label mapping | `aoko-app` |
 | `SrvLookupCacheTests.cs` | 5 | An SRV failure expires (10-minute TTL) so the next lookup asks again, a success is reused for the session, a later success replaces a cached failure, hosts are matched case-insensitively | `aoko-core` |
-| `StatsTrackerTests.cs` | 5 | `RecordClick` updates CPS buckets/average/peak, the detailed CPS window is tight, left/right counts are separated, `RecordPlaytimeSample` only advances for active play | `aoko-core` |
+| `StatsTrackerTests.cs` | 5 | `RecordClick` updates CPS buckets/average/peak, the detailed CPS window is tight, left/right counts are separated, `RecordPlaytimeSample` only advances for active play | `aoko-protocol` |
 | `StoreRecoveryTests.cs` | 6 | `Message` names the store and the quarantine copy, `FromStore` reads the optional `RecoveredFrom` hook, `FindQuarantined` only counts this session's files and ignores other stores and missing folders | `aoko-app` |
 | `TabCopyTests.cs` | 6 | Both tabs explain a missing capability with identical words taken from the bridge layer; not-connected and return-to-main-menu copy follow the bridge message; capacity refusals differ only by the action refused | `aoko-app` |
-| `TcpPortHelperTests.cs` | 2 | The listening-port regex matches expected `netstat` lines; `TryGetListeningProcessId` returns null or a positive pid | `aoko-platform` |
+| `TcpPortHelperTests.cs` | 2 | The listening-port regex matches expected `netstat` lines; `TryGetListeningProcessId` returns null or a positive pid | `aoko-protocol` |
 | `TestAssembly.cs` | 0 | Assembly-level attribute only (test infrastructure) | `none` — test infrastructure |
 | `TestRepo.cs` | 0 | Locates the repository root via `CallerFilePath` so source-assertion tests can read `Aoko/**` and `McInjector/**`; throws when `Aoko/Core/GameStateClient.cs` cannot be found | `none` — test infrastructure |
 | `UpdateServiceTests.cs` | 2 | `IsNewerRelease` compares semantic versions; `ParseReleaseVersion` accepts a GitHub `v` tag prefix and build metadata | `aoko-core` |
@@ -612,7 +615,7 @@ locally. None of it may be dropped.
 | Module toggle path change | `Aoko/Core/InputHooks.cs` (3-line change) | `aoko-platform` | Search rows toggle through the same path as keybinds so the two cannot drift |
 | Shared tab chrome | `Aoko/Views/TabCopy.cs`, `TabStyles.xaml`, `StoreRecovery.cs`, `RelativeTime.cs` | `aoko-app` | One button/chip language, fixed destructive red, "corrupt store quarantined this session" notice, one relative-time formatter |
 | Docs | `AGENTS.md`, `README.md`, `website/src/content/docs/gui/{accounts,module-search,servers}.md`, `website/astro.config.mjs`, `website/src/landing.html` | `none` — docs | Must describe the Rust build once the GUI moves |
-| Native side | `McInjector/src/main/cpp/{bridge,bridge_261}.cpp`, `jni_core/account_command_router.h`, `jni_core/session_helper_bridge.{h,cpp}`, `jni_core/scoped_env.h`, `jni_core/session_switcher.inc`, `src/main/java/com/aoko/helper/SessionSwitcher.java`, `gen_java_helper.sh`, `build*.bat`, `run_tests.bat`, `McInjector/tests/*` | `none` — `McInjector/` is not rewritten | The Rust host must speak this exact protocol; `account_command_router_tests.cpp`, `session_helper_format_tests.cpp` and `SessionSwitcherStructuralTest.java` remain the native gates |
+| Native side | `McInjector/src/main/cpp/{bridge,bridge_261}.cpp`, `bridge_capabilities.h`, `jni_core/account_command_router.h`, `jni_core/helper_bridge.cpp`, `jni_core/session_helper_bridge.{h,cpp}`, `jni_core/scoped_env.h`, `jni_core/session_switcher.inc`, `src/main/java/com/aoko/helper/SessionSwitcher.java`, `gen_java_helper.sh`, `McInjector/.gitattributes`, `build*.bat`, `run_tests.bat`, `McInjector/tests/*` (including `tests/java/run_tests.sh`) | `none` — `McInjector/` is not rewritten | The Rust host must speak this exact protocol; `account_command_router_tests.cpp`, `session_helper_format_tests.cpp` and `SessionSwitcherStructuralTest.java` remain the native gates |
 
 ### Test files introduced by `f1a9f5f` → Rust target
 
@@ -631,12 +634,13 @@ locally. None of it may be dropped.
 | `ModuleSearchIndexTests.cs` | `aoko-core` | Rank tiers and every catalog module having a GUI row with a real card/toggle |
 | `PaletteContrastTests.cs` | `aoko-app` | AA contrast on the real palette tables |
 | `ServerAddressTests.cs` | `aoko-core` | Parse accepted/rejected forms, 256-char cap |
-| `ServerPingTests.cs` | `aoko-core` | Status parse, MOTD flatten, error fallback |
+| `ServerPingTests.cs` | `aoko-platform` | Status parse, MOTD flatten, error fallback |
 | `ServerStoreTests.cs` | `aoko-core` | Path, dedupe, atomic camelCase write, join stamps |
 | `ServersViewTests.cs` | `aoko-app` | Sort, selection retention, chip wording/tone, dual locks |
 | `SrvLookupCacheTests.cs` | `aoko-core` | Failure TTL vs success reuse |
 | `StoreRecoveryTests.cs` | `aoko-app` | Quarantine notice only for this session |
 | `TabCopyTests.cs` | `aoko-app` | Shared refusal copy sourced from the bridge layer |
+| `TestRepo.cs` | `none` — test infrastructure | Repo-root locator for the C# suite; no Rust port, but the Rust tests need an equivalent workspace-relative helper for fixtures |
 | `XamlBindingTests.cs` | `aoko-app` | Every resource key and row/card binding path resolves |
 | `ModuleRegistrationTests.cs` (modified, not added) | `aoko-protocol` | One-line change in this commit; the surface contract itself predates it |
 

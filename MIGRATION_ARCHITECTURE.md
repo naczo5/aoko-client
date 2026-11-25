@@ -23,15 +23,35 @@ aoko-core     controller state machines, schedulers, app coordination
     |
 aoko-platform OS traits + Windows/Linux implementations
     |
-aoko-protocol pure data: wire types, profile, catalog, solver. zero deps.
+aoko-protocol pure data: wire types, profile, catalog, solver. no OS, socket, process or UI dependency.
 ```
 
 | Crate | Owns | Ported from |
 | --- | --- | --- |
-| `aoko-protocol` | Wire types, capability negotiation, bounded framing, game state, patch merging, profile + palette + HUD layout persistence, module catalog, stats, GTB solver, transport metrics, TCP port selection | `GameState.cs`, `GameStatePatchMerger.cs`, `BoundedLineReader.cs`, `BridgeCapabilities.cs`, `ManagedTransportDiagnostics.cs`, `TcpPortHelper.cs`, `GameStateClient.cs` (transport seam), `HudLayout.cs`, `KillAuraSettings.cs`, `NickHiderConfig.cs`, `BlockEsp.cs`, `ModuleCatalog.cs`, `Profile.cs`, `CustomPalette.cs`, `StatsTracker.cs`, `GtbWordSolver.cs`, `BridgeCommandProtocol.cs`, `BridgeCommandResult.cs`, `Accounts/*` pure parsers, `Servers/ServerAddress.cs` |
-| `aoko-platform` | `ProcessInspector`, `WindowInspector`, `InputBackend`, `NativeBridgeInjector`, `DiscordRpcTransport`, `PlatformCapabilities` | `ProcessCommandLine.cs`, `InjectionTargetDiscovery.cs`, `WindowDetection.cs`, `InputHooks.cs`, `NativeInjector.cs`, `DiscordRichPresenceService.cs` (transport half), `Servers/ServerPing.cs` (socket half) |
+| `aoko-protocol` | Wire types, capability negotiation, bounded framing, game state, patch merging, profile + palette + HUD layout persistence, module catalog, stats, GTB solver, transport metrics, `netstat` line parsing | `GameState.cs`, `GameStatePatchMerger.cs`, `BoundedLineReader.cs`, `BridgeCapabilities.cs`, `ManagedTransportDiagnostics.cs`, `TcpPortHelper.cs` (parse half), `GameStateClient.cs` (transport seam), `HudLayout.cs`, `KillAuraSettings.cs`, `NickHiderConfig.cs`, `BlockEsp.cs`, `ModuleCatalog.cs`, `Profile.cs`, `CustomPalette.cs`, `StatsTracker.cs`, `GtbWordSolver.cs`, `BridgeCommandProtocol.cs`, `BridgeCommandResult.cs`, `Accounts/*` pure parsers, `Servers/ServerAddress.cs` |
+| `aoko-platform` | `ProcessInspector`, `WindowInspector`, `InputBackend`, `NativeBridgeInjector`, `DiscordRpcTransport`, `PlatformCapabilities`, `TcpPortProbe` | `ProcessCommandLine.cs`, `InjectionTargetDiscovery.cs`, `WindowDetection.cs`, `InputHooks.cs`, `NativeInjector.cs`, `DiscordRichPresenceService.cs` (transport half), `Servers/ServerPing.cs`, `TcpPortHelper.cs` (process spawn half) |
 | `aoko-core` | `clicker/`, `aim_assist`, `chest_stealer`, `refill`, `auto_rod`, `auto_tool`, `concurrency/`, `services/` | `Clicker.cs`, `AdvancedClickTimingState.cs`, `ClickDeadlineScheduler.cs`, `ClickRandomizationMode.cs`, `AimAssistMotionController.cs`, `ChestStealerController.cs`, `ChestStealerCoordinateMapper.cs`, `RefillController.cs`, `CoalescedCallback.cs`, `CoalescedLatestValue.cs`, `OwnedAsyncLoop.cs`, `UpdateService.cs`, `DiscordRichPresenceService.cs` (state half), `Accounts/*` services, `Servers/*Store/Join*`, `ModuleSearchIndex.cs` |
 | `aoko-app` | `theme/`, `assets/`, `components/`, `views/`, `dialogs/`, `capture/`, `main.rs` | `App.xaml`, `MainWindow.xaml(.cs)`, `ColorPickerDialog.*`, `WindowPickerDialog.*`, `ThemeManager.cs`, `Views/*` |
+
+### Placement rule
+
+One rule settles every "which crate owns this file" question, so the two gating documents
+cannot drift apart again:
+
+- `aoko-protocol` may do computation, parsing and persistence. It may **not** open a socket,
+  spawn a process, read a file outside an in-memory buffer it was handed, or call the OS.
+  Its only dependencies are `serde`, `serde_json`, `thiserror` and `tracing`.
+- `aoko-platform` owns anything that touches the OS: sockets, processes, windows, hooks,
+  named pipes, `/proc`, X11.
+- `aoko-core` owns state machines and coordination, and may call both of the above.
+
+Where a C# file straddles the line, it is split and both halves are named in the table, rather
+than being awarded to one crate and silently violating the rule. `GameStateClient.cs` splits
+three ways and `TcpPortHelper.cs` splits two ways for exactly this reason: `TcpPortHelper`
+runs `netstat -ano -p tcp` through `ProcessStartInfo` and regex-matches the output, so the
+regex and line model live in `aoko-protocol` and the spawn lives in `aoko-platform`. That
+split is also what keeps `TcpPortHelperTests`, which tests the regex and the null-on-no-match
+behaviour, a pure protocol test.
 
 ### Why `GameStateClient` splits across two crates
 

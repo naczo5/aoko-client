@@ -438,6 +438,19 @@ always emits lowercase, so byte-for-byte output must be lowercase.
 If **all four** are empty the whole payload is rejected and the previous capability set is
 kept. If some are present, present ones win and only the empty ones fall back.
 
+`settings` is documented as "config key names the bridge reads", and three advertised
+entries break that rule. Do not assume a capability string is a working config key:
+
+| Advertised `settings` entry | What the bridges actually parse | Consequence |
+| --- | --- | --- |
+| `chesteprange` | `chestEspRange` (`bridge.cpp`, `bridge_261.cpp`) | `chesteprange` is neither the key nor `ToLowerInvariant` of it (`chestesprange` would be). |
+| `nametagsrange` | `nametagRange` (`bridge.cpp`, `bridge_261.cpp`) | Same mismatch; a `supports_setting("nametagRange")` gate reads as unsupported. |
+| `killaurarotmode` | Not parsed by either bridge | Advertised but inert. |
+
+These are transcribed exactly as the headers publish them. When gating a write on a
+capability, compare against the advertised string, and when actually sending config use the
+key the bridge parses. The two sets are not identical.
+
 ### `actions` (identical in both bridges, 4 entries)
 
 ```
@@ -557,8 +570,19 @@ Differences from legacy:
   `autototemelytra`, `autototembehaviormode`, `autototemdelay`.
 - `gtbhint`, `gtbcount`, `gtbpreview` move from the tail (after `jumpresetchance`) to
   immediately after `speedbridgelookingdownonly`.
+- The 11-entry block `showmodulelist`, `moduleliststyle`, `showlogo`, `guitheme`,
+  `keybindautoclicker`, `keybindspeedbridge`, `keybindnametags`, `keybindclosestplayer`,
+  `keybindchestesp`, `keybindcheststealer`, `keybindrefill` moves. In legacy it sits after
+  `gtbpreview` and before `pixelpartyassist`; in modern it sits after `reloadmappingsnonce`
+  and before `autototemenabled`. (In modern, `keybindtriggerbot` is inserted inside the
+  moved block, directly after `keybindautoclicker`.)
 
 Delta arithmetic: 194 - 3 + 1 + 1 + 1 + 6 = 200. Confirmed by count.
+
+The bullet list above is a description, not a reconstruction recipe: the block move changes
+order without changing membership, so applying only the add/remove bullets yields 200 entries
+in the wrong order from that point on. For a byte-exact table, transcribe the modern array
+from `bridge_capabilities.h` directly rather than deriving it.
 
 ### Host fallback tables (`BridgeCapabilities.ForVersionFallback`) and where they diverge
 
@@ -1193,7 +1217,7 @@ new JsonSerializerOptions { WriteIndented = true, PropertyNamingPolicy = JsonNam
 - No `JsonPropertyName` attributes exist anywhere in `Profile.cs`; the JSON name is always the
   camelCase conversion of the C# property name.
 - The naming policy applies to **both** write and read, and matching is case-sensitive. A file
-  containing `MinCPS` does **not** bind to `MinCPS`; the policy-produced name is `minCPS`.
+  containing the JSON key `MinCPS` does **not** bind to the C# property `MinCPS`; the policy-produced key is `minCPS`.
 - No `PropertyNameCaseInsensitive`, no `NumberHandling`, no `DefaultIgnoreCondition`, no enum
   converter, no `JsonExtensionData`, no `[JsonRequired]`.
 - Location: `%AppData%\Aoko\profiles\<Name>.json`; a one-time copy migrates
@@ -1215,9 +1239,22 @@ new JsonSerializerOptions { WriteIndented = true, PropertyNamingPolicy = JsonNam
 | Write failure (IO / ACL / NotSupported) | Reported to debug output only; profile unchanged |
 | Out-of-range value in a `KillAuraSettings` property | Clamped by the property setter on assign |
 
-### Top-level properties (137)
+### Top-level properties (143)
 
 Format: JSON key — C# type — default. Every key is written on every save.
+
+Two setter behaviours must survive the port, because they are observable through a
+load/save round trip and through the GUI:
+
+- `ChestStealerMenuCheck` is not a plain flag. Its setter assigns the menu check, then,
+  while the private `_hasExplicitSubChecks` field is still `false`, copies the value into
+  `chestStealerTitleCheck`, `chestStealerCustomItemsCheck` and `chestStealerPhysicalCheck`.
+  Each of those three setters sets `_hasExplicitSubChecks = true`. `_hasExplicitSubChecks`
+  is private and therefore **not serialised**, so it resets to `false` on every load and
+  the cascade therefore depends on JSON property order within the object.
+- `AutoRodSlotMode` clamps to `0..=9` and `AutoRodExtensionTicks` clamps to `1..=40` in
+  their setters, so an out-of-range value read from an old profile is coerced on load and
+  the coerced value is what gets written back.
 
 | Key | Type | Default |
 | --- | --- | --- |
@@ -1290,6 +1327,10 @@ Format: JSON key — C# type — default. Every key is written on every save.
 | `chestEspRange` | int | `4` |
 | `chestStealerEnabled` | bool | `false` |
 | `chestStealerDelayMs` | int | `120` |
+| `chestStealerMenuCheck` | bool | `true` |
+| `chestStealerTitleCheck` | bool | `true` |
+| `chestStealerCustomItemsCheck` | bool | `true` |
+| `chestStealerPhysicalCheck` | bool | `true` |
 | `refillEnabled` | bool | `false` |
 | `refillDelayMs` | int | `120` |
 | `blockEspEnabled` | bool | `false` |
@@ -1325,7 +1366,9 @@ Format: JSON key — C# type — default. Every key is written on every save.
 | `autoHealEnabled` | bool | `false` |
 | `autoHealHealth` | int | `17` |
 | `autoHealDelayMs` | int | `500` |
+| `autoRodSlotMode` | int | `0` |
 | `autoRodVerifyForcedSlot` | bool | `true` |
+| `autoRodExtensionTicks` | int | `4` |
 | `autoRodHoldToExtend` | bool | `false` |
 | `autoRodActionKey` | int | `0` |
 | `throwpotActionKey` | int | `0` |
@@ -1391,7 +1434,7 @@ are dropped.
 
 ### Nested `killAuraSettings`
 
-60 persisted properties, camelCase of the C# names, no attributes. Every setter clamps, so a
+62 persisted properties, camelCase of the C# names, no attributes. Every setter clamps, so a
 hand-edited out-of-range value is clamped rather than rejected.
 
 ```
