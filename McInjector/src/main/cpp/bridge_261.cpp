@@ -65,6 +65,7 @@
 #include "jni_core/local_frame.h"
 #include "jni_core/resolver.h"
 #include "jni_core/helper_bridge.h"
+#include "jni_core/account_command_router.h"
 #include "render_backend.h"
 #include "kill_aura_core.h"
 #include "kill_aura_premotion.h"
@@ -409,6 +410,10 @@ static volatile LONG g_forceGlobalJniRemap_121 = 0;
 static void SetNativePerfDiagnosticsEnabled(bool enabled);
 static void SetLastActionResult(int requestId, const char* result);
 static std::string LastActionJson();
+// Runs accountCommand / serverCommand on the inbound socket thread and queues the
+// commandResult for that same thread to write back.
+static void HandleAccountCommand(const std::string& packetType,
+                                 const lc::SimpleJsonConfigReader& reader);
 
 // ===================== CONFIG PARSER =====================
 static void ParseConfig(const std::string& line) {
@@ -416,6 +421,13 @@ static void ParseConfig(const std::string& line) {
     lc::SimpleJsonConfigReader reader(line);
 
     const std::string packetType = reader.GetString("type");
+    if (packetType == "accountCommand" || packetType == "serverCommand") {
+        // Over-long command lines are answered by InboundCommandTracker; never let
+        // one reach the helper, even if the transport still delivered it.
+        if (line.size() > AccountCommandRouter::kCommandLineLimit) return;
+        HandleAccountCommand(packetType, reader);
+        return;
+    }
     if (packetType == "moduleAction") {
         const int requestId = reader.GetInt("requestId", 0);
         if (reader.GetString("action") == "autoRod") {
@@ -1310,6 +1322,30 @@ static bool IsOsCursorVisible() {
 
 // Cached game ClassLoader (global ref) used for safe class loads.
 static jobject g_gameClassLoader = nullptr;
+
+// What the account command path is allowed to read off the inbound socket thread:
+// the resolved Minecraft binary name, and a class loader reference that is created
+// once at discovery and released only after that thread exited. A forced reload
+// (reloadmappings) deletes g_mcInstance and g_gameClassLoader; the 5 s auto-retry
+// replaces only g_mcInstance. Neither may be used from that thread, so the two
+// snapshots below stand in for them.
+static Mutex       g_helperHintsMtx;
+static std::string g_mcClassName;
+static jobject     g_helperCommandLoader = nullptr;
+
+// Last connect-path triple handed to the helper by WarmLoadSessionHelper(). The
+// helper's hintConnect() is static synchronized and can wait behind a session
+// command's 4 s game-thread await, so a discovery pass re-hints only when a resolved
+// name changed. The first hint is always taken, even when nothing resolved.
+static bool        g_connectHintTaken = false;
+static std::string g_connectHint;
+static std::string g_serverAddressHint;
+static std::string g_serverDataHint;
+
+static void SetMcClassNameHint(const std::string& name) {
+    LockGuard lk(g_helperHintsMtx);
+    g_mcClassName = name;
+}
 
 // JNI globals: chat screen cursor + game state
 static jobject   g_mcInstance      = nullptr;
@@ -13966,7 +14002,10 @@ extern "C" __declspec(dllexport) void Detach() {
         const bool workersStopped =
             WaitForOwnedThreadExit(g_chestThreadHandle, "chest scan thread", 5000) &&
             WaitForOwnedThreadExit(g_fastPollThreadHandle, "fast poll thread", 5000) &&
-            WaitForOwnedThreadExit(g_mainThreadHandle, "main thread", 5000);
+            // A setSession already in flight can sit in the helper's 4 s
+            // runOnGameThread await plus a follow-up read, so give this thread more
+            // than one 5 s budget before giving up on a clean teardown.
+            WaitForOwnedThreadExit(g_mainThreadHandle, "main thread", 15000);
         if (!workersStopped) {
             // The caller may retry after a transient JNI stall; do not leave
             // the idempotence latch permanently closed when no cleanup ran.
@@ -14000,6 +14039,17 @@ extern "C" __declspec(dllexport) void Detach() {
         CleanupImGuiAndHooks();
         ResetAutoRodModernCaches(env);
         CleanupJniGlobals(env);
+
+        // The socket thread (part of the main worker) has exited, so nothing can
+        // reach the helper or the command loader any more: release both here. The
+        // helper is not unloaded on a remap because its cached jmethodIDs stay valid
+        // for the life of the class and a re-load would only cost a defineClass.
+        SessionHelperBridge::Unload(env);
+        {
+            LockGuard lk(g_helperHintsMtx);
+            DeleteGlobalRefSafe(env, g_helperCommandLoader);
+            g_mcClassName.clear();
+        }
 
         if (attached && g_jvm) g_jvm->DetachCurrentThread();
 
@@ -14037,6 +14087,37 @@ static std::string GetClassNameFromClass(JNIEnv* env, jclass cls) {
     env->DeleteLocalRef(jn);
     env->DeleteLocalRef(classClass);
     return r;
+}
+
+// accountCommand / serverCommand. Runs on the inbound socket thread: attach JNI
+// here, load com.aoko.helper.SessionSwitcher once a game ClassLoader exists, and
+// queue the reply for this same thread's send path (never the render hook).
+static void HandleAccountCommand(const std::string& packetType,
+                                 const lc::SimpleJsonConfigReader& reader) {
+    std::string reply;
+    JNIEnv* env = JniEnv::Get(g_jvm);
+    if (env && !SessionHelperBridge::IsLoaded()) {
+        // Never read g_mcInstance here: the scan thread deletes that global ref
+        // during a remap and using it afterwards aborts the JVM. The class name and
+        // the loader are snapshots discovery owns under g_helperHintsMtx, read under
+        // one lock so the pair cannot come from two different discovery passes.
+        std::string mcClassName;
+        jobject commandLoader = nullptr;
+        {
+            LockGuard lk(g_helperHintsMtx);
+            mcClassName = g_mcClassName;
+            commandLoader = g_helperCommandLoader;
+        }
+        static bool loggedLoadFailure = false;
+        if (AccountCommandRouter::LoadHelper(env, commandLoader, mcClassName.c_str())) {
+            loggedLoadFailure = false;
+        } else if (!loggedLoadFailure) {
+            loggedLoadFailure = true;
+            Log("Session helper not loaded yet; the reply reports not-ready until it resolves.");
+        }
+    }
+    AccountCommandRouter::Handle(env, packetType, reader, &reply);
+    AccountCommandRouter::PushReply(reply);
 }
 
 static jfieldID FindFieldByType(JNIEnv* env, jclass targetClass, const std::string& typeSig) {
@@ -14335,6 +14416,81 @@ static bool ResolveGuiScreenPath(JNIEnv* env, jobject mcInst, jclass mcClass, jo
     env->DeleteLocalRef(guiCls);
     env->DeleteLocalRef(guiObj);
     return true;
+}
+
+// The account path may load the helper from the socket thread, so it needs a
+// loader reference that survives a remap: created once here, released only after
+// that thread exited (Detach).
+static void EnsureHelperCommandLoader(JNIEnv* env, jobject classLoader) {
+    if (!env || !classLoader) return;
+    LockGuard lk(g_helperHintsMtx);
+    if (!g_helperCommandLoader) g_helperCommandLoader = env->NewGlobalRef(classLoader);
+}
+
+// First of the candidates that this client's loader actually has. loadClass runs no
+// static initialiser, so probing a not-yet-loaded class here is free.
+static std::string FirstLoadableClassName(JNIEnv* env, jobject gcl, const char* const* names) {
+    if (!env || !gcl) return std::string();
+    for (int i = 0; names[i]; ++i) {
+        jclass c = LoadClassWithLoader(env, gcl, names[i]);
+        if (!c) continue;
+        env->DeleteLocalRef(c);
+        return std::string(names[i]);
+    }
+    return std::string();
+}
+
+// Resolve the session helper as soon as the game loader is known, instead of on the
+// first account command: the first switch must not race class resolution. Runs on
+// the discovery thread (which already holds g_jniRemapMtx) and never sleeps; a
+// loader that is not ready yet just leaves the helper unloaded.
+static void WarmLoadSessionHelper(JNIEnv* env, jobject gcl, const std::string& mcName) {
+    if (!env || !gcl) return;
+    if (!AccountCommandRouter::LoadHelper(env, gcl, mcName.empty() ? nullptr : mcName.c_str()))
+        return;
+
+    const char* connectNames[] = {
+        "net.minecraft.client.gui.screens.ConnectScreen",
+        "net.minecraft.client.gui.screen.ConnectScreen",
+        "net.minecraft.class_412",
+        nullptr
+    };
+    const char* addressNames[] = {
+        "net.minecraft.client.multiplayer.resolver.ServerAddress",
+        "net.minecraft.class_3899",
+        nullptr
+    };
+    const char* dataNames[] = {
+        "net.minecraft.client.multiplayer.ServerData",
+        "net.minecraft.class_642",
+        nullptr
+    };
+    const std::string connect = FirstLoadableClassName(env, gcl, connectNames);
+    const std::string address = FirstLoadableClassName(env, gcl, addressNames);
+    const std::string data = FirstLoadableClassName(env, gcl, dataNames);
+
+    // hintConnect() is static synchronized in the helper, so calling it on every pass
+    // would park this thread on the helper monitor while a session command holds it
+    // across its 4 s game-thread await - with g_jniRemapMtx held, which the 200 Hz fast
+    // poll needs. Re-hint only when a resolved name changed; the compare and the store
+    // stay out of the JNI call so the helper monitor is never waited on under the lock.
+    {
+        LockGuard lk(g_helperHintsMtx);
+        if (g_connectHintTaken && connect == g_connectHint
+                && address == g_serverAddressHint && data == g_serverDataHint) {
+            return;
+        }
+    }
+    AccountCommandRouter::HintConnectPath(
+        env,
+        connect.empty() ? nullptr : connect.c_str(),
+        address.empty() ? nullptr : address.c_str(),
+        data.empty() ? nullptr : data.c_str());
+    LockGuard lk(g_helperHintsMtx);
+    g_connectHintTaken = true;
+    g_connectHint = connect;
+    g_serverAddressHint = address;
+    g_serverDataHint = data;
 }
 
 // ===================== JNI DISCOVERY (ported from 1.8.9, adapted for 1.21) =====================
@@ -14676,6 +14832,13 @@ static bool DiscoverJniMappings(JNIEnv* env) {
     }
     g_mcInstance = env->NewGlobalRef(mcInst);
     g_stateJniReady = (g_mcInstance != nullptr && HasScreenAccess());
+
+    // What the inbound socket thread may use. g_mcInstance and g_gameClassLoader
+    // above are replaced/deleted by the next remap, so the account path gets the
+    // binary class name and a loader reference that outlives remaps instead.
+    SetMcClassNameHint(mcName);
+    EnsureHelperCommandLoader(env, gcl);
+    WarmLoadSessionHelper(env, gcl, mcName);
     bool hasSetScreen = (g_setScreenMethod != nullptr || g_guiSetScreenMethod != nullptr);
     bool hasChatPath = ((g_chatScreenClass != nullptr && g_chatScreenCtor != nullptr) || g_guiOpenChatScreenMethod != nullptr);
     g_chatJniReady  = hasSetScreen && hasChatPath;
@@ -21306,10 +21469,13 @@ glfw_done:;
     AtomicSocketStore121(&g_serverSocket, srv);
     int opt = 1; setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, (char*)&opt, sizeof(opt));
     sockaddr_in addr = {}; addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY; addr.sin_port = htons(25590);
+    // Loopback only: this port carries the live session, including the access token
+    // setSession() writes into the game, so it must not be reachable from the LAN.
+    // The loader always connects to 127.0.0.1:25590.
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK); addr.sin_port = htons(25590);
     bind(srv, (sockaddr*)&addr, sizeof(addr));
     listen(srv, 1);
-    Log("TCP server listening on port 25590.");
+    Log("TCP server listening on 127.0.0.1:25590.");
 
     setlocale(LC_NUMERIC, "C");
 
@@ -21326,9 +21492,13 @@ glfw_done:;
         }
         Log("C# Loader connected.");
         ResetLastActionState();
+        AccountCommandRouter::ClearReplies();
         u_long nb = 1; ioctlsocket(cli, FIONBIO, &nb);
 
         lc::BoundedNewlineBuffer readBuf(1024 * 1024);
+        // Watches the raw stream so an over-long account/server command line is
+        // answered instead of dropped. Config line handling stays untouched.
+        AccountCommandRouter::InboundCommandTracker commandTracker;
         std::vector<std::string> receivedConfigLines;
         bool capabilitiesSent = false;
         bool capabilitiesAttempted = false;
@@ -21661,6 +21831,13 @@ glfw_done:;
                 int r = recv(cli, buf, sizeof(buf)-1, 0);
                 if (r > 0) {
                     receivedConfigLines.clear();
+                    // The tracker answers over-long command lines straight into the
+                    // reply queue, in line order, before ParseConfig sees them.
+                    if (commandTracker.Observe(buf, static_cast<size_t>(r))) {
+                        Log("Rejected account/server command line over "
+                            + std::to_string(AccountCommandRouter::kCommandLineLimit)
+                            + " bytes.");
+                    }
                     size_t discarded = readBuf.Append(
                         buf,
                         static_cast<size_t>(r),
@@ -21678,6 +21855,23 @@ glfw_done:;
                 }
             }
 
+            // accountCommand / serverCommand answers travel on the same connection
+            // through the existing state send path. Drained every iteration, not
+            // only after a recv, so a reply that hit backpressure is retried
+            // instead of waiting for the client to speak again.
+            {
+                std::string commandReply;
+                while (AccountCommandRouter::PeekReply(&commandReply)) {
+                    const int sent = SendJsonLine121(cli, commandReply);
+                    if (sent == 0) break;   // backpressure: keep it queued
+                    if (sent < 0) {         // stream is unusable: drop the backlog
+                        AccountCommandRouter::ClearReplies();
+                        break;
+                    }
+                    AccountCommandRouter::PopReply();
+                }
+            }
+
             MaybeLogNativePerfDiagnostics();
             Sleep(stateIntervalMs);
         }
@@ -21690,6 +21884,11 @@ glfw_done:;
     SOCKET ownedServer = AtomicSocketTake121(&g_serverSocket);
     if (ownedServer != INVALID_SOCKET) closesocket(ownedServer);
     WSACleanup();
+    // Account commands were the only JNI users on this thread; release that
+    // attachment (and the TLS slot behind it) before the thread dies, so a
+    // re-inject does not inherit a stale JNIEnv trampoline.
+    JniEnv::DetachThisThread(g_jvm);
+    AccountCommandRouter::ClearReplies();
     return 0;
 }
 

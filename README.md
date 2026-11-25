@@ -43,6 +43,9 @@ aoko client is an open-source Windows utility client and external overlay for Lu
 - Per-module keybinds (all unbound by default, configurable in the external GUI)
 - Profiles saved in `%AppData%\Aoko\profiles\`
 - GUI customization (slate palettes, module list style, client watermark)
+- Module search (Search button, Ctrl+K, or start typing in the window; Enter jumps to the card, Ctrl+Space toggles it)
+- Accounts tab (imports Localts tokens, Netscape `cookies.txt`, cookie headers, access tokens, or cracked usernames; switches the live session and restores the launch account)
+- Servers tab (saved list with MOTD, latency and player counts, direct connect, joins through the client's own connect path)
 
 ## Screenshots
 
@@ -64,6 +67,12 @@ aoko client is an open-source Windows utility client and external overlay for Lu
 4. Use the external GUI.
 
 _Inject while in a server or world so modules initialize cleanly._
+
+## Accounts and servers
+
+The **Accounts** tab keeps saved logins for switching the session the game runs, and the **Servers** tab keeps a saved list to join from. Both drive the game through the bridge: switching and joining need the client injected and connected, while the saved lists and server pings work without it.
+
+Switching or restoring a session needs the main menu; the tab refuses while you are in a world. Saved credentials are stored unencrypted in `%AppData%\Aoko\accounts.json` on this machine.
 
 ## Install and update with Scoop
 
@@ -120,12 +129,16 @@ Run from repository root unless noted.
 aoko/
 |- Aoko/              # WPF loader + external GUI (.NET 8)
 |  |- Core/                    # Clicker, hooks, profile, TCP client
+|  |  |- Accounts/             # Saved logins, cookie/JWT parsing, Microsoft auth
+|  |  `- Servers/              # Saved servers, address/SRV resolution, server list ping
+|  |- Views/                   # Accounts and Servers tabs, module search overlay
 |  |- MainWindow.xaml(.cs)     # Main UI
 |  |- bridge.dll               # 1.8.9 bridge (legacy)
 |  `- bridge_261.dll           # 26.1 bridge
 |- McInjector/
 |  |- build.bat                # 1.8.9 bridge build (legacy)
 |  |- build_261.bat            # 26.1 bridge build
+|  |- src/main/java/           # Embedded Java helper (session switch, join)
 |  `- src/main/cpp/            # Native bridge sources
 |- website/                    # Docs site (Astro + Starlight) + landing page in public/
 `- README.md

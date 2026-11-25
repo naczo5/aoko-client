@@ -3,11 +3,14 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:local="clr-namespace:Aoko"
         xmlns:core="clr-namespace:Aoko.Core"
+        xmlns:views="clr-namespace:Aoko.Views"
         Title="aoko client"
         Width="360" Height="310"
         WindowStyle="SingleBorderWindow"
         ResizeMode="NoResize"
         Background="{DynamicResource BgBrush}"
+        PreviewKeyDown="Window_PreviewKeyDown"
+        PreviewTextInput="Window_PreviewTextInput"
         WindowStartupLocation="CenterScreen">
 
     <Window.Resources>
@@ -188,17 +191,74 @@
                                     Padding="7,10,7,8">
                                 <Grid>
                                     <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto"/>
                                         <RowDefinition Height="*"/>
                                         <RowDefinition Height="Auto"/>
                                     </Grid.RowDefinitions>
 
-                                    <StackPanel Grid.Row="0"
+                                    <Button x:Name="ModuleSearchButton"
+                                            Grid.Row="0"
+                                            Margin="0,0,0,10"
+                                            Padding="8,6"
+                                            Cursor="Hand"
+                                            Click="ModuleSearchButton_Click"
+                                            ToolTip="Search modules and tabs (Ctrl+K)"
+                                            AutomationProperties.Name="Search modules and tabs">
+                                        <Button.Style>
+                                            <!-- Ghost rail entry point: no accent fill, so the hint and icon stay readable -->
+                                            <Style TargetType="Button">
+                                                <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
+                                                <Setter Property="Template">
+                                                    <Setter.Value>
+                                                        <ControlTemplate TargetType="Button">
+                                                            <Border x:Name="SearchSurface"
+                                                                    Background="Transparent"
+                                                                    BorderBrush="#2E8EB1CC"
+                                                                    BorderThickness="1"
+                                                                    CornerRadius="8"
+                                                                    Padding="{TemplateBinding Padding}">
+                                                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                            </Border>
+                                                            <ControlTemplate.Triggers>
+                                                                <Trigger Property="IsMouseOver" Value="True">
+                                                                    <Setter TargetName="SearchSurface" Property="Background" Value="#14FFFFFF"/>
+                                                                    <Setter TargetName="SearchSurface" Property="BorderBrush" Value="#59A9C2E8"/>
+                                                                </Trigger>
+                                                                <Trigger Property="IsPressed" Value="True">
+                                                                    <Setter TargetName="SearchSurface" Property="Background" Value="#1FFFFFFF"/>
+                                                                </Trigger>
+                                                            </ControlTemplate.Triggers>
+                                                        </ControlTemplate>
+                                                    </Setter.Value>
+                                                </Setter>
+                                            </Style>
+                                        </Button.Style>
+                                        <Grid Width="118">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                                                <Path Width="11" Height="11" Stretch="None"
+                                                      Data="M3.25,0.75 A2.5,2.5 0 1,1 3.25,5.75 A2.5,2.5 0 1,1 3.25,0.75 M5.2,5.2 L9.3,9.3"
+                                                      Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                                      StrokeThickness="1.1"/>
+                                                <TextBlock Text="Search" FontSize="11" FontWeight="SemiBold"
+                                                           Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                            </StackPanel>
+                                            <TextBlock Grid.Column="1" Text="ctrl k" FontSize="9"
+                                                       Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                                       VerticalAlignment="Center"/>
+                                        </Grid>
+                                    </Button>
+
+                                    <StackPanel Grid.Row="1"
                                                 IsItemsHost="True"
                                                 KeyboardNavigation.TabIndex="1"
                                                 VerticalAlignment="Top"/>
 
                                     <Button x:Name="UpdateStatusButton"
-                                            Grid.Row="1"
+                                            Grid.Row="2"
                                             Margin="0,8,0,0"
                                             Padding="8"
                                             Background="{DynamicResource SliderBgBrush}"
@@ -293,7 +353,7 @@
             <TabItem Header="Combat">
                 <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" HorizontalContentAlignment="Stretch">
                     <StackPanel Margin="12">
-                        <Border Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
+                        <Border x:Name="AutoClickerCard" Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
                             <StackPanel>
                                 <DockPanel>
                                     <Button x:Name="KeybindAutoclickerButton" Tag="autoclicker" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
@@ -329,7 +389,7 @@
                             </StackPanel>
                         </Border>
 
-                        <Border Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
+                        <Border x:Name="RightClickCard" Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
                             <StackPanel>
                                 <DockPanel>
                                     <Button x:Name="KeybindRightClickButton" Tag="rightclick" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
@@ -535,7 +595,7 @@
             <TabItem Header="Render">
                 <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" HorizontalContentAlignment="Stretch">
                     <StackPanel Margin="12">
-                        <Border Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
+                        <Border x:Name="NametagsCard" Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
                             <StackPanel>
                                 <DockPanel>
                                     <Button x:Name="KeybindNametagsButton" Tag="nametags" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
@@ -557,7 +617,7 @@
                             </StackPanel>
                         </Border>
 
-                        <Border Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
+                        <Border x:Name="NickHiderCard" Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
                             <StackPanel>
                                 <DockPanel>
                                     <Button x:Name="KeybindNickHiderButton" Tag="nickhider" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
@@ -573,7 +633,7 @@
                             </StackPanel>
                         </Border>
 
-                        <Border Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
+                        <Border x:Name="FightStatusCard" Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
                             <StackPanel>
                                 <DockPanel>
                                     <Button x:Name="KeybindFightStatusButton" Tag="fightstatus" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
@@ -584,7 +644,7 @@
                             </StackPanel>
                         </Border>
 
-                        <Border Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
+                        <Border x:Name="ChestEspCard" Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
                             <StackPanel>
                                 <DockPanel>
                                     <Button x:Name="KeybindChestEspButton" Tag="chestesp" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
@@ -600,7 +660,7 @@
                             </StackPanel>
                         </Border>
 
-                        <Border Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
+                        <Border x:Name="BlockEspCard" Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
                             <StackPanel>
                                 <DockPanel>
                                     <Button x:Name="KeybindBlockEspButton" Tag="blockesp" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
@@ -663,7 +723,7 @@
                             </StackPanel>
                         </Border>
 
-                        <Border Style="{StaticResource ControlCardStyle}">
+                        <Border x:Name="BedPlatesCard" Style="{StaticResource ControlCardStyle}">
                             <StackPanel>
                                 <DockPanel>
                                     <Button x:Name="KeybindBedPlatesButton" Tag="bedplates" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
@@ -682,7 +742,7 @@
                             </StackPanel>
                         </Border>
 
-                        <Border Style="{StaticResource ControlCardStyle}">
+                        <Border x:Name="FireballWarningCard" Style="{StaticResource ControlCardStyle}">
                             <StackPanel>
                                 <DockPanel>
                                     <Button x:Name="KeybindFireballWarningButton" Tag="fireballwarning" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
@@ -698,7 +758,7 @@
                             </StackPanel>
                         </Border>
 
-                        <Border Style="{StaticResource ControlCardStyle}">
+                        <Border x:Name="ClosestPlayerCard" Style="{StaticResource ControlCardStyle}">
                             <StackPanel>
                                 <DockPanel>
                                     <Button x:Name="KeybindClosestPlayerButton" Tag="closestplayer" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
@@ -715,7 +775,7 @@
                             </StackPanel>
                         </Border>
 
-                        <Border Style="{StaticResource ControlCardStyle}" Margin="0,12,0,0">
+                        <Border x:Name="HudEditorCard" Style="{StaticResource ControlCardStyle}" Margin="0,12,0,0">
                             <StackPanel>
                                 <CheckBox Content="Edit HUD" IsChecked="{Binding HudEditorActive, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
                                 <TextBlock Text="Drag HUD elements in-game to reposition them. Open chat to move things around." Foreground="{DynamicResource DimTextBrush}" FontSize="12" Margin="0,8,0,0"/>
@@ -939,7 +999,7 @@
                             </StackPanel>
                         </Border>
 
-                        <Border Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
+                        <Border x:Name="PanicCard" Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
                             <StackPanel>
                                 <DockPanel Margin="0,0,0,6">
                                     <Button x:Name="KeybindPanicButton" Tag="panic" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
@@ -1365,6 +1425,14 @@
                         </Border>
                     </StackPanel>
                 </ScrollViewer>
+            </TabItem>
+
+            <TabItem Header="Accounts">
+                <views:AccountsView x:Name="AccountsTab"/>
+            </TabItem>
+
+            <TabItem Header="Servers">
+                <views:ServersView x:Name="ServersTab"/>
             </TabItem>
 
             <TabItem Header="Stats" DataContext="{x:Static core:StatsTracker.Instance}">
@@ -2034,5 +2102,8 @@
                 </ScrollViewer>
             </TabItem>
         </TabControl>
+
+        <!-- Command search overlay: full-window scrim above the tab control -->
+        <views:CommandSearchOverlay x:Name="CommandSearchHost" Margin="-20"/>
     </Grid>
 </Window>

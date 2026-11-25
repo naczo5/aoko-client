@@ -32,10 +32,17 @@ public class GameStateClient : INotifyPropertyChanged
     private readonly ManagedTransportDiagnostics _transportDiagnostics =
         ManagedTransportDiagnostics.FromEnvironment();
     private readonly CoalescedLatestValue<string> _actionBarDispatcher;
+    private readonly BridgeCommandDispatcher _commandDispatcher;
     private const int ConfigHeartbeatMs = 2000;
     private const int ConfigChangeCoalesceMs = 25;
     private const int StateNotificationIntervalMs = 25;
     private const int MaximumInboundMessageCharacters = 1024 * 1024;
+
+    /// <summary>
+    /// Ceiling for one command line write. A ~2 KB loopback write finishes in microseconds; the
+    /// timeout only exists so a stalled peer cannot hold <see cref="_sendLock"/> forever.
+    /// </summary>
+    private static readonly TimeSpan SendTimeout = TimeSpan.FromSeconds(10);
 
     private volatile GameState _currentState = new();
     private readonly CoalescedCallback _stateNotification;
@@ -77,6 +84,9 @@ public class GameStateClient : INotifyPropertyChanged
                 dispatcher.BeginInvoke(action);
             },
             actionBar => Clicker.Instance.UpdateGtbFromActionBar(actionBar));
+        _commandDispatcher = new BridgeCommandDispatcher(
+            (line, token) => SendMessageAsync(line, token),
+            () => IsConnected);
     }
 
     // === Properties ===
@@ -450,6 +460,7 @@ public class GameStateClient : INotifyPropertyChanged
             _ = DisposeCtsWhenDoneAsync(previousCts, previousConfigTask, previousReadTask);
         }
 
+        FailPendingCommands();
         _cts = new CancellationTokenSource();
         var token = _cts.Token;
 
@@ -536,13 +547,23 @@ public class GameStateClient : INotifyPropertyChanged
                 long parseStarted = Stopwatch.GetTimestamp();
                 try
                 {
-                    if (line.Contains("\"type\":\"capabilities\""))
+                    JsonNode? rawNode = JsonNode.Parse(line);
+
+                    // Dispatch on the parsed "type" property, never on serialized text: a reply
+                    // written with a space or with the property reordered must still complete its
+                    // request, and must never reach the GameState branch below where any object
+                    // deserializes into an empty state and blanks the HUD.
+                    switch (BridgeInboundClassifier.Classify(rawNode))
                     {
-                        HandleBridgeCapabilities(line);
-                        continue;
+                        case BridgeInboundKind.CommandResult:
+                            HandleBridgeCommandResult(rawNode);
+                            continue;
+
+                        case BridgeInboundKind.Capabilities:
+                            HandleBridgeCapabilities(rawNode);
+                            continue;
                     }
 
-                    JsonNode? rawNode = JsonNode.Parse(line);
                     GameState? state = null;
                     if (GameStatePatchMerger.IsPartial(rawNode) && rawNode is JsonObject patch)
                         state = GameStatePatchMerger.Apply(CurrentState, patch);
@@ -587,6 +608,7 @@ public class GameStateClient : INotifyPropertyChanged
         }
         finally
         {
+            FailPendingCommands();
             IsConnected = false;
             _client?.Dispose();
             _client = null;
@@ -669,6 +691,7 @@ public class GameStateClient : INotifyPropertyChanged
                      _client.Close();
                      _client = null;
                  }
+                 FailPendingCommands();
                  IsConnected = false;
                  
                  // Call native detach
@@ -699,6 +722,7 @@ public class GameStateClient : INotifyPropertyChanged
         _client?.Dispose();
         _client = null;
         Volatile.Write(ref _pendingActionRequestId, 0);
+        FailPendingCommands();
         IsConnected = false;
         IsInjected = false;
         IsInjectionInProgress = false;
@@ -1035,6 +1059,74 @@ public class GameStateClient : INotifyPropertyChanged
         }
     }
 
+    // === Session / server commands (requestId + commandResult) ===
+
+    /// <summary>
+    /// Sends an ACCOUNTS command and waits for its correlated "commandResult"
+    /// reply (20 s budget). Cancelling <paramref name="token"/> throws
+    /// <see cref="OperationCanceledException"/>; every other failure returns an
+    /// unsuccessful <see cref="BridgeCommandResult"/> whose
+    /// <see cref="BridgeCommandResult.Message"/> is safe to show in the GUI.
+    /// </summary>
+    public Task<BridgeCommandResult> SendAccountCommandAsync(
+        AccountCommand command,
+        CancellationToken token = default)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+        return _commandDispatcher.SendAsync(
+            command.Action,
+            requestId => BridgeCommandWire.BuildAccountCommandLine(requestId, command),
+            token);
+    }
+
+    public Task<BridgeCommandResult> GetSessionAsync(CancellationToken token = default)
+        => SendAccountCommandAsync(AccountCommand.GetSession(), token);
+
+    public Task<BridgeCommandResult> SetSessionAsync(
+        string name,
+        string uuid,
+        string msaToken,
+        string? refreshToken = null,
+        CancellationToken token = default)
+    {
+        if (string.IsNullOrWhiteSpace(name) ||
+            string.IsNullOrWhiteSpace(uuid) ||
+            string.IsNullOrWhiteSpace(msaToken))
+        {
+            return Task.FromResult(
+                BridgeCommandResult.Failure(
+                    BridgeActions.SetSession,
+                    BridgeCommandResult.InvalidSessionDataError));
+        }
+
+        return SendAccountCommandAsync(
+            AccountCommand.SetSession(name.Trim(), uuid.Trim(), msaToken, refreshToken),
+            token);
+    }
+
+    public Task<BridgeCommandResult> RestoreSessionAsync(CancellationToken token = default)
+        => SendAccountCommandAsync(AccountCommand.RestoreSession(), token);
+
+    public Task<BridgeCommandResult> JoinServerAsync(
+        string host,
+        int port,
+        CancellationToken token = default)
+    {
+        if (string.IsNullOrWhiteSpace(host) || port is < 1 or > 65535)
+        {
+            return Task.FromResult(
+                BridgeCommandResult.Failure(
+                    BridgeActions.Join,
+                    BridgeCommandResult.InvalidAddressError));
+        }
+
+        string trimmedHost = host.Trim();
+        return _commandDispatcher.SendAsync(
+            BridgeActions.Join,
+            requestId => BridgeCommandWire.BuildServerCommandLine(requestId, trimmedHost, port),
+            token);
+    }
+
     private async Task<bool> SendMessageAsync(
         string message,
         CancellationToken token,
@@ -1077,8 +1169,25 @@ public class GameStateClient : INotifyPropertyChanged
                 return false;
 
             NetworkStream stream = client.GetStream();
-            await stream.WriteAsync(data, token).ConfigureAwait(false);
-            return true;
+
+            // Line framing is shared with the bridge: a command cancelled halfway leaves a
+            // fragment on the socket, the bridge concatenates the next command onto it, and one
+            // line is dropped while the next one silently never runs. So once the lock is held
+            // the write runs to completion, bounded by its own timeout rather than the caller's.
+            using var writeTimeout = new CancellationTokenSource(SendTimeout);
+            try
+            {
+                await stream.WriteAsync(data, writeTimeout.Token).ConfigureAwait(false);
+                return true;
+            }
+            catch (Exception ex) when (ex is OperationCanceledException or IOException
+                                          or ObjectDisposedException or SocketException)
+            {
+                // The buffer may be partially written: drop the connection so the GUI
+                // reconnects instead of reusing a desynchronised channel.
+                FailTornWrite(client, ex);
+                return false;
+            }
         }
         finally
         {
@@ -1086,25 +1195,71 @@ public class GameStateClient : INotifyPropertyChanged
         }
     }
 
+    /// <summary>
+    /// Tears down a socket whose last write may be incomplete. The read loop and the reconnect
+    /// path take it from here, so the bridge never sees two commands glued onto one line.
+    /// Only the socket that failed is dropped: a write on an abandoned connection must not
+    /// tear down the one that replaced it.
+    /// </summary>
+    private void FailTornWrite(TcpClient client, Exception ex)
+    {
+        Log($"Bridge write failed ({ex.GetType().Name}); dropping the connection to resynchronise.");
+
+        if (!ReferenceEquals(_client, client))
+            return;
+
+        _client = null;
+        client.Dispose();
+        FailPendingCommands();
+        IsConnected = false;
+    }
+
     // === Config Sending (C# -> Bridge for HUD display) ===
 
-    private void HandleBridgeCapabilities(string json)
+    private void HandleBridgeCapabilities(JsonNode? node)
     {
         try
         {
-            JsonNode? node = JsonNode.Parse(json);
-            if (!string.Equals(node?["type"]?.GetValue<string>(), "capabilities", StringComparison.OrdinalIgnoreCase))
+            if (BridgeInboundClassifier.Classify(node) != BridgeInboundKind.Capabilities)
                 return;
 
             BridgeCapabilities fallback = BridgeCapabilities.ForVersionFallback(InjectedVersion);
             BridgeCapabilities parsed = BridgeCapabilities.FromPayload(node, fallback);
             Capabilities = parsed;
-            Log($"Bridge capabilities updated (modules={parsed.ModuleCount}, settings={parsed.SettingCount}, state={parsed.StateFieldCount}).");
+            Log($"Bridge capabilities updated (modules={parsed.ModuleCount}, settings={parsed.SettingCount}, state={parsed.StateFieldCount}, actions={parsed.ActionCount}).");
         }
         catch (Exception ex)
         {
             Log($"Error parsing bridge capabilities: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Completes the pending session/server command a "commandResult" line belongs
+    /// to. Unknown ids and malformed replies stay out of the state pipeline.
+    /// </summary>
+    private void HandleBridgeCommandResult(JsonNode? node)
+    {
+        try
+        {
+            if (!_commandDispatcher.TryComplete(node))
+                Log("Ignored commandResult with no pending request.");
+        }
+        catch (Exception ex)
+        {
+            Log($"Error parsing commandResult: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Fails every pending session/server command so a dropped connection cannot
+    /// leave the GUI waiting out the 20 s budget.
+    /// </summary>
+    private void FailPendingCommands()
+    {
+        int failed = _commandDispatcher.FailAll(BridgeCommandResult.ConnectionLostError);
+        if (failed > 0)
+            Log($"{failed} pending bridge command(s) failed on connection drop.");
     }
 
     private async Task ConfigSenderLoop(CancellationToken token)

@@ -250,7 +250,8 @@ public static class InputHooks
         _captureAllowsMouse = false;
     }
 
-    private static void ToggleModule(string moduleId)
+    // Authoritative module toggle map: keybinds and the external GUI command search both go through here.
+    internal static void ToggleModule(string moduleId)
     {
         if (string.Equals(moduleId, "panic", StringComparison.OrdinalIgnoreCase))
         {

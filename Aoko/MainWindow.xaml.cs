@@ -5,16 +5,22 @@ using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
+using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
+using System.Windows.Media.Effects;
 using System.Windows.Threading;
 using Aoko.Core;
+using Aoko.Views;
 
 namespace Aoko;
 
@@ -72,6 +78,20 @@ public partial class MainWindow : Window
     private readonly CancellationTokenSource _updateCheckCancellation = new();
     private string? _latestReleaseUrl;
     private bool _updateCheckInProgress;
+
+    // Command search: cached blur (never rebuilt per keystroke) and the focus to restore on close.
+    private readonly BlurEffect _commandSearchBlur = new()
+    {
+        Radius = 12,
+        KernelType = KernelType.Gaussian,
+        RenderingBias = RenderingBias.Performance,
+    };
+
+    private IInputElement? _commandSearchPriorFocus;
+    private AdornerLayer? _cardPulseLayer;
+    private CardPulseAdorner? _cardPulseAdorner;
+
+    private static readonly Dictionary<string, PropertyInfo> ModuleStateGetters = CreateModuleStateGetters();
     private static readonly Dictionary<string, string> ModuleTitles = new()
     {
         ["autoclicker"] = "AutoClicker",
@@ -404,6 +424,11 @@ public partial class MainWindow : Window
         UpdateGameStateUI();
         UpdateKeybindButtons();
         RefreshConfigList();
+
+        CommandSearchHost.StateProvider = GetCommandSearchRowState;
+        CommandSearchHost.JumpRequested += CommandSearchHost_JumpRequested;
+        CommandSearchHost.ToggleRequested += CommandSearchHost_ToggleRequested;
+        CommandSearchHost.Closed += CommandSearchHost_Closed;
     }
 
     private void ToggleArmed_Click(object sender, RoutedEventArgs e)
@@ -451,6 +476,10 @@ public partial class MainWindow : Window
         Title = "aoko client";
         Width = 1020;
         Height = 760;
+        // Floor below which the command search card and its footer legend would clip: the card is 340 wide
+        // plus the overlay's 56 px gutters, and 460 tall fits the header, three rows and the legend.
+        MinWidth = 560;
+        MinHeight = 460;
         ResizeMode = ResizeMode.CanResizeWithGrip;
         ApplyNativeTitleBarTheme();
 
@@ -502,14 +531,6 @@ public partial class MainWindow : Window
     private static bool IsModuleSupported(string moduleId)
         => string.Equals(moduleId, "panic", StringComparison.OrdinalIgnoreCase)
             || GameStateClient.Instance.SupportsModule(moduleId);
-
-    private static string GetUnavailableModuleReason(string moduleId)
-    {
-        if (string.Equals(moduleId, "triggerbot", StringComparison.OrdinalIgnoreCase))
-            return "Unavailable on 1.8.9 (cooldown-era PvP only)";
-
-        return "Unavailable on current bridge";
-    }
 
     private void UpdateVersionAvailabilityUi()
     {
@@ -604,7 +625,7 @@ public partial class MainWindow : Window
         TriggerbotAvailabilityText.Text = triggerbotSupported ? "Available" : "Unavailable on 1.8.9 (cooldown-era PvP only)";
         string killAuraRuntimeReason = GameStateClient.Instance.CurrentState.KillAuraUnavailableReason;
         KillAuraAvailabilityText.Text = !killAuraSupported
-            ? GetUnavailableModuleReason("killaura")
+            ? CommandSearchRowPolicy.UnavailableReason("killaura")
             : string.IsNullOrWhiteSpace(killAuraRuntimeReason) ? "Available" : killAuraRuntimeReason;
         SpeedBridgeAvailabilityText.Text = speedBridgeSupported ? "Available" : "Unavailable on current bridge";
         ReachAvailabilityText.Text = reachSupported ? "Available" : "Unavailable on current bridge";
@@ -672,6 +693,12 @@ public partial class MainWindow : Window
 
         _lastModuleStatus = null;
         RefreshModuleStatusTexts();
+
+        AccountsTab.RefreshAvailability();
+        ServersTab.RefreshAvailability();
+
+        // Capabilities changed what the bridge can run, so an open overlay's rows (and their switches) changed too.
+        RefreshCommandSearchRows();
     }
 
     // Availability labels that can show a runtime reason from the bridge's
@@ -1299,6 +1326,16 @@ public partial class MainWindow : Window
         SetBrushColor("TextBrush", palette.Text);
         SetBrushColor("DimTextBrush", palette.DimText);
 
+        // Command search card: the panel colour at 89% so the blurred GUI reads through the glass.
+        SetBrushColor("CommandSearchGlassBrush", Color.FromArgb(0xE4, palette.Panel.R, palette.Panel.G, palette.Panel.B));
+
+        // Card text tints, derived so they follow the palette: a fixed light tint erases the matched run on a
+        // light custom palette (the name renders with holes). The pill is the accent at 18% behind that run.
+        SetBrushColor("CommandSearchMatchBrush", Blend(palette.Text, palette.Accent, 0.28));
+        SetBrushColor("CommandSearchMatchPillBrush", Color.FromArgb(0x2E, palette.Accent.R, palette.Accent.G, palette.Accent.B));
+        SetBrushColor("CommandSearchPlaceholderBrush", Blend(palette.DimText, palette.Text, 0.35));
+        SetBrushColor("CommandSearchSubtleTextBrush", Blend(palette.DimText, palette.Text, 0.55));
+
         SetBrushColor("BgBrush", palette.Background, this.Resources);
         SetBrushColor("PanelBrush", palette.Panel, this.Resources);
         SetBrushColor("SliderBgBrush", palette.SliderBackground, this.Resources);
@@ -1577,6 +1614,250 @@ public partial class MainWindow : Window
         }
     }
 
+    // ── Command search (module search overlay) ─────────────────────────────────
+
+    private void ModuleSearchButton_Click(object sender, RoutedEventArgs e)
+        => OpenCommandSearch(null);
+
+    /// <summary>Any printable character typed outside a text field opens the overlay with that character.</summary>
+    private void Window_PreviewTextInput(object sender, TextCompositionEventArgs e)
+    {
+        if (!_controlMode || CommandSearchHost.IsOpen || !CanOpenCommandSearch())
+            return;
+
+        // Text fields keep their own typing. OriginalSource is the focused element, which also
+        // covers text inputs hosted in popups where the visual tree walk cannot reach.
+        if (e.OriginalSource is TextBoxBase or PasswordBox or ComboBox)
+            return;
+
+        string text = e.Text;
+        if (text.Length != 1 || char.IsControl(text[0]) || char.IsWhiteSpace(text[0]))
+            return;
+
+        OpenCommandSearch(text);
+        e.Handled = true;
+    }
+
+    private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.K && Keyboard.Modifiers == ModifierKeys.Control)
+        {
+            if (_controlMode && !CommandSearchHost.IsOpen && CanOpenCommandSearch())
+            {
+                OpenCommandSearch(null);
+                e.Handled = true;
+            }
+
+            return;
+        }
+
+        if (e.Key == Key.Escape && CommandSearchHost.IsOpen)
+        {
+            CloseCommandSearch();
+            e.Handled = true;
+        }
+    }
+
+    /// <summary>
+    /// Only an active keybind capture owns the keyboard (its low-level hook swallows the keys before
+    /// this window sees them). A focused text field does not block the shortcut; type-to-open checks
+    /// the focused element on its own.
+    /// </summary>
+    private bool CanOpenCommandSearch()
+        => !InputHooks.IsCapturingKey
+           && _pendingKeybindModuleId == null
+           && !_pendingAutoRodActionBind
+           && !_pendingThrowpotActionBind;
+
+    private void OpenCommandSearch(string? seed)
+    {
+        if (!_controlMode || CommandSearchHost.IsOpen || InputHooks.IsCapturingKey)
+            return;
+
+        RemoveCardPulse();
+        _commandSearchPriorFocus = Keyboard.FocusedElement;
+        ControlPanel.Effect = _commandSearchBlur;
+        CommandSearchHost.Open(seed);
+    }
+
+    private void CloseCommandSearch() => CommandSearchHost.Close();
+
+    private void CommandSearchHost_Closed(object? sender, EventArgs e)
+    {
+        ControlPanel.Effect = null;
+
+        IInputElement? focus = _commandSearchPriorFocus;
+        _commandSearchPriorFocus = null;
+
+        if (focus is UIElement element && element.IsVisible && element.IsEnabled)
+            Keyboard.Focus(element);
+        else
+            ControlPanel.Focus();
+    }
+
+    private void CommandSearchHost_JumpRequested(object? sender, ModuleSearchEntry entry)
+    {
+        if (!entry.IsDestination)
+        {
+            SelectTab(entry.Tab);
+            ControlPanel.UpdateLayout();
+
+            if (FindModuleCard(entry) is Border card)
+            {
+                card.BringIntoView();
+                PulseModuleCard(card);
+            }
+
+            return;
+        }
+
+        SelectTab(entry.Tab);
+    }
+
+    private void CommandSearchHost_ToggleRequested(object? sender, ModuleSearchEntry entry)
+    {
+        if (entry.IsDestination || entry.ToggleProperty.Length == 0)
+            return;
+
+        // InputHooks owns the module toggle map, so keybinds and this row cannot drift apart.
+        InputHooks.ToggleModule(entry.Id);
+    }
+
+    private CommandSearchRowState GetCommandSearchRowState(ModuleSearchEntry entry)
+    {
+        bool hasToggle = entry.ToggleProperty.Length > 0;
+
+        return CommandSearchRowPolicy.Resolve(
+            entry,
+            devMode: Clicker.Instance.DevMode,
+            // The same predicate InputHooks.ToggleModule guards on: a row may only offer what the toggle would do.
+            supported: IsModuleSupported(entry.Id),
+            isOn: hasToggle && TryReadModuleEnabled(entry),
+            keybindText: entry.HasKeybind ? FormatVirtualKey(InputHooks.GetModuleKey(entry.Id)) : string.Empty);
+    }
+
+    /// <summary>
+    /// Reads the module card's own bound property so the row switch matches the GUI checkbox.
+    /// Writing goes through <see cref="InputHooks.ToggleModule"/> instead of touching the property.
+    /// </summary>
+    private static bool TryReadModuleEnabled(ModuleSearchEntry entry)
+        => entry.ToggleProperty.Length > 0
+           && ModuleStateGetters.TryGetValue(entry.ToggleProperty, out PropertyInfo? property)
+           && property.GetValue(Clicker.Instance) is true;
+
+    private static Dictionary<string, PropertyInfo> CreateModuleStateGetters()
+    {
+        var getters = new Dictionary<string, PropertyInfo>(StringComparer.Ordinal);
+        foreach (ModuleSearchEntry entry in ModuleSearchIndex.Default.Entries)
+        {
+            if (entry.ToggleProperty.Length == 0 || getters.ContainsKey(entry.ToggleProperty))
+                continue;
+
+            PropertyInfo? property = typeof(Clicker).GetProperty(entry.ToggleProperty, BindingFlags.Public | BindingFlags.Instance);
+            if (property != null)
+                getters[entry.ToggleProperty] = property;
+        }
+
+        return getters;
+    }
+
+    private Border? FindModuleCard(ModuleSearchEntry entry)
+        => entry.CardName.Length > 0 && FindName(entry.CardName) is Border card ? card : null;
+
+    private void SelectTab(string tabName)
+    {
+        foreach (object item in ControlPanel.Items)
+        {
+            if (item is TabItem tab && string.Equals(tab.Header as string, tabName, StringComparison.OrdinalIgnoreCase))
+            {
+                ControlPanel.SelectedItem = tab;
+                return;
+            }
+        }
+    }
+
+    /// <summary>Pulses an accent ring around a module card so the jump target is obvious.</summary>
+    private void PulseModuleCard(Border card)
+    {
+        RemoveCardPulse();
+
+        // The pulse is pure motion; with system animations off the card still scrolls into view, unmarked.
+        if (!SystemParameters.ClientAreaAnimation)
+            return;
+
+        AdornerLayer? layer = AdornerLayer.GetAdornerLayer(card);
+        if (layer is null || TryFindResource("AccentBrush") is not Brush accent)
+            return;
+
+        var adorner = new CardPulseAdorner(card, accent);
+        _cardPulseLayer = layer;
+        _cardPulseAdorner = adorner;
+        layer.Add(adorner);
+
+        var animation = new DoubleAnimationUsingKeyFrames { FillBehavior = FillBehavior.HoldEnd };
+        animation.KeyFrames.Add(new LinearDoubleKeyFrame(0, KeyTime.FromTimeSpan(TimeSpan.Zero)));
+        animation.KeyFrames.Add(new EasingDoubleKeyFrame(1, KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(160)))
+        {
+            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
+        });
+        animation.KeyFrames.Add(new LinearDoubleKeyFrame(1, KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(820))));
+        animation.KeyFrames.Add(new EasingDoubleKeyFrame(0, KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(1200))));
+        animation.Completed += (_, _) =>
+        {
+            if (ReferenceEquals(_cardPulseAdorner, adorner))
+                RemoveCardPulse();
+        };
+
+        adorner.BeginAnimation(OpacityProperty, animation);
+    }
+
+    private void RemoveCardPulse()
+    {
+        if (_cardPulseLayer != null && _cardPulseAdorner != null)
+            _cardPulseLayer.Remove(_cardPulseAdorner);
+
+        _cardPulseLayer = null;
+        _cardPulseAdorner = null;
+    }
+
+    /// <summary>Draws a 1.2s accent ring around the jumped-to module card, outside the card layout.</summary>
+    private sealed class CardPulseAdorner : Adorner
+    {
+        private readonly Pen _ring;
+        private readonly Pen _halo;
+        private readonly double _radius;
+
+        public CardPulseAdorner(UIElement adornedElement, Brush accent) : base(adornedElement)
+        {
+            IsHitTestVisible = false;
+            _radius = adornedElement is Border card ? card.CornerRadius.TopLeft + 2 : 8;
+
+            _ring = new Pen(accent, 1.6);
+            _ring.Freeze();
+
+            var haloBrush = accent.Clone();
+            haloBrush.Opacity = 0.28;
+            haloBrush.Freeze();
+
+            _halo = new Pen(haloBrush, 3.2);
+            _halo.Freeze();
+        }
+
+        protected override void OnRender(DrawingContext drawingContext)
+        {
+            double width = AdornedElement.RenderSize.Width;
+            double height = AdornedElement.RenderSize.Height;
+            if (width <= 2 || height <= 2)
+                return;
+
+            var haloRect = new Rect(-1.5, -1.5, width + 3, height + 3);
+            drawingContext.DrawRoundedRectangle(null, _halo, haloRect, _radius + 1, _radius + 1);
+
+            var ringRect = new Rect(0.5, 0.5, width - 1, height - 1);
+            drawingContext.DrawRoundedRectangle(null, _ring, ringRect, _radius, _radius);
+        }
+    }
+
     protected override void OnClosed(EventArgs e)
     {
         _updateCheckCancellation.Cancel();
@@ -1793,7 +2074,22 @@ public partial class MainWindow : Window
 
     private void InputHooks_OnStateChanged()
     {
-        Dispatcher.BeginInvoke(UpdateKeybindButtons);
+        // Raised from the keybind hook thread, so everything it touches is marshalled first.
+        Dispatcher.BeginInvoke(() =>
+        {
+            RefreshCommandSearchRows();
+            UpdateKeybindButtons();
+        });
+    }
+
+    /// <summary>
+    /// Pushes live module state into the open overlay. Without this a keybind toggle during search leaves
+    /// the row switch showing the state the module had before.
+    /// </summary>
+    private void RefreshCommandSearchRows()
+    {
+        if (CommandSearchHost.IsOpen)
+            CommandSearchHost.RefreshRows();
     }
 
     private void UpdateKeybindButtons()
@@ -1848,7 +2144,7 @@ public partial class MainWindow : Window
     {
         if (!IsModuleSupported(moduleId))
         {
-            btn.Content = GetUnavailableModuleReason(moduleId);
+            btn.Content = CommandSearchRowPolicy.UnavailableReason(moduleId);
             return;
         }
 

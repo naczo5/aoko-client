@@ -9,19 +9,32 @@ public sealed class BridgeCapabilities
     private readonly HashSet<string> _modules;
     private readonly HashSet<string> _settings;
     private readonly HashSet<string> _stateFields;
+    private readonly HashSet<string> _actions;
 
     public int ModuleCount => _modules.Count;
     public int SettingCount => _settings.Count;
     public int StateFieldCount => _stateFields.Count;
+    public int ActionCount => _actions.Count;
     public IReadOnlyCollection<string> Modules => _modules;
     public IReadOnlyCollection<string> Settings => _settings;
     public IReadOnlyCollection<string> StateFields => _stateFields;
 
-    private BridgeCapabilities(HashSet<string> modules, HashSet<string> settings, HashSet<string> stateFields)
+    /// <summary>
+    /// Session/server command names advertised after the "state" array. A payload without the
+    /// list inherits the version fallback, which mirrors <c>bridge_capabilities.h</c>.
+    /// </summary>
+    public IReadOnlyCollection<string> Actions => _actions;
+
+    private BridgeCapabilities(
+        HashSet<string> modules,
+        HashSet<string> settings,
+        HashSet<string> stateFields,
+        HashSet<string>? actions = null)
     {
         _modules = modules;
         _settings = settings;
         _stateFields = stateFields;
+        _actions = actions ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     }
 
     public static BridgeCapabilities ForVersionFallback(string? injectedVersion)
@@ -261,7 +274,8 @@ public sealed class BridgeCapabilities
                     "pixelpartytargetdist",
                     "pixelpartyyawdelta",
                     "hudlayout"
-                )
+                ),
+                BuildBridgeActionSet()
             );
         }
 
@@ -482,24 +496,42 @@ public sealed class BridgeCapabilities
                 "pixelpartytargetdist",
                 "pixelpartyyawdelta",
                 "hudlayout"
-            )
+            ),
+            BuildBridgeActionSet()
         );
     }
+
+    /// <summary>
+    /// The session/server commands both shipped bridges advertise in
+    /// <c>bridge_capabilities.h</c>. The fallback is used between connect and the capabilities
+    /// frame (and for a bridge whose frame never arrives), so leaving actions out told the
+    /// user to rebuild the DLLs for a feature the bridge supports.
+    /// </summary>
+    private static HashSet<string> BuildBridgeActionSet() => BuildSet(
+        BridgeActions.AccountGetSession,
+        BridgeActions.AccountSetSession,
+        BridgeActions.AccountRestoreSession,
+        BridgeActions.ServerJoin);
 
     public static BridgeCapabilities FromPayload(JsonNode? node, BridgeCapabilities fallback)
     {
         var modules = ParseStringArray(node?["modules"]);
         var settings = ParseStringArray(node?["settings"]);
         var stateFields = ParseStringArray(node?["state"]);
+        var actions = ParseStringArray(node?["actions"]);
 
-        if (modules.Count == 0 && settings.Count == 0 && stateFields.Count == 0)
+        if (modules.Count == 0 && settings.Count == 0 && stateFields.Count == 0 && actions.Count == 0)
             return fallback;
 
         if (modules.Count == 0) modules = new HashSet<string>(fallback._modules, StringComparer.OrdinalIgnoreCase);
         if (settings.Count == 0) settings = new HashSet<string>(fallback._settings, StringComparer.OrdinalIgnoreCase);
         if (stateFields.Count == 0) stateFields = new HashSet<string>(fallback._stateFields, StringComparer.OrdinalIgnoreCase);
+        // A payload from a bridge that predates the actions list must not report the session
+        // and join commands as unsupported: both shipped bridges advertise them, so the
+        // fallback set is the better answer than "rebuild the bridge DLLs".
+        if (actions.Count == 0) actions = new HashSet<string>(fallback._actions, StringComparer.OrdinalIgnoreCase);
 
-        return new BridgeCapabilities(modules, settings, stateFields);
+        return new BridgeCapabilities(modules, settings, stateFields, actions);
     }
 
     public bool SupportsModule(string moduleId)
@@ -510,6 +542,14 @@ public sealed class BridgeCapabilities
 
     public bool SupportsStateField(string fieldName)
         => _stateFields.Contains(Normalize(fieldName));
+
+    /// <summary>
+    /// Whether the connected bridge advertises a session/server command such as
+    /// <c>account.setSession</c> or <c>server.join</c>. Actions are not modules,
+    /// settings, or state fields.
+    /// </summary>
+    public bool SupportsAction(string actionName)
+        => _actions.Contains(Normalize(actionName));
 
     private static HashSet<string> BuildSet(params string[] values)
     {
@@ -530,7 +570,11 @@ public sealed class BridgeCapabilities
 
         foreach (JsonNode? item in arr)
         {
-            string? raw = item?.GetValue<string>();
+            // A non-string element means a malformed payload; skip it instead of throwing
+            // out of the capability parse and leaving the previous set in place.
+            if (item is not JsonValue value || !value.TryGetValue<string>(out string? raw))
+                continue;
+
             string normalized = Normalize(raw);
             if (!string.IsNullOrWhiteSpace(normalized))
                 set.Add(normalized);

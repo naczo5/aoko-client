@@ -9,6 +9,10 @@ if not exist "%GPP%" (
     exit /b 1
 )
 
+REM jni.h is needed by the accountCommand/serverCommand wire test.
+set "JAVA_INC=C:/Program Files/Java/jdk-17/include"
+if defined JAVA_HOME set "JAVA_INC=%JAVA_HOME:\=/%/include"
+
 if not exist "tests" mkdir "tests"
 
 echo [NativeTests] Building auto_rod_core_tests.exe...
@@ -209,6 +213,22 @@ if %errorlevel% neq 0 exit /b %errorlevel%
 
 echo [NativeTests] Running beta_modules_tests.exe...
 tests\beta_modules_tests.exe
+if %errorlevel% neq 0 exit /b %errorlevel%
+
+echo [NativeTests] Building account_command_router_tests.exe...
+"%GPP%" -m64 -std=c++11 -O2 -static-libgcc -static-libstdc++ -I"%JAVA_INC%" -I"%JAVA_INC%/win32" -Isrc/main/cpp -o tests\account_command_router_tests.exe tests\account_command_router_tests.cpp
+if %errorlevel% neq 0 exit /b %errorlevel%
+
+echo [NativeTests] Running account_command_router_tests.exe...
+tests\account_command_router_tests.exe
+if %errorlevel% neq 0 exit /b %errorlevel%
+
+echo [NativeTests] Building session_helper_format_tests.exe...
+"%GPP%" -m64 -std=c++11 -O2 -static-libgcc -static-libstdc++ -I"%JAVA_INC%" -I"%JAVA_INC%/win32" -Isrc/main/cpp -o tests\session_helper_format_tests.exe tests\session_helper_format_tests.cpp src\main\cpp\jni_core\session_helper_bridge.cpp
+if %errorlevel% neq 0 exit /b %errorlevel%
+
+echo [NativeTests] Running session_helper_format_tests.exe...
+tests\session_helper_format_tests.exe
 if %errorlevel% neq 0 exit /b %errorlevel%
 
 echo [NativeTests] All native harness tests passed.

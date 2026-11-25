@@ -249,7 +249,7 @@ public class ModuleRegistrationTests
     public void KeybindMaps_ToggleModuleSwitch_CoversEveryToggleableCatalogModule()
     {
         string code = File.ReadAllText(Path.Combine(RepoRoot, "Aoko", "Core", "InputHooks.cs"));
-        int start = code.IndexOf("private static void ToggleModule(string moduleId)", StringComparison.Ordinal);
+        int start = code.IndexOf("static void ToggleModule(string moduleId)", StringComparison.Ordinal);
         Assert.True(start >= 0, "ToggleModule not found");
         int end = code.IndexOf("private static bool ShouldBlockModuleKeybinds()", start, StringComparison.Ordinal);
         Assert.True(end > start, "ShouldBlockModuleKeybinds boundary not found");

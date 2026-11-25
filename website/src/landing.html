@@ -155,7 +155,7 @@
   <section id="registry" class="section">
     <div class="section-head">
       <h2><span class="eyebrow">01 / modules</span> Everything in one place</h2>
-      <p>Every module aoko ships, grouped by subsystem. Beta modules live in the Beta tab. Expand a row for details.</p>
+      <p>Every module aoko ships, grouped by subsystem, then the GUI tabs that are not modules. Beta modules live in the Beta tab. Expand a row for details.</p>
     </div>
 
     <div class="reg-group" data-group="combat">
@@ -330,6 +330,24 @@
         <details class="mod">
           <summary><span class="mod-i">▸</span><span class="mod-name">discord rpc</span><span class="mod-tag">integration</span></summary>
           <p>Live state, version, and active module count surfaced through Discord Rich Presence.</p>
+        </details>
+      </div>
+    </div>
+
+    <div class="reg-group" data-group="gui">
+      <div class="reg-label">gui<span class="reg-count">3</span></div>
+      <div class="reg-rows">
+        <details class="mod">
+          <summary><span class="mod-i">▸</span><span class="mod-name">module search</span><span class="mod-tag">gui</span></summary>
+          <p>Ranks every module card and GUI tab. Opens from the rail, <code>Ctrl+K</code>, or the first letter typed. Enter jumps to the card, <code>Ctrl+Space</code> toggles it.</p>
+        </details>
+        <details class="mod">
+          <summary><span class="mod-i">▸</span><span class="mod-name">accounts</span><span class="mod-tag">gui</span></summary>
+          <p>Imports Localts tokens, Netscape cookies, cookie headers, access tokens, and cracked names, then switches the live session or restores the launch account.</p>
+        </details>
+        <details class="mod">
+          <summary><span class="mod-i">▸</span><span class="mod-name">servers</span><span class="mod-tag">gui</span></summary>
+          <p>Saved server list with MOTD, latency, and player counts through Minecraft server list ping. Direct connect joins through the client's own connect path.</p>
         </details>
       </div>
     </div>

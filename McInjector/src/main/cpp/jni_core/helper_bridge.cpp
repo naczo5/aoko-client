@@ -37,8 +37,9 @@ bool Load(JNIEnv* env, jobject classLoader) {
     env->SetByteArrayRegion(ba, 0, kAokoHelperClassLen,
                             reinterpret_cast<const jbyte*>(kAokoHelperClassBytes));
 
-    // Class name as jstring
-    jstring jname = env->NewStringUTF("com/aoko/helper/AokoHelper");
+    // Class name as jstring. defineClass takes the binary (dotted) name: its
+    // checkName rejects '/' on Java 9+ with NoClassDefFoundError: IllegalName.
+    jstring jname = env->NewStringUTF("com.aoko.helper.AokoHelper");
     if (!jname) { env->DeleteLocalRef(ba); return false; }
 
     // Call defineClass
@@ -50,9 +51,25 @@ bool Load(JNIEnv* env, jobject classLoader) {
     env->DeleteLocalRef(ba);
 
     if (!defined) {
-        // Class may already be defined — try loading it
-        defined = (jclass)env->FindClass("com/aoko/helper/AokoHelper");
-        if (env->ExceptionCheck()) { env->ExceptionClear(); defined = nullptr; }
+        // Already defined in this loader (retry after a failed load): look it up
+        // through that loader, not FindClass — a native thread attached without a
+        // Java frame resolves FindClass against the bootstrap loader only.
+        jclass clLoad = env->FindClass("java/lang/ClassLoader");
+        jmethodID loadClass = clLoad
+            ? env->GetMethodID(clLoad, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;")
+            : nullptr;
+        if (env->ExceptionCheck()) { env->ExceptionClear(); loadClass = nullptr; }
+        if (loadClass) {
+            jstring jdotted = env->NewStringUTF("com.aoko.helper.AokoHelper");
+            if (jdotted) {
+                defined = (jclass)env->CallObjectMethod(classLoader, loadClass, jdotted);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); defined = nullptr; }
+                env->DeleteLocalRef(jdotted);
+            } else if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+            }
+        }
+        if (clLoad) env->DeleteLocalRef(clLoad);
     }
     if (!defined) return false;
 

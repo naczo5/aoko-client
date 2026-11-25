@@ -1,0 +1,515 @@
+<UserControl x:Class="Aoko.Views.AccountsView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Background="Transparent"
+             FontFamily="Segoe UI"
+             FontSize="12"
+             UseLayoutRounding="True"
+             SnapsToDevicePixels="True"
+             AllowDrop="True"
+             DragEnter="View_DragEnter"
+             DragOver="View_DragOver"
+             DragLeave="View_DragLeave"
+             Drop="View_Drop">
+
+    <UserControl.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="TabStyles.xaml"/>
+            </ResourceDictionary.MergedDictionaries>
+
+            <!--
+                One card container: hover and selection are accent washes under the
+                content, selection adds a 2px accent rule inset over the hairline so
+                nothing reflows and there is no double frame with a gap.
+            -->
+            <Style x:Key="AccountCardItem" TargetType="ListBoxItem">
+                <Setter Property="Width" Value="232"/>
+                <Setter Property="Height" Value="104"/>
+                <Setter Property="Margin" Value="0,0,8,8"/>
+                <Setter Property="Padding" Value="12"/>
+                <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                <Setter Property="VerticalContentAlignment" Value="Center"/>
+                <Setter Property="Cursor" Value="Hand"/>
+                <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+                <Setter Property="ToolTip" Value="{Binding UuidTooltip}"/>
+                <Setter Property="AutomationProperties.Name" Value="{Binding AutomationName}"/>
+                <Setter Property="AutomationProperties.HelpText" Value="{Binding UuidTooltip}"/>
+                <Setter Property="AutomationProperties.ItemStatus" Value="{Binding AutomationStatus}"/>
+                <Setter Property="Template">
+                    <Setter.Value>
+                        <ControlTemplate TargetType="ListBoxItem">
+                            <Border x:Name="Card"
+                                    Background="{DynamicResource PanelBrush}"
+                                    BorderBrush="{DynamicResource SliderFgBrush}"
+                                    BorderThickness="1"
+                                    CornerRadius="8">
+                                <Grid>
+                                    <Border x:Name="Wash" Style="{StaticResource TabCardWash}"/>
+                                    <Border Padding="{TemplateBinding Padding}">
+                                        <ContentPresenter HorizontalAlignment="Stretch"
+                                                          VerticalAlignment="Center"/>
+                                    </Border>
+                                    <Border x:Name="Rule" Style="{StaticResource TabSelectionRule}"/>
+                                </Grid>
+                            </Border>
+                            <ControlTemplate.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter TargetName="Wash" Property="Opacity" Value="0.06"/>
+                                    <Setter TargetName="Card" Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
+                                </Trigger>
+                                <Trigger Property="IsKeyboardFocused" Value="True">
+                                    <Setter TargetName="Wash" Property="Opacity" Value="0.06"/>
+                                    <Setter TargetName="Card" Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
+                                </Trigger>
+                                <Trigger Property="IsSelected" Value="True">
+                                    <Setter TargetName="Wash" Property="Opacity" Value="0.12"/>
+                                    <Setter TargetName="Rule" Property="Visibility" Value="Visible"/>
+                                </Trigger>
+                            </ControlTemplate.Triggers>
+                        </ControlTemplate>
+                    </Setter.Value>
+                </Setter>
+            </Style>
+
+            <!-- Transparent chrome; the themed ScrollBar and the card rhythm do the rest. -->
+            <Style x:Key="AccountCardList" TargetType="ListBox">
+                <Setter Property="Background" Value="Transparent"/>
+                <Setter Property="BorderThickness" Value="0"/>
+                <Setter Property="Padding" Value="0"/>
+                <Setter Property="HorizontalContentAlignment" Value="Left"/>
+                <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+                <Setter Property="KeyboardNavigation.TabNavigation" Value="Once"/>
+                <Setter Property="KeyboardNavigation.DirectionalNavigation" Value="Contained"/>
+                <Setter Property="Template">
+                    <Setter.Value>
+                        <ControlTemplate TargetType="ListBox">
+                            <ScrollViewer Focusable="False"
+                                          HorizontalScrollBarVisibility="Disabled"
+                                          VerticalScrollBarVisibility="Auto">
+                                <ItemsPresenter/>
+                            </ScrollViewer>
+                        </ControlTemplate>
+                    </Setter.Value>
+                </Setter>
+            </Style>
+
+            <DataTemplate x:Key="AccountCardTemplate">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+
+                        <Grid Width="28" Height="28" VerticalAlignment="Top">
+                            <Border CornerRadius="14" Background="{DynamicResource AccentBrush}" Opacity="0.16"/>
+                            <TextBlock Text="{Binding Initial}"
+                                       FontSize="12"
+                                       FontWeight="SemiBold"
+                                       Foreground="{DynamicResource TextBrush}"
+                                       HorizontalAlignment="Center"
+                                       VerticalAlignment="Center"/>
+                        </Grid>
+
+                        <StackPanel Grid.Column="1" Margin="8,0,0,0" VerticalAlignment="Center">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <Ellipse x:Name="CurrentDot"
+                                         Width="6"
+                                         Height="6"
+                                         Fill="{DynamicResource AccentBrush}"
+                                         Margin="0,0,4,0"
+                                         VerticalAlignment="Center"
+                                         Visibility="Collapsed"/>
+                                <TextBlock
+                                           Grid.Column="1"
+                                           Text="{Binding Name}"
+                                           FontSize="12"
+                                           FontWeight="SemiBold"
+                                           Foreground="{DynamicResource TextBrush}"
+                                           TextTrimming="CharacterEllipsis"/>
+                            </Grid>
+
+                            <Border x:Name="SourceChip"
+                                    Style="{StaticResource TabChip}"
+                                    Margin="0,4,0,0">
+                                <Grid>
+                                    <Border x:Name="SourceTint"
+                                            Style="{StaticResource TabChipTint}"
+                                            Background="{DynamicResource DimTextBrush}"/>
+                                    <TextBlock Text="{Binding SourceLabel}"
+                                               Style="{StaticResource TabChipText}"/>
+                                </Grid>
+                            </Border>
+                        </StackPanel>
+                    </Grid>
+
+                    <TextBlock Grid.Row="1"
+                               Text="{Binding LastUsedText}"
+                               FontSize="11"
+                               Foreground="{DynamicResource DimTextBrush}"
+                               TextTrimming="CharacterEllipsis"
+                               Margin="0,8,0,0"/>
+                </Grid>
+
+                <DataTemplate.Triggers>
+                    <DataTrigger Binding="{Binding IsCurrent}" Value="True">
+                        <Setter TargetName="CurrentDot" Property="Visibility" Value="Visible"/>
+                    </DataTrigger>
+                    <DataTrigger Binding="{Binding IsLocalts}" Value="True">
+                        <Setter TargetName="SourceTint" Property="Background" Value="{DynamicResource AccentBrush}"/>
+                        <Setter TargetName="SourceChip" Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
+                    </DataTrigger>
+                    <DataTrigger Binding="{Binding IsOffline}" Value="True">
+                        <Setter TargetName="SourceTint" Property="Background" Value="{StaticResource WarnBrush}"/>
+                        <Setter TargetName="SourceChip" Property="BorderBrush" Value="{StaticResource WarnBrush}"/>
+                    </DataTrigger>
+                </DataTemplate.Triggers>
+            </DataTemplate>
+        </ResourceDictionary>
+    </UserControl.Resources>
+
+    <Grid Margin="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Row 0: subtitle and the import affordances -->
+        <StackPanel Grid.Row="0" Margin="0,0,0,12">
+            <DockPanel>
+                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Top" Margin="12,0,0,0">
+                    <Button x:Name="ImportFileButton"
+                            Content="Import file"
+                            Style="{StaticResource TabSecondaryButton}"
+                            Click="ImportFile_Click"
+                            ToolTip="Choose one or more Localts token or cookie export files"/>
+                    <Button x:Name="PasteImportButton"
+                            Content="Paste"
+                            Style="{StaticResource TabSecondaryButton}"
+                            Margin="8,0,0,0"
+                            Click="PasteImport_Click"
+                            ToolTip="Paste a token or cookie export"/>
+                    <Button x:Name="AddOfflineButton"
+                            Content="Add offline"
+                            Style="{StaticResource TabSecondaryButton}"
+                            Margin="8,0,0,0"
+                            Click="AddOffline_Click"
+                            ToolTip="Save a cracked username"/>
+                </StackPanel>
+                <TextBlock Text="Switch the account the game is signed in with. Drop a cookie file here, or use the buttons on the right."
+                           Foreground="{DynamicResource DimTextBrush}"
+                           FontSize="12"
+                           TextWrapping="Wrap"
+                           VerticalAlignment="Center"/>
+            </DockPanel>
+
+            <!-- Paste panel: its own validation line sits under the box, not in the footer. -->
+            <Border x:Name="PastePanel"
+                    Visibility="Collapsed"
+                    Margin="0,12,0,0"
+                    Background="{DynamicResource SliderBgBrush}"
+                    BorderBrush="{DynamicResource SliderFgBrush}"
+                    BorderThickness="1"
+                    CornerRadius="6"
+                    Padding="12">
+                <StackPanel>
+                    <TextBlock Text="Paste an account" Style="{StaticResource TabSectionTitle}"/>
+                    <Grid Margin="0,8,0,0">
+                        <TextBox x:Name="PasteBox"
+                                 Style="{StaticResource TabTextBox}"
+                                 MinHeight="96"
+                                 AcceptsReturn="True"
+                                 TextWrapping="Wrap"
+                                 VerticalContentAlignment="Top"
+                                 VerticalScrollBarVisibility="Auto"
+                                 SpellCheck.IsEnabled="False"
+                                 TextChanged="PasteBox_TextChanged"/>
+                        <TextBlock x:Name="PastePlaceholder"
+                                   IsHitTestVisible="False"
+                                   VerticalAlignment="Top"
+                                   Margin="8,8,8,0"
+                                   FontSize="11"
+                                   Foreground="{DynamicResource DimTextBrush}"
+                                   TextWrapping="Wrap"
+                                   Text="Accepted: a Netscape cookie export, a cookie JSON export, a Localts token JSON, or a raw Minecraft access token."/>
+                    </Grid>
+                    <TextBlock x:Name="PasteValidationText"
+                               Style="{StaticResource TabCaption}"
+                               Foreground="{DynamicResource CriticalBrush}"
+                               Margin="0,4,0,0"
+                               Visibility="Collapsed"/>
+                    <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                        <Button x:Name="PasteAuthenticateButton"
+                                Content="Import"
+                                Style="{StaticResource TabPrimaryButton}"
+                                Click="PasteAuthenticate_Click"
+                                ToolTip="Import the pasted token or cookie export"/>
+                        <Button x:Name="PasteCancelButton"
+                                Content="Cancel"
+                                Style="{StaticResource TabSecondaryButton}"
+                                Margin="8,0,0,0"
+                                IsCancel="True"
+                                Click="PasteCancel_Click"
+                                ToolTip="Close the panel and keep what you typed"/>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- Offline panel -->
+            <Border x:Name="OfflinePanel"
+                    Visibility="Collapsed"
+                    Margin="0,12,0,0"
+                    Background="{DynamicResource SliderBgBrush}"
+                    BorderBrush="{DynamicResource SliderFgBrush}"
+                    BorderThickness="1"
+                    CornerRadius="6"
+                    Padding="12">
+                <StackPanel>
+                    <TextBlock Text="Add an offline account" Style="{StaticResource TabSectionTitle}"/>
+                    <TextBox x:Name="OfflineNameBox"
+                             Style="{StaticResource TabTextBox}"
+                             Margin="0,8,0,0"
+                             MaxLength="16"
+                             SpellCheck.IsEnabled="False"
+                             KeyDown="OfflineNameBox_KeyDown"/>
+                    <TextBlock Text="Usernames must be 3-16 characters using only letters, numbers, and underscores."
+                               Foreground="{DynamicResource DimTextBrush}"
+                               FontSize="11"
+                               TextWrapping="Wrap"
+                               Margin="0,4,0,0"/>
+                    <TextBlock x:Name="OfflineValidationText"
+                               Style="{StaticResource TabCaption}"
+                               Foreground="{DynamicResource CriticalBrush}"
+                               Margin="0,4,0,0"
+                               Visibility="Collapsed"/>
+                    <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                        <Button x:Name="OfflineAddButton"
+                                Content="Add"
+                                Style="{StaticResource TabPrimaryButton}"
+                                Click="OfflineAdd_Click"
+                                ToolTip="Save this username as an offline account"/>
+                        <Button x:Name="OfflineCancelButton"
+                                Content="Cancel"
+                                Style="{StaticResource TabSecondaryButton}"
+                                Margin="8,0,0,0"
+                                IsCancel="True"
+                                Click="OfflineCancel_Click"
+                                ToolTip="Close the panel and keep what you typed"/>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </StackPanel>
+
+        <!-- Row 1: live session strip -->
+        <Border x:Name="SessionStrip"
+                Grid.Row="1"
+                Background="{DynamicResource PanelBrush}"
+                BorderBrush="{DynamicResource SliderFgBrush}"
+                BorderThickness="1"
+                CornerRadius="6"
+                Padding="12"
+                Margin="0,0,0,12">
+            <DockPanel>
+                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center" Margin="12,0,0,0">
+                    <Grid VerticalAlignment="Center">
+                        <Border x:Name="ChipOffline"
+                                Style="{StaticResource TabChip}"
+                                BorderBrush="{StaticResource CriticalBrush}"
+                                Visibility="Collapsed">
+                            <Grid>
+                                <Border CornerRadius="3" Background="{StaticResource CriticalBrush}" Opacity="0.2"/>
+                                <TextBlock Text="Bridge offline" Style="{StaticResource TabChipText}"/>
+                            </Grid>
+                        </Border>
+                        <Border x:Name="ChipMainMenu"
+                                Style="{StaticResource TabChip}"
+                                BorderBrush="{DynamicResource AccentBrush}"
+                                Visibility="Collapsed">
+                            <Grid>
+                                <Border Style="{StaticResource TabChipTint}"/>
+                                <TextBlock Text="At main menu" Style="{StaticResource TabChipText}"/>
+                            </Grid>
+                        </Border>
+                        <Border x:Name="ChipWorld"
+                                Style="{StaticResource TabChip}"
+                                BorderBrush="{StaticResource WarnBrush}"
+                                Visibility="Collapsed">
+                            <Grid>
+                                <Border CornerRadius="3" Background="{StaticResource WarnBrush}" Opacity="0.16"/>
+                                <TextBlock Text="In a world" Style="{StaticResource TabChipText}"/>
+                            </Grid>
+                        </Border>
+                    </Grid>
+                    <Button x:Name="RefreshSessionButton"
+                            Content="Refresh"
+                            Style="{StaticResource TabSecondaryButton}"
+                            Margin="8,0,0,0"
+                            Click="RefreshSession_Click"
+                            ToolTip="Read the account signed in to the game. Needs the client injected and the main menu."/>
+                </StackPanel>
+                <StackPanel VerticalAlignment="Center">
+                    <TextBlock x:Name="SessionNameText"
+                               Text="Session unknown"
+                               Foreground="{DynamicResource TextBrush}"
+                               FontSize="12"
+                               FontWeight="SemiBold"
+                               TextTrimming="CharacterEllipsis"/>
+                    <TextBlock x:Name="SessionUuidText"
+                               Text="Refresh to read it."
+                               Foreground="{DynamicResource DimTextBrush}"
+                               FontSize="11"
+                               TextTrimming="CharacterEllipsis"
+                               Margin="0,2,0,0"/>
+                </StackPanel>
+            </DockPanel>
+        </Border>
+
+        <!-- Row 2: saved cards, as a real ListBox so arrows and selection come free -->
+        <Grid Grid.Row="2">
+            <ListBox x:Name="CardsControl"
+                     Style="{StaticResource AccountCardList}"
+                     ItemContainerStyle="{StaticResource AccountCardItem}"
+                     ItemTemplate="{StaticResource AccountCardTemplate}"
+                     SelectionMode="Single"
+                     SelectionChanged="CardsControl_SelectionChanged"/>
+
+            <StackPanel x:Name="EmptyState"
+                        Visibility="Collapsed"
+                        VerticalAlignment="Center"
+                        HorizontalAlignment="Center"
+                        Margin="0,12,0,12">
+                <TextBlock Text="No accounts yet" Style="{StaticResource TabEmptyTitle}"/>
+                <TextBlock Text="Import a Localts token, a cookie export, or a raw access token — or drop a cookie file here."
+                           Style="{StaticResource TabEmptyBody}"/>
+                <Button Content="Import a file"
+                        Style="{StaticResource TabPrimaryButton}"
+                        HorizontalAlignment="Center"
+                        Margin="0,12,0,0"
+                        Click="ImportFile_Click"/>
+            </StackPanel>
+
+            <!-- Visible only while a file is dragged over the tab. -->
+            <Grid x:Name="DropHint" Visibility="Collapsed" IsHitTestVisible="False">
+                <Border Background="{DynamicResource AccentBrush}" CornerRadius="6" Opacity="0.08"/>
+                <Rectangle Stroke="{DynamicResource AccentBrush}"
+                           StrokeThickness="1"
+                           StrokeDashArray="2 2"
+                           RadiusX="6"
+                           RadiusY="6"
+                           Fill="Transparent"/>
+                <TextBlock Text="Drop to import"
+                           FontSize="12"
+                           FontWeight="SemiBold"
+                           Foreground="{DynamicResource TextBrush}"
+                           HorizontalAlignment="Center"
+                           VerticalAlignment="Center"/>
+            </Grid>
+        </Grid>
+
+        <!-- Row 3: pinned footer: persistent hint, actions, transient status, storage -->
+        <Border Grid.Row="3"
+                Margin="0,12,0,0"
+                Padding="0,12,0,0"
+                BorderBrush="{DynamicResource SliderBgBrush}"
+                BorderThickness="0,1,0,0">
+            <StackPanel>
+                <DockPanel Margin="0,0,0,8">
+                    <ProgressBar x:Name="BusyBar"
+                                 DockPanel.Dock="Right"
+                                 IsIndeterminate="True"
+                                 Width="80"
+                                 Height="3"
+                                 Margin="12,0,0,0"
+                                 VerticalAlignment="Center"
+                                 Visibility="Collapsed"
+                                 Foreground="{DynamicResource AccentBrush}"
+                                 Background="{DynamicResource SliderBgBrush}"
+                                 BorderThickness="0"/>
+                    <TextBlock x:Name="PrimaryHint"
+                               Style="{StaticResource TabStatusText}"
+                               VerticalAlignment="Center"/>
+                </DockPanel>
+
+                <DockPanel Margin="0,0,0,8">
+                    <Button x:Name="DeleteButton"
+                            Content="Delete"
+                            DockPanel.Dock="Right"
+                            Style="{StaticResource TabDangerButton}"
+                            Click="DeleteAccount_Click"/>
+                    <StackPanel Orientation="Horizontal">
+                        <Button x:Name="UseAccountButton"
+                                Content="Use account"
+                                Style="{StaticResource TabPrimaryButton}"
+                                Click="UseAccount_Click"/>
+                        <Button x:Name="RestoreSessionButton"
+                                Content="Restore launch account"
+                                Style="{StaticResource TabSecondaryButton}"
+                                Margin="8,0,0,0"
+                                Click="RestoreSession_Click"/>
+                    </StackPanel>
+                </DockPanel>
+
+                <TextBlock x:Name="StatusText" Style="{StaticResource TabStatusText}"/>
+
+                <TextBlock x:Name="RecoveryText"
+                           Style="{StaticResource TabStatusText}"
+                           Foreground="{DynamicResource CriticalBrush}"
+                           Visibility="Collapsed"
+                           Margin="0,8,0,0"/>
+
+                <Grid Margin="0,12,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock x:Name="StoragePathText"
+                               Foreground="{DynamicResource DimTextBrush}"
+                               FontSize="11"
+                               TextTrimming="CharacterEllipsis"
+                               VerticalAlignment="Center"/>
+                    <Button x:Name="OpenFolderButton"
+                            Grid.Column="1"
+                            Content="Open folder"
+                            Style="{StaticResource TabSecondaryButton}"
+                            Margin="12,0,0,0"
+                            Click="OpenFolder_Click"
+                            ToolTip="Open the folder that holds accounts.json"/>
+                </Grid>
+
+                <CheckBox x:Name="LunarAccountsCheck"
+                          Content="Write saved accounts into Lunar"
+                          Style="{StaticResource ModuleSwitch}"
+                          FontSize="11"
+                          MaxWidth="380"
+                          HorizontalAlignment="Left"
+                          Margin="0,8,0,0"
+                          ToolTipService.ShowOnDisabled="True"
+                          Click="LunarAccounts_Click"
+                          ToolTip="Writes every saved Microsoft account into Lunar's accounts.json after an import or switch. Offline accounts are skipped, and Lunar must be relaunched to read the file."/>
+
+                <TextBlock x:Name="LunarStatusText"
+                           Style="{StaticResource TabStatusText}"
+                           Visibility="Collapsed"
+                           Margin="0,4,0,0"/>
+
+                <TextBlock Text="Saved credentials are stored unencrypted on this PC."
+                           Foreground="{DynamicResource DimTextBrush}"
+                           FontSize="11"
+                           TextWrapping="Wrap"
+                           Margin="0,4,0,0"/>
+            </StackPanel>
+        </Border>
+    </Grid>
+</UserControl>

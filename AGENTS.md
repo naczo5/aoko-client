@@ -23,10 +23,13 @@ Operating guide for coding agents working in `aoko-client` (`legoclickerC`). Bui
 
 - `Aoko/`: .NET 8 WPF loader + external GUI (publishes as `Aoko.exe`).
 - `Aoko/Core/`: clicker engine, input hooks, profile persistence, TCP client, GTB solver.
+- `Aoko/Core/Accounts/`: saved logins and the parsers behind the Accounts tab. Credentials live in `%AppData%\Aoko\accounts.json`, unencrypted. The optional Lunar mirror writes to Lunar's own `accounts.json`.
+- `Aoko/Core/Servers/`: saved server list, address validation, Minecraft server list ping.
+- `Aoko/Views/`: external GUI tabs. `AccountsView` and `ServersView` own the account and server tabs; `CommandSearchOverlay` is the module search overlay, fed by `ModuleSearchIndex`.
 - `McInjector/`: native bridge DLLs (`bridge.dll` for 1.8.9, `bridge_261.dll` for 26.1 / 26.2 / 26.3 / 1.21.x).
 - `McInjector/src/main/cpp/`: JNI/Win32/OpenGL/Vulkan/ImGui/MinHook bridge sources.
   - `overlay_ui.h`: header-only shared HUD layer (theme tokens, watermark, module list, cards, HUD-editor outline). Both bridges include it; keep new overlay drawing here so the two versions stay visually in sync.
-- `McInjector/src/main/java/`: Unused/obsolete Java agent code (ignore). Bridges perform all JNI, rendering, and TCP duties themselves.
+- `McInjector/src/main/java/`: `com/aoko/helper/SessionSwitcher.java` is the embedded helper that swaps the game session and starts server joins. The rest of the directory is obsolete agent code. Bridges perform all JNI, rendering, and TCP duties themselves.
 
 ## Required Toolchain
 
@@ -76,8 +79,12 @@ Bridge build scripts auto-copy output to `Aoko\bin\Debug\`, `Release\`, and `pub
 ## Architecture & Domain Safety Rules
 
 - Loader and bridge communicate over TCP on port `25590`.
+- The bridge binds `127.0.0.1:25590` only. That socket carries the live session, including the access token, so never widen it to `INADDR_ANY`.
 - **Safety Rule:** Keep bridge code read-first. Do NOT add raw packet spam or unrelated gameplay mutation.
 - Input simulation normally happens in C# via Win32 `SendInput`. Controlled bridge-side JNI/game interaction is allowed only when explicitly owned by a module (consult `packet-and-call-hygiene` skill before touching combat/packet methods).
+- Accounts and servers reuse the same line protocol. `BridgeCommandProtocol.cs` owns the `accountCommand` / `serverCommand` action names and framing; `BridgeCommandDispatcher.cs` correlates each `commandResult` reply by `requestId`, times out after 20 s, and fails pending requests when the connection drops.
+- Those commands are capability-gated by the bridge `actions` array: `account.getSession`, `account.setSession`, `account.restoreSession`, `server.join`. A bridge that omits an action leaves the matching tab control disabled behind an "update aoko" message, so never infer support from the module or settings lists.
+- Session writes and joins run in the embedded Java helper. `McInjector/src/main/java/com/aoko/helper/SessionSwitcher.java` is compiled to `jni_core/session_switcher.inc` by `McInjector/gen_java_helper.sh` and defined in the game JVM by `jni_core/session_helper_bridge.cpp`. Keep the class Java 8 bytecode compatible and rerun the script after editing it.
 - `bridge_261.cpp` uses Yarn-first, Mojmap-fallback arrays for dual-version 1.21 / 26.1 support.
 - **Renderer auto-detect (`bridge_261.dll`):** OpenGL (`wglSwapBuffers`) or Vulkan (`render_backend.cpp`). Whichever present path fires first claims the session (`RenderBackend_GetActiveKind()`). Kill-switch: `AOKO_BRIDGE261_VULKAN=0`.
 - Preserve menu-injection compatibility (1.8.9): recover mappings when entering a world after injecting in title screen/lobby.
