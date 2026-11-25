@@ -8,6 +8,13 @@ Everything below is transcribed from the files named in each section, at base co
 `f1a9f5f9362cd274a97531bc0c10a6e86d291ca0` (branch `rust`). Where a value could not be read out of
 the source it says `unknown` rather than guessing.
 
+Read `MIGRATION_ARCHITECTURE.md` section 8 before implementing anything here. It records the
+eight places where the sources disagree with themselves and the decided resolution, including:
+`MainWindow.GuiPalettes` (10 roles) is the normative theme table and `ThemeManager.Themes` is a
+derived 8-role view; the capability `state` arrays must never gate decoding; the C#
+`ForVersionFallback` quirks are preserved rather than reconciled to `bridge_capabilities.h`;
+and `ModuleCatalog.Entry.ManagedOnly` stays `false` because no entry sets it.
+
 ## Conventions
 
 ### Surface flags (`ModuleCatalog.Surfaces`)

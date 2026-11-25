@@ -194,7 +194,24 @@ GPUI is consumed as a git dependency pinned to a single zed revision, not as a f
 
 Cargo is configured with `net.git-fetch-with-cli = true` in `~/.cargo/config.toml` because libgit2's full-history clone of zed is prohibitively slow.
 
-## 8. Documented trade-offs
+## 8. Contract decisions requiring arbitration
+
+Phase 0 discovery surfaced places where the sources disagree with themselves. Each is decided
+here so no builder invents semantics or "fixes" the C# behaviour. Deviating from these is a
+parity bug, not an improvement.
+
+| # | Question | Decision | Why |
+| --- | --- | --- | --- |
+| 1 | Two palette tables coexist: `MainWindow.GuiPalettes` (10 roles) and `Core/ThemeManager.Themes` (8 roles). | **`GuiPalettes` is normative.** The Rust `Theme` has 10 roles. `ThemeManager.Themes` becomes a derived 8-role view, not a second source. | The persisted user type `CustomPalette.cs` carries `TabSelected`/`TabHover`, which only `GuiPalettes` defines. On `Slate` the two agree on all 8 shared roles, so nothing is lost. `MainWindow.ApplyGuiTheme` is the live render path (6 call sites); `ThemeManager.ApplyTheme` only fires from `Profile.cs` during load. |
+| 2 | The capability `state` arrays disagree with what the bridges actually emit: `bridge.cpp` sends `health`/`posx`/`posy`/`posz` that its legacy array omits, and both bridges send `guiOpen`/`screenName`/`entities` that neither advertises. | **Never gate decoding on the `state` capability list.** Decode permissively: unknown fields ignored, absent fields defaulted. | `docs/performance/STATE_FIELD_BUDGETS.md` already mandates tolerance of unknown fields and defaults for absent ones. Capabilities gate *writes and UI affordances*, not deserialization. |
+| 3 | `BridgeCapabilities.ForVersionFallback` is stale and partly inverted versus `bridge_capabilities.h` (155 vs 200 modern settings, 143 vs 194 legacy; the two disagree about `health`/`pos*`). | **Preserve the C# fallback exactly** as it is, quirks included. Do not reconcile it to the header. | The fallback is what the shipped C# host tells the UI before a `capabilities` frame arrives. Existing behaviour is the compatibility contract. The header is what a bridge advertises when it does send capabilities. The two intentionally differ; document, do not unify. |
+| 4 | `hudLayout` is extracted by brace-matching in C#, not parsed, so a `"hudLayout":` sequence inside a string value could hijack it. | Parse the whole line as JSON first. Only if that fails, fall back to the legacy brace scan. | For every valid message both approaches agree, so parity holds. For adversarial input the new path is strictly safer. This is a documented, deliberate deviation. |
+| 5 | `commandResult` can emit `inWorld` and `ready` twice (session block plus `in_world` failure tail). | **Last-wins**, matching `System.Text.Json` and therefore the C# host. Do not error on duplicate keys. | Divergence here would change which value the UI reads on the exact failure path users hit most. |
+| 6 | The 1.8.9 bridge sends a state line with **no `type` field at all**. | The decoder accepts both a bare state object and a typed one. A missing `type` on an object that looks like state means state. | A strict `type` discriminator would reject the entire legacy wire format. |
+| 7 | `ModuleCatalog.Entry.ManagedOnly` is declared but **no** entry sets it. | Keep the field, always `false`. Do not start honouring it. | Honouring a flag nothing sets would invent gating behaviour the shipped app never had. |
+| 8 | Per-property ordering inside `BuildConfigPayload` is not documented. | JSON object key order is **not** part of the contract; TCP framing bytes are. | `ParseConfig` on both bridges is key-based. Framing (newline-delimited UTF-8, 1 MiB inbound cap, trailing `\r` trimmed) is byte-level and must match exactly. |
+
+## 9. Documented trade-offs
 
 Recorded here rather than hidden.
 
@@ -205,7 +222,7 @@ Recorded here rather than hidden.
 5. **Split of `GameStateClient`** trades a one-to-one file mapping for layer purity. Tracked in `MIGRATION_PARITY.md` so the mapping stays auditable.
 6. **`aoko-platform` depends on `aoko-protocol`** for shared types, so "platform" is not importable by the protocol crate. This is intentional: the wire format must not learn OS concepts.
 
-## 9. Verification commands
+## 10. Verification commands
 
 ```bash
 cargo check --workspace --all-targets
@@ -217,7 +234,7 @@ cargo run -p aoko-app -- --capture-screenshots <out_dir>
 
 CI runs the Linux and Windows matrices; `McInjector` DLL pipelines are untouched.
 
-## 10. Non-goals for this migration
+## 11. Non-goals for this migration
 
 - Rewriting or re-deriving the C++ bridge.
 - Shipping the Linux `.so` bridge.
