@@ -184,10 +184,14 @@ dependencies = [
 name = "aoko-core"
 version = "0.1.0"
 dependencies = [
+ "aoko-platform",
+ "aoko-protocol",
+ "arc-swap",
  "crossbeam-channel",
  "parking_lot",
  "rand 0.8.8",
  "rand_chacha 0.3.1",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
@@ -222,6 +226,15 @@ name = "arbitrary"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3bc62ac97cc33321f50863d514c3bc38a453947a8f9e781137e47c7401020aed"
+
+[[package]]
+name = "arc-swap"
+version = "1.9.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "84a22b5d51209f6de83d37a0b33d320acb8da88823e42a94c075140708f032a5"
+dependencies = [
+ "rustversion",
+]
 
 [[package]]
 name = "arg_enum_proc_macro"

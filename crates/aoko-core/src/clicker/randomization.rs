@@ -1,14 +1,17 @@
-//! Click randomization mode and its derived `jitterEnabled` view.
+//! Click randomization: the view the settings UI and the click loop derive from
+//! [`ClickRandomizationMode`].
 //!
-//! Port of `Aoko/Core/ClickRandomizationMode.cs` plus the three properties that
-//! `Clicker` derives from it (`Aoko/Core/Clicker.cs:319-359`):
+//! The enum itself lives in `aoko-protocol` (`crates/aoko-protocol/src/profile.rs`),
+//! because it is part of the persisted profile and the config wire payload. This
+//! module keeps only the *derived* surface that `Aoko/Core/Clicker.cs:319-359`
+//! exposes to the view-model:
 //!
 //! - `RandomizationModeIndex`: `(int)mode`, and the setter clamps to `0..=2`
 //!   (`Clicker.cs:336-340`).
-//! - `RandomizationModeText`: `Basic` / `Medium` / `Advanced`, with a `_ => "Medium"`
-//!   fallback arm (`Clicker.cs:342-348`). That fallback is unreachable through the
-//!   typed enum but reachable through a persisted integer, so it is kept as
-//!   [`ClickRandomizationMode::text_for_raw`].
+//! - `RandomizationModeText`: `Basic` / `Medium` / `Advanced`, with a
+//!   `_ => "Medium"` fallback arm (`Clicker.cs:342-348`). That arm is unreachable
+//!   through the typed enum but reachable through a persisted integer, so it is
+//!   kept as [`text_for_raw`].
 //! - `JitterEnabled`: `mode != Basic`; setting it `false` forces `Basic`, and
 //!   setting it `true` only promotes `Basic` back to `Medium`
 //!   (`Clicker.cs:350-360`).
@@ -16,116 +19,136 @@
 //! The default is `Medium` in both `Clicker` (`Clicker.cs:122`) and `Profile`
 //! (`Profile.cs:29`).
 
-/// Which CPS model the click loop uses.
-///
-/// The discriminants are wire-visible: `randomizationMode` is sent to the bridge
-/// as an integer (`docs/rust/WIRE_CONTRACT.md`, `config` frame).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, PartialOrd, Ord)]
-#[repr(u8)]
-pub enum ClickRandomizationMode {
-    /// Uniform CPS across the configured bounds.
-    Basic = 0,
-    /// Gaussian CPS around the midpoint. The default everywhere.
-    #[default]
-    Medium = 1,
-    /// [`crate::clicker::AdvancedClickTimingState`]: fatigue, butterfly doublets,
-    /// drift and micro-hesitations.
-    Advanced = 2,
+pub use aoko_protocol::profile::ClickRandomizationMode;
+
+/// All three modes in index order.
+pub const ALL_MODES: [ClickRandomizationMode; 3] = [
+    ClickRandomizationMode::Basic,
+    ClickRandomizationMode::Medium,
+    ClickRandomizationMode::Advanced,
+];
+
+/// `RandomizationModeIndex` getter: the mode as an integer.
+#[must_use]
+pub fn index(mode: ClickRandomizationMode) -> i64 {
+    i64::from(mode.as_i32())
 }
 
-impl ClickRandomizationMode {
-    /// All three modes in index order.
-    pub const ALL: [Self; 3] = [Self::Basic, Self::Medium, Self::Advanced];
-
-    /// Integer value, as used by `RandomizationModeIndex` and the wire payload.
-    #[must_use]
-    pub const fn index(self) -> i64 {
-        self as i64
+/// `RandomizationModeIndex` setter: clamps instead of wrapping.
+#[must_use]
+pub fn from_index(value: i64) -> ClickRandomizationMode {
+    match value.clamp(0, 2) {
+        0 => ClickRandomizationMode::Basic,
+        2 => ClickRandomizationMode::Advanced,
+        _ => ClickRandomizationMode::Medium,
     }
+}
 
-    /// `Clicker.RandomizationModeIndex` setter: clamps instead of wrapping.
-    #[must_use]
-    pub fn from_index(index: i64) -> Self {
-        match index.clamp(0, 2) {
-            0 => Self::Basic,
-            2 => Self::Advanced,
-            _ => Self::Medium,
+/// `RandomizationModeText`.
+#[must_use]
+pub const fn text(mode: ClickRandomizationMode) -> &'static str {
+    match mode {
+        ClickRandomizationMode::Basic => "Basic",
+        ClickRandomizationMode::Medium => "Medium",
+        ClickRandomizationMode::Advanced => "Advanced",
+    }
+}
+
+/// `JitterEnabled` getter.
+#[must_use]
+pub const fn jitter_enabled(mode: ClickRandomizationMode) -> bool {
+    !matches!(mode, ClickRandomizationMode::Basic)
+}
+
+/// `JitterEnabled` setter: `false` forces `Basic`, `true` only promotes `Basic`.
+#[must_use]
+pub const fn with_jitter_enabled(
+    mode: ClickRandomizationMode,
+    enabled: bool,
+) -> ClickRandomizationMode {
+    if !enabled {
+        ClickRandomizationMode::Basic
+    } else {
+        match mode {
+            ClickRandomizationMode::Basic => ClickRandomizationMode::Medium,
+            other => other,
         }
     }
+}
 
-    /// `RandomizationModeText`.
-    #[must_use]
-    pub const fn text(self) -> &'static str {
-        // Same arms as the C# switch, and the same `_ => "Medium"` default.
-        match self {
-            Self::Basic => "Basic",
-            Self::Medium => "Medium",
-            Self::Advanced => "Advanced",
-        }
+/// Maps a persisted integer, `None` when it is not one of the three modes.
+///
+/// The C# setter clamps and the persisted field does not, so a profile that stores
+/// `7` keeps `7` in memory and renders as `Medium` (`Clicker.cs:346`). Use
+/// [`text_for_raw`] for that path.
+#[must_use]
+pub fn from_raw(raw: i64) -> Option<ClickRandomizationMode> {
+    ClickRandomizationMode::from_i64(raw)
+}
+
+/// `RandomizationModeText` for any integer, including one that is not a mode.
+#[must_use]
+pub const fn text_for_raw(raw: i64) -> &'static str {
+    match raw {
+        0 => "Basic",
+        2 => "Advanced",
+        _ => "Medium",
+    }
+}
+
+/// `JitterEnabled` for any integer, including one that is not a mode.
+#[must_use]
+pub const fn jitter_enabled_for_raw(raw: i64) -> bool {
+    raw != 0
+}
+
+/// Method-call form of the free functions above, so view-model code reads like the
+/// managed properties it replaces.
+pub trait RandomizationModeView {
+    /// See [`index`].
+    fn mode_index(self) -> i64;
+    /// See [`text`].
+    fn mode_text(self) -> &'static str;
+    /// See [`jitter_enabled`].
+    fn jitter_enabled(self) -> bool;
+    /// See [`with_jitter_enabled`].
+    fn with_jitter_enabled(self, enabled: bool) -> Self;
+}
+
+impl RandomizationModeView for ClickRandomizationMode {
+    fn mode_index(self) -> i64 {
+        index(self)
     }
 
-    /// `JitterEnabled` getter.
-    #[must_use]
-    pub const fn jitter_enabled(self) -> bool {
-        !matches!(self, Self::Basic)
+    fn mode_text(self) -> &'static str {
+        text(self)
     }
 
-    /// `JitterEnabled` setter: `false` forces `Basic`, `true` only promotes `Basic`.
-    #[must_use]
-    pub const fn with_jitter_enabled(self, enabled: bool) -> Self {
-        if !enabled {
-            Self::Basic
-        } else {
-            match self {
-                Self::Basic => Self::Medium,
-                other => other,
-            }
-        }
+    fn jitter_enabled(self) -> bool {
+        jitter_enabled(self)
     }
 
-    /// Maps a persisted integer, `None` when it is not one of the three modes.
-    ///
-    /// The C# setter clamps and the persisted field does not, so a profile that
-    /// stores `7` keeps `7` in memory and renders as `Medium`
-    /// (`Clicker.cs:346`). Use [`Self::text_for_raw`] for that path.
-    #[must_use]
-    pub const fn from_raw(raw: i64) -> Option<Self> {
-        match raw {
-            0 => Some(Self::Basic),
-            1 => Some(Self::Medium),
-            2 => Some(Self::Advanced),
-            _ => None,
-        }
-    }
-
-    /// `RandomizationModeText` for any integer, including one that is not a mode.
-    #[must_use]
-    pub const fn text_for_raw(raw: i64) -> &'static str {
-        match raw {
-            0 => "Basic",
-            2 => "Advanced",
-            _ => "Medium",
-        }
-    }
-
-    /// `JitterEnabled` for any integer, including one that is not a mode.
-    #[must_use]
-    pub const fn jitter_enabled_for_raw(raw: i64) -> bool {
-        raw != 0
+    fn with_jitter_enabled(self, enabled: bool) -> Self {
+        with_jitter_enabled(self, enabled)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aoko_protocol::profile::Profile;
+
+    fn profile_from(json: &str) -> Profile {
+        serde_json::from_str(json).expect("the managed profile shape parses")
+    }
 
     /// `ClickerRandomizationTests.Clicker_RandomizationMode_DefaultsToMedium_AndJitterEnabledIsTrue`.
     #[test]
     fn the_default_is_medium_with_jitter_enabled() {
         let mode = ClickRandomizationMode::default();
         assert_eq!(mode, ClickRandomizationMode::Medium);
-        assert_eq!(mode.index(), 1);
-        assert_eq!(mode.text(), "Medium");
+        assert_eq!(mode.mode_index(), 1);
+        assert_eq!(mode.mode_text(), "Medium");
         assert!(mode.jitter_enabled());
     }
 
@@ -133,29 +156,33 @@ mod tests {
     #[test]
     fn every_mode_maps_to_its_index_text_and_jitter_flag() {
         let expected = [
-            (ClickRandomizationMode::Basic, 0, "Basic", false),
+            (ClickRandomizationMode::Basic, 0_i64, "Basic", false),
             (ClickRandomizationMode::Medium, 1, "Medium", true),
             (ClickRandomizationMode::Advanced, 2, "Advanced", true),
         ];
 
-        for (mode, index, text, jitter) in expected {
-            assert_eq!(mode.index(), index);
-            assert_eq!(mode.text(), text);
-            assert_eq!(mode.jitter_enabled(), jitter);
-            assert_eq!(ClickRandomizationMode::from_index(index), mode);
-            assert_eq!(ClickRandomizationMode::from_raw(index), Some(mode));
+        for (mode, expected_index, expected_text, expected_jitter) in expected {
+            assert_eq!(index(mode), expected_index);
+            assert_eq!(mode.mode_index(), expected_index);
+            assert_eq!(text(mode), expected_text);
+            assert_eq!(mode.mode_text(), expected_text);
+            assert_eq!(jitter_enabled(mode), expected_jitter);
+            assert_eq!(from_index(expected_index), mode);
+            assert_eq!(from_raw(expected_index), Some(mode));
         }
+
+        assert_eq!(ALL_MODES.len(), 3);
     }
 
     /// `ClickerRandomizationTests.Clicker_JitterEnabled_SettingFalse_SetsModeToBasic`.
     #[test]
     fn disabling_jitter_forces_basic() {
-        for mode in ClickRandomizationMode::ALL {
-            let forced = mode.with_jitter_enabled(false);
+        for mode in ALL_MODES {
+            let forced = with_jitter_enabled(mode, false);
             assert_eq!(forced, ClickRandomizationMode::Basic);
-            assert_eq!(forced.index(), 0);
-            assert_eq!(forced.text(), "Basic");
-            assert!(!forced.jitter_enabled());
+            assert_eq!(index(forced), 0);
+            assert_eq!(text(forced), "Basic");
+            assert!(!jitter_enabled(forced));
         }
     }
 
@@ -163,16 +190,16 @@ mod tests {
     #[test]
     fn enabling_jitter_only_promotes_basic() {
         assert_eq!(
-            ClickRandomizationMode::Basic.with_jitter_enabled(true),
+            with_jitter_enabled(ClickRandomizationMode::Basic, true),
             ClickRandomizationMode::Medium
         );
         // An already-jittering mode is left alone.
         assert_eq!(
-            ClickRandomizationMode::Advanced.with_jitter_enabled(true),
+            with_jitter_enabled(ClickRandomizationMode::Advanced, true),
             ClickRandomizationMode::Advanced
         );
         assert_eq!(
-            ClickRandomizationMode::Medium.with_jitter_enabled(true),
+            with_jitter_enabled(ClickRandomizationMode::Medium, true),
             ClickRandomizationMode::Medium
         );
     }
@@ -180,42 +207,70 @@ mod tests {
     /// `ClickerRandomizationTests.Clicker_RandomizationModeIndex_ClampsValues`.
     #[test]
     fn the_index_setter_clamps_instead_of_wrapping() {
-        assert_eq!(
-            ClickRandomizationMode::from_index(-5),
-            ClickRandomizationMode::Basic
-        );
-        assert_eq!(
-            ClickRandomizationMode::from_index(0),
-            ClickRandomizationMode::Basic
-        );
-        assert_eq!(
-            ClickRandomizationMode::from_index(1),
-            ClickRandomizationMode::Medium
-        );
-        assert_eq!(
-            ClickRandomizationMode::from_index(2),
-            ClickRandomizationMode::Advanced
-        );
-        assert_eq!(
-            ClickRandomizationMode::from_index(99),
-            ClickRandomizationMode::Advanced
-        );
-        assert_eq!(
-            ClickRandomizationMode::from_index(i64::MAX),
-            ClickRandomizationMode::Advanced
-        );
+        assert_eq!(from_index(-5), ClickRandomizationMode::Basic);
+        assert_eq!(from_index(0), ClickRandomizationMode::Basic);
+        assert_eq!(from_index(1), ClickRandomizationMode::Medium);
+        assert_eq!(from_index(2), ClickRandomizationMode::Advanced);
+        assert_eq!(from_index(99), ClickRandomizationMode::Advanced);
+        assert_eq!(from_index(i64::MAX), ClickRandomizationMode::Advanced);
     }
 
     /// The `_ => "Medium"` arm of `Clicker.RandomizationModeText` is only reachable
     /// through an unvalidated persisted integer, so it has its own entry point.
     #[test]
     fn an_out_of_range_persisted_value_still_renders_as_medium() {
-        assert_eq!(ClickRandomizationMode::from_raw(7), None);
-        assert_eq!(ClickRandomizationMode::text_for_raw(7), "Medium");
-        assert_eq!(ClickRandomizationMode::text_for_raw(-1), "Medium");
-        assert!(ClickRandomizationMode::jitter_enabled_for_raw(7));
-        assert!(!ClickRandomizationMode::jitter_enabled_for_raw(0));
-        assert_eq!(ClickRandomizationMode::text_for_raw(0), "Basic");
-        assert_eq!(ClickRandomizationMode::text_for_raw(2), "Advanced");
+        assert_eq!(from_raw(7), None);
+        assert_eq!(text_for_raw(7), "Medium");
+        assert_eq!(text_for_raw(-1), "Medium");
+        assert!(jitter_enabled_for_raw(7));
+        assert!(!jitter_enabled_for_raw(0));
+        assert_eq!(text_for_raw(0), "Basic");
+        assert_eq!(text_for_raw(2), "Advanced");
+    }
+
+    /// `ClickerRandomizationTests.Profile_RandomizationMode_DefaultsToMedium`.
+    #[test]
+    fn a_profile_defaults_to_medium_with_jitter_enabled() {
+        let profile = Profile::default();
+        assert_eq!(profile.randomization_mode(), ClickRandomizationMode::Medium);
+        assert!(profile.jitter_enabled());
+    }
+
+    /// `ClickerRandomizationTests.Profile_RandomizationMode_SerializesAndRoundTrips`.
+    #[test]
+    fn a_profile_round_trips_the_advanced_mode() {
+        let mut profile = Profile::default();
+        profile.name = String::from("HumanizedProfile");
+        profile.set_randomization_mode(ClickRandomizationMode::Advanced);
+
+        let json = serde_json::to_string(&profile).expect("the profile serializes");
+        let round_tripped = profile_from(&json);
+
+        assert_eq!(
+            round_tripped.randomization_mode(),
+            ClickRandomizationMode::Advanced
+        );
+        assert!(round_tripped.jitter_enabled());
+        // The wire keeps the integer discriminant, not the variant name.
+        assert!(
+            json.contains("\"randomizationMode\":2"),
+            "expected an integer mode in {json}"
+        );
+    }
+
+    /// `ClickerRandomizationTests.Profile_LegacyJitterEnabledFalse_DeserializesToBasic`.
+    #[test]
+    fn a_legacy_jitter_false_profile_becomes_basic() {
+        let profile = profile_from(r#"{"name":"OldProfile","jitterEnabled":false}"#);
+        assert!(!profile.jitter_enabled());
+        assert_eq!(profile.randomization_mode(), ClickRandomizationMode::Basic);
+    }
+
+    /// `ClickerRandomizationTests.Profile_LegacyJitterEnabledTrue_DeserializesToMedium`.
+    #[test]
+    fn a_legacy_jitter_true_profile_becomes_medium() {
+        let profile = profile_from(r#"{"name":"OldProfile","jitterEnabled":true}"#);
+        assert!(profile.jitter_enabled());
+        assert_eq!(profile.randomization_mode(), ClickRandomizationMode::Medium);
     }
 }

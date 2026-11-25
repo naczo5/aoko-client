@@ -10,11 +10,14 @@
 //! | [`clicker`] | `ClickDeadlineScheduler.cs`, `ClickRandomizationMode.cs`, `AdvancedClickTimingState.cs` |
 //! | [`aim_assist`] | `AimAssistMotionController.cs` |
 //! | [`services::update`] | `UpdateService.cs` |
+//! | [`chest_stealer`] | `ChestStealerController.cs`, `ChestStealerCoordinateMapper.cs` |
+//! | [`refill`] | `RefillController.cs` |
+//! | [`search`] | `ModuleSearchIndex.cs` |
+//! | [`app`] | `AppController` coordination, `GameStateClient` hand-off |
+//! | [`discord`] | `DiscordRichPresenceService.cs`, state half |
+//! | [`resources`] | the exclusive-resource discipline from `packet-and-call-hygiene` |
 //!
-//! Deliberately absent until wave 2, because they need `aoko-protocol::GameState`:
-//! `Clicker.cs`, `ChestStealerController.cs`, `ChestStealerCoordinateMapper.cs`,
-//! `RefillController.cs`, the AutoRod / AutoTool state machines,
-//! `DiscordRichPresenceService.cs` (state half) and `ModuleSearchIndex.cs`.
+//! Still to come: the AutoRod / AutoTool state machines.
 //!
 //! Two rules hold across the crate:
 //!
@@ -25,9 +28,15 @@
 //!   `Duration::from_secs_f64` on an unvalidated float.
 
 pub mod aim_assist;
+pub mod app;
+pub mod chest_stealer;
 pub mod clicker;
 pub mod clock;
 pub mod concurrency;
+pub mod discord;
+pub mod refill;
+pub mod resources;
+pub mod search;
 pub mod services;
 
 /// Deterministic test doubles (virtual clock, manual scheduler).

@@ -13,6 +13,10 @@ description = "Automation state machines, scheduling and app coordination. Fully
 testing = []
 
 [dependencies]
+aoko-protocol = { workspace = true }
+aoko-platform = { workspace = true }
+arc-swap = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
