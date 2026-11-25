@@ -7,14 +7,15 @@ license.workspace = true
 repository.workspace = true
 description = "Automation state machines, scheduling and app coordination. Fully headless and clock-injectable."
 
+[features]
+# Exposes `aoko_core::testing` (virtual clock, manual scheduler) to a dependent
+# crate's tests. The module is always compiled for this crate's own tests.
+testing = []
+
 [dependencies]
-aoko-protocol = { workspace = true }
-aoko-platform = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-arc-swap = { workspace = true }
 crossbeam-channel = { workspace = true }
 parking_lot = { workspace = true }
 rand = { workspace = true }
