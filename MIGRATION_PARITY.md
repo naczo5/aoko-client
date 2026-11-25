@@ -667,8 +667,11 @@ locally. None of it may be dropped.
   full.
 - `CommandSearchOverlay.xaml` (477 lines), `AccountsView.xaml` (515 lines) and `ServersView.xaml`
   (457 lines) were read for named elements, styles, `Content` strings and template keys. Individual
-  `Grid` / `Border` metrics beyond the ones recorded here (search card 340 wide, overlay gutters 56,
-  switch 46×24, thumb 18) are `unknown` and need a pixel pass.
+  `Grid` / `Border` metrics beyond the ones recorded here are `unknown` and need a pixel pass. Three
+  figures that were previously listed here are now corrected: `340` is the **command-search card's
+  minimum width** (`CommandSearchOverlay.xaml.cs:25`, `CardMinWidth = 340`), not a module-card width;
+  `56` is a `ColumnDefinition` width inside the overlay, not a gutter. The switch is 46x24 with an
+  18px thumb, which remains correct.
 - `PaletteContrastTests` records specific contrast ratios that are not quoted here; the thresholds live
   in that test and in `TabStyles.xaml` comments (for example the accent label "4.99:1", AA at 12 px).
   Port the test, not the numbers, unless the design is frozen.
