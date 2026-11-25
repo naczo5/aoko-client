@@ -273,6 +273,15 @@ impl InputBackend for UnsupportedInput {
             "no input backend for this target",
         ))
     }
+
+    fn probe_mouse_state(&self) -> Option<MouseState> {
+        // Nothing can be observed here, and `None` is the answer that says so.
+        None
+    }
+
+    fn probe_key_state(&self, _key: Key) -> Option<bool> {
+        None
+    }
 }
 
 #[cfg(not(any(windows, target_os = "linux")))]

@@ -15,5 +15,3 @@ path = "src/main.rs"
 gpui = { workspace = true }
 gpui_platform = { workspace = true }
 
-[lints]
-workspace = true

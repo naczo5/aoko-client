@@ -58,17 +58,21 @@ pub trait InputBackend: Send + Sync {
     /// cannot tell whether a button is held" must not be the same answer, or the
     /// clicker acts while the user is holding the button down.
     ///
-    /// The default forwards to [`InputBackend::mouse_state`], so a backend that
-    /// implemented the lossy form keeps its claim that it can always answer.
+    /// **The default is deliberately `None`.** Observability is a claim a backend
+    /// has to make, so a backend that cannot see input must not inherit a confident
+    /// answer from the lossy [`InputBackend::mouse_state`]. Every real backend
+    /// overrides this, and a new one must override it too.
     fn probe_mouse_state(&self) -> Option<MouseState> {
-        Some(self.mouse_state())
+        None
     }
 
     /// Sampled key state, `None` on the same "cannot observe" terms as
     /// [`InputBackend::probe_mouse_state`]. A key with no keycode in the current
     /// layout is also `None`: unknowable, not up.
-    fn probe_key_state(&self, key: Key) -> Option<bool> {
-        Some(self.key_state(key))
+    ///
+    /// The default is `None` for the same fail-closed reason: override it to opt in.
+    fn probe_key_state(&self, _key: Key) -> Option<bool> {
+        None
     }
 
     /// Sampled mouse state. Cheap enough to call from an automation tick.
@@ -161,12 +165,15 @@ mod tests {
     }
 
     #[test]
-    fn probing_defaults_to_the_lossy_answer_an_implementor_already_gave() {
+    fn probing_is_opt_in_so_an_unsure_backend_cannot_claim_zero() {
         let backend = Minimal;
-        // `Minimal` claims it can always answer, so the probe must agree with it
-        // rather than inventing an "unknown".
-        assert_eq!(backend.probe_mouse_state(), Some(MouseState::default()));
-        assert_eq!(backend.probe_key_state(Key::Char('a')), Some(false));
+        // `Minimal` implements only the lossy pair, so it inherits the fail-closed
+        // default: a caller must not read its `false` as "nothing is held".
+        assert_eq!(backend.probe_mouse_state(), None);
+        assert_eq!(backend.probe_key_state(Key::Char('a')), None);
+        // The lossy forms still work for callers that accept the ambiguity.
+        assert_eq!(backend.mouse_state(), MouseState::default());
+        assert!(!backend.key_state(Key::Char('a')));
     }
 
     #[test]

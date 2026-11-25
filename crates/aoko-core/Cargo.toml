@@ -28,5 +28,3 @@ rand = { workspace = true }
 rand_chacha = { workspace = true }
 tempfile = { workspace = true }
 
-[lints]
-workspace = true

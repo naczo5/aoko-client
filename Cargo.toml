@@ -35,8 +35,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-anyhow = "1"
 
 # Pre-declared so parallel crate owners never have to edit this file. A crate
 # opts in with `dep = { workspace = true }`; only the workspace owner adds a new
@@ -46,7 +44,6 @@ crossbeam-channel = "0.5" # bounded channels for coalesced callbacks
 parking_lot = "0.12"      # short critical sections without poisoning
 rand = "0.8"              # production RNG; tests inject their own
 rand_chacha = "0.3"       # deterministic, seedable RNG for tests
-criterion = "0.5"         # benchmarks (dev-dependency)
 tempfile = "3"            # scratch dirs for persistence tests (dev-dependency)
 
 # Windows platform implementation.
@@ -71,7 +68,6 @@ libc = "0.2"
 
 aoko-protocol = { path = "crates/aoko-protocol" }
 aoko-platform = { path = "crates/aoko-platform" }
-aoko-core = { path = "crates/aoko-core" }
 
 [profile.release]
 opt-level = 3
@@ -91,6 +87,3 @@ opt-level = 2
 [profile.bench]
 lto = "thin"
 codegen-units = 1
-
-[workspace.lints.cargo]
-unused_workspace_dependencies = "allow"

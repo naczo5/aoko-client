@@ -93,7 +93,9 @@ pub struct LinuxInputBackend {
     xtest: bool,
     /// Created lazily, on the first synthesis call that needs it.
     uinput: Mutex<Option<UinputDevice>>,
-    uinput_error: Mutex<Option<String>>,
+    /// The classified failure from the last attempt, so a caller that retries does
+    /// not have to re-derive why the device could not be created.
+    uinput_error: Mutex<Option<PlatformError>>,
     observer: Option<EvdevObserver>,
     observer_error: Option<PlatformError>,
 }
@@ -185,9 +187,12 @@ impl LinuxInputBackend {
             .map_err(|_| PlatformError::os("uinput mutex", "poisoned"))?;
 
         if guard.is_none() {
+            // Return the stored failure exactly as it was classified. Re-wrapping it
+            // here used to relabel a missing module (`Os`) as `PermissionDenied` on
+            // every retry, which points the user at the wrong remedy.
             if let Ok(mut error) = self.uinput_error.lock() {
-                if let Some(detail) = error.take() {
-                    return Err(PlatformError::permission_denied(detail));
+                if let Some(error) = error.take() {
+                    return Err(error);
                 }
             }
             let keys = uinput_keys();
@@ -203,9 +208,8 @@ impl LinuxInputBackend {
             match device {
                 Ok(device) => *guard = Some(device),
                 Err(err) => {
-                    let detail = err.user_facing();
                     if let Ok(mut error) = self.uinput_error.lock() {
-                        *error = Some(detail.clone());
+                        *error = Some(err.clone());
                     }
                     return Err(err);
                 }
@@ -440,6 +444,53 @@ mod tests {
                 Err(err) => assert!(!err.user_facing().is_empty()),
             }
         }
+    }
+
+    #[test]
+    fn a_stored_failure_is_returned_as_is_rather_than_reclassified() {
+        let backend = LinuxInputBackend::new();
+        // A `Os` classification, which is what a missing uinput module produces. The
+        // cached path used to rebuild this as `PermissionDenied`.
+        let stored = PlatformError::os("open /dev/uinput", "No such file or directory");
+        *backend
+            .uinput_error
+            .lock()
+            .expect("the failure cache is not poisoned") = Some(stored.clone());
+
+        let returned = backend
+            .with_uinput(|_| Ok(()))
+            .expect_err("the stored failure is handed back");
+        assert_eq!(
+            returned, stored,
+            "the cached error must come back unchanged"
+        );
+    }
+
+    #[test]
+    fn a_cached_synthesis_failure_keeps_the_classification_it_was_given() {
+        let backend = LinuxInputBackend::new();
+        // Two calls reach both paths: the first attempt classifies, the second reads
+        // the stored failure back.
+        let first = backend.with_uinput(|_| Ok(()));
+        let second = backend.with_uinput(|_| Ok(()));
+
+        if first.is_ok() && second.is_ok() {
+            // A writable /dev/uinput: there is no failure to classify here.
+            return;
+        }
+
+        let first = first.expect_err("the first attempt failed");
+        let second = second.expect_err("the cached attempt failed");
+        assert_eq!(
+            std::mem::discriminant(&first),
+            std::mem::discriminant(&second),
+            "the cached failure must not be re-classified: {first:?} then {second:?}"
+        );
+        assert!(
+            !matches!(second, PlatformError::PermissionDenied { .. })
+                || matches!(first, PlatformError::PermissionDenied { .. }),
+            "a failure that was not a permission problem must not become one: {second:?}"
+        );
     }
 
     #[test]

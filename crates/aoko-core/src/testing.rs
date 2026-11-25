@@ -412,7 +412,16 @@ impl aoko_platform::InputBackend for FakeInput {
         if self.unobservable.load(Ordering::Acquire) {
             return None;
         }
+        // Explicit, not inherited: the trait default is fail-closed (`None`), and
+        // this fake models a session that *can* observe, so a test relying on
+        // observable input must not silently switch to "unobservable" behaviour
+        // behind a green suite.
         Some(self.mouse_state())
+    }
+
+    fn probe_key_state(&self, key: aoko_platform::Key) -> Option<bool> {
+        // Same reasoning: the fake observes keys and always answers `up`.
+        Some(self.key_state(key))
     }
 
     fn mouse_state(&self) -> aoko_platform::MouseState {

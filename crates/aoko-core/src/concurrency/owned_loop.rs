@@ -81,6 +81,9 @@ struct Inner {
     name: String,
     on_failure: Mutex<Option<FailureHook>>,
     state: Mutex<State>,
+    /// Signalled when a joiner releases the worker handle, so the joiners queued
+    /// behind it can finish their own `stop_and_join` instead of returning early.
+    join_finished: parking_lot::Condvar,
     unexpected_completions: AtomicU32,
     restarts: AtomicU32,
     generation: AtomicU64,
@@ -89,18 +92,31 @@ struct Inner {
 struct State {
     requested: bool,
     disposed: bool,
-    /// A `stop_and_join` is between "cancel" and "the thread is gone".
+    /// How many callers are between "cancel" and "the thread is gone" inside
+    /// [`OwnedLoop::stop_and_join`].
     ///
-    /// While this is set no generation may be launched, by `start`, by an
-    /// unexpected-completion restart, or by the relaunch tail of `stop_and_join`.
-    /// Without it, a `start` that lands after `stop` cancelled generation 1 but
-    /// before generation 1's completion runs makes that completion launch
-    /// generation 2 with a *fresh, uncancelled* token, and the in-progress join
-    /// waits on a generation nobody will ever cancel.
-    joining: bool,
+    /// A count, not a flag. While it is non-zero no generation may be launched, by
+    /// `start`, by an unexpected-completion restart, or by the relaunch tail of
+    /// `stop_and_join`. Without that seal a `start` landing after `stop` cancelled
+    /// generation 1 but before generation 1's completion runs makes that completion
+    /// launch generation 2 with a *fresh, uncancelled* token, and the in-progress
+    /// join waits on a generation nobody will ever cancel. A flag is not enough to
+    /// express that: with two concurrent joiners whichever exits first would clear
+    /// the flag while the other is still inside `join`, reopening the window.
+    joiners: usize,
+    /// Whether one of those callers currently holds the detached worker handle.
+    ///
+    /// Only one caller may own the [`std::thread::JoinHandle`] at a time, so the
+    /// others wait on [`Inner::join_finished`] instead of observing `None` and
+    /// returning as if there were nothing to join.
+    worker_checked_out: bool,
     body: Option<LoopBody>,
     cancel: Option<CancelToken>,
     running_generation: Option<u64>,
+    /// The current (or last) worker handle.
+    ///
+    /// It is *not* cleared when the body completes: it is the only way another
+    /// thread can wait for this thread, and the thread cannot join itself.
     worker: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -121,12 +137,14 @@ impl OwnedLoop {
                 state: Mutex::new(State {
                     requested: false,
                     disposed: false,
-                    joining: false,
+                    joiners: 0,
+                    worker_checked_out: false,
                     body: None,
                     cancel: None,
                     running_generation: None,
                     worker: None,
                 }),
+                join_finished: parking_lot::Condvar::new(),
                 unexpected_completions: AtomicU32::new(0),
                 restarts: AtomicU32::new(0),
                 generation: AtomicU64::new(0),
@@ -174,41 +192,54 @@ impl OwnedLoop {
 
     /// Cancels and waits for the worker thread to finish.
     ///
-    /// While the join is in progress the loop is *sealed*: `start` and an
-    /// unexpected-completion restart both decline to launch, so the join cannot end
-    /// up waiting on a generation nobody cancels. A `start` that lands during the
-    /// join is honoured once the join finishes, which is the "most recent request
-    /// wins" rule `start`/`stop` already follow.
+    /// The loop is *sealed* for as long as any caller is inside this method, as a
+    /// count: `start` and an unexpected-completion restart both decline to launch,
+    /// so a join can never end up waiting on a generation nobody cancels. Every
+    /// caller waits for the worker thread; when several arrive at once, one owns
+    /// the handle and the rest wait for it rather than reporting "nothing to join".
+    /// The last caller out honours a `start` that raced the join, which is the
+    /// "most recent request wins" rule `start`/`stop` already follow.
     ///
-    /// Safe to call from any thread except the loop's own body.
+    /// Safe to call from any thread except the loop's own body, and safe to call
+    /// concurrently with itself.
     pub fn stop_and_join(&self) {
-        {
-            let mut state = self.inner.state.lock();
-            state.joining = true;
-            state.requested = false;
-            if let Some(cancel) = state.cancel.as_ref() {
-                cancel.cancel();
-            }
-        }
+        let _seal = JoinerGuard::enter(Arc::clone(&self.inner));
 
         loop {
-            let handle = self.inner.state.lock().worker.take();
-            let Some(handle) = handle else {
-                break;
+            let handle = {
+                let mut state = self.inner.state.lock();
+                // Another joiner owns the handle. Its thread is the one being
+                // waited for, so waiting for it here is the same guarantee, not a
+                // weaker one.
+                while state.worker_checked_out {
+                    self.inner.join_finished.wait(&mut state);
+                }
+                match state.worker.take() {
+                    Some(handle) => {
+                        state.worker_checked_out = true;
+                        handle
+                    }
+                    // Nothing left to wait for: every launched generation has been
+                    // joined by this caller or by a joiner it waited for.
+                    None => break,
+                }
             };
-            if handle.join().is_err() {
+
+            // Joined with no lock held: the worker's completion needs the same
+            // lock, and a body may be waiting on whoever calls this.
+            let joined = handle.join();
+
+            {
+                let mut state = self.inner.state.lock();
+                state.worker_checked_out = false;
+                self.inner.join_finished.notify_all();
+            }
+
+            if joined.is_err() {
                 // The body panicked and `panic = "abort"` was off; the failure was
                 // already recorded inside the worker.
                 tracing::warn!(loop_name = %self.inner.name, "loop worker panicked");
             }
-        }
-
-        let mut state = self.inner.state.lock();
-        state.joining = false;
-        // A `start` that raced the join set `requested` but could not launch.
-        if state.requested && !state.disposed && state.body.is_some() {
-            let inner = Arc::clone(&self.inner);
-            Inner::launch(&inner, &mut state, false);
         }
     }
 
@@ -237,11 +268,29 @@ impl OwnedLoop {
     /// Whether a [`Self::stop_and_join`] is between its cancel and its join.
     ///
     /// While sealed, no generation is launched: `start` only records the request and
-    /// the join's tail honours it afresh. Diagnostics and tests use this to observe
-    /// the sealed window instead of racing it.
+    /// the last joiner's tail honours it afresh. Diagnostics and tests use this to
+    /// observe the sealed window instead of racing it.
     #[must_use]
     pub fn is_sealed(&self) -> bool {
-        self.inner.state.lock().joining
+        self.inner.state.lock().joiners > 0
+    }
+
+    /// How many callers are currently inside [`Self::stop_and_join`].
+    ///
+    /// The seal is this count, so a test can wait for the second stopper to arrive
+    /// instead of assuming it did.
+    #[must_use]
+    pub fn joiners(&self) -> usize {
+        self.inner.state.lock().joiners
+    }
+
+    /// Whether a joiner currently holds the worker handle and is inside `join`.
+    ///
+    /// Diagnostics and tests only: it makes the window in which a second stopper
+    /// must *wait* rather than observe `None` observable.
+    #[must_use]
+    pub fn is_joining_worker(&self) -> bool {
+        self.inner.state.lock().worker_checked_out
     }
 
     /// Unexpected exits observed while the loop was requested.
@@ -276,9 +325,45 @@ impl std::fmt::Debug for OwnedLoop {
     }
 }
 
+/// Holds the seal for one [`OwnedLoop::stop_and_join`] caller.
+///
+/// Entry increments [`State::joiners`], cancels the current generation and clears
+/// `requested` under one lock; drop decrements it and, on the last caller out,
+/// relaunches only if a `start` raced the join. Decrementing on every path is why
+/// this is a guard: an early return (a panicking `join`, a body that aborts) must
+/// not leave the loop sealed forever.
+struct JoinerGuard {
+    inner: Arc<Inner>,
+}
+
+impl JoinerGuard {
+    fn enter(inner: Arc<Inner>) -> Self {
+        {
+            let mut state = inner.state.lock();
+            state.joiners += 1;
+            state.requested = false;
+            if let Some(cancel) = state.cancel.as_ref() {
+                cancel.cancel();
+            }
+        }
+        Self { inner }
+    }
+}
+
+impl Drop for JoinerGuard {
+    fn drop(&mut self) {
+        let mut state = self.inner.state.lock();
+        state.joiners = state.joiners.saturating_sub(1);
+        if state.joiners == 0 && state.requested && !state.disposed && state.body.is_some() {
+            let inner = Arc::clone(&self.inner);
+            Inner::launch(&inner, &mut state, false);
+        }
+    }
+}
+
 impl Inner {
     fn launch(self: &Arc<Self>, state: &mut State, restart: bool) {
-        if !state.requested || state.disposed || state.joining || state.body.is_none() {
+        if !state.requested || state.disposed || state.joiners > 0 || state.body.is_none() {
             return;
         }
 
@@ -358,10 +443,15 @@ impl Inner {
 
         state.running_generation = None;
         state.cancel = None;
-        // Detaches this thread; its own handle cannot be joined from inside it.
-        state.worker = None;
+        // The worker handle is deliberately left in place. This thread cannot join
+        // itself, and the handle is the only way a [`OwnedLoop::stop_and_join`]
+        // caller can wait for it; clearing it here made a joiner take `None` and
+        // return without having joined anything. A restart overwrites it below,
+        // which is safe because this thread has reached its last statement.
 
-        if state.requested && !state.disposed && !state.joining && state.body.is_some() {
+        // A completion while a join is in progress is relaunched by that joiner's
+        // tail, once the seal count reaches zero and no one is waiting any more.
+        if state.joiners == 0 && state.requested && !state.disposed && state.body.is_some() {
             if unexpected {
                 self.unexpected_completions.fetch_add(1, Ordering::AcqRel);
                 self.restarts.fetch_add(1, Ordering::AcqRel);
@@ -391,6 +481,20 @@ mod tests {
     /// Failure guard for thread synchronisation. The assertions are event driven;
     /// the timeout only stops a broken loop from hanging the suite.
     const SIGNAL_TIMEOUT: Duration = Duration::from_secs(5);
+
+    /// Waits for a condition another thread is responsible for, without sleeping.
+    ///
+    /// A bounded spin is an assertion, not a schedule: exhausting the budget means
+    /// the other thread never reached the state the test needs, which is a real
+    /// failure rather than a slow machine.
+    fn spin_until(mut condition: impl FnMut() -> bool, what: &str) {
+        let mut spins = 0_u32;
+        while !condition() {
+            std::hint::spin_loop();
+            spins += 1;
+            assert!(spins < 50_000_000, "{what}");
+        }
+    }
 
     #[test]
     fn stop_then_start_runs_only_the_latest_requested_generation() {
@@ -592,6 +696,120 @@ mod tests {
 
         assert!(!loop_.is_running());
         assert!(!loop_.is_sealed());
+    }
+
+    /// Regression for the *second* `stop_and_join` race.
+    ///
+    /// The seal used to be a flag, so a stopper that found the worker handle
+    /// already taken returned immediately and cleared the flag while the first
+    /// stopper was still inside `join`. A `start` landing in that window then
+    /// relaunched a generation with a fresh, uncancelled token which the first
+    /// stopper joined forever. A one-stopper test cannot see that, which is why it
+    /// reported the fix as complete.
+    #[test]
+    fn two_concurrent_stoppers_and_a_racing_start_never_strand_a_join() {
+        let loop_ = Arc::new(OwnedLoop::new("race-two"));
+        let (entered_tx, entered_rx) = mpsc::channel::<()>();
+        let gate = Arc::new((Mutex::new(false), parking_lot::Condvar::new()));
+
+        let body: LoopBody = {
+            let gate = Arc::clone(&gate);
+            let entered_tx = entered_tx.clone();
+            let first = Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let first_generation = Arc::clone(&first);
+            Arc::new(move |cancel: &CancelToken| {
+                if first_generation.swap(false, Ordering::AcqRel) {
+                    let _ = entered_tx.send(());
+                    // Parks after cancellation but before returning, so the joiners
+                    // are provably inside `join` when the race is staged.
+                    let (lock, cvar) = &*gate;
+                    let mut released = lock.lock();
+                    while !*released {
+                        cvar.wait(&mut released);
+                    }
+                    return Ok(());
+                }
+                cancel.wait();
+                Ok(())
+            })
+        };
+
+        assert!(loop_.start(Arc::clone(&body)));
+        entered_rx
+            .recv_timeout(SIGNAL_TIMEOUT)
+            .expect("generation 1 entered its body");
+
+        let spawn_stopper = |loop_: Arc<OwnedLoop>| {
+            let (tx, rx) = mpsc::channel::<()>();
+            let handle = std::thread::spawn(move || {
+                loop_.stop_and_join();
+                let _ = tx.send(());
+            });
+            (handle, rx)
+        };
+
+        let (first, first_done) = spawn_stopper(Arc::clone(&loop_));
+        // The exact window the old code lost: the first stopper owns the handle and
+        // is inside `join`, so a second one used to see `None`.
+        spin_until(
+            || loop_.is_joining_worker(),
+            "the first stopper never began joining the worker",
+        );
+
+        let (second, second_done) = spawn_stopper(Arc::clone(&loop_));
+        spin_until(
+            || loop_.joiners() == 2,
+            "the second stopper never joined the seal",
+        );
+
+        // The racing start: accepted, recorded, and unable to launch through the
+        // seal.
+        assert!(loop_.start(Arc::clone(&body)));
+        assert!(loop_.is_requested());
+        assert!(loop_.is_sealed(), "two joiners must keep the loop sealed");
+
+        {
+            let (lock, cvar) = &*gate;
+            *lock.lock() = true;
+            cvar.notify_all();
+        }
+
+        // Both must return. Before the fix the first one waited on a generation
+        // nobody cancels and this times out.
+        first_done
+            .recv_timeout(SIGNAL_TIMEOUT)
+            .expect("the first stop_and_join never returned");
+        second_done
+            .recv_timeout(SIGNAL_TIMEOUT)
+            .expect("the second stop_and_join never returned");
+        first.join().expect("first stopper thread");
+        second.join().expect("second stopper thread");
+
+        assert_eq!(loop_.joiners(), 0);
+        assert!(!loop_.is_sealed());
+        // Only the racing start relaunched anything, and it is not an
+        // unexpected-completion restart.
+        assert_eq!(loop_.restart_count(), 0);
+        assert_eq!(loop_.unexpected_completion_count(), 0);
+        assert!(
+            loop_.is_running(),
+            "the last joiner out honours the racing start"
+        );
+
+        // And that generation is reachable: nothing uncancelled survives the pair.
+        let (done_tx, done_rx) = mpsc::channel::<()>();
+        let final_loop = Arc::clone(&loop_);
+        let stopper = std::thread::spawn(move || {
+            final_loop.stop_and_join();
+            let _ = done_tx.send(());
+        });
+        done_rx
+            .recv_timeout(SIGNAL_TIMEOUT)
+            .expect("a generation nobody cancels survived the two-stopper race");
+        stopper.join().expect("final stopper thread");
+
+        assert!(!loop_.is_running());
+        assert_eq!(loop_.joiners(), 0);
     }
 
     #[test]

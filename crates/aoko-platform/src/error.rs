@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlatformError {
     /// The OS denied access (permissions, protected process, sandbox).
     PermissionDenied { detail: String },

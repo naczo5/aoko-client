@@ -641,6 +641,54 @@ mod tests {
     }
 
     #[test]
+    fn a_later_success_replaces_a_cached_miss() {
+        let exchange = FakeExchange::new(vec![
+            Reply::Fail,
+            Reply::Answer {
+                datagram: srv_response("_minecraft._tcp.mc.example.com", "mc.example.com", 25566),
+            },
+        ]);
+        let clock = TestClock::new();
+        let resolver = SrvResolver::with_parts(
+            vec![RESOLVER.to_string()],
+            Arc::clone(&exchange) as Arc<dyn SrvExchange>,
+            SrvLookupCache::with_clock(SRV_FAILURE_TTL, SRV_SUCCESS_TTL, clock.clock()),
+        );
+        let expected = SrvTarget {
+            host: "mc.example.com".to_string(),
+            port: 25566,
+        };
+
+        // 1. A miss, cached under the short TTL.
+        assert_eq!(resolver.resolve("mc.example.com", &uncancelled()), None);
+        assert_eq!(exchange.calls(), 1);
+        assert_eq!(resolver.cache().try_get("mc.example.com"), Some(None));
+
+        // 2. Once the miss lapses, the same host resolves: the store overwrites the
+        //    negative entry instead of keeping it.
+        clock.advance(SRV_FAILURE_TTL + Duration::from_secs(1));
+        assert_eq!(
+            resolver.resolve("mc.example.com", &uncancelled()),
+            Some(expected.clone())
+        );
+        assert_eq!(exchange.calls(), 2);
+        assert_eq!(
+            resolver.cache().try_get("mc.example.com"),
+            Some(Some(expected.clone())),
+            "the miss is gone, the record replaced it"
+        );
+
+        // 3. The replacement carries the success TTL, not the remainder of the short
+        //    one: nearly an hour later it is still served without a new query.
+        clock.advance(SRV_SUCCESS_TTL - Duration::from_secs(60));
+        assert_eq!(
+            resolver.resolve("mc.example.com", &uncancelled()),
+            Some(expected)
+        );
+        assert_eq!(exchange.calls(), 2, "the success is cached, not re-queried");
+    }
+
+    #[test]
     fn an_expired_entry_is_evicted_on_read() {
         let clock = TestClock::new();
         let cache = SrvLookupCache::with_clock(SRV_FAILURE_TTL, SRV_SUCCESS_TTL, clock.clock());
