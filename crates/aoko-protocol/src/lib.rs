@@ -3,6 +3,27 @@
 //! This crate must never depend on a platform, UI or async runtime so that it
 //! stays testable, benchable and wire-pinned against `McInjector/`.
 
+pub mod accounts;
+pub mod block_esp;
+pub mod capabilities;
+pub mod codec;
+pub mod command_result;
+pub mod commands;
+pub mod config_payload;
+pub mod diagnostics;
+pub mod framing;
+pub mod gtb;
+pub mod hud;
+pub mod kill_aura;
+pub mod module_catalog;
+pub mod netstat;
+pub mod nick_hider;
+pub mod palettes;
+pub mod profile;
+pub mod servers;
+pub mod state;
+pub mod state_patch;
+pub mod stats;
 pub mod transport;
 
 /// TCP port the bridge binds and the host dials. See `AGENTS.md`.
@@ -16,6 +37,8 @@ pub mod cadence {
     pub const CONFIG_CHANGE_COALESCE_MS: u64 = 25;
     /// `StateNotificationIntervalMs`: coalesce UI notifications.
     pub const STATE_NOTIFICATION_INTERVAL_MS: u64 = 25;
+    /// `SendTimeout`: ceiling for one command/config line write.
+    pub const SEND_TIMEOUT_MS: u64 = 10_000;
 }
 
 #[cfg(test)]
@@ -32,5 +55,6 @@ mod tests {
         assert_eq!(cadence::CONFIG_HEARTBEAT_MS, 2000);
         assert_eq!(cadence::CONFIG_CHANGE_COALESCE_MS, 25);
         assert_eq!(cadence::STATE_NOTIFICATION_INTERVAL_MS, 25);
+        assert_eq!(cadence::SEND_TIMEOUT_MS, 10_000);
     }
 }

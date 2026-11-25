@@ -176,3 +176,123 @@ mod tests {
         assert_eq!(READ_BUFFER_BYTES, 4096);
     }
 }
+
+/// In-memory duplex peer for tests and for the host's own seam tests.
+///
+/// The managed suite fakes the socket; this is the equivalent. Bytes fed into the
+/// peer are framed by the same [`crate::framing::BoundedLineReader`], so the CRLF,
+/// cap, and oversized-line rules are exercised end to end without a socket.
+pub mod memory {
+    use std::collections::VecDeque;
+    use std::io::Read;
+    use std::sync::{Arc, Mutex, MutexGuard};
+
+    use super::{LineBuf, RecvOutcome, Transport, TransportError};
+    use crate::framing::BoundedLineReader;
+
+    #[derive(Debug, Default)]
+    struct Shared {
+        inbound: VecDeque<u8>,
+        sent: Vec<Vec<u8>>,
+    }
+
+    fn lock(shared: &Arc<Mutex<Shared>>) -> MutexGuard<'_, Shared> {
+        match shared.lock() {
+            Ok(guard) => guard,
+            // A panicking test must not turn every later read into a poison error.
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    /// The peer end: feeds inbound bytes and inspects what the client wrote.
+    #[derive(Debug, Clone)]
+    pub struct MemoryPeer {
+        shared: Arc<Mutex<Shared>>,
+    }
+
+    impl MemoryPeer {
+        /// Appends bytes the client will read. Empty inbound behaves as EOF.
+        pub fn feed(&self, bytes: &[u8]) {
+            let mut shared = lock(&self.shared);
+            shared.inbound.extend(bytes.iter().copied());
+        }
+
+        /// Every line the client has written, in order, without the trailing LF.
+        #[must_use]
+        pub fn sent_lines(&self) -> Vec<String> {
+            let shared = lock(&self.shared);
+            shared
+                .sent
+                .iter()
+                .map(|line| String::from_utf8_lossy(line).into_owned())
+                .collect()
+        }
+
+        /// The newest written line, if any.
+        #[must_use]
+        pub fn last_sent(&self) -> Option<String> {
+            let shared = lock(&self.shared);
+            shared
+                .sent
+                .last()
+                .map(|line| String::from_utf8_lossy(line).into_owned())
+        }
+    }
+
+    /// Reads from the peer's inbound queue; empty means end of stream.
+    #[derive(Debug)]
+    struct QueueReader {
+        shared: Arc<Mutex<Shared>>,
+    }
+
+    impl Read for QueueReader {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            let mut shared = lock(&self.shared);
+            if shared.inbound.is_empty() {
+                return Ok(0);
+            }
+
+            let take = out.len().min(shared.inbound.len());
+            for slot in out.iter_mut().take(take) {
+                *slot = shared.inbound.pop_front().unwrap_or_default();
+            }
+            Ok(take)
+        }
+    }
+
+    /// Client end of the in-memory pair.
+    #[derive(Debug)]
+    pub struct MemoryTransport {
+        reader: BoundedLineReader<QueueReader>,
+        shared: Arc<Mutex<Shared>>,
+    }
+
+    impl Transport for MemoryTransport {
+        fn recv_line(&mut self, out: &mut LineBuf) -> Result<RecvOutcome, TransportError> {
+            self.reader.read_line(out).map_err(TransportError::Io)
+        }
+
+        fn send_line(&mut self, line: &[u8]) -> Result<(), TransportError> {
+            let mut shared = lock(&self.shared);
+            let mut stored = line.to_vec();
+            if stored.last() != Some(&b'\n') {
+                stored.push(b'\n');
+            }
+            shared.sent.push(stored);
+            Ok(())
+        }
+    }
+
+    /// Creates the pair, both ends honouring the 1 MiB inbound cap.
+    #[must_use]
+    pub fn duplex() -> (MemoryTransport, MemoryPeer) {
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        let transport = MemoryTransport {
+            reader: BoundedLineReader::with_wire_cap(QueueReader {
+                shared: Arc::clone(&shared),
+            }),
+            shared: Arc::clone(&shared),
+        };
+        (transport, MemoryPeer { shared })
+    }
+}
