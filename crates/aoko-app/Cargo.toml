@@ -1,0 +1,25 @@
+[package]
+name = "aoko-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "GPUI desktop application for the Aoko host."
+
+[[bin]]
+name = "aoko"
+path = "src/main.rs"
+
+[dependencies]
+aoko-protocol = { workspace = true }
+aoko-platform = { workspace = true }
+aoko-core = { workspace = true }
+gpui = { workspace = true }
+gpui_platform = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }

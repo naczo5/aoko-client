@@ -1,0 +1,14 @@
+[package]
+name = "aoko-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Wire protocol, game state, profile and module catalog for the Aoko host. No OS or UI dependencies."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

@@ -1,0 +1,62 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/aoko-protocol",
+    "crates/aoko-platform",
+    "crates/aoko-core",
+    "crates/aoko-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.100.0"
+license = "GPL-3.0-only"
+repository = "https://github.com/naczo5/aoko-client"
+
+[workspace.dependencies]
+# Pinned to a concrete zed revision: GPUI's API moves fast and its toolchain
+# pin (rust-toolchain.toml) is stable 1.100.0. Never float this to `main`.
+gpui = { git = "https://github.com/zed-industries/zed", rev = "552644414c580ed540f027f6439881ea5c88d02a", default-features = false, features = [
+    "font-kit",
+    "wayland",
+    "x11",
+    "windows-manifest",
+] }
+
+# `gpui::Application` has no bare constructor at this revision; it needs an
+# explicit platform. `gpui_platform::application()` / `headless()` supply it.
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "552644414c580ed540f027f6439881ea5c88d02a", default-features = false, features = [
+    "wayland",
+    "x11",
+] }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+
+aoko-protocol = { path = "crates/aoko-protocol" }
+aoko-platform = { path = "crates/aoko-platform" }
+aoko-core = { path = "crates/aoko-core" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+
+# GPUI is unusably slow to debug at opt-level 0, but the rest of the
+# workspace should stay fast to compile during iteration.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.bench]
+lto = "thin"
+codegen-units = 1

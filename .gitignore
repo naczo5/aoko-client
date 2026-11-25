@@ -61,3 +61,6 @@ Desktop.ini
 # ── Local showcase tooling ───────────────────────────────────────
 # Remotion video project (local-only; generated audio + lockfile noise)
 /motion/
+
+# ── Rust build outputs ───────────────────────────────────────────
+target/

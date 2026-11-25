@@ -1,0 +1,20 @@
+[package]
+name = "aoko-platform"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "OS abstraction layer: process/window inspection, input, native bridge injection, Discord IPC."
+
+[dependencies]
+aoko-protocol = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = ["Win32_Foundation"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
