@@ -28,10 +28,10 @@ aoko-protocol pure data: wire types, profile, catalog, solver. no OS, socket, pr
 
 | Crate | Owns | Ported from |
 | --- | --- | --- |
-| `aoko-protocol` | Wire types, capability negotiation, bounded framing, game state, patch merging, profile + palette + HUD layout persistence, module catalog, stats, GTB solver, transport metrics, `netstat` line parsing | `GameState.cs`, `GameStatePatchMerger.cs`, `BoundedLineReader.cs`, `BridgeCapabilities.cs`, `ManagedTransportDiagnostics.cs`, `TcpPortHelper.cs` (parse half), `GameStateClient.cs` (transport seam), `HudLayout.cs`, `KillAuraSettings.cs`, `NickHiderConfig.cs`, `BlockEsp.cs`, `ModuleCatalog.cs`, `Profile.cs`, `CustomPalette.cs`, `StatsTracker.cs`, `GtbWordSolver.cs`, `BridgeCommandProtocol.cs`, `BridgeCommandResult.cs`, `Accounts/*` pure parsers, `Servers/ServerAddress.cs` |
-| `aoko-platform` | `ProcessInspector`, `WindowInspector`, `InputBackend`, `NativeBridgeInjector`, `DiscordRpcTransport`, `PlatformCapabilities`, `TcpPortProbe` | `ProcessCommandLine.cs`, `InjectionTargetDiscovery.cs`, `WindowDetection.cs`, `InputHooks.cs`, `NativeInjector.cs`, `DiscordRichPresenceService.cs` (transport half), `Servers/ServerPing.cs`, `TcpPortHelper.cs` (process spawn half) |
+| `aoko-protocol` | Wire types, capability negotiation, bounded framing, game state, patch merging, profile + palette + HUD layout persistence, module catalog, stats, GTB solver, transport metrics, `netstat` line parsing | `GameState.cs`, `GameStatePatchMerger.cs`, `BoundedLineReader.cs`, `BridgeCapabilities.cs`, `ManagedTransportDiagnostics.cs`, `TcpPortHelper.cs` (parse half), `GameStateClient.cs` (transport seam), `HudLayout.cs`, `KillAuraSettings.cs`, `NickHiderConfig.cs`, `BlockEsp.cs`, `ModuleCatalog.cs`, `Profile.cs`, `CustomPalette.cs`, `StatsTracker.cs`, `GtbWordSolver.cs`, `BridgeCommandProtocol.cs`, `BridgeCommandResult.cs`, `Accounts/*` pure parsers, `Servers/ServerAddress.cs` (parse half), `StatsTracker.cs` (aggregation half) |
+| `aoko-platform` | `ProcessInspector`, `WindowInspector`, `InputBackend`, `NativeBridgeInjector`, `DiscordRpcTransport`, `PlatformCapabilities`, `TcpPortProbe` | `ProcessCommandLine.cs`, `InjectionTargetDiscovery.cs`, `WindowDetection.cs`, `InputHooks.cs`, `NativeInjector.cs`, `DiscordRichPresenceService.cs` (transport half), `Servers/ServerPing.cs`, `Servers/ServerAddress.cs` (SRV lookup half), `TcpPortHelper.cs` (process spawn half) |
 | `aoko-core` | `clicker/`, `aim_assist`, `chest_stealer`, `refill`, `auto_rod`, `auto_tool`, `concurrency/`, `services/` | `Clicker.cs`, `AdvancedClickTimingState.cs`, `ClickDeadlineScheduler.cs`, `ClickRandomizationMode.cs`, `AimAssistMotionController.cs`, `ChestStealerController.cs`, `ChestStealerCoordinateMapper.cs`, `RefillController.cs`, `CoalescedCallback.cs`, `CoalescedLatestValue.cs`, `OwnedAsyncLoop.cs`, `UpdateService.cs`, `DiscordRichPresenceService.cs` (state half), `Accounts/*` services, `Servers/*Store/Join*`, `ModuleSearchIndex.cs` |
-| `aoko-app` | `theme/`, `assets/`, `components/`, `views/`, `dialogs/`, `capture/`, `main.rs` | `App.xaml`, `MainWindow.xaml(.cs)`, `ColorPickerDialog.*`, `WindowPickerDialog.*`, `ThemeManager.cs`, `Views/*` |
+| `aoko-app` | `theme/`, `assets/`, `components/`, `views/`, `dialogs/`, `capture/`, `main.rs` | `App.xaml`, `MainWindow.xaml(.cs)`, `ColorPickerDialog.*`, `WindowPickerDialog.*`, `ThemeManager.cs`, `StatsTracker.cs` (change-notification half), `Views/*` |
 
 ### Placement rule
 
@@ -52,6 +52,19 @@ runs `netstat -ano -p tcp` through `ProcessStartInfo` and regex-matches the outp
 regex and line model live in `aoko-protocol` and the spawn lives in `aoko-platform`. That
 split is also what keeps `TcpPortHelperTests`, which tests the regex and the null-on-no-match
 behaviour, a pure protocol test.
+
+Three more files split for the same reason, and are listed as halves in the table above:
+
+- `Servers/ServerAddress.cs` is mostly pure — `TryParse`, `DefaultPort = 25565`, the 256-character
+  cap — but `ResolveForPingAsync` opens a `UdpClient` for SRV lookup. Parsing and validation are
+  `aoko-protocol`; the SRV query and its cache are `aoko-platform`.
+- `StatsTracker.cs` is pure aggregation (CPS buckets, playtime, left/right counts) wrapped in
+  `INotifyPropertyChanged` with a marshalled UI-thread notification. The aggregation and its
+  persistence are `aoko-protocol`; turning a change into a scoped GPUI `cx.notify()` belongs to
+  `aoko-app`, which is where the reactivity rules in section 6 already live.
+- `Servers/ServerPing.cs` opens the socket, so it is `aoko-platform` in full. Its
+  `ParseStatus`/`FlattenMotd` decode helpers are pure, but they are only useful beside the socket,
+  so they stay with it rather than being split for their own sake.
 
 ### Why `GameStateClient` splits across two crates
 

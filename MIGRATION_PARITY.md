@@ -571,11 +571,11 @@ column is derived from the subject the file exercises.
 | `OwnedAsyncLoopTests.cs` | 3 | Stop-then-start runs only the latest generation, an unexpected completion is restarted and reported, a failure callback does not prevent cleanup | `aoko-core` |
 | `PaletteContrastTests.cs` | 5 | Contrast measured on the real palette tables: primary labels pass AA on the background brush, chip labels pass AA on their tint layers, status tones pass AA on the tab background, card edge/wash values meet recorded lower bounds | `aoko-app` |
 | `ProtocolCompatibilityTests.cs` | 5 | Captured V1 messages from both bridge families deserialise; the modern fixture ignores unknown future fields; loader-newer/bridge-older absent optionals use safe defaults; bridge-newer/loader-older unknown capability entries are tolerated; capability fallbacks expose the published state and held-item settings | `aoko-protocol` |
-| `ServerAddressTests.cs` | 15 | Accepted forms, rejected forms, a trailing colon keeps a bare host, the 256-character cap, `DefaultPort = 25565` | `aoko-core` |
+| `ServerAddressTests.cs` | 15 | Accepted forms, rejected forms, a trailing colon keeps a bare host, the 256-character cap, `DefaultPort = 25565` | `aoko-protocol` (parse half; the SRV query half is tested in `aoko-platform`) |
 | `ServerPingTests.cs` | 15 | `ParseStatus` reads players and version, survives a minimal response, labels fall back to the error, `FlattenMotd` joins components and strips colour codes | `aoko-platform` |
 | `ServerStoreTests.cs` | 12 | Store path under `%AppData%\Aoko`, `Add` dedupes by parsed host+port, camelCase indented atomic write, load restores entries and join stamps, `Remove` reports whether it removed | `aoko-core` |
 | `ServersViewTests.cs` | 31 | `ServersViewLogic` / `SavedServerRow`: sort order (most recent join first, never-joined last, then `AddedAt`, then name), selection index retention and neighbour fallback, chip wording/tone thresholds (<100 ms accent, ≤300 warn, else critical), join gate states, pings allowed alongside the exclusive lock, MOTD trimming, error-label mapping | `aoko-app` |
-| `SrvLookupCacheTests.cs` | 5 | An SRV failure expires (10-minute TTL) so the next lookup asks again, a success is reused for the session, a later success replaces a cached failure, hosts are matched case-insensitively | `aoko-core` |
+| `SrvLookupCacheTests.cs` | 5 | An SRV failure expires (10-minute TTL) so the next lookup asks again, a success is reused for the session, a later success replaces a cached failure, hosts are matched case-insensitively | `aoko-platform` |
 | `StatsTrackerTests.cs` | 5 | `RecordClick` updates CPS buckets/average/peak, the detailed CPS window is tight, left/right counts are separated, `RecordPlaytimeSample` only advances for active play | `aoko-protocol` |
 | `StoreRecoveryTests.cs` | 6 | `Message` names the store and the quarantine copy, `FromStore` reads the optional `RecoveredFrom` hook, `FindQuarantined` only counts this session's files and ignores other stores and missing folders | `aoko-app` |
 | `TabCopyTests.cs` | 6 | Both tabs explain a missing capability with identical words taken from the bridge layer; not-connected and return-to-main-menu copy follow the bridge message; capacity refusals differ only by the action refused | `aoko-app` |
@@ -609,8 +609,8 @@ locally. None of it may be dropped.
 | Accounts: auth chain | `Aoko/Core/Accounts/CookieAuth.cs`, `AccountImportService.cs` (`AccountImportResult`, `AccountImportFailure`, `AccountImportProgress`, `AccountBatchImportResult`) | `aoko-core` | SISU redirect walk from `login.live.com`, launcher client id, `t=` ticket prefix, retry/backoff honouring `Retry-After` clamped to two minutes, three attempts, batch failures aggregated by file name, `ThrowIfMcaExpired` |
 | Accounts: Lunar mirror | `Aoko/Core/Accounts/LunarAccountManager.cs` (`LunarAccountWriteResult`, `Upsert`, `UpsertAll`) | `aoko-core` | Writes Lunar's own `accounts.json`: undashed local ids, Xbox XUID remote ids, MSA refresh tokens when known, unknown keys preserved, offline accounts refused, one pending active account per batch, errors carry no filesystem path |
 | Accounts tab UI | `Aoko/Views/AccountsView.xaml`, `.xaml.cs`, `AccountsViewLogic.cs` | `aoko-app` | `PastePanel` / `OfflinePanel`, session strip chips, card grid (`AccountCardTemplate`), drag-drop import, `LunarAccountsCheck`, `RecoveryText`, `StoragePathText`, exclusive-work guard (`RunExclusiveAsync`) |
-| Servers: address model + SRV | `Aoko/Core/Servers/ServerAddress.cs` (`ServerAddress`, `TryParse`, `ResolveForPingAsync`, `DefaultPort = 25565`, `MaximumTextLength = 256`), SRV lookup cache | `aoko-core` | Failure TTL 10 min, success cached for the session, case-insensitive hosts |
-| Servers: ping | `Aoko/Core/Servers/ServerPing.cs` (`ServerPingResult`, `QueryAsync`, `PingManyAsync`, `ParseStatus`, `FlattenMotd`, `ProtocolVersion = 767`) | `aoko-core` | Server List Ping handshake, status JSON decode, MOTD flattening |
+| Servers: address model + SRV | `Aoko/Core/Servers/ServerAddress.cs` (`ServerAddress`, `TryParse`, `DefaultPort = 25565`, `MaximumTextLength = 256`), SRV lookup cache | `aoko-protocol` for the pure parse/validate half; `aoko-platform` for `ResolveForPingAsync` and the SRV cache, which open a `UdpClient` | Failure TTL 10 min, success cached for the session, case-insensitive hosts |
+| Servers: ping | `Aoko/Core/Servers/ServerPing.cs` (`ServerPingResult`, `QueryAsync`, `PingManyAsync`, `ParseStatus`, `FlattenMotd`, `ProtocolVersion = 767`) | `aoko-platform` (opens the socket) | Server List Ping handshake, status JSON decode, MOTD flattening |
 | Servers: store | `Aoko/Core/Servers/ServerStore.cs`, `SavedServer.cs` | `aoko-core` | `%AppData%\Aoko\servers.json`, camelCase indented atomic write, dedupe by parsed host+port, `MarkJoined`, `Remove`, JSON shape stays compatible with lunar-cookies' `servers.json` |
 | Servers: join validation | `Aoko/Core/Servers/ServerJoinService.cs` (`ServerTarget`, `ValidateTarget`, `TryBuildJoinRequest`, `MaximumHostLength = 256`) | `aoko-core` | Validation only, no socket; the join itself is a bridge command |
 | Servers tab UI | `Aoko/Views/ServersView.xaml`, `.xaml.cs`, `ServersViewLogic.cs` (`SavedServerRow`) | `aoko-app` | Direct join, add form, ping all, per-row re-ping, latency chip tones, selection retention, pings never take the exclusive lock |
@@ -640,11 +640,11 @@ locally. None of it may be dropped.
 | `CookieParserClaimTests.cs` | `aoko-core` | Untrusted claims, no cookie value in messages |
 | `ModuleSearchIndexTests.cs` | `aoko-core` | Rank tiers and every catalog module having a GUI row with a real card/toggle |
 | `PaletteContrastTests.cs` | `aoko-app` | AA contrast on the real palette tables |
-| `ServerAddressTests.cs` | `aoko-core` | Parse accepted/rejected forms, 256-char cap |
+| `ServerAddressTests.cs` | `aoko-protocol` | Parse accepted/rejected forms, 256-char cap |
 | `ServerPingTests.cs` | `aoko-platform` | Status parse, MOTD flatten, error fallback |
 | `ServerStoreTests.cs` | `aoko-core` | Path, dedupe, atomic camelCase write, join stamps |
 | `ServersViewTests.cs` | `aoko-app` | Sort, selection retention, chip wording/tone, dual locks |
-| `SrvLookupCacheTests.cs` | `aoko-core` | Failure TTL vs success reuse |
+| `SrvLookupCacheTests.cs` | `aoko-platform` | Failure TTL vs success reuse |
 | `StoreRecoveryTests.cs` | `aoko-app` | Quarantine notice only for this session |
 | `TabCopyTests.cs` | `aoko-app` | Shared refusal copy sourced from the bridge layer |
 | `TestRepo.cs` | `none` — test infrastructure | Repo-root locator for the C# suite; no Rust port, but the Rust tests need an equivalent workspace-relative helper for fixtures |
