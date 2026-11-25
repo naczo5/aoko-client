@@ -13,6 +13,9 @@
 //! | [`chest_stealer`] | `ChestStealerController.cs`, `ChestStealerCoordinateMapper.cs` |
 //! | [`refill`] | `RefillController.cs` |
 //! | [`search`] | `ModuleSearchIndex.cs` |
+//! | [`auto_rod`] | `AutoRod` settings, frames and ack tracking |
+//! | [`auto_tool`] | `AutoTool` settings and clamps |
+//! | [`loops`] | the four `Clicker.cs` loop executors |
 //! | [`app`] | `AppController` coordination, `GameStateClient` hand-off |
 //! | [`discord`] | `DiscordRichPresenceService.cs`, state half |
 //! | [`resources`] | the exclusive-resource discipline from `packet-and-call-hygiene` |
@@ -29,11 +32,14 @@
 
 pub mod aim_assist;
 pub mod app;
+pub mod auto_rod;
+pub mod auto_tool;
 pub mod chest_stealer;
 pub mod clicker;
 pub mod clock;
 pub mod concurrency;
 pub mod discord;
+pub mod loops;
 pub mod refill;
 pub mod resources;
 pub mod search;

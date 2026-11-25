@@ -9,7 +9,7 @@
 //! Available under `cfg(test)` and under the `testing` feature, so a dependent
 //! crate's tests can wire the same doubles without duplicating them.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -296,5 +296,260 @@ mod tests {
 
         assert_eq!(scheduler.run_all(), 2);
         assert_eq!(ran.load(Ordering::Acquire), 1);
+    }
+}
+
+/// One call a loop made into the input backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputCall {
+    /// `click(button)`.
+    Click(aoko_platform::MouseButton),
+    /// `move_relative(dx, dy)`.
+    Move(i32, i32),
+    /// `key_down(key)`.
+    KeyDown(aoko_platform::Key),
+    /// `key_up(key)`.
+    KeyUp(aoko_platform::Key),
+}
+
+/// An [`aoko_platform::InputBackend`] that records instead of injecting.
+///
+/// `cancel_after_clicks` makes a loop stop itself deterministically after a fixed
+/// number of clicks, which is how the thread-lifecycle tests avoid any wall-clock
+/// coordination with the loop thread.
+#[derive(Debug, Default)]
+pub struct FakeInput {
+    calls: Mutex<Vec<InputCall>>,
+    left_down: AtomicBool,
+    cancel_after_clicks: AtomicU64,
+    cancel: Mutex<Option<crate::concurrency::CancelToken>>,
+}
+
+impl FakeInput {
+    /// Nothing recorded, left button up.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Cancels `token` once this many clicks have been recorded.
+    pub fn cancel_after_clicks(&self, clicks: u64, token: crate::concurrency::CancelToken) {
+        self.cancel_after_clicks
+            .store(clicks.max(1), Ordering::Release);
+        *self.cancel.lock() = Some(token);
+    }
+
+    /// Makes `mouse_state().left_down` report this.
+    pub fn set_left_down(&self, down: bool) {
+        self.left_down.store(down, Ordering::Release);
+    }
+
+    /// Recorded calls, in order.
+    #[must_use]
+    pub fn calls(&self) -> Vec<InputCall> {
+        self.calls.lock().clone()
+    }
+
+    /// Number of recorded calls.
+    #[must_use]
+    pub fn call_count(&self) -> usize {
+        self.calls.lock().len()
+    }
+
+    /// Number of recorded clicks.
+    #[must_use]
+    pub fn click_count(&self) -> usize {
+        self.calls
+            .lock()
+            .iter()
+            .filter(|call| matches!(call, InputCall::Click(_)))
+            .count()
+    }
+
+    /// Number of recorded relative moves.
+    #[must_use]
+    pub fn move_count(&self) -> usize {
+        self.calls
+            .lock()
+            .iter()
+            .filter(|call| matches!(call, InputCall::Move(..)))
+            .count()
+    }
+
+    /// Forgets everything recorded.
+    pub fn clear(&self) {
+        self.calls.lock().clear();
+    }
+
+    fn record(&self, call: InputCall) {
+        let mut calls = self.calls.lock();
+        calls.push(call);
+        let clicks = calls
+            .iter()
+            .filter(|call| matches!(call, InputCall::Click(_)))
+            .count() as u64;
+        drop(calls);
+
+        let threshold = self.cancel_after_clicks.load(Ordering::Acquire);
+        if threshold > 0 && clicks >= threshold {
+            if let Some(token) = self.cancel.lock().as_ref() {
+                token.cancel();
+            }
+        }
+    }
+}
+
+impl aoko_platform::InputBackend for FakeInput {
+    fn mouse_state(&self) -> aoko_platform::MouseState {
+        aoko_platform::MouseState {
+            left_down: self.left_down.load(Ordering::Acquire),
+            right_down: false,
+        }
+    }
+
+    fn key_state(&self, _key: aoko_platform::Key) -> bool {
+        false
+    }
+
+    fn click(
+        &self,
+        button: aoko_platform::MouseButton,
+    ) -> Result<(), aoko_platform::PlatformError> {
+        self.record(InputCall::Click(button));
+        Ok(())
+    }
+
+    fn move_relative(&self, dx: i32, dy: i32) -> Result<(), aoko_platform::PlatformError> {
+        self.record(InputCall::Move(dx, dy));
+        Ok(())
+    }
+
+    fn key_press(&self, key: aoko_platform::Key) -> Result<(), aoko_platform::PlatformError> {
+        self.record(InputCall::KeyDown(key));
+        self.record(InputCall::KeyUp(key));
+        Ok(())
+    }
+
+    fn poll_events(
+        &self,
+        _out: &mut Vec<aoko_platform::InputEvent>,
+    ) -> Result<(), aoko_platform::PlatformError> {
+        Ok(())
+    }
+
+    fn key_down(&self, key: aoko_platform::Key) -> Result<(), aoko_platform::PlatformError> {
+        self.record(InputCall::KeyDown(key));
+        Ok(())
+    }
+
+    fn key_up(&self, key: aoko_platform::Key) -> Result<(), aoko_platform::PlatformError> {
+        self.record(InputCall::KeyUp(key));
+        Ok(())
+    }
+}
+
+/// A sleeper that parks inside `sleep_until` until the test releases it.
+///
+/// This is the one place a test does coordinate with a loop thread, and it does so
+/// through a condvar rather than a duration: `entered` proves the loop is inside a
+/// sleep, so "cancel while sleeping" is an ordering guarantee, not a race.
+#[derive(Debug, Default)]
+pub struct GateSleeper {
+    state: Mutex<GateState>,
+    cvar: parking_lot::Condvar,
+}
+
+#[derive(Debug, Default)]
+struct GateState {
+    entered: bool,
+    released: bool,
+}
+
+impl GateSleeper {
+    /// Closed gate: the first `sleep_until` parks.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Blocks until a loop has parked in `sleep_until`.
+    pub fn wait_until_entered(&self) {
+        let mut state = self.state.lock();
+        while !state.entered {
+            self.cvar.wait(&mut state);
+        }
+    }
+
+    /// Lets every parked wait return.
+    pub fn release(&self) {
+        let mut state = self.state.lock();
+        state.released = true;
+        self.cvar.notify_all();
+    }
+
+    /// Whether a loop parked at least once.
+    #[must_use]
+    pub fn entered(&self) -> bool {
+        self.state.lock().entered
+    }
+}
+
+impl Sleeper for GateSleeper {
+    fn sleep_until(&self, _deadline: Instant) {
+        let mut state = self.state.lock();
+        state.entered = true;
+        self.cvar.notify_all();
+        while !state.released {
+            self.cvar.wait(&mut state);
+        }
+    }
+}
+
+/// Advances a [`VirtualClock`] and cancels a token after a fixed number of sleeps.
+///
+/// Lets a test pin down a loop's delay schedule without running a thread: the loop
+/// sleeps `n` times, then stops, and `clock.gaps()` is the exact sequence. The token
+/// is attached after the runtime exists, because the runtime owns it.
+#[derive(Debug)]
+pub struct CancelAfterSleeper {
+    clock: Arc<VirtualClock>,
+    token: Mutex<Option<crate::concurrency::CancelToken>>,
+    after: u32,
+    sleeps: AtomicU64,
+}
+
+impl CancelAfterSleeper {
+    /// Cancels the attached token on the `after`-th sleep.
+    #[must_use]
+    pub fn new(clock: Arc<VirtualClock>, after: u32) -> Self {
+        Self {
+            clock,
+            token: Mutex::new(None),
+            after: after.max(1),
+            sleeps: AtomicU64::new(0),
+        }
+    }
+
+    /// Attaches the runtime's token. Call once, after building the runtime.
+    pub fn attach(&self, token: crate::concurrency::CancelToken) {
+        *self.token.lock() = Some(token);
+    }
+
+    /// How many sleeps were observed.
+    #[must_use]
+    pub fn sleeps(&self) -> u64 {
+        self.sleeps.load(Ordering::Acquire)
+    }
+}
+
+impl Sleeper for CancelAfterSleeper {
+    fn sleep_until(&self, deadline: Instant) {
+        self.clock.sleep_until(deadline);
+        let count = self.sleeps.fetch_add(1, Ordering::AcqRel) + 1;
+        if count >= u64::from(self.after) {
+            if let Some(token) = self.token.lock().as_ref() {
+                token.cancel();
+            }
+        }
     }
 }

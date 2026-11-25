@@ -30,9 +30,10 @@ use aoko_protocol::module_catalog::{self, EnabledFlag};
 use aoko_protocol::profile::Profile;
 use aoko_protocol::state::GameState;
 use arc_swap::ArcSwapOption;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 
 use crate::discord::{self, PresenceInputs, PresenceSnapshot};
+use crate::loops::LoopSense;
 
 /// A published state plus the moment it arrived.
 #[derive(Debug, Clone)]
@@ -478,5 +479,113 @@ mod tests {
 
         assert!(bridge_supported(BridgeSupport::Supported));
         assert!(!bridge_supported(BridgeSupport::UnsupportedOnLinuxYet));
+    }
+}
+
+/// Production [`crate::loops::LoopSense`]: the shared [`StateStore`] plus the
+/// window and capability facts the app samples elsewhere.
+///
+/// The managed loops each called `WindowDetection` and `GameStateClient` statics
+/// directly; a headless core cannot, so the app pushes those observations in with
+/// the setters below and the loops read them back without a lock on the hot path.
+#[derive(Debug)]
+pub struct StoreSense {
+    store: Arc<StateStore>,
+    minecraft_active: AtomicBool,
+    cursor_visible: AtomicBool,
+    framebuffer: Mutex<Option<(i32, i32)>>,
+    support: RwLock<Support>,
+}
+
+#[derive(Debug, Default)]
+struct Support {
+    modules: Vec<String>,
+    state_fields: Vec<String>,
+}
+
+impl StoreSense {
+    /// Wraps a store. Nothing is active, visible or supported until the app says so.
+    #[must_use]
+    pub fn new(store: Arc<StateStore>) -> Self {
+        Self {
+            store,
+            minecraft_active: AtomicBool::new(false),
+            cursor_visible: AtomicBool::new(false),
+            framebuffer: Mutex::new(None),
+            support: RwLock::new(Support::default()),
+        }
+    }
+
+    /// `WindowDetection.IsMinecraftActive()`.
+    pub fn set_minecraft_active(&self, active: bool) {
+        self.minecraft_active.store(active, Ordering::Release);
+    }
+
+    /// `WindowDetection.IsCursorVisible()`.
+    pub fn set_cursor_visible(&self, visible: bool) {
+        self.cursor_visible.store(visible, Ordering::Release);
+    }
+
+    /// Client size, used when the state carries no viewport.
+    pub fn set_framebuffer_size(&self, size: Option<(i32, i32)>) {
+        *self.framebuffer.lock() = size;
+    }
+
+    /// Replaces the advertised module set, as a capabilities handshake does.
+    pub fn set_supported_modules(&self, modules: Vec<String>) {
+        self.support.write().modules = modules;
+    }
+
+    /// Replaces the advertised state-field set.
+    pub fn set_supported_state_fields(&self, fields: Vec<String>) {
+        self.support.write().state_fields = fields;
+    }
+
+    /// The store this sense reads.
+    #[must_use]
+    pub fn store(&self) -> &Arc<StateStore> {
+        &self.store
+    }
+}
+
+impl LoopSense for StoreSense {
+    fn snapshot(&self) -> Option<Arc<StateSnapshot>> {
+        self.store.snapshot()
+    }
+
+    fn is_connected(&self) -> bool {
+        self.store.is_connected()
+    }
+
+    fn is_injected(&self) -> bool {
+        self.store.is_injected()
+    }
+
+    fn minecraft_active(&self) -> bool {
+        self.minecraft_active.load(Ordering::Acquire)
+    }
+
+    fn cursor_visible(&self) -> bool {
+        self.cursor_visible.load(Ordering::Acquire)
+    }
+
+    fn supports_module(&self, module: &str) -> bool {
+        self.support
+            .read()
+            .modules
+            .iter()
+            .any(|known| known.eq_ignore_ascii_case(module))
+    }
+
+    fn supports_state_field(&self, field: &str) -> bool {
+        self.support
+            .read()
+            .state_fields
+            .iter()
+            .any(|known| known.eq_ignore_ascii_case(field))
+    }
+
+    fn framebuffer_size(&self) -> Option<(i32, i32)> {
+        *self.framebuffer.lock()
     }
 }

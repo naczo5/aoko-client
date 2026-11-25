@@ -57,6 +57,8 @@ const MIN_TARGET_DIST: f64 = 0.01;
 /// Upper bound of the configured aim-assist FOV, halved into a threshold (`:55`).
 const MAX_AIM_ASSIST_FOV: f32 = 180.0;
 
+use aoko_protocol::state::EntityInfo;
+
 /// One candidate entity, borrowed from whatever state snapshot the caller holds.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AimEntity<'a> {
@@ -146,6 +148,55 @@ impl AimAssistMotionController {
         params: &AimAssistParams,
         looking_at_entity: bool,
     ) -> AimAssistMotion<'e> {
+        self.update_over(
+            params,
+            looking_at_entity,
+            entities
+                .iter()
+                .enumerate()
+                .map(|(index, entity)| (index, entity.name, entity.sx, entity.sy, entity.dist)),
+        )
+    }
+
+    /// Same selection, fed straight from the bridge's `EntityInfo` list.
+    ///
+    /// The input loop runs at 125 Hz, so it must not build an adapter vector every
+    /// tick; both entry points funnel into one monomorphised core instead.
+    pub fn update_from_state<'e>(
+        &mut self,
+        entities: &'e [EntityInfo],
+        params: &AimAssistParams,
+        looking_at_entity: bool,
+    ) -> AimAssistMotion<'e> {
+        self.update_over(
+            params,
+            looking_at_entity,
+            entities.iter().enumerate().map(|(index, entity)| {
+                (
+                    index,
+                    entity.name.as_str(),
+                    entity.sx,
+                    entity.sy,
+                    entity.dist,
+                )
+            }),
+        )
+    }
+
+    /// The selection and filtering core shared by [`Self::update`] and
+    /// [`Self::update_from_state`].
+    ///
+    /// The iterator yields `(index, name, screen_x, screen_y, distance)` so neither
+    /// caller has to materialise a candidate list.
+    fn update_over<'e, I>(
+        &mut self,
+        params: &AimAssistParams,
+        looking_at_entity: bool,
+        candidates: I,
+    ) -> AimAssistMotion<'e>
+    where
+        I: Iterator<Item = (usize, &'e str, f32, f32, f64)>,
+    {
         if looking_at_entity {
             self.reset();
             return AimAssistMotion {
@@ -154,7 +205,7 @@ impl AimAssistMotionController {
             };
         }
 
-        if entities.is_empty() || params.width <= 0 || params.height <= 0 {
+        if params.width <= 0 || params.height <= 0 {
             self.reset();
             return AimAssistMotion::default();
         }
@@ -176,21 +227,17 @@ impl AimAssistMotionController {
         let max_angle = f64::from(params.aim_assist_fov.clamp(1.0, MAX_AIM_ASSIST_FOV)) * 0.5;
         let range = f64::from(params.range).max(0.0);
 
-        let mut best: Option<BestTarget<'_>> = None;
-        for (index, entity) in entities.iter().enumerate() {
-            if entity.dist <= MIN_TARGET_DIST || entity.dist > range {
+        let mut best: Option<BestTarget<'e>> = None;
+        for (index, name, sx, sy, dist) in candidates {
+            if dist <= MIN_TARGET_DIST || dist > range {
                 continue;
             }
-            if entity.sx < 0.0
-                || entity.sx > params.width as f32
-                || entity.sy < 0.0
-                || entity.sy > params.height as f32
-            {
+            if sx < 0.0 || sx > params.width as f32 || sy < 0.0 || sy > params.height as f32 {
                 continue;
             }
 
-            let dx = f64::from(entity.sx) - center_x;
-            let dy = f64::from(entity.sy) - center_y;
+            let dx = f64::from(sx) - center_x;
+            let dy = f64::from(sy) - center_y;
             let radial = (dx * dx + dy * dy).sqrt();
             let angle = radial.atan2(focal_length_px) * 180.0 / std::f64::consts::PI;
             if angle > max_angle {
@@ -205,11 +252,7 @@ impl AimAssistMotionController {
                     dy,
                     index,
                     // `string.IsNullOrEmpty(entity.Name) ? $"#{index}" : entity.Name` (`:83-85`)
-                    name: if entity.name.is_empty() {
-                        None
-                    } else {
-                        Some(entity.name)
-                    },
+                    name: if name.is_empty() { None } else { Some(name) },
                 });
             }
         }
