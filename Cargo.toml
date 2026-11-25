@@ -38,6 +38,37 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 
+# Pre-declared so parallel crate owners never have to edit this file. A crate
+# opts in with `dep = { workspace = true }`; only the workspace owner adds a new
+# entry here. Versions are exercised by `cargo check --workspace`.
+arc-swap = "1"            # cheap snapshot publication for coalesced telemetry
+crossbeam-channel = "0.5" # bounded channels for coalesced callbacks
+parking_lot = "0.12"      # short critical sections without poisoning
+rand = "0.8"              # production RNG; tests inject their own
+rand_chacha = "0.3"       # deterministic, seedable RNG for tests
+criterion = "0.5"         # benchmarks (dev-dependency)
+tempfile = "3"            # scratch dirs for persistence tests (dev-dependency)
+
+# Windows platform implementation.
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Pipes",
+    "Win32_System_IO",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_Storage_FileSystem",
+] }
+
+# Linux platform implementation.
+x11rb = "0.13"
+libc = "0.2"
+
 aoko-protocol = { path = "crates/aoko-protocol" }
 aoko-platform = { path = "crates/aoko-platform" }
 aoko-core = { path = "crates/aoko-core" }

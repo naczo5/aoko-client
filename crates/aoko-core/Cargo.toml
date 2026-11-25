@@ -14,3 +14,11 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+arc-swap = { workspace = true }
+crossbeam-channel = { workspace = true }
+parking_lot = { workspace = true }
+rand = { workspace = true }
+
+[dev-dependencies]
+rand_chacha = { workspace = true }
+tempfile = { workspace = true }

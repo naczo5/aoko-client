@@ -195,8 +195,14 @@ version = "0.1.0"
 dependencies = [
  "aoko-platform",
  "aoko-protocol",
+ "arc-swap",
+ "crossbeam-channel",
+ "parking_lot",
+ "rand 0.8.8",
+ "rand_chacha 0.3.1",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "tracing",
 ]
@@ -206,11 +212,14 @@ name = "aoko-platform"
 version = "0.1.0"
 dependencies = [
  "aoko-protocol",
+ "libc",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "tracing",
  "windows 0.58.0",
+ "x11rb",
 ]
 
 [[package]]
@@ -228,6 +237,15 @@ name = "arbitrary"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3bc62ac97cc33321f50863d514c3bc38a453947a8f9e781137e47c7401020aed"
+
+[[package]]
+name = "arc-swap"
+version = "1.9.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "84a22b5d51209f6de83d37a0b33d320acb8da88823e42a94c075140708f032a5"
+dependencies = [
+ "rustversion",
+]
 
 [[package]]
 name = "arg_enum_proc_macro"
@@ -976,6 +994,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fd9ae8fcb3ea71b0b26338b4ffb13006bb175de8fd07921089a906ce7e5e6945"
 dependencies = [
  "cfg-if",
+]
+
+[[package]]
+name = "crossbeam-channel"
+version = "0.5.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "98b0cc327b5bc766e7fda9c9260cc0fa81b43a8e240440422dff70788e3f9ef1"
+dependencies = [
+ "crossbeam-utils",
 ]
 
 [[package]]
@@ -1735,7 +1762,7 @@ dependencies = [
  "log",
  "presser",
  "thiserror 2.0.21",
- "windows 0.58.0",
+ "windows 0.62.2",
 ]
 
 [[package]]
@@ -2252,7 +2279,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.58.0",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
