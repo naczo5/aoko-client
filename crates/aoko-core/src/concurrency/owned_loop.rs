@@ -89,6 +89,15 @@ struct Inner {
 struct State {
     requested: bool,
     disposed: bool,
+    /// A `stop_and_join` is between "cancel" and "the thread is gone".
+    ///
+    /// While this is set no generation may be launched, by `start`, by an
+    /// unexpected-completion restart, or by the relaunch tail of `stop_and_join`.
+    /// Without it, a `start` that lands after `stop` cancelled generation 1 but
+    /// before generation 1's completion runs makes that completion launch
+    /// generation 2 with a *fresh, uncancelled* token, and the in-progress join
+    /// waits on a generation nobody will ever cancel.
+    joining: bool,
     body: Option<LoopBody>,
     cancel: Option<CancelToken>,
     running_generation: Option<u64>,
@@ -112,6 +121,7 @@ impl OwnedLoop {
                 state: Mutex::new(State {
                     requested: false,
                     disposed: false,
+                    joining: false,
                     body: None,
                     cancel: None,
                     running_generation: None,
@@ -152,7 +162,8 @@ impl OwnedLoop {
     }
 
     /// Cancels the current generation and returns immediately. The body observes
-    /// cancellation through its [`CancelToken`].
+    /// cancellation through its [`CancelToken`]. [`Self::stop_and_join`] does not
+    /// delegate here: it takes the same lock once and also seals the loop.
     pub fn stop(&self) {
         let mut state = self.inner.state.lock();
         state.requested = false;
@@ -163,19 +174,41 @@ impl OwnedLoop {
 
     /// Cancels and waits for the worker thread to finish.
     ///
+    /// While the join is in progress the loop is *sealed*: `start` and an
+    /// unexpected-completion restart both decline to launch, so the join cannot end
+    /// up waiting on a generation nobody cancels. A `start` that lands during the
+    /// join is honoured once the join finishes, which is the "most recent request
+    /// wins" rule `start`/`stop` already follow.
+    ///
     /// Safe to call from any thread except the loop's own body.
     pub fn stop_and_join(&self) {
-        self.stop();
+        {
+            let mut state = self.inner.state.lock();
+            state.joining = true;
+            state.requested = false;
+            if let Some(cancel) = state.cancel.as_ref() {
+                cancel.cancel();
+            }
+        }
+
         loop {
             let handle = self.inner.state.lock().worker.take();
             let Some(handle) = handle else {
-                return;
+                break;
             };
             if handle.join().is_err() {
                 // The body panicked and `panic = "abort"` was off; the failure was
                 // already recorded inside the worker.
                 tracing::warn!(loop_name = %self.inner.name, "loop worker panicked");
             }
+        }
+
+        let mut state = self.inner.state.lock();
+        state.joining = false;
+        // A `start` that raced the join set `requested` but could not launch.
+        if state.requested && !state.disposed && state.body.is_some() {
+            let inner = Arc::clone(&self.inner);
+            Inner::launch(&inner, &mut state, false);
         }
     }
 
@@ -199,6 +232,16 @@ impl OwnedLoop {
     #[must_use]
     pub fn is_running(&self) -> bool {
         self.inner.state.lock().running_generation.is_some()
+    }
+
+    /// Whether a [`Self::stop_and_join`] is between its cancel and its join.
+    ///
+    /// While sealed, no generation is launched: `start` only records the request and
+    /// the join's tail honours it afresh. Diagnostics and tests use this to observe
+    /// the sealed window instead of racing it.
+    #[must_use]
+    pub fn is_sealed(&self) -> bool {
+        self.inner.state.lock().joining
     }
 
     /// Unexpected exits observed while the loop was requested.
@@ -235,7 +278,7 @@ impl std::fmt::Debug for OwnedLoop {
 
 impl Inner {
     fn launch(self: &Arc<Self>, state: &mut State, restart: bool) {
-        if !state.requested || state.disposed || state.body.is_none() {
+        if !state.requested || state.disposed || state.joining || state.body.is_none() {
             return;
         }
 
@@ -318,7 +361,7 @@ impl Inner {
         // Detaches this thread; its own handle cannot be joined from inside it.
         state.worker = None;
 
-        if state.requested && !state.disposed && state.body.is_some() {
+        if state.requested && !state.disposed && !state.joining && state.body.is_some() {
             if unexpected {
                 self.unexpected_completions.fetch_add(1, Ordering::AcqRel);
                 self.restarts.fetch_add(1, Ordering::AcqRel);
@@ -460,6 +503,95 @@ mod tests {
         assert!(!loop_.is_requested());
         assert!(!loop_.is_running());
         assert_eq!(loop_.name(), "test");
+    }
+
+    /// Regression for the `stop_and_join` / `start` race: a `start` that lands
+    /// inside the sealed window must not make generation 1's completion launch a
+    /// fresh generation that the join then waits on forever.
+    #[test]
+    fn a_start_during_stop_and_join_never_strands_the_join() {
+        let loop_ = Arc::new(OwnedLoop::new("race"));
+        let (entered_tx, entered_rx) = mpsc::channel::<()>();
+        let gate = Arc::new((Mutex::new(false), parking_lot::Condvar::new()));
+
+        let body: LoopBody = {
+            let gate = Arc::clone(&gate);
+            let entered_tx = entered_tx.clone();
+            let first = Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let first_generation = Arc::clone(&first);
+            Arc::new(move |cancel: &CancelToken| {
+                if first_generation.swap(false, Ordering::AcqRel) {
+                    let _ = entered_tx.send(());
+                    // Park *after* cancellation but *before* returning, which is
+                    // exactly the window in which `complete` used to relaunch.
+                    let (lock, cvar) = &*gate;
+                    let mut released = lock.lock();
+                    while !*released {
+                        cvar.wait(&mut released);
+                    }
+                    return Ok(());
+                }
+                cancel.wait();
+                Ok(())
+            })
+        };
+
+        assert!(loop_.start(Arc::clone(&body)));
+        entered_rx
+            .recv_timeout(SIGNAL_TIMEOUT)
+            .expect("generation 1 entered its body");
+
+        let stopper = {
+            let loop_ = Arc::clone(&loop_);
+            std::thread::spawn(move || loop_.stop_and_join())
+        };
+
+        // Wait for the seal rather than guessing: the request below must land
+        // inside it.
+        let mut spins = 0_u32;
+        while !loop_.is_sealed() {
+            std::hint::spin_loop();
+            spins += 1;
+            assert!(spins < 10_000_000, "stop_and_join never sealed the loop");
+        }
+        assert!(
+            loop_.start(Arc::clone(&body)),
+            "a start during a join is accepted"
+        );
+
+        {
+            let (lock, cvar) = &*gate;
+            *lock.lock() = true;
+            cvar.notify_all();
+        }
+
+        // Before the fix this join waited on an uncancelled generation 2 forever.
+        // A watchdog keeps a regression a failure instead of a hung suite.
+        let (done_tx, done_rx) = mpsc::channel();
+        let watchdog = std::thread::spawn(move || {
+            stopper.join().expect("stopper thread");
+            let _ = done_tx.send(());
+        });
+        done_rx
+            .recv_timeout(SIGNAL_TIMEOUT)
+            .expect("stop_and_join must not wait on a generation nobody cancels");
+        watchdog.join().expect("watchdog thread");
+
+        // The racing start was honoured after the join, so the loop is live again and
+        // a second stop can reach it.
+        let loop_2 = Arc::clone(&loop_);
+        let (done_tx, done_rx) = mpsc::channel();
+        let watchdog = std::thread::spawn(move || {
+            loop_2.stop_and_join();
+            let _ = done_tx.send(());
+        });
+        done_rx
+            .recv_timeout(SIGNAL_TIMEOUT)
+            .expect("the relaunched generation must be stoppable");
+        watchdog.join().expect("watchdog thread");
+
+        assert!(!loop_.is_running());
+        assert!(!loop_.is_sealed());
     }
 
     #[test]

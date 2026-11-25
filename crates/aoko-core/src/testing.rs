@@ -321,6 +321,7 @@ pub enum InputCall {
 pub struct FakeInput {
     calls: Mutex<Vec<InputCall>>,
     left_down: AtomicBool,
+    unobservable: AtomicBool,
     cancel_after_clicks: AtomicU64,
     cancel: Mutex<Option<crate::concurrency::CancelToken>>,
 }
@@ -342,6 +343,13 @@ impl FakeInput {
     /// Makes `mouse_state().left_down` report this.
     pub fn set_left_down(&self, down: bool) {
         self.left_down.store(down, Ordering::Release);
+    }
+
+    /// Makes the backend report that it cannot see the mouse at all, the way a
+    /// Wayland session without `/dev/input` access does: `probe_mouse_state`
+    /// returns `None` while `mouse_state` stays lossy.
+    pub fn set_mouse_unobservable(&self, unobservable: bool) {
+        self.unobservable.store(unobservable, Ordering::Release);
     }
 
     /// Recorded calls, in order.
@@ -400,6 +408,13 @@ impl FakeInput {
 }
 
 impl aoko_platform::InputBackend for FakeInput {
+    fn probe_mouse_state(&self) -> Option<aoko_platform::MouseState> {
+        if self.unobservable.load(Ordering::Acquire) {
+            return None;
+        }
+        Some(self.mouse_state())
+    }
+
     fn mouse_state(&self) -> aoko_platform::MouseState {
         aoko_platform::MouseState {
             left_down: self.left_down.load(Ordering::Acquire),

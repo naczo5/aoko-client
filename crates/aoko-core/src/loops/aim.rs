@@ -63,10 +63,25 @@ pub fn run(
             continue;
         }
 
+        // GUI before freshness, exactly as managed: the loop reads `CurrentState`
+        // and checks `GuiOpen && IsCursorVisible()` at `:2676-2684` and only then
+        // looks at the timestamp at `:2686-2696`. A stale GUI therefore still takes
+        // the 16 ms path.
+        if sense
+            .snapshot()
+            .is_some_and(|snapshot| snapshot.state.gui_open)
+            && sense.cursor_visible()
+        {
+            controller.reset();
+            if !runtime.park(GUI_POLL) {
+                break;
+            }
+            continue;
+        }
+
         let now = runtime.now();
         let Some(snapshot) = sense.fresh_state(now, AIM_STATE_FRESH_MS) else {
-            // Either no state yet or a stale one: both take the 8 ms reset path in
-            // the managed code (`:2679-2696`).
+            // No state yet or a stale one: the 8 ms reset path (`:2686-2696`).
             controller.reset();
             if !runtime.park(IDLE_POLL) {
                 break;
@@ -75,15 +90,33 @@ pub fn run(
         };
         let state = &snapshot.state;
 
-        if state.gui_open && sense.cursor_visible() {
-            controller.reset();
-            if !runtime.park(GUI_POLL) {
-                break;
+        // The hold guard (`Clicker.cs:2704-2706`) is licensed by the physical left
+        // button: `if (leftHeld || autoLeftClicking) TryApplyAimAssist(...)`.
+        //
+        // `probe_mouse_state` is `None` on a session that cannot see the mouse at
+        // all - Wayland plus uinput, or no `/dev/input` access. Unknown is neither
+        // "held" nor "up": the managed code only had the always-answering
+        // `GetAsyncKeyState`, so there is no C# antecedent for this state. Acting is
+        // licensed by proof of the hold, so an unobservable session does not move
+        // this tick; it does not silently claim the button is up either, which
+        // would be the same silent no-op wearing a `false`. Do not rewrite this as
+        // `unwrap_or(false)`.
+        let left_held = match input.probe_mouse_state() {
+            Some(mouse) => mouse.left_down,
+            None => {
+                if !config.auto_left_clicking {
+                    controller.reset();
+                    if !runtime.park(IDLE_POLL) {
+                        break;
+                    }
+                    continue;
+                }
+                // Auto-left-clicking supplies the hold the guard asks for, so the
+                // physical sample is not part of this decision.
+                false
             }
-            continue;
-        }
+        };
 
-        let left_held = input.mouse_state().left_down;
         if left_held || config.auto_left_clicking {
             apply(sense, input, config, controller, state);
         } else {

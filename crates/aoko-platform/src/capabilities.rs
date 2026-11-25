@@ -47,6 +47,8 @@ pub struct CapabilityReport {
     pub input_synthesis: bool,
     /// Discord IPC reachability.
     pub discord_rpc: bool,
+    /// SRV resolution for a host entered without an explicit port.
+    pub srv_resolution: bool,
     /// Native bridge injection status.
     pub bridge: BridgeSupport,
     /// Human-readable notes explaining any `false` above.
@@ -64,6 +66,7 @@ impl CapabilityReport {
             input_observation: false,
             input_synthesis: false,
             discord_rpc: false,
+            srv_resolution: true,
             bridge: BridgeSupport::UnsupportedOnLinuxYet,
             notes: vec!["OS services unavailable in this build".to_string()],
         }
@@ -90,6 +93,7 @@ mod tests {
         let report = CapabilityReport::transport_only(SessionKind::Wayland);
         assert_eq!(report.session, SessionKind::Wayland);
         assert!(!report.input_synthesis);
+        assert!(report.srv_resolution, "UDP needs no OS service");
         assert!(!report.bridge.is_usable());
         assert!(!report.notes.is_empty());
     }

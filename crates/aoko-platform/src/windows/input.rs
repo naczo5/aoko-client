@@ -11,7 +11,6 @@
 //! relative move is one `MOUSEEVENTF_MOVE` `INPUT`, and a key is a down or up
 //! `INPUT_KEYBOARD` event.
 
-use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::Mutex;
 
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
@@ -19,9 +18,10 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, SendInput, VkKeyScanW, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE,
     KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
-    MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEINPUT, MOUSE_EVENT_FLAGS,
-    VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_F1, VK_LBUTTON, VK_LEFT, VK_MENU,
-    VK_RBUTTON, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
+    MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN,
+    MOUSEEVENTF_RIGHTUP, MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_DOWN,
+    VK_ESCAPE, VK_F1, VK_LBUTTON, VK_LEFT, VK_MENU, VK_RBUTTON, VK_RETURN, VK_RIGHT, VK_SHIFT,
+    VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, SetWindowsHookExW, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, MSLLHOOKSTRUCT,
@@ -41,8 +41,7 @@ const EVENT_CAPACITY: usize = 4096;
 const LLMHF_INJECTED: u32 = 0x0000_0001;
 
 static EVENTS: Mutex<Vec<InputEvent>> = Mutex::new(Vec::new());
-static KEYBOARD_HOOK: AtomicIsize = AtomicIsize::new(0);
-static MOUSE_HOOK: AtomicIsize = AtomicIsize::new(0);
+static HOOKS: Mutex<Option<HookGuard>> = Mutex::new(None);
 
 pub struct WindowsInputBackend;
 
@@ -59,65 +58,100 @@ impl Default for WindowsInputBackend {
     }
 }
 
-/// Installs both low-level hooks.
+/// An installed pair of low-level hooks, unhooked on drop.
 ///
-/// The installing thread must pump messages for the hooks to fire, which is what
-/// the managed host's WPF dispatcher provided. Calling this twice is a no-op.
-pub fn install_hooks() -> Result<(), PlatformError> {
-    if KEYBOARD_HOOK.load(Ordering::Acquire) != 0 {
-        return Ok(());
+/// This is the only owner: a caller that installs and then returns early drops the
+/// guard and the hooks with it, instead of leaking two `HHOOK`s for the life of the
+/// process. The handles are kept as `isize` so the guard is `Send` without an
+/// `unsafe impl`; a hook is a plain token, and `UnhookWindowsHookEx` may be called
+/// from any thread.
+pub struct HookGuard {
+    keyboard: isize,
+    mouse: isize,
+}
+
+impl HookGuard {
+    /// Installs both hooks, or neither.
+    ///
+    /// The installing thread must pump messages for them to fire, which is what the
+    /// managed host's WPF dispatcher provided.
+    pub fn install() -> Result<Self, PlatformError> {
+        // SAFETY: a null module name asks for this process's own module, which is
+        // the module that owns the hook procedures below.
+        let module = unsafe { GetModuleHandleW(windows::core::PCWSTR::null()) }
+            .map_err(|err| PlatformError::os("GetModuleHandleW", err.to_string()))?;
+        let instance = windows::Win32::Foundation::HINSTANCE(module.0);
+
+        // SAFETY: the callback is a `'static` function with the exact `HOOKPROC`
+        // signature, and the module handle outlives the hook.
+        let keyboard =
+            unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), instance, 0) }
+                .map_err(|err| {
+                    PlatformError::os("SetWindowsHookExW(WH_KEYBOARD_LL)", err.to_string())
+                })?;
+
+        // From here on the keyboard hook is owned by `guard`: if the mouse install
+        // fails, `?` drops the guard and unhooks it rather than leaking it.
+        let mut guard = Self {
+            keyboard: keyboard.0 as isize,
+            mouse: 0,
+        };
+
+        // SAFETY: as above.
+        let mouse = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), instance, 0) }
+            .map_err(|err| PlatformError::os("SetWindowsHookExW(WH_MOUSE_LL)", err.to_string()))?;
+        guard.mouse = mouse.0 as isize;
+        Ok(guard)
     }
+}
 
-    // SAFETY: a null module name asks for this process's own module, which is the
-    // module that owns the hook procedures below.
-    let module = unsafe { GetModuleHandleW(windows::core::PCWSTR::null()) }
-        .map_err(|err| PlatformError::os("GetModuleHandleW", err.to_string()))?;
-    let instance = windows::Win32::Foundation::HINSTANCE(module.0);
-
-    // SAFETY: the callback is a `'static` function with the exact `HOOKPROC`
-    // signature, and the module handle outlives the hook.
-    let keyboard = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), instance, 0) }
-        .map_err(|err| {
-        PlatformError::os("SetWindowsHookExW(WH_KEYBOARD_LL)", err.to_string())
-    })?;
-    KEYBOARD_HOOK.store(keyboard.0 as isize, Ordering::Release);
-
-    // SAFETY: as above.
-    let mouse = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), instance, 0) };
-    match mouse {
-        Ok(mouse) => {
-            MOUSE_HOOK.store(mouse.0 as isize, Ordering::Release);
-            Ok(())
+impl Drop for HookGuard {
+    fn drop(&mut self) {
+        // SAFETY: whichever handle is non-zero came from a successful
+        // `SetWindowsHookExW` in `install`, is still installed, and is cleared here,
+        // so each hook is unhooked exactly once.
+        if self.keyboard != 0 {
+            unsafe {
+                let _ = UnhookWindowsHookEx(HHOOK(self.keyboard as *mut core::ffi::c_void));
+            }
+            self.keyboard = 0;
         }
-        Err(err) => {
-            // Do not leave a half-installed pair behind.
-            uninstall_hooks();
-            Err(PlatformError::os(
-                "SetWindowsHookExW(WH_MOUSE_LL)",
-                err.to_string(),
-            ))
+        if self.mouse != 0 {
+            // SAFETY: as above, for the mouse handle: it came from a successful
+            // `SetWindowsHookExW`, is still installed, and is zeroed here.
+            unsafe {
+                let _ = UnhookWindowsHookEx(HHOOK(self.mouse as *mut core::ffi::c_void));
+            }
+            self.mouse = 0;
         }
     }
 }
 
+/// Installs both low-level hooks into a process-global owner that keeps them for
+/// the life of the process.
+///
+/// Idempotent: the second call sees the existing guard and does nothing, and
+/// concurrent callers serialise on the mutex instead of both passing the empty
+/// check and leaking the handle that loses the race.
+pub fn install_hooks() -> Result<(), PlatformError> {
+    let mut installed = HOOKS
+        .lock()
+        .map_err(|_| PlatformError::os("input hooks", "poisoned"))?;
+    if installed.is_some() {
+        return Ok(());
+    }
+    *installed = Some(HookGuard::install()?);
+    Ok(())
+}
+
 /// Removes both hooks. Safe to call when nothing is installed.
 pub fn uninstall_hooks() {
-    let keyboard = KEYBOARD_HOOK.swap(0, Ordering::AcqRel);
-    if keyboard != 0 {
-        // SAFETY: the value came from a successful `SetWindowsHookExW` and was
-        // atomically swapped to zero, so it is unhooked exactly once.
-        unsafe {
-            let _ = UnhookWindowsHookEx(HHOOK(keyboard as *mut core::ffi::c_void));
-        }
-    }
-
-    let mouse = MOUSE_HOOK.swap(0, Ordering::AcqRel);
-    if mouse != 0 {
-        // SAFETY: as above.
-        unsafe {
-            let _ = UnhookWindowsHookEx(HHOOK(mouse as *mut core::ffi::c_void));
-        }
-    }
+    // A poisoned lock still holds the guard, so recover rather than leaking it.
+    let taken = match HOOKS.lock() {
+        Ok(mut slot) => slot.take(),
+        Err(poisoned) => poisoned.into_inner().take(),
+    };
+    drop(taken);
 }
 
 fn push_event(event: InputEvent) {
@@ -215,6 +249,17 @@ fn virtual_key(key: Key) -> VIRTUAL_KEY {
     }
 }
 
+/// `(down, up)` mouse flags for one button. Each button has its own pair, so
+/// reporting the middle button as a left click would make this backend and the
+/// Linux one disagree about the same [`InputBackend`] method.
+const fn mouse_flags(button: MouseButton) -> (MOUSE_EVENT_FLAGS, MOUSE_EVENT_FLAGS) {
+    match button {
+        MouseButton::Left => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
+        MouseButton::Right => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
+        MouseButton::Middle => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
+    }
+}
+
 fn mouse_input(flags: MOUSE_EVENT_FLAGS, dx: i32, dy: i32) -> INPUT {
     INPUT {
         r#type: INPUT_MOUSE,
@@ -280,45 +325,44 @@ fn vk_down(vk: VIRTUAL_KEY) -> bool {
 }
 
 impl InputBackend for WindowsInputBackend {
-    fn mouse_state(&self) -> MouseState {
-        MouseState {
+    fn probe_mouse_state(&self) -> Option<MouseState> {
+        // `GetAsyncKeyState` always has a definite answer on Windows.
+        Some(MouseState {
             left_down: vk_down(VK_LBUTTON),
             right_down: vk_down(VK_RBUTTON),
+        })
+    }
+
+    fn mouse_state(&self) -> MouseState {
+        self.probe_mouse_state().unwrap_or_default()
+    }
+
+    fn probe_key_state(&self, key: Key) -> Option<bool> {
+        let vk = virtual_key(key);
+        // A key with no virtual-key code cannot be queried at all, which is
+        // unknown rather than up - the same answer the Linux backend gives.
+        if vk.0 == 0 {
+            return None;
         }
+        Some(vk_down(vk))
     }
 
     fn key_state(&self, key: Key) -> bool {
-        let vk = virtual_key(key);
-        if vk.0 == 0 {
-            return false;
-        }
-        vk_down(vk)
+        self.probe_key_state(key).unwrap_or(false)
     }
 
     fn click(&self, button: MouseButton) -> Result<(), PlatformError> {
-        let (down, up) = match button {
-            MouseButton::Left => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
-            MouseButton::Right => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
-            MouseButton::Middle => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
-        };
+        let (down, up) = mouse_flags(button);
         // One call for the pair, like `Clicker.PerformClick`.
         send(&[mouse_input(down, 0, 0), mouse_input(up, 0, 0)])
     }
 
     fn button_down(&self, button: MouseButton) -> Result<(), PlatformError> {
-        let flags = match button {
-            MouseButton::Left | MouseButton::Middle => MOUSEEVENTF_LEFTDOWN,
-            MouseButton::Right => MOUSEEVENTF_RIGHTDOWN,
-        };
-        send(&[mouse_input(flags, 0, 0)])
+        send(&[mouse_input(mouse_flags(button).0, 0, 0)])
     }
 
     fn button_up(&self, button: MouseButton) -> Result<(), PlatformError> {
-        let flags = match button {
-            MouseButton::Left | MouseButton::Middle => MOUSEEVENTF_LEFTUP,
-            MouseButton::Right => MOUSEEVENTF_RIGHTUP,
-        };
-        send(&[mouse_input(flags, 0, 0)])
+        send(&[mouse_input(mouse_flags(button).1, 0, 0)])
     }
 
     fn move_relative(&self, dx: i32, dy: i32) -> Result<(), PlatformError> {
@@ -389,6 +433,24 @@ mod tests {
     }
 
     #[test]
+    fn each_button_maps_to_its_own_flag_pair() {
+        // The middle row is the regression: it used to reuse the left pair, so a
+        // `click(Middle)` sent a left click.
+        assert_eq!(
+            mouse_flags(MouseButton::Left),
+            (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP)
+        );
+        assert_eq!(
+            mouse_flags(MouseButton::Right),
+            (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP)
+        );
+        assert_eq!(
+            mouse_flags(MouseButton::Middle),
+            (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP)
+        );
+    }
+
+    #[test]
     fn keyboard_input_sets_the_key_up_flag_only_on_release() {
         let down = keyboard_input(VK_SPACE, false);
         let up = keyboard_input(VK_SPACE, true);
@@ -448,11 +510,63 @@ mod tests {
             .all(|event| *event == InputEvent::KeyDown(Key::Other(0x41))));
     }
 
+    /// Serialises the tests that share the process-global hook slot, so they do not
+    /// observe each other's installs.
+    static HOOK_TEST_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
-    fn hook_state_is_idempotent_and_never_underflows() {
-        assert_eq!(KEYBOARD_HOOK.load(Ordering::Acquire), 0);
+    fn uninstalling_twice_is_idempotent_and_never_underflows() {
+        let _serialised = HOOK_TEST_LOCK.lock().ok();
         uninstall_hooks();
         uninstall_hooks();
+        let slot = HOOKS.lock().map(|slot| slot.is_none());
+        assert!(slot.is_ok_and(|empty| empty));
+    }
+
+    #[test]
+    fn a_guard_without_handles_drops_without_calling_user32() {
+        // A zero handle is what `install` leaves behind when the second hook fails,
+        // so `Drop` must treat it as "nothing to unhook" rather than passing a
+        // `NULL` `HHOOK` to `UnhookWindowsHookEx`.
+        drop(HookGuard {
+            keyboard: 0,
+            mouse: 0,
+        });
+    }
+
+    #[test]
+    fn concurrent_installs_never_leave_more_than_one_pair() {
+        let _serialised = HOOK_TEST_LOCK.lock().ok();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+        let workers: Vec<_> = (0..4)
+            .map(|_| {
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    install_hooks().is_ok()
+                })
+            })
+            .collect();
+
+        let installed: Vec<bool> = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap_or(false))
+            .collect();
+
+        // The guard is a single slot, so at most one pair can be owned however many
+        // callers raced; the losers either saw it filled or failed outright.
+        let count = match HOOKS.lock() {
+            Ok(slot) => usize::from(slot.is_some()),
+            Err(poisoned) => usize::from(poisoned.into_inner().is_some()),
+        };
+        assert!(count <= 1, "{count} hook pairs owned");
+        if installed.iter().all(|ok| *ok) {
+            assert_eq!(count, 1, "a successful install must be owned");
+        }
+
+        uninstall_hooks();
+        let slot = HOOKS.lock().map(|slot| slot.is_none());
+        assert!(slot.is_ok_and(|empty| empty));
     }
 
     #[test]

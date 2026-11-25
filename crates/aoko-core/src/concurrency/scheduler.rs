@@ -10,7 +10,7 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::io;
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -85,6 +85,12 @@ pub struct TimerScheduler {
     sender: Option<Sender<TimerEntry>>,
     worker: Option<std::thread::JoinHandle<()>>,
     sequence: AtomicU64,
+    /// Cleared when the worker thread leaves its loop.
+    ///
+    /// A task that panics is caught per task, so this is only cleared by an orderly
+    /// shutdown (or an internal bug). Exposing it lets a caller tell "queued" from
+    /// "silently dead" instead of watching `schedule_at` return `false` forever.
+    alive: Arc<AtomicBool>,
 }
 
 impl TimerScheduler {
@@ -95,15 +101,37 @@ impl TimerScheduler {
     pub fn new(clock: Arc<dyn Clock>) -> io::Result<Self> {
         let (sender, receiver) = crossbeam_channel::unbounded();
         let worker_clock = Arc::clone(&clock);
+        let alive = Arc::new(AtomicBool::new(true));
+        let worker_alive = Arc::clone(&alive);
         let worker = std::thread::Builder::new()
             .name("aoko-timer".to_owned())
-            .spawn(move || run_worker(&worker_clock, &receiver))?;
+            .spawn(move || {
+                // A drop guard, so even an internal panic clears the flag.
+                let _guard = AliveGuard(Arc::clone(&worker_alive));
+                run_worker(&worker_clock, &receiver);
+            })?;
         Ok(Self {
             clock,
             sender: Some(sender),
             worker: Some(worker),
             sequence: AtomicU64::new(0),
+            alive,
         })
+    }
+
+    /// Whether the worker thread is still delivering tasks.
+    #[must_use]
+    pub fn is_alive(&self) -> bool {
+        self.alive.load(AtomicOrdering::Acquire)
+    }
+}
+
+/// Clears an [`AtomicBool`] when dropped.
+struct AliveGuard(Arc<AtomicBool>);
+
+impl Drop for AliveGuard {
+    fn drop(&mut self) {
+        self.0.store(false, AtomicOrdering::Release);
     }
 }
 
@@ -111,6 +139,7 @@ impl std::fmt::Debug for TimerScheduler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TimerScheduler")
             .field("live", &self.sender.is_some())
+            .field("alive", &self.is_alive())
             .finish_non_exhaustive()
     }
 }
@@ -155,7 +184,15 @@ fn run_worker(clock: &Arc<dyn Clock>, receiver: &Receiver<TimerEntry>) {
                 break;
             }
             if let Some(entry) = heap.pop() {
-                (entry.0.task)();
+                // Caught per task, exactly as `owned_loop.rs` catches a loop body.
+                // Without this, one panicking task unwinds the worker, drops the
+                // channel's receiver, and every later `schedule_at` returns `false`
+                // with nothing to observe: deferred delivery would be dead for the
+                // rest of the process.
+                let task = entry.0.task;
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(task)).is_err() {
+                    tracing::error!("scheduled task panicked; the scheduler continues");
+                }
             }
         }
 
@@ -237,10 +274,52 @@ mod tests {
         let scheduler = TimerScheduler::new(Arc::new(SystemClock)).expect("timer thread");
         assert!(scheduler.schedule_in(Duration::from_secs(3_600), Box::new(|| {})));
 
-        let started = Instant::now();
         // Would block for an hour if the worker slept through the deadline
-        // instead of observing the closed channel.
-        drop(scheduler);
-        assert!(started.elapsed() < Duration::from_secs(5));
+        // instead of observing the closed channel. The timeout is a watchdog, not
+        // an assertion about how long the drop took.
+        let (tx, rx) = mpsc::channel();
+        let dropper = std::thread::spawn(move || {
+            drop(scheduler);
+            let _ = tx.send(());
+        });
+        assert!(
+            rx.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "dropping the scheduler blocked on a pending deadline"
+        );
+        dropper.join().expect("dropper thread");
+    }
+
+    #[test]
+    fn a_panicking_task_does_not_kill_deferred_delivery() {
+        let scheduler = TimerScheduler::new(Arc::new(SystemClock)).expect("timer thread");
+        let (tx, rx) = mpsc::channel();
+
+        // The panic message the runtime prints is unavoidable noise here: a
+        // panicking task is the thing under test, and suppressing the hook would
+        // hide real panics from every other test in this process.
+        assert!(scheduler.schedule_in(
+            Duration::ZERO,
+            Box::new(|| {
+                panic!("scheduled task exploded");
+            }),
+        ));
+        assert!(scheduler.schedule_in(
+            Duration::from_millis(5),
+            Box::new(move || {
+                let _ = tx.send("after");
+            }),
+        ));
+
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(5)),
+            Ok("after"),
+            "a panicking task must not stop later work from running"
+        );
+        assert!(
+            scheduler.is_alive(),
+            "the worker must survive a panicking task"
+        );
+        // And the queue still accepts work: the receiver was never dropped.
+        assert!(scheduler.schedule_in(Duration::ZERO, Box::new(|| {})));
     }
 }

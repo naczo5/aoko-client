@@ -15,6 +15,7 @@ mod evdev;
 mod injector;
 mod input;
 mod process;
+mod srv;
 mod uinput;
 mod window;
 mod x11;
@@ -42,6 +43,8 @@ pub struct Detected {
     pub uinput: bool,
     /// Discord IPC sockets that exist right now.
     pub discord_sockets: usize,
+    /// Resolvers configured in `/etc/resolv.conf`.
+    pub dns_servers: usize,
 }
 
 impl Detected {
@@ -61,6 +64,7 @@ impl Detected {
             evdev_devices: evdev::enumerate_devices().len(),
             uinput: uinput::is_available(),
             discord_sockets: LinuxDiscordTransport::available_socket_count(),
+            dns_servers: srv::collect_system_dns_servers().len(),
         }
     }
 
@@ -109,6 +113,13 @@ impl Detected {
         if self.discord_sockets == 0 {
             notes.push("no Discord IPC socket found; Discord is probably not running".to_string());
         }
+        if self.dns_servers == 0 {
+            notes.push(
+                "no nameserver in /etc/resolv.conf; SRV lookups will ask the public resolvers \
+                 8.8.8.8 and 1.1.1.1"
+                    .to_string(),
+            );
+        }
         notes.push(
             "native bridge injection is unavailable on Linux: the shipped bridges are Windows DLLs"
                 .to_string(),
@@ -121,6 +132,9 @@ impl Detected {
             input_observation: self.evdev_devices > 0,
             input_synthesis: self.x11 || self.uinput,
             discord_rpc: self.discord_sockets > 0,
+            // UDP DNS needs no session at all, so a host with no display and no
+            // input devices can still resolve a record.
+            srv_resolution: true,
             bridge: BridgeSupport::UnsupportedOnLinuxYet,
             notes,
         }
@@ -142,6 +156,7 @@ pub fn services() -> crate::PlatformServices {
         input: Box::new(LinuxInputBackend::new()),
         injector: Box::new(LinuxBridgeInjector::new()),
         discord: Box::new(LinuxDiscordTransport::new()),
+        srv: crate::SrvResolver::new(srv::collect_system_dns_servers()),
         capabilities: probe_capabilities(),
     }
 }
@@ -159,6 +174,7 @@ mod tests {
             evdev_devices: 3,
             uinput: false,
             discord_sockets: 1,
+            dns_servers: 1,
         }
         .report();
 
@@ -185,6 +201,7 @@ mod tests {
             evdev_devices: 0,
             uinput: false,
             discord_sockets: 0,
+            dns_servers: 0,
         }
         .report();
 

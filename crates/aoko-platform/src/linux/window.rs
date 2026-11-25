@@ -46,10 +46,13 @@ impl LinuxWindowInspector {
     }
 
     fn backend(&self) -> Result<&X11, PlatformError> {
+        // The stored error is already the right one - `Unsupported` for a missing
+        // display, `Os` for a failed atom intern - so it is returned unchanged
+        // rather than relabelled, which would point a UI at the wrong remedy.
         self.x11.as_ref().ok_or_else(|| {
             self.unavailable
-                .as_ref()
-                .map_or_else(|| PlatformError::unsupported("no X11 display"), describe)
+                .clone()
+                .unwrap_or_else(|| PlatformError::unsupported("no X11 display"))
         })
     }
 
@@ -124,10 +127,6 @@ impl Default for LinuxWindowInspector {
     fn default() -> Self {
         Self::new()
     }
-}
-
-fn describe(err: &PlatformError) -> PlatformError {
-    PlatformError::unsupported(err.user_facing())
 }
 
 impl WindowInspector for LinuxWindowInspector {

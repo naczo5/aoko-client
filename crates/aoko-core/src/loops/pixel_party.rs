@@ -197,6 +197,21 @@ pub fn run(
             continue;
         }
 
+        // GUI before freshness (`:2741-2748` then `:2750-2768`), so a stale GUI
+        // still takes the 16 ms path.
+        if sense
+            .snapshot()
+            .is_some_and(|snapshot| snapshot.state.gui_open)
+            && sense.cursor_visible()
+        {
+            keys.release_all(input);
+            memory.last_ms = 0;
+            if !runtime.park(IDLE_POLL) {
+                break;
+            }
+            continue;
+        }
+
         let now = runtime.now();
         let now_ms = runtime.now_ms();
         let Some(snapshot) = sense.fresh_state(now, PIXEL_PARTY_STATE_FRESH_MS) else {
@@ -208,15 +223,6 @@ pub fn run(
             continue;
         };
         let state = &snapshot.state;
-
-        if state.gui_open && sense.cursor_visible() {
-            keys.release_all(input);
-            memory.last_ms = 0;
-            if !runtime.park(IDLE_POLL) {
-                break;
-            }
-            continue;
-        }
 
         let mut target_found = state.pixel_party_target_found;
         let mut yaw_delta = state.pixel_party_yaw_delta;

@@ -51,8 +51,35 @@ pub enum InputEvent {
 }
 
 pub trait InputBackend: Send + Sync {
+    /// Sampled mouse state, or `None` when this backend cannot see the mouse at
+    /// all - no display, no `/dev/input` access, no session to query.
+    ///
+    /// The distinction matters to the hold guards: "no button is held" and "I
+    /// cannot tell whether a button is held" must not be the same answer, or the
+    /// clicker acts while the user is holding the button down.
+    ///
+    /// The default forwards to [`InputBackend::mouse_state`], so a backend that
+    /// implemented the lossy form keeps its claim that it can always answer.
+    fn probe_mouse_state(&self) -> Option<MouseState> {
+        Some(self.mouse_state())
+    }
+
+    /// Sampled key state, `None` on the same "cannot observe" terms as
+    /// [`InputBackend::probe_mouse_state`]. A key with no keycode in the current
+    /// layout is also `None`: unknowable, not up.
+    fn probe_key_state(&self, key: Key) -> Option<bool> {
+        Some(self.key_state(key))
+    }
+
     /// Sampled mouse state. Cheap enough to call from an automation tick.
+    ///
+    /// Lossy: a backend that cannot observe returns an idle state. Use
+    /// [`InputBackend::probe_mouse_state`] when the difference from "idle"
+    /// matters.
     fn mouse_state(&self) -> MouseState;
+
+    /// Sampled key state. Lossy in the same way as
+    /// [`InputBackend::mouse_state`]; prefer [`InputBackend::probe_key_state`].
     fn key_state(&self, key: Key) -> bool;
 
     fn click(&self, button: MouseButton) -> Result<(), PlatformError>;
@@ -131,6 +158,15 @@ mod tests {
         fn poll_events(&self, _out: &mut Vec<InputEvent>) -> Result<(), PlatformError> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn probing_defaults_to_the_lossy_answer_an_implementor_already_gave() {
+        let backend = Minimal;
+        // `Minimal` claims it can always answer, so the probe must agree with it
+        // rather than inventing an "unknown".
+        assert_eq!(backend.probe_mouse_state(), Some(MouseState::default()));
+        assert_eq!(backend.probe_key_state(Key::Char('a')), Some(false));
     }
 
     #[test]

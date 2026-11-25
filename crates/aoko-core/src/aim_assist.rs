@@ -227,6 +227,12 @@ impl AimAssistMotionController {
         let max_angle = f64::from(params.aim_assist_fov.clamp(1.0, MAX_AIM_ASSIST_FOV)) * 0.5;
         let range = f64::from(params.range).max(0.0);
 
+        // `double bestScore = double.MaxValue;` with `if (score < bestScore)`
+        // (`AimAssistMotionController.cs:57,78`). The sentinel matters: a candidate
+        // whose score is NaN compares false against everything, so it is skipped
+        // instead of becoming "the best" by being first. An `Option` with
+        // `is_none_or` would accept it.
+        let mut best_score = f64::MAX;
         let mut best: Option<BestTarget<'e>> = None;
         for (index, name, sx, sy, dist) in candidates {
             if dist <= MIN_TARGET_DIST || dist > range {
@@ -245,9 +251,9 @@ impl AimAssistMotionController {
             }
 
             let score = dx * dx + dy * dy;
-            if best.is_none_or(|current| score < current.score) {
+            if score < best_score {
+                best_score = score;
                 best = Some(BestTarget {
-                    score,
                     dx,
                     dy,
                     index,
@@ -323,7 +329,6 @@ impl AimAssistMotionController {
 /// Best candidate seen so far in one tick.
 #[derive(Clone, Copy)]
 struct BestTarget<'e> {
-    score: f64,
     dx: f64,
     dy: f64,
     index: usize,
@@ -666,6 +671,38 @@ mod tests {
             assert!(!movement.has_target);
             assert_eq!(movement.move_x, 0);
         }
+    }
+
+    /// A NaN-scored candidate must be skipped, not selected: the managed code
+    /// compares against `double.MaxValue` (`AimAssistMotionController.cs:57,78`),
+    /// and every NaN comparison is false.
+    #[test]
+    fn a_nan_candidate_never_wins_over_a_real_one() {
+        let entities = [
+            entity("nan", f32::NAN, 540.0, 3.0),
+            entity("second", 1030.0, 540.0, 3.0),
+        ];
+        let mut controller = AimAssistMotionController::new();
+        let movement = controller.update(&entities, &params(), false);
+
+        assert!(movement.has_target);
+        assert_eq!(movement.target, Some(AimTargetRef::Named("second")));
+        assert_ne!(movement.move_x, 0, "the real target is still aimed at");
+    }
+
+    /// With only the NaN candidate every candidate is rejected, so the tick reports
+    /// no target instead of emitting a NaN-derived move.
+    #[test]
+    fn a_nan_only_candidate_yields_no_target() {
+        let entities = [entity("nan", f32::NAN, f32::NAN, 3.0)];
+        let mut controller = AimAssistMotionController::new();
+        let movement = controller.update(&entities, &params(), false);
+
+        assert!(!movement.has_target);
+        assert_eq!(movement.target, None);
+        assert_eq!(movement.move_x, 0);
+        assert_eq!(movement.move_y, 0);
+        assert!(!controller.has_latched_target());
     }
 
     #[test]

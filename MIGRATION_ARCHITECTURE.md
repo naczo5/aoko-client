@@ -234,6 +234,8 @@ Recorded here rather than hidden.
 4. **`Aoko/wndproc_new.cpp` is dead code.** 3.8 KB, absent from `Aoko.csproj`, referenced by no source file, script, or doc in the repo. It is not ported and not treated as a contract.
 5. **Split of `GameStateClient`** trades a one-to-one file mapping for layer purity. Tracked in `MIGRATION_PARITY.md` so the mapping stays auditable.
 6. **`aoko-platform` depends on `aoko-protocol`** for shared types, so "platform" is not importable by the protocol crate. This is intentional: the wire format must not learn OS concepts.
+7. **Unobservable input is not "nothing held" (Linux).** `InputBackend::probe_mouse_state` and `probe_key_state` return `Option`, and `None` means the session cannot observe input, not that no button is down. The clicker hold guards refuse to act on `None` rather than assuming a free button. C# never faced this case, because `GetAsyncKeyState` always answers; it is therefore a new-platform decision, not a parity break. Coercing it with `unwrap_or(false)` is exactly the silent no-op that section 5 forbids.
+8. **SRV resolution splits across two crates.** `aoko-protocol` owns the DNS wire codec (`srv_query_name`, `build_srv_query`, `try_read_srv`, `resolve_dns_servers`); `aoko-platform` owns the UDP exchange and the TTL cache, because only the platform crate may open a socket. The managed `SrvLookupCache` semantics are preserved exactly: 2 s per-resolver timeout, 10 min negative TTL, 1 h positive TTL, case-insensitive keys, and a cancelled lookup is never cached because caching it would send the next join to port 25565.
 
 ## 10. Verification commands
 

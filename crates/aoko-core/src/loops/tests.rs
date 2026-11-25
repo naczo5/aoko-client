@@ -473,7 +473,7 @@ fn a_stopped_loop_never_touches_the_backend_again() {
 }
 
 #[test]
-fn the_click_loop_polls_at_one_hundred_milliseconds_without_a_state() {
+fn the_click_loop_polls_at_one_hundred_milliseconds_while_not_connected() {
     let clock = Arc::new(VirtualClock::new());
     // 100 ms is four 25 ms slices, so the fourth sleep is the last.
     let sleeper = Arc::new(CancelAfterSleeper::new(clock.clone(), 4));
@@ -484,7 +484,9 @@ fn the_click_loop_polls_at_one_hundred_milliseconds_without_a_state() {
     );
     sleeper.attach(loop_runtime.token().clone());
     let token = loop_runtime.token().clone();
-    let sense = StaticSense::new(None);
+    // Not connected *and* the OS cursor is visible: the only not-connected branch
+    // that polls instead of clicking (`Clicker.cs:3175-3183`).
+    let sense = StaticSense::new(None).with_cursor_visible();
     let input = FakeInput::new();
     let sink = CountingSink::default();
     let mut state = timing();
@@ -906,4 +908,559 @@ fn all_five_bodies_start_on_their_own_threads_and_stop_together() {
     // Stop is idempotent and dropping afterwards is harmless.
     loops.stop();
     drop(loops);
+}
+
+// ---------------------------------------------------------------------------
+// The not-connected branch (`Clicker.cs:3175-3183`).
+//
+// A missing snapshot is *not* "do nothing": managed falls through to the click
+// logic when the cursor is hidden, which is what keeps standalone clicking alive.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_missing_snapshot_with_a_hidden_cursor_still_clicks() {
+    let clock = Arc::new(VirtualClock::new());
+    // One sleep: the click lands first, then the post-click wait cancels us.
+    let sleeper = Arc::new(CancelAfterSleeper::new(clock.clone(), 1));
+    let loop_runtime = LoopRuntime::new(
+        clock.clone(),
+        sleeper.clone(),
+        Box::new(SplitMix64::new(71)),
+    );
+    sleeper.attach(loop_runtime.token().clone());
+    let token = loop_runtime.token().clone();
+
+    // No snapshot at all, cursor hidden, window active: before the fix this parked
+    // forever and standalone clicking was dead.
+    let sense = StaticSense::new(None);
+    let input = FakeInput::new();
+    let sink = CountingSink::default();
+    let mut state = timing();
+
+    super::click::run(
+        &loop_runtime,
+        &sense,
+        &input,
+        &sink,
+        &click_config(true),
+        &mut state,
+    );
+
+    assert!(token.is_cancelled());
+    assert_eq!(
+        input.click_count(),
+        1,
+        "an un-injected session with a hidden cursor must click"
+    );
+    assert_eq!(sink.clicks.load(Ordering::Acquire), 1);
+}
+
+#[test]
+fn a_missing_snapshot_with_a_visible_cursor_never_clicks() {
+    let clock = Arc::new(VirtualClock::new());
+    // `NOT_FOREGROUND_POLL` is 100 ms, sliced into four 25 ms waits.
+    let sleeper = Arc::new(CancelAfterSleeper::new(clock.clone(), 4));
+    let loop_runtime = LoopRuntime::new(
+        clock.clone(),
+        sleeper.clone(),
+        Box::new(SplitMix64::new(73)),
+    );
+    sleeper.attach(loop_runtime.token().clone());
+
+    let sense = StaticSense::new(None).with_cursor_visible();
+    let input = FakeInput::new();
+    let sink = CountingSink::default();
+    let mut state = timing();
+
+    super::click::run(
+        &loop_runtime,
+        &sense,
+        &input,
+        &sink,
+        &click_config(true),
+        &mut state,
+    );
+
+    assert_eq!(input.call_count(), 0);
+    assert_eq!(sink.clicks.load(Ordering::Acquire), 0);
+}
+
+// ---------------------------------------------------------------------------
+// GUI before freshness (`Clicker.cs:2676-2696` and `:2741-2768`).
+//
+// A stale state that also has a GUI open and the cursor visible must take the
+// 16 ms GUI path, not the 8 ms stale path.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_aim_loop_checks_the_gui_before_a_stale_state() {
+    let clock = Arc::new(VirtualClock::new());
+    let sleeper = Arc::new(CancelAfterSleeper::new(clock.clone(), 1));
+    let loop_runtime = LoopRuntime::new(
+        clock.clone(),
+        sleeper.clone(),
+        Box::new(SplitMix64::new(79)),
+    );
+    sleeper.attach(loop_runtime.token().clone());
+
+    let mut state = clicking_state();
+    state.gui_open = true;
+    let sense = StaticSense::new(Some(state)).with_cursor_visible();
+    // The snapshot is stamped at the clock's origin; a second of virtual time makes
+    // it far older than `AIM_STATE_FRESH_MS` (220 ms) without touching the wall
+    // clock.
+    clock.advance(Duration::from_secs(1));
+
+    let input = FakeInput::new();
+    let mut controller = crate::aim_assist::AimAssistMotionController::new();
+    super::aim::run(
+        &loop_runtime,
+        &sense,
+        &input,
+        &super::aim::AimLoopConfig {
+            enabled: true,
+            params: crate::aim_assist::AimAssistParams {
+                width: 1600,
+                height: 900,
+                game_fov: 70.0,
+                aim_assist_fov: 30.0,
+                range: 6.0,
+                strength: 50,
+            },
+            auto_left_clicking: true,
+        },
+        &mut controller,
+    );
+
+    assert_eq!(
+        clock.gaps(),
+        vec![Duration::from_millis(16)],
+        "the GUI gate runs before the staleness check, so the delay is 16 ms"
+    );
+    assert_eq!(input.move_count(), 0);
+}
+
+#[test]
+fn the_pixel_party_loop_checks_the_gui_before_a_stale_state() {
+    let clock = Arc::new(VirtualClock::new());
+    let sleeper = Arc::new(CancelAfterSleeper::new(clock.clone(), 1));
+    let loop_runtime = LoopRuntime::new(
+        clock.clone(),
+        sleeper.clone(),
+        Box::new(SplitMix64::new(83)),
+    );
+    sleeper.attach(loop_runtime.token().clone());
+
+    let mut state = clicking_state();
+    state.gui_open = true;
+    let sense = StaticSense::new(Some(state)).with_cursor_visible();
+    // Far older than `PIXEL_PARTY_STATE_FRESH_MS` (120 ms).
+    clock.advance(Duration::from_secs(1));
+
+    let input = FakeInput::new();
+    let mut keys = super::pixel_party::WalkKeys::default();
+    super::pixel_party::run(
+        &loop_runtime,
+        &sense,
+        &input,
+        &super::pixel_party::PixelPartyConfig {
+            enabled: true,
+            auto_look: true,
+            auto_walk: true,
+        },
+        &mut keys,
+    );
+
+    assert_eq!(
+        clock.gaps(),
+        vec![Duration::from_millis(16)],
+        "the GUI gate runs before the staleness check, so the delay is 16 ms"
+    );
+    assert_eq!(input.call_count(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Liveness (`ClickerLoops::running`).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_body_that_returned_early_is_not_reported_as_running() {
+    let clock = Arc::new(VirtualClock::new());
+    let loop_runtime = runtime(&clock, clock.clone(), 89);
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+
+    let mut handle = LoopHandle::spawn("early-exit", loop_runtime, move |runtime| {
+        assert!(!runtime.is_cancelled());
+        let _ = done_tx.send(());
+        // Returns without ever consulting the token: a body that finished on its
+        // own.
+    })
+    .expect("thread starts");
+
+    done_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("body ran");
+
+    // The flag clears as the body leaves its scope, so wait for that fact rather
+    // than asserting an elapsed time.
+    let mut spins = 0_u32;
+    while handle.is_running() {
+        std::hint::spin_loop();
+        spins += 1;
+        assert!(spins < 10_000_000, "the liveness flag never cleared");
+    }
+
+    assert!(!handle.is_running());
+    assert!(
+        handle.owns_thread(),
+        "the thread handle is still owned until stop"
+    );
+
+    handle.stop();
+    assert!(!handle.owns_thread());
+    assert!(!handle.is_running());
+}
+
+// ---------------------------------------------------------------------------
+// Unobservable input (`InputBackend::probe_mouse_state` returning `None`).
+//
+// `None` is "this session cannot see the mouse", not "no button is held". Both
+// hold guards are licensed by proof of a hold, so unknown parks the tick without
+// pretending to have observed a free button, and the loop keeps polling so it
+// recovers the moment the session becomes observable.
+// ---------------------------------------------------------------------------
+
+/// Flips a [`FakeInput`] to observable (and held, if asked) on the `flip_at`-th
+/// sleep and cancels `cancel_at` sleeps later, so the loop's own polling drives
+/// the recovery instead of the test's timing.
+struct FlipInputOnSleep {
+    clock: Arc<VirtualClock>,
+    input: Arc<FakeInput>,
+    flip_at: usize,
+    left_down: bool,
+    cancel_at: usize,
+    token: parking_lot::Mutex<Option<CancelToken>>,
+    sleeps: AtomicUsize,
+}
+
+impl FlipInputOnSleep {
+    fn new(
+        clock: Arc<VirtualClock>,
+        input: Arc<FakeInput>,
+        flip_at: usize,
+        left_down: bool,
+        cancel_at: usize,
+    ) -> Self {
+        Self {
+            clock,
+            input,
+            flip_at,
+            left_down,
+            cancel_at,
+            token: parking_lot::Mutex::new(None),
+            sleeps: AtomicUsize::new(0),
+        }
+    }
+
+    fn attach(&self, token: CancelToken) {
+        *self.token.lock() = Some(token);
+    }
+}
+
+impl crate::clock::Sleeper for FlipInputOnSleep {
+    fn sleep_until(&self, deadline: Instant) {
+        self.clock.sleep_until(deadline);
+        let count = self.sleeps.fetch_add(1, Ordering::AcqRel) + 1;
+        if count == self.flip_at {
+            self.input.set_mouse_unobservable(false);
+            self.input.set_left_down(self.left_down);
+        }
+        if count >= self.cancel_at {
+            if let Some(token) = self.token.lock().as_ref() {
+                token.cancel();
+            }
+        }
+    }
+}
+
+/// A state with one target a little right of centre, so a licensed aim tick moves.
+fn aim_target_state() -> GameState {
+    let mut state = clicking_state();
+    state.viewport_width = 1600;
+    state.viewport_height = 900;
+    state.fov = 70.0;
+    state.entities = vec![EntityInfo {
+        sx: 900.0,
+        sy: 450.0,
+        dist: 3.0,
+        name: "Target".to_owned(),
+        ..EntityInfo::default()
+    }];
+    state
+}
+
+fn aim_config(auto_left_clicking: bool) -> super::aim::AimLoopConfig {
+    super::aim::AimLoopConfig {
+        enabled: true,
+        params: crate::aim_assist::AimAssistParams {
+            width: 1600,
+            height: 900,
+            game_fov: 70.0,
+            aim_assist_fov: 30.0,
+            range: 6.0,
+            strength: 100,
+        },
+        auto_left_clicking,
+    }
+}
+
+#[test]
+fn the_aim_loop_does_not_move_while_the_mouse_is_unobservable() {
+    let clock = Arc::new(VirtualClock::new());
+    // Five 8 ms polls of the reset path: enough ticks that a mistaken "free
+    // button" reading would have produced a move.
+    let sleeper = Arc::new(CancelAfterSleeper::new(clock.clone(), 5));
+    let loop_runtime = LoopRuntime::new(
+        clock.clone(),
+        sleeper.clone(),
+        Box::new(SplitMix64::new(97)),
+    );
+    sleeper.attach(loop_runtime.token().clone());
+    let token = loop_runtime.token().clone();
+
+    let input = FakeInput::new();
+    input.set_mouse_unobservable(true);
+    let sense = StaticSense::new(Some(aim_target_state()));
+    let mut controller = crate::aim_assist::AimAssistMotionController::new();
+
+    super::aim::run(
+        &loop_runtime,
+        &sense,
+        &input,
+        &aim_config(false),
+        &mut controller,
+    );
+
+    assert!(token.is_cancelled());
+    assert_eq!(input.move_count(), 0, "unknown must not license a move");
+    assert_eq!(
+        clock.gaps(),
+        vec![Duration::from_millis(8); 5],
+        "the loop keeps polling rather than breaking out"
+    );
+    assert!(!controller.has_latched_target());
+}
+
+#[test]
+fn the_aim_loop_recovers_when_the_mouse_becomes_observable() {
+    let clock = Arc::new(VirtualClock::new());
+    let input = Arc::new(FakeInput::new());
+    input.set_mouse_unobservable(true);
+    let backend: &dyn InputBackend = input.as_ref();
+    // Unobservable for four polls, then provably held.
+    let sleeper = Arc::new(FlipInputOnSleep::new(
+        clock.clone(),
+        Arc::clone(&input),
+        4,
+        true,
+        12,
+    ));
+    let loop_runtime = LoopRuntime::new(
+        clock.clone(),
+        sleeper.clone(),
+        Box::new(SplitMix64::new(101)),
+    );
+    sleeper.attach(loop_runtime.token().clone());
+    let token = loop_runtime.token().clone();
+
+    let sense = StaticSense::new(Some(aim_target_state()));
+    let mut controller = crate::aim_assist::AimAssistMotionController::new();
+
+    super::aim::run(
+        &loop_runtime,
+        &sense,
+        backend,
+        &aim_config(false),
+        &mut controller,
+    );
+
+    assert!(token.is_cancelled());
+    assert!(
+        input.move_count() >= 1,
+        "the loop must resume once the sample exists again"
+    );
+}
+
+#[test]
+fn the_aim_loop_still_needs_the_hold_when_the_mouse_is_observable() {
+    let clock = Arc::new(VirtualClock::new());
+    let sleeper = Arc::new(CancelAfterSleeper::new(clock.clone(), 5));
+    let loop_runtime = LoopRuntime::new(
+        clock.clone(),
+        sleeper.clone(),
+        Box::new(SplitMix64::new(103)),
+    );
+    sleeper.attach(loop_runtime.token().clone());
+
+    let input = FakeInput::new();
+    // Observable and provably *not* held: the guard is unchanged.
+    input.set_left_down(false);
+    let sense = StaticSense::new(Some(aim_target_state()));
+    let mut controller = crate::aim_assist::AimAssistMotionController::new();
+
+    super::aim::run(
+        &loop_runtime,
+        &sense,
+        &input,
+        &aim_config(false),
+        &mut controller,
+    );
+
+    assert_eq!(input.move_count(), 0);
+}
+
+#[test]
+fn auto_left_clicking_licenses_the_aim_loop_without_an_observation() {
+    let clock = Arc::new(VirtualClock::new());
+    let sleeper = Arc::new(CancelAfterSleeper::new(clock.clone(), 1));
+    let loop_runtime = LoopRuntime::new(
+        clock.clone(),
+        sleeper.clone(),
+        Box::new(SplitMix64::new(107)),
+    );
+    sleeper.attach(loop_runtime.token().clone());
+
+    let input = FakeInput::new();
+    input.set_mouse_unobservable(true);
+    let sense = StaticSense::new(Some(aim_target_state()));
+    let mut controller = crate::aim_assist::AimAssistMotionController::new();
+
+    super::aim::run(
+        &loop_runtime,
+        &sense,
+        &input,
+        &aim_config(true),
+        &mut controller,
+    );
+
+    assert!(
+        input.move_count() >= 1,
+        "the hold the guard asks for comes from the clicker itself, so an \
+         unobservable physical button is not part of the decision"
+    );
+}
+
+/// The clicking triggerbot configuration and state used by the hold-guard tests.
+fn triggerbot_target_state() -> GameState {
+    let mut state = clicking_state();
+    state.viewport_width = 1600;
+    state.viewport_height = 900;
+    state.attack_cooldown = 1.0;
+    state.attack_cooldown_per_tick = 0.05;
+    state.looking_at_entity = true;
+    state.entities = vec![EntityInfo {
+        sx: 800.0,
+        sy: 450.0,
+        dist: 3.0,
+        hp: 20.0,
+        ..EntityInfo::default()
+    }];
+    state
+}
+
+fn triggerbot_config(require_click: bool) -> super::triggerbot::TriggerbotConfig {
+    super::triggerbot::TriggerbotConfig {
+        enabled: true,
+        require_click,
+        only_crosshair: true,
+        only_if_can_attack: true,
+        cooldown_threshold: 90,
+        hit_chance: 100,
+        break_blocks_enabled: false,
+    }
+}
+
+#[test]
+fn the_triggerbot_does_not_fire_while_the_mouse_is_unobservable() {
+    let clock = Arc::new(VirtualClock::new());
+    // 30 polls is 240 ms of virtual time: far past the 45..220 ms reaction window,
+    // so an unlicensed click would have happened.
+    let sleeper = Arc::new(CancelAfterSleeper::new(clock.clone(), 30));
+    let loop_runtime = LoopRuntime::new(
+        clock.clone(),
+        sleeper.clone(),
+        Box::new(SplitMix64::new(109)),
+    );
+    sleeper.attach(loop_runtime.token().clone());
+    let token = loop_runtime.token().clone();
+
+    let input = FakeInput::new();
+    input.set_mouse_unobservable(true);
+    let sense = LiveSense::new(triggerbot_target_state(), &clock);
+
+    super::triggerbot::run(&loop_runtime, &sense, &input, &triggerbot_config(true));
+
+    assert!(token.is_cancelled());
+    assert_eq!(input.click_count(), 0, "unknown must not fire the trigger");
+    assert_eq!(
+        clock.gaps(),
+        vec![Duration::from_millis(8); 30],
+        "the loop keeps polling at the hold guard's cadence"
+    );
+}
+
+#[test]
+fn the_triggerbot_recovers_when_the_mouse_becomes_observable() {
+    let clock = Arc::new(VirtualClock::new());
+    let input = Arc::new(FakeInput::new());
+    input.set_mouse_unobservable(true);
+    let backend: &dyn InputBackend = input.as_ref();
+    // Unobservable for 30 polls, then observable and held for the remaining 200.
+    let sleeper = Arc::new(FlipInputOnSleep::new(
+        clock.clone(),
+        Arc::clone(&input),
+        30,
+        true,
+        230,
+    ));
+    let loop_runtime = LoopRuntime::new(
+        clock.clone(),
+        sleeper.clone(),
+        Box::new(SplitMix64::new(113)),
+    );
+    sleeper.attach(loop_runtime.token().clone());
+    let token = loop_runtime.token().clone();
+
+    let sense = LiveSense::new(triggerbot_target_state(), &clock);
+
+    super::triggerbot::run(&loop_runtime, &sense, backend, &triggerbot_config(true));
+
+    assert!(token.is_cancelled());
+    assert_eq!(
+        input.click_count(),
+        1,
+        "exactly one click once the hold is observable, none before"
+    );
+}
+
+#[test]
+fn the_triggerbot_ignores_an_unobservable_mouse_when_the_hold_guard_is_off() {
+    let clock = Arc::new(VirtualClock::new());
+    let sleeper = Arc::new(CancelAfterSleeper::new(clock.clone(), 120));
+    let loop_runtime = LoopRuntime::new(
+        clock.clone(),
+        sleeper.clone(),
+        Box::new(SplitMix64::new(127)),
+    );
+    sleeper.attach(loop_runtime.token().clone());
+
+    let input = FakeInput::new();
+    input.set_mouse_unobservable(true);
+    let sense = LiveSense::new(triggerbot_target_state(), &clock);
+
+    // `require_click` is what needs the observation; with it off the trigger does
+    // not over-block.
+    super::triggerbot::run(&loop_runtime, &sense, &input, &triggerbot_config(false));
+
+    assert_eq!(input.click_count(), 1);
 }

@@ -205,7 +205,6 @@ dependencies = [
  "aoko-protocol",
  "crossbeam-channel",
  "libc",
- "serde",
  "serde_json",
  "tempfile",
  "tracing",

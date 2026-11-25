@@ -137,6 +137,13 @@ pub struct UiSnapshot {
     pub modules_on: usize,
     /// Whether the platform can drive clicks at all.
     pub can_click: bool,
+    /// Whether the platform can observe the physical buttons and keys at all.
+    ///
+    /// `false` is why the hold guards park instead of acting: on such a session
+    /// the clicker cannot tell a held button from a free one, so automated action
+    /// that needs that proof stays off. The UI shows this next to `can_click` so an
+    /// inactive session is explainable rather than mysterious.
+    pub input_observable: bool,
     /// Whether the bridge transport is usable.
     pub bridge_usable: bool,
     /// Short reasons a control is disabled, for the UI's tooltip.
@@ -205,8 +212,17 @@ impl AppController {
     }
 
     /// Replaces the whole profile, as loading a saved config does.
-    pub fn replace_profile(&self, profile: Profile) {
+    ///
+    /// The apply path normalises dedicated action binds first
+    /// ([`Profile::normalize_action_binds`]): `Profile.cs:889-899` clears both action
+    /// keys, applies every module bind, then only keeps an action key that did not
+    /// collide — general module binds win. The stored profile is the normalised one,
+    /// because the managed `ApplyToClicker` also zeroes the field on the profile it
+    /// was handed. Returns whether anything was changed by normalisation.
+    pub fn replace_profile(&self, mut profile: Profile) -> bool {
+        let normalised = profile.normalize_action_binds();
         *self.profile.write() = profile;
+        normalised
     }
 
     /// Sets one module switch.
@@ -286,6 +302,7 @@ impl AppController {
             screen_name: state.as_ref().map(|state| state.screen_name.clone()),
             modules_on: self.count_enabled_modules(),
             can_click: self.capabilities.input_synthesis,
+            input_observable: self.capabilities.input_observation,
             bridge_usable: self.capabilities.bridge.is_usable(),
             notes: self.capabilities.notes.clone(),
         }
@@ -452,6 +469,44 @@ mod tests {
         assert!(!app.profile().dev_mode);
     }
 
+    /// `AutoRodManagedTests.ProfileConflict_PreservesGeneralBindAndClearsActionBind`
+    /// (`Aoko.Tests/AutoRodManagedTests.cs:117`), on the apply path.
+    #[test]
+    fn applying_a_profile_clears_a_colliding_action_bind_and_keeps_the_module_bind() {
+        let app = AppController::default();
+
+        let mut profile = Profile::default();
+        profile.auto_rod_action_key = 0x52;
+        profile.module_keys.insert(String::from("autorod"), 0x52);
+        assert!(profile.has_action_bind_collision());
+
+        assert!(
+            app.replace_profile(profile),
+            "normalisation must report the change"
+        );
+
+        let applied = app.profile();
+        assert_eq!(
+            applied.module_keys.get("autorod").copied(),
+            Some(0x52),
+            "the general module bind wins and is preserved"
+        );
+        assert_eq!(applied.auto_rod_action_key, 0);
+        assert!(!applied.has_action_bind_collision());
+    }
+
+    #[test]
+    fn applying_a_profile_without_a_collision_leaves_the_action_bind_alone() {
+        let app = AppController::default();
+
+        let mut profile = Profile::default();
+        profile.auto_rod_action_key = 0x53;
+        profile.module_keys.insert(String::from("autorod"), 0x52);
+
+        assert!(!app.replace_profile(profile));
+        assert_eq!(app.profile().auto_rod_action_key, 0x53);
+    }
+
     #[test]
     fn the_game_window_is_chosen_by_title_then_handle() {
         let windows = [
@@ -476,6 +531,17 @@ mod tests {
         assert!(snapshot.can_click);
         assert!(!snapshot.bridge_usable);
         assert!(!snapshot.notes.is_empty());
+        // `transport_only` cannot observe input, so an unobservable session is
+        // explainable from the snapshot instead of looking like a stuck clicker.
+        assert!(!snapshot.input_observable);
+
+        let mut observable = transport_only();
+        observable.input_observation = true;
+        assert!(
+            AppController::new(observable)
+                .ui_snapshot(Instant::now())
+                .input_observable
+        );
 
         assert!(bridge_supported(BridgeSupport::Supported));
         assert!(!bridge_supported(BridgeSupport::UnsupportedOnLinuxYet));

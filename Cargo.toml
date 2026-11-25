@@ -91,3 +91,6 @@ opt-level = 2
 [profile.bench]
 lto = "thin"
 codegen-units = 1
+
+[workspace.lints.cargo]
+unused_workspace_dependencies = "allow"

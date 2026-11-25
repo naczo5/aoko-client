@@ -109,6 +109,31 @@ fn auto_rod_fallback_supports_module_and_config() {
 }
 
 #[test]
+fn auto_tool_is_available_on_all_supported_versions() {
+    // Port of `AutoToolManagedTests.Capabilities_IncludesAutoToolOnAllSupportedVersions`.
+    for version in ["1.8.9", "26.1", "26.2"] {
+        let caps = fallback(version);
+        assert!(caps.supports_module("autotool"), "{version}");
+        for setting in [
+            "autotoolenabled",
+            "autotoolswapweapon",
+            "autotoolinstantswap",
+            "autotoolswaptodelay",
+            "autotoolswapback",
+            "autotoolswapbackdelay",
+            "autotoolrequiremousedown",
+            "autotoolonlysneaking",
+            "autotoolbedwarsmode",
+        ] {
+            assert!(
+                caps.supports_setting(setting),
+                "{version} is missing {setting}"
+            );
+        }
+    }
+}
+
+#[test]
 fn anti_debuff_is_available_on_all_versions() {
     let modern = fallback("26.1");
     let legacy = fallback("1.8.9");

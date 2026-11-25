@@ -677,6 +677,44 @@ impl Profile {
         true
     }
 
+    /// Clears the dedicated Auto Rod and Throwpot action binds when they collide
+    /// with a general module bind.
+    ///
+    /// Mirrors the ordering in `Profile.ApplyTo`: the general module binds are
+    /// applied first and win, so a dedicated bind that duplicates any module bind is
+    /// refused and the stored value reset to `0`. The general bind is always
+    /// preserved. A zero or negative action key never collides, which is also why the
+    /// fresh profile state is a no-op here.
+    ///
+    /// The app layer calls this once, right after it has applied `module_keys` and
+    /// the two action binds; loading a document does not normalise it, so a profile
+    /// file round-trips as stored.
+    ///
+    /// Returns whether anything changed.
+    pub fn normalize_action_binds(&mut self) -> bool {
+        let collides = |key: i32, module_keys: &BTreeMap<String, i32>| {
+            key > 0 && module_keys.values().any(|value| *value == key)
+        };
+
+        let mut changed = false;
+        if collides(self.auto_rod_action_key, &self.module_keys) {
+            self.auto_rod_action_key = 0;
+            changed = true;
+        }
+        if collides(self.throwpot_action_key, &self.module_keys) {
+            self.throwpot_action_key = 0;
+            changed = true;
+        }
+        changed
+    }
+
+    /// Whether a dedicated action bind currently collides with a module bind.
+    #[must_use]
+    pub fn has_action_bind_collision(&self) -> bool {
+        let collides = |key: i32| key > 0 && self.module_keys.values().any(|value| *value == key);
+        collides(self.auto_rod_action_key) || collides(self.throwpot_action_key)
+    }
+
     /// Forced Auto Rod slot, clamped to `[0, 9]`.
     #[must_use]
     pub fn auto_rod_slot_mode(&self) -> i32 {
@@ -1558,8 +1596,17 @@ fn is_invalid_file_name_char(character: char) -> bool {
         )
 }
 
-/// Serialises a profile the way `ProfileManager.JsonOptions` does: camelCase keys
-/// and indented output.
+/// Serialises a profile with camelCase keys and indented output.
+///
+/// The bytes are **not** reproducible from the managed writer, and chasing that would
+/// be wasted work: the eight setter-managed keys are emitted last here (the managed
+/// serialiser follows its own property order), and `f32` values print as `8.0` where
+/// `.NET` prints `8`. Per section 8 of the migration architecture, key order and float
+/// formatting are not part of the profile contract.
+///
+/// The contract we do hold: every key and every value round-trips. A file written by
+/// this function loads back with identical values, a file written by the managed host
+/// loads here, and an untouched profile is written identically across saves.
 #[must_use]
 pub fn to_profile_json(profile: &Profile) -> String {
     serde_json::to_string_pretty(profile).unwrap_or_default()

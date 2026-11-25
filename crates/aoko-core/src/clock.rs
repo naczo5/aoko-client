@@ -7,7 +7,7 @@
 //! through millions of simulated clicks in microseconds.
 //!
 //! Production wires [`SystemClock`], [`ThreadSleeper`] and [`EntropyRng`].
-//! Tests wire [`crate::testing::VirtualClock`] (a clock that only moves when the
+//! Tests wire `crate::testing::VirtualClock` (a clock that only moves when the
 //! sleeper is asked to sleep) and [`SplitMix64`] with a fixed seed.
 //!
 //! The C# originals call `Stopwatch.GetTimestamp()` directly (for example

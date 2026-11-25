@@ -25,10 +25,9 @@ pub const FRAME_HEADER_LEN: usize = 8;
 
 /// Upper bound on a presence payload, so a hostile peer cannot allocate freely.
 ///
-/// The managed client allowed 1 MiB on its read path; a real presence frame is a
-/// few hundred bytes, so the tighter cap is kept and oversized frames are
-/// reported instead of read.
-pub const MAX_FRAME_PAYLOAD: usize = 64 * 1024;
+/// This is the managed `MaxPayloadBytes`: `1024 * 1024`, rejected only when a
+/// length is strictly greater, which is how `DiscordIpcClient` bounded a frame.
+pub const MAX_FRAME_PAYLOAD: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscordFrame {
@@ -292,6 +291,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_read_cap_is_the_managed_one_mebibyte() {
+        // `DiscordRichPresenceService.MaxPayloadBytes` is `1024 * 1024`; anything
+        // tighter would reject frames the managed client accepted.
+        assert_eq!(MAX_FRAME_PAYLOAD, 1024 * 1024);
+    }
 
     #[test]
     fn frame_round_trips_through_header() {

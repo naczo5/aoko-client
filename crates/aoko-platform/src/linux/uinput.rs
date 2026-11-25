@@ -106,12 +106,21 @@ impl UinputDevice {
             .write(true)
             .open(&path)
             .map_err(|err| {
-                let hint = if err.kind() == std::io::ErrorKind::PermissionDenied {
-                    " (add your user to the 'input' group, or install a udev rule granting rw-rw---- on /dev/uinput)"
+                let detail = format!("{}: {err}", path.display());
+                if err.kind() == std::io::ErrorKind::PermissionDenied {
+                    // Only a real `EACCES`/`EPERM` earns the group remedy; a missing
+                    // node means the module is not loaded, which is `Os`, not a
+                    // permission problem.
+                    PlatformError::permission_denied(format!(
+                        "{detail} (add your user to the 'input' group, or install a udev rule \
+                         granting rw-rw---- on /dev/uinput)"
+                    ))
                 } else {
-                    " (the uinput kernel module may not be loaded: modprobe uinput)"
-                };
-                PlatformError::permission_denied(format!("{}: {err}{hint}", path.display()))
+                    PlatformError::os(
+                        "open /dev/uinput",
+                        format!("{detail} (load the module with `modprobe uinput`)"),
+                    )
+                }
             })?;
 
         let descriptor = file.as_raw_fd();

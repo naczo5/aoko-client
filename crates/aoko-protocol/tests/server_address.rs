@@ -136,7 +136,7 @@ fn resolve_for_ping_rejects_garbage_with_the_user_facing_message() {
 
 #[test]
 fn build_srv_query_encodes_the_minecraft_service_name() {
-    let query = build_srv_query("_minecraft._tcp.play.hypixel.net");
+    let query = build_srv_query("_minecraft._tcp.play.hypixel.net").expect("a well-formed name");
 
     assert_eq!(query[0], 0x1C);
     assert_eq!(query[1], 0x0D);
@@ -156,6 +156,28 @@ fn build_srv_query_encodes_the_minecraft_service_name() {
     assert_eq!(query[tail + 3], 0x00);
     assert_eq!(query[tail + 4], 0x01);
     assert_eq!(SRV_TRANSACTION_ID, 0x1C0D);
+}
+
+#[test]
+fn build_srv_query_refuses_a_label_that_does_not_fit_the_length_prefix() {
+    // A DNS label length is one byte. A longer label must refuse rather than wrap to
+    // `len % 256` and send a packet that points at the wrong bytes.
+    let too_long = format!("_minecraft._tcp.{}", "a".repeat(256));
+    assert!(build_srv_query(&too_long).is_none());
+
+    // The boundary still encodes, and the length byte is exact.
+    let at_limit = format!("_minecraft._tcp.{}", "a".repeat(255));
+    let query = build_srv_query(&at_limit).expect("255 bytes still fits");
+    // 12-byte header, then `_minecraft` and `_tcp` each behind a one-byte length.
+    let label_start = 12 + (1 + "_minecraft".len()) + (1 + "_tcp".len());
+    assert_eq!(query[label_start], 255);
+    assert_eq!(
+        &query[label_start + 1..label_start + 256],
+        "a".repeat(255).as_bytes()
+    );
+
+    // And a normal name is unaffected.
+    assert!(build_srv_query(&srv_query_name("play.hypixel.net")).is_some());
 }
 
 #[test]

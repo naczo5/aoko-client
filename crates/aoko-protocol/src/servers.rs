@@ -212,8 +212,13 @@ pub fn try_build_join_request(address: &ServerAddress) -> Option<(String, u16)> 
 ///
 /// Header `(0x1C0D, 0x0100, qdcount 1, 0, 0, 0)`, the label sequence, then
 /// `qtype 33`, `qclass 1`.
+///
+/// `None` when a label does not fit the wire format: the length prefix is one byte,
+/// so a label longer than 255 bytes cannot be encoded and the packet would otherwise
+/// go out malformed. Nothing is sent in that case; the caller drops the SRV lookup and
+/// falls back to the plain host and port.
 #[must_use]
-pub fn build_srv_query(name: &str) -> Vec<u8> {
+pub fn build_srv_query(name: &str) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(64 + name.len());
     out.extend_from_slice(&SRV_TRANSACTION_ID.to_be_bytes());
     out.extend_from_slice(&0x0100u16.to_be_bytes());
@@ -223,14 +228,14 @@ pub fn build_srv_query(name: &str) -> Vec<u8> {
     out.extend_from_slice(&0u16.to_be_bytes());
 
     for label in name.split('.').filter(|label| !label.is_empty()) {
-        out.push(label.len() as u8);
+        out.push(u8::try_from(label.len()).ok()?);
         out.extend_from_slice(label.as_bytes());
     }
 
     out.push(0);
     out.extend_from_slice(&SRV_TYPE.to_be_bytes());
     out.extend_from_slice(&IN_CLASS.to_be_bytes());
-    out
+    Some(out)
 }
 
 /// Reads a SRV answer.

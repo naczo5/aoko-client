@@ -2,17 +2,20 @@
 //!
 //! `ProcessCommandLine.TryGet` reads the target's PEB on x64: `PEB+0x20` is
 //! `RTL_USER_PROCESS_PARAMETERS`, and `CommandLine` is the `UNICODE_STRING` at
-//! `+0x70` (length) / `+0x78` (buffer). The offsets, the Wow64 bail-out and the
-//! 32 KiB cap are the managed values.
+//! `+0x70` (length) / `+0x78` (buffer). The offsets, the 32 KiB cap and the two
+//! width guards are the managed values: a 32-bit host cannot use them at all, and
+//! neither can a WOW64 target, whose PEB is the 32-bit one. Both cases report the
+//! command line as unknown rather than reading it with the wrong layout.
 
 use core::ffi::c_void;
 
-use windows::Win32::Foundation::HANDLE;
+use windows::Win32::Foundation::{BOOL, HANDLE};
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
 use windows::Win32::System::Threading::{
-    OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
+    IsWow64Process, OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
+    PROCESS_VM_READ,
 };
 
 use crate::error::PlatformError;
@@ -154,6 +157,14 @@ pub fn read_command_line(pid: u32) -> Result<String, PlatformError> {
 
     let process = open_for_inspection(pid)?;
 
+    if is_wow64(&process) {
+        return Err(PlatformError::unsupported(format!(
+            "pid {pid} is a 32-bit process running under WOW64, so its PEB uses the 32-bit \
+             layout these x64 offsets do not describe; the command line is reported as \
+             unknown rather than read from the wrong offsets"
+        )));
+    }
+
     let mut info = ProcessBasicInformation {
         reserved1: 0,
         peb_base_address: 0,
@@ -230,6 +241,21 @@ pub fn read_command_line(pid: u32) -> Result<String, PlatformError> {
         )));
     }
     Ok(trimmed.to_string())
+}
+
+/// Whether the target runs under WOW64, i.e. is a 32-bit process on a 64-bit
+/// Windows. `ProcessCommandLine` returned `null` for these because the PEB offsets
+/// it used are the x64 ones and do not describe a 32-bit PEB.
+///
+/// The managed reader wrote `IsWow64Process(handle, out isWow64) && isWow64`, so a
+/// failed probe counted as "not WOW64" and the read continued; a failing probe here
+/// means the handle lacks query rights, which the read below then reports on its own.
+fn is_wow64(process: &OwnedHandle) -> bool {
+    let mut result = BOOL(0);
+    // SAFETY: `result` is a live, correctly sized `BOOL` and `process` is an owned
+    // handle opened with query access, which is what `IsWow64Process` requires.
+    let probed = unsafe { IsWow64Process(process.get(), &mut result) };
+    probed.is_ok() && result.as_bool()
 }
 
 fn open_for_inspection(pid: u32) -> Result<OwnedHandle, PlatformError> {
@@ -310,6 +336,16 @@ mod tests {
     fn our_own_command_line_is_readable() {
         let command_line = read_command_line(std::process::id()).expect("own command line");
         assert!(!command_line.is_empty());
+    }
+
+    #[test]
+    fn the_wow64_guard_is_consulted_and_accepts_this_64_bit_process() {
+        let process = open_for_inspection(std::process::id()).expect("own process handle");
+        // This suite runs as a 64-bit binary, so it cannot itself be a WOW64 target.
+        assert!(!is_wow64(&process), "a 64-bit test host is not under WOW64");
+        // The guard must not reject a target it does not apply to: the very same
+        // handle still feeds a successful PEB read.
+        assert!(read_command_line(std::process::id()).is_ok());
     }
 
     #[test]

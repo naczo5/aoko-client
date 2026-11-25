@@ -256,8 +256,18 @@ pub fn run(
             continue;
         }
 
-        let left_held = input.mouse_state().left_down;
-        if config.require_click && !left_held {
+        // `InputHooks.IsPhysicalLeftButtonDown` (`Clicker.cs:2897-2898`). The
+        // trigger only fires on proof that the user is holding the button, so an
+        // unobservable session (`None`: Wayland plus uinput, or no `/dev/input`
+        // access) must not be read as "not held" and must not be read as "held"
+        // either: it parks, exactly like a proven "not held", but for the recorded
+        // reason. C# only had the always-answering `GetAsyncKeyState`, so the
+        // unknown state is a new-platform decision rather than a parity difference.
+        // The UI explains the inactivity from
+        // `CapabilityReport::input_observation`; do not rewrite this as
+        // `unwrap_or(false)`.
+        let left_held = input.probe_mouse_state().map(|mouse| mouse.left_down);
+        if config.require_click && left_held != Some(true) {
             timing.had_target = false;
             if !runtime.park(NO_TARGET_POLL) {
                 break;

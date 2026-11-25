@@ -268,32 +268,32 @@ impl Default for LinuxInputBackend {
 }
 
 impl InputBackend for LinuxInputBackend {
-    fn mouse_state(&self) -> MouseState {
-        let Some(x11) = self.x11.as_ref() else {
-            return MouseState::default();
-        };
-        let Some((_, _, mask)) = x11.pointer() else {
-            return MouseState::default();
-        };
-        MouseState {
+    fn probe_mouse_state(&self) -> Option<MouseState> {
+        // No display means no way to see buttons at all; that is `None`, not idle.
+        let x11 = self.x11.as_ref()?;
+        let (_, _, mask) = x11.pointer()?;
+        Some(MouseState {
             left_down: mask & 0x0100 != 0,
             right_down: mask & 0x0400 != 0,
-        }
+        })
+    }
+
+    fn mouse_state(&self) -> MouseState {
+        self.probe_mouse_state().unwrap_or_default()
+    }
+
+    fn probe_key_state(&self, key: Key) -> Option<bool> {
+        let x11 = self.x11.as_ref()?;
+        // A key the layout cannot name is unknowable, not up.
+        let code = self.keycode(key)?;
+        let keymap = x11.keymap()?;
+        let index = usize::from(code) / 8;
+        let bit = 1u8 << (code % 8);
+        Some(keymap.get(index).is_some_and(|byte| *byte & bit != 0))
     }
 
     fn key_state(&self, key: Key) -> bool {
-        let Some(x11) = self.x11.as_ref() else {
-            return false;
-        };
-        let Some(code) = self.keycode(key) else {
-            return false;
-        };
-        let Some(keymap) = x11.keymap() else {
-            return false;
-        };
-        let index = usize::from(code) / 8;
-        let bit = 1u8 << (code % 8);
-        keymap.get(index).is_some_and(|byte| *byte & bit != 0)
+        self.probe_key_state(key).unwrap_or(false)
     }
 
     fn click(&self, button: MouseButton) -> Result<(), PlatformError> {
@@ -342,10 +342,13 @@ impl InputBackend for LinuxInputBackend {
                 observer.drain_into(out);
                 Ok(())
             }
+            // `EvdevObserver::start` already distinguishes a real permission
+            // problem (no readable `/dev/input/event*`) from an `Os` failure such as
+            // a thread that would not spawn, so the variant is preserved.
             None => Err(self
                 .observer_error
-                .as_ref()
-                .map_or_else(|| PlatformError::unsupported("no evdev observer"), describe)),
+                .clone()
+                .unwrap_or_else(|| PlatformError::unsupported("no evdev observer"))),
         }
     }
 
@@ -355,10 +358,6 @@ impl InputBackend for LinuxInputBackend {
             .and_then(X11::pointer)
             .map(|(x, y, _)| (x, y))
     }
-}
-
-fn describe(err: &PlatformError) -> PlatformError {
-    PlatformError::permission_denied(err.user_facing())
 }
 
 /// Logical key to X11 keysym.
@@ -439,6 +438,24 @@ mod tests {
             match backend.click(MouseButton::Left) {
                 Ok(()) => assert!(backend.has_uinput()),
                 Err(err) => assert!(!err.user_facing().is_empty()),
+            }
+        }
+    }
+
+    #[test]
+    fn sampling_reports_unknown_rather_than_idle_without_a_display() {
+        let backend = LinuxInputBackend::new();
+        match backend.probe_mouse_state() {
+            Some(state) => {
+                // A display answered, so the answer is definite and the lossy form
+                // must agree with it rather than contradicting it.
+                assert_eq!(backend.mouse_state(), state);
+            }
+            None => {
+                // No display: the honest form is the one a hold guard can branch
+                // on, and the lossy form still degrades to idle.
+                assert_eq!(backend.mouse_state(), MouseState::default());
+                assert_eq!(backend.probe_key_state(Key::Char('a')), None);
             }
         }
     }

@@ -196,7 +196,7 @@ pub struct SlotChoice {
 /// Picks the live slot nearest the cursor.
 ///
 /// `blocked` carries the per-slot retry cooldowns. Slots the bridge no longer
-/// reports are pruned by [`prune_retry_blocks`] before this runs, so a stale entry
+/// reports are pruned by [`RetryBlocks::prune`] before this runs, so a stale entry
 /// cannot hide a slot that came back.
 #[must_use]
 pub fn nearest_live_slot(

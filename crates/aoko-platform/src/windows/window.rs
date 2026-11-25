@@ -282,8 +282,25 @@ mod tests {
     }
 
     #[test]
-    fn a_handle_too_large_for_a_pointer_is_rejected() {
-        assert!(hwnd_from_handle(WindowHandle(u64::MAX)).is_none());
+    fn a_handle_that_does_not_fit_a_pointer_is_rejected() {
+        let oversized = WindowHandle(u64::MAX);
+        // Whether `u64::MAX` fits is exactly the pointer-width question, so each
+        // width asserts its own half rather than assuming the other one.
+        #[cfg(target_pointer_width = "64")]
+        {
+            // Every u64 is a valid pointer value here, so it must survive intact
+            // instead of being rejected or truncated.
+            assert_eq!(
+                hwnd_from_handle(oversized).map(|window| window.0 as usize),
+                Some(usize::MAX)
+            );
+        }
+        #[cfg(target_pointer_width = "32")]
+        {
+            // A 32-bit pointer cannot represent it, so the conversion must fail
+            // rather than silently truncate.
+            assert!(hwnd_from_handle(oversized).is_none());
+        }
     }
 
     #[test]

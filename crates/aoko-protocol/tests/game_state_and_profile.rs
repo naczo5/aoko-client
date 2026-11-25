@@ -7,7 +7,8 @@
 //! pinned here, while `InitializeProfileDirectory`/`TryWriteProfile` do file I/O and
 //! belong to `aoko-platform`.
 
-use aoko_protocol::config_payload::module_list_style_to_index;
+use aoko_protocol::config_payload::{module_list_style_to_index, ConfigPayload};
+use aoko_protocol::hud::HudLayout;
 use aoko_protocol::profile::{
     get_legacy_profiles_directory, get_profiles_directory, load_profile_from_json, to_profile_json,
     Profile,
@@ -379,6 +380,35 @@ fn profile_new_modules_default_false_and_serialize_round_trip() {
         let round = load_profile_from_json(&to_profile_json(&enabled_profile)).expect("profile");
         assert!(is_enabled(&round), "{json_key} must survive the round trip");
     }
+}
+
+#[test]
+fn config_payload_defaults_dash_the_gtb_strings() {
+    // `Clicker` initialises `_gtbCurrentHint` and `_gtbMatchesPreview` to `"-"`, not to
+    // an empty string: the shipped UI renders a dash until the solver has a hint, and
+    // the bridge parses whatever config it is given.
+    let payload = ConfigPayload::default();
+
+    assert_eq!(payload.gtb_hint, "-");
+    assert_eq!(payload.gtb_preview, "-");
+    assert_eq!(payload.gtb_count, 0);
+
+    let line = payload.to_line(&HudLayout::default());
+    assert!(
+        line.contains("\"gtbHint\":\"-\""),
+        "{}",
+        &line[..line.len().min(200)]
+    );
+    assert!(
+        line.contains("\"gtbPreview\":\"-\""),
+        "{}",
+        &line[..line.len().min(200)]
+    );
+    assert!(
+        line.contains("\"gtbCount\":0"),
+        "{}",
+        &line[..line.len().min(200)]
+    );
 }
 
 #[test]

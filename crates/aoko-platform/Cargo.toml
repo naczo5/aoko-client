@@ -9,12 +9,15 @@ description = "OS abstraction layer: process/window inspection, input, native br
 
 [dependencies]
 aoko-protocol = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
-windows = { workspace = true }
+windows = { workspace = true, features = [
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = { workspace = true, features = ["xtest"] }
@@ -23,3 +26,6 @@ crossbeam-channel = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[lints]
+workspace = true

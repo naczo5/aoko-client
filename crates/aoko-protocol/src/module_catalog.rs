@@ -6,7 +6,7 @@
 //! The managed entry carried a `Func<Clicker, bool>`; this crate must not depend
 //! on the clicker, so each entry names an [`EnabledFlag`] instead and the caller
 //! resolves it against its own state. `ModuleRegistrationTests` checks that
-//! contract, and so does [`module_catalog`]'s own test suite.
+//! contract, and so does [`crate::module_catalog`]'s own test suite.
 
 /// Which surfaces a module must appear on.
 ///

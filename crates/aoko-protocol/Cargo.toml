@@ -10,3 +10,6 @@ description = "Wire protocol, game state, profile and module catalog for the Aok
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+[lints]
+workspace = true

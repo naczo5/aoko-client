@@ -11,11 +11,12 @@ mod injector;
 mod input;
 mod process;
 mod raw;
+mod srv;
 mod window;
 
 pub use discord::WindowsDiscordTransport;
 pub use injector::WindowsBridgeInjector;
-pub use input::{install_hooks, uninstall_hooks, WindowsInputBackend};
+pub use input::{install_hooks, uninstall_hooks, HookGuard, WindowsInputBackend};
 pub use process::{read_command_line, WindowsProcessInspector};
 pub use window::{process_image_name, window_title, WindowsWindowInspector};
 
@@ -26,10 +27,18 @@ use crate::capabilities::{BridgeSupport, CapabilityReport, SessionKind};
 #[must_use]
 pub fn probe_capabilities() -> CapabilityReport {
     let discord_pipes = WindowsDiscordTransport::available_pipe_count();
+    let dns_servers = srv::collect_system_dns_servers().len();
     let mut notes = Vec::new();
 
     if discord_pipes == 0 {
         notes.push("no Discord IPC pipe found; Discord is probably not running".to_string());
+    }
+    if dns_servers == 0 {
+        notes.push(
+            "no DNS server on an active adapter; SRV lookups will ask the public resolvers \
+             8.8.8.8 and 1.1.1.1"
+                .to_string(),
+        );
     }
     notes.push(
         "bridge injection needs the host and the game at the same integrity level".to_string(),
@@ -42,6 +51,7 @@ pub fn probe_capabilities() -> CapabilityReport {
         input_observation: true,
         input_synthesis: true,
         discord_rpc: discord_pipes > 0,
+        srv_resolution: true,
         bridge: BridgeSupport::Supported,
         notes,
     }
@@ -56,6 +66,7 @@ pub fn services() -> crate::PlatformServices {
         input: Box::new(WindowsInputBackend::new()),
         injector: Box::new(WindowsBridgeInjector::new()),
         discord: Box::new(WindowsDiscordTransport::new()),
+        srv: crate::SrvResolver::new(srv::collect_system_dns_servers()),
         capabilities: probe_capabilities(),
     }
 }

@@ -56,7 +56,7 @@ pub const CANCEL_SLICE: Duration = Duration::from_millis(25);
 /// Everything that is not in [`aoko_protocol::state::GameState`] but that the C#
 /// loops query directly — `WindowDetection.IsMinecraftActive`, `IsCursorVisible`,
 /// `GameStateClient.SupportsModule` — is here. The production implementation is
-/// [`StoreSense`]; a test can implement the trait over fixed values.
+/// [`crate::app::StoreSense`]; a test can implement the trait over fixed values.
 pub trait LoopSense: Send + Sync {
     /// Latest state snapshot, `None` before the first bridge message.
     fn snapshot(&self) -> Option<Arc<StateSnapshot>>;
@@ -92,6 +92,22 @@ pub trait LoopSense: Send + Sync {
     /// The snapshot when it is younger than `max_age_ms`, else `None`.
     ///
     /// One atomic load, so the loop cannot observe a torn state/age pair.
+    ///
+    /// # `stateMs` versus receive time
+    ///
+    /// The managed loops measure age two ways (`Clicker.cs:2686-2693`): from the
+    /// bridge's own `StateMs` when it is non-zero, else from
+    /// `DateTime.Now - state.LastUpdate`. This crate uses the third equivalent:
+    /// the [`Instant`] the ingest side stamped the snapshot with.
+    ///
+    /// That is deliberate, not an oversight. `StateMs` is `Environment.TickCount64`
+    /// *on the bridge's machine*: it shares no epoch with this process, so using it
+    /// would require a clock-offset estimate and would inherit any skew between the
+    /// two. The receive instant is always within one frame of the send instant, is
+    /// the same quantity the `LastUpdate` fallback measures, and — being a
+    /// monotonic [`Instant`] — cannot be moved by a wall-clock adjustment. The
+    /// difference is bounded by the IPC latency, which is far below every freshness
+    /// threshold in use (35 ms for the triggerbot is the tightest).
     fn fresh_state(&self, now: Instant, max_age_ms: u64) -> Option<Arc<StateSnapshot>> {
         let snapshot = self.snapshot()?;
         let age = now.saturating_duration_since(snapshot.at).as_millis() as u64;
@@ -438,6 +454,16 @@ impl ClickerLoops {
             .count()
     }
 
+    /// How many thread handles this bundle still owns, whether or not their bodies
+    /// are executing.
+    #[must_use]
+    pub fn owned(&self) -> usize {
+        self.handles
+            .iter()
+            .filter(|handle| handle.owns_thread())
+            .count()
+    }
+
     /// Registered names, in start order.
     #[must_use]
     pub fn names(&self) -> Vec<&str> {
@@ -502,6 +528,9 @@ pub struct LoopHandle {
     name: String,
     token: CancelToken,
     thread: Option<std::thread::JoinHandle<()>>,
+    /// Cleared the instant the body returns, so a body that finished on its own is
+    /// not reported as running.
+    live: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl LoopHandle {
@@ -519,10 +548,17 @@ impl LoopHandle {
     {
         let name = name.into();
         let token = runtime.token().clone();
+        let live = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let body_live = Arc::clone(&live);
         let thread_name = format!("aoko-{name}");
         let thread = std::thread::Builder::new()
             .name(thread_name)
-            .spawn(move || body(&runtime))
+            .spawn(move || {
+                // A drop guard, so a body that panics is not reported as running
+                // either.
+                let _guard = LiveGuard(body_live);
+                body(&runtime);
+            })
             .map_err(|source| LoopSpawnError {
                 name: name.clone(),
                 source,
@@ -531,6 +567,7 @@ impl LoopHandle {
             name,
             token,
             thread: Some(thread),
+            live,
         })
     }
 
@@ -546,9 +583,20 @@ impl LoopHandle {
         &self.name
     }
 
-    /// Whether the thread is still owned, i.e. [`Self::stop`] has not run.
+    /// Whether the body is still executing.
+    ///
+    /// This is liveness, not ownership: a body that returned on its own (for
+    /// example one whose loop condition was already false) reports `false` even
+    /// though its thread handle is still held until [`Self::stop`].
     #[must_use]
     pub fn is_running(&self) -> bool {
+        self.live.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Whether this handle still owns a thread handle, i.e. [`Self::stop`] has not
+    /// run yet.
+    #[must_use]
+    pub fn owns_thread(&self) -> bool {
         self.thread.is_some()
     }
 
@@ -561,6 +609,15 @@ impl LoopHandle {
             // waits for the thread to finish.
             let _ = thread.join();
         }
+    }
+}
+
+/// Clears a liveness flag when the body leaves its scope.
+struct LiveGuard(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for LiveGuard {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Release);
     }
 }
 

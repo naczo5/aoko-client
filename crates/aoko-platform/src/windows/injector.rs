@@ -10,7 +10,6 @@
 
 use std::path::Path;
 
-use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Foundation::WAIT_OBJECT_0;
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows::Win32::System::Memory::{
@@ -54,11 +53,10 @@ impl NativeBridgeInjector for WindowsBridgeInjector {
         // The remote side receives an ANSI path because the thread entry point is
         // `LoadLibraryA`, exactly as the managed injector sends it.
         let remote_path = library.to_string_lossy();
-        let mut path_bytes = remote_path.as_bytes().to_vec();
-        path_bytes.push(0);
+        let path_bytes = ascii_path_bytes(library);
 
         let process = open_target(pid)?;
-        let allocation = RemoteAllocation::new(process.get(), path_bytes.len())?;
+        let allocation = RemoteAllocation::new(&process, path_bytes.len())?;
 
         let mut written = 0usize;
         // SAFETY: `allocation` covers `path_bytes.len()` bytes of committed,
@@ -169,18 +167,23 @@ fn load_library_a_address() -> Result<LPTHREAD_START_ROUTINE, PlatformError> {
 }
 
 /// Remote memory that frees itself with `MEM_RELEASE`, the C# `finally` block.
-struct RemoteAllocation {
-    process: HANDLE,
+///
+/// The process handle is borrowed rather than copied, so the borrow checker - not
+/// the order of two `let` statements - guarantees the handle outlives the
+/// allocation. A copy would make the `Drop` `VirtualFreeEx` a use-after-close the
+/// moment the two declarations were swapped.
+struct RemoteAllocation<'a> {
+    process: &'a OwnedHandle,
     address: *mut core::ffi::c_void,
 }
 
-impl RemoteAllocation {
-    fn new(process: HANDLE, size: usize) -> Result<Self, PlatformError> {
+impl<'a> RemoteAllocation<'a> {
+    fn new(process: &'a OwnedHandle, size: usize) -> Result<Self, PlatformError> {
         // SAFETY: a null requested address lets the OS choose, and the size and
         // protection flags are the documented pair for a writable scratch buffer.
         let address = unsafe {
             VirtualAllocEx(
-                process,
+                process.get(),
                 None,
                 size,
                 MEM_COMMIT | MEM_RESERVE,
@@ -197,16 +200,60 @@ impl RemoteAllocation {
     }
 }
 
-impl Drop for RemoteAllocation {
+impl Drop for RemoteAllocation<'_> {
     fn drop(&mut self) {
         if self.address.is_null() {
             return;
         }
-        // SAFETY: `address` came from `VirtualAllocEx` on this same process handle
-        // and has not been freed; `MEM_RELEASE` requires a zero size.
+        // SAFETY: `address` came from `VirtualAllocEx` on `self.process`, whose
+        // borrow the compiler enforces is still live here, and has not been freed;
+        // `MEM_RELEASE` requires a zero size.
         unsafe {
-            let _ = VirtualFreeEx(self.process, self.address, 0, MEM_RELEASE);
+            let _ = VirtualFreeEx(self.process.get(), self.address, 0, MEM_RELEASE);
         }
         self.address = core::ptr::null_mut();
+    }
+}
+
+/// `Encoding.ASCII.GetBytes(path + "\0")`: one byte per char, with every
+/// non-ASCII char replaced by `?`, which is how .NET's ASCII encoder behaves.
+///
+/// UTF-8 bytes would differ for any non-ASCII path, and `LoadLibraryA` reads the
+/// buffer in the ANSI code page, so the managed encoding is the one to match.
+fn ascii_path_bytes(path: &Path) -> Vec<u8> {
+    let text = path.to_string_lossy();
+    let mut bytes = Vec::with_capacity(text.len() + 1);
+    for character in text.chars() {
+        let code = u32::from(character);
+        bytes.push(if code < 0x80 { code as u8 } else { b'?' });
+    }
+    bytes.push(0);
+    bytes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_remote_path_is_ascii_with_a_terminator() {
+        let bytes = ascii_path_bytes(Path::new(r"C:\bridge\aoko.dll"));
+        assert_eq!(bytes, b"C:\\bridge\\aoko.dll\0");
+    }
+
+    #[test]
+    fn a_non_ascii_path_is_question_marked_like_the_managed_encoder() {
+        // .NET's ASCII encoder emits one `?` per non-ASCII char; UTF-8 would emit
+        // two bytes here and `LoadLibraryA` would read a different path.
+        let bytes = ascii_path_bytes(Path::new("C:/a/b\u{00ef}c.dll"));
+        assert_eq!(bytes, b"C:/a/b?c.dll\0");
+    }
+
+    #[test]
+    fn a_missing_library_is_reported_before_any_process_is_opened() {
+        let err = WindowsBridgeInjector::new()
+            .inject(1, Path::new(r"C:\definitely\not\here.dll"))
+            .expect_err("missing library");
+        assert!(matches!(err, PlatformError::NotFound { .. }));
     }
 }

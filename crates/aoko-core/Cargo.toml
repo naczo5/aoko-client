@@ -27,3 +27,6 @@ rand = { workspace = true }
 [dev-dependencies]
 rand_chacha = { workspace = true }
 tempfile = { workspace = true }
+
+[lints]
+workspace = true

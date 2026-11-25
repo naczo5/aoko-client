@@ -17,6 +17,7 @@ mod error;
 mod input;
 mod netstat;
 mod process;
+mod srv;
 mod tcp;
 mod version;
 mod window;
@@ -42,6 +43,10 @@ pub use process::{
     compare_ignore_case, describe_target, is_java_process_name, select_best_window, sort_targets,
     ClientType, DiscoveryTarget, InstanceCandidate, ProcessInfo, ProcessInspector,
 };
+pub use srv::{
+    Clock as SrvClock, SrvExchange, SrvLookupCache, SrvResolver, SrvTarget, UdpExchange, DNS_PORT,
+    SRV_FAILURE_TTL, SRV_SUCCESS_TTL, SRV_TIMEOUT,
+};
 pub use tcp::{TcpBridgeTransport, BRIDGE_ADDRESS, SEND_TIMEOUT};
 pub use version::{normalize_detected_version, resolve_bridge_dll_name, try_parse_version};
 pub use window::{sort_windows, Rect, WindowHandle, WindowInfo, WindowInspector};
@@ -51,7 +56,7 @@ pub use evdev_table::{code_for_key, key_from_code};
 
 #[cfg(windows)]
 pub use windows::{
-    install_hooks, process_image_name, read_command_line, uninstall_hooks, window_title,
+    install_hooks, process_image_name, read_command_line, uninstall_hooks, window_title, HookGuard,
     WindowsBridgeInjector, WindowsDiscordTransport, WindowsInputBackend, WindowsProcessInspector,
     WindowsWindowInspector,
 };
@@ -130,6 +135,8 @@ pub struct PlatformServices {
     pub input: Box<dyn InputBackend>,
     pub injector: Box<dyn NativeBridgeInjector>,
     pub discord: Box<dyn DiscordRpcTransport>,
+    /// SRV resolution for a host entered without an explicit port.
+    pub srv: SrvResolver,
     pub capabilities: CapabilityReport,
 }
 
@@ -174,6 +181,9 @@ pub fn default_services() -> PlatformServices {
             input: Box::new(UnsupportedInput),
             injector: Box::new(UnsupportedInjector),
             discord: Box::new(UnsupportedDiscord),
+            // SRV needs only a UDP socket, so the public resolvers still work
+            // where no OS service exists.
+            srv: SrvResolver::new(Vec::new()),
             capabilities: probe_capabilities(),
         }
     }

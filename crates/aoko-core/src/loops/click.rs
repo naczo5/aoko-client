@@ -150,18 +150,21 @@ pub fn run(
     timing: &mut AdvancedClickTimingState,
 ) {
     let mut next_deadline: Option<Instant> = None;
+    // The not-connected state, built once: no snapshot is not "do nothing", it is
+    // the managed not-connected branch (`Clicker.cs:3175-3183`), which only delays
+    // when the cursor is *visible* and falls straight through into the click logic
+    // when it is hidden. That is what keeps standalone (un-injected) clicking
+    // alive, and `decide` already models it from `GameState::is_connected`, so the
+    // default state is fed in rather than short-circuiting here.
+    let disconnected = aoko_protocol::state::GameState::default();
 
     while !runtime.is_cancelled() {
         let now = runtime.now();
 
-        // The guards need a connected state. Without one the managed loop still
-        // polls the cursor, so a missing snapshot is the 100 ms not-connected path.
-        let Some(snapshot) = sense.snapshot() else {
-            if !runtime.park(crate::clicker::tick::NOT_FOREGROUND_POLL) {
-                break;
-            }
-            continue;
-        };
+        let snapshot = sense.snapshot();
+        let state = snapshot
+            .as_ref()
+            .map_or(&disconnected, |snapshot| &*snapshot.state);
 
         let mut guards = config.guards;
         guards.injected = sense.is_injected();
@@ -170,7 +173,7 @@ pub fn run(
             cursor_visible: sense.cursor_visible(),
         };
 
-        match decide(&snapshot.state, &guards, context, config.left_button) {
+        match decide(state, &guards, context, config.left_button) {
             TickDecision::Wait(delay) => {
                 if !runtime.park(delay) {
                     break;
