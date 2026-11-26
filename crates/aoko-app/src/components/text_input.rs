@@ -23,23 +23,39 @@
 //!
 //! # Why a key handler is not optional here
 //!
-//! Registering the handler is enough for paste, IME and native text services, but it
-//! is not enough to type on every Linux backend:
+//! Two routes can put a character into this field. They are not the same route, and an
+//! earlier revision of this comment got the second one wrong, so both are spelled out
+//! with what the pin actually does:
 //!
-//! - **Wayland** dispatches a typed character to the registered handler itself
-//!   (`gpui_linux/src/linux/wayland/window.rs:1616-1631`, after the app callback
-//!   returns `propagate`): `input_handler.replace_text_in_range(None, key_char)`.
-//! - **X11** does not. `gpui_linux/src/linux/x11/client.rs:1207` only forwards
-//!   `PlatformInput::KeyDown` into the window, and `Window::finish_dispatch_key_event`
-//!   (`gpui/src/window.rs:6879`) ends at key listeners and observers without ever
-//!   calling `dispatch_input`. The only in-tree `dispatch_input` callers are the
-//!   programmatic ones: `Window::dispatch_keystroke` (`window.rs:6195`) and replay of
-//!   a pending chord (`window.rs:7107`).
+//! - **The platform's post-callback fallback.** `x11/window.rs:1230-1243` and
+//!   `wayland/window.rs:1622-1632` both call `replace_text_in_range(None, key_char)` on
+//!   the window's stored input handler, *after* the app's input callback returns and
+//!   only if it propagated. `gpui` installs that handler at the end of every draw
+//!   (`window.rs:3917-3925`), so it is live on **both** Linux backends — not Wayland
+//!   only. A handler-only field would insert typed characters under Xvfb as well.
+//! - **This component's `on_key_down`.** `PlatformInput::KeyDown` reaches
+//!   `Window::dispatch_event` (`window.rs:6220`) → `dispatch_key_event`
+//!   (`window.rs:6647`) → `finish_dispatch_key_event` (`window.rs:6867`), which ends at
+//!   key listeners and observers and never calls `dispatch_input`. The listener edits
+//!   from `KeyDownEvent::keystroke.key_char`.
 //!
-//! So a field that relied on `EntityInputHandler` alone would take keystrokes on
-//! Wayland and silently swallow them under Xvfb. This component does both: the key
-//! handler edits from `KeyDownEvent::keystroke.key_char` (which the X11 backend does
-//! populate), and the registered handler covers paste, IME and the Wayland path.
+//! The listener is what makes the field an *editor*: the fallback only ever sees
+//! `key_char`, so Backspace, Delete, Left, Right, Home and End — none of which carry a
+//! printable character — would do nothing under either backend without it. And because
+//! the listener calls `stop_propagation`, the two routes never both edit one keystroke:
+//! the fallback is skipped exactly when the listener took the key.
+//!
+//! `TestPlatform` implements no post-callback fallback (`platform/test/window.rs` has
+//! no `handle_input` and no `replace_text_in_range`), so a raw `PlatformInput::KeyDown`
+//! in a test reaches the listener and nothing else. Measured by deleting the
+//! `on_key_down` handling and re-running: `a_raw_key_down_edits_through_the_key_listener`
+//! fails on its first assertion — `propagate` comes back `true` and nothing was typed.
+//! `Window::dispatch_keystroke` (`window.rs:6178-6201`) does run the handler itself
+//! afterwards, so the `dispatch_keystroke` tests insert characters either way and only
+//! the `key_char`-less keys distinguish the routes there; that is why the older
+//! `a_keystroke_reaches_the_field_through_the_key_listener` does break in the same
+//! experiment but only at its Backspace step, with a message that names the edit rather
+//! than the missing route.
 //!
 //! # What this does not do yet
 //!
@@ -869,9 +885,136 @@ mod tests {
         assert_eq!(display, ("•••".to_owned(), String::new()));
     }
 
-    /// A window whose only content is the field under test.
+    /// The test that fails when the `on_key_down` handling is removed.
+    ///
+    /// It feeds `PlatformInput::KeyDown` straight into `Window::dispatch_event`
+    /// (`window.rs:6220`), which is the shape the X11 backend delivers
+    /// (`x11/client.rs:1207`) and which ends at key listeners: no `dispatch_input`, and
+    /// `TestPlatform` has no post-callback fallback to fall back on, so only the listener
+    /// can edit here. `Window::dispatch_keystroke` (`window.rs:6178-6201`) instead runs
+    /// the handler itself after the listener propagates, which is why the
+    /// `dispatch_keystroke` tests above fail late — at Backspace — rather than on the
+    /// first character when this handling is removed: characters have a second route,
+    /// the `key_char`-less keys do not.
+    ///
+    /// A character first, then the `key_char`-less keys — Left, Home, Backspace,
+    /// Delete — which no platform fallback could ever produce.
+    #[test]
+    fn a_raw_key_down_edits_through_the_key_listener() {
+        use gpui::TestAppContext;
+
+        let mut cx = TestAppContext::single();
+        let (form, window) = form_window(&mut cx, "raw", false);
+        focus_field(&window, &form, &mut cx);
+        let handle: gpui::AnyWindowHandle = window.into();
+
+        let result = dispatch_key(&mut cx, handle, "a", Some("a"));
+        assert!(
+            !result.propagate,
+            "the listener consumes the key it edits, so the platform fallback cannot insert \
+             the same character a second time"
+        );
+        assert_eq!(
+            value(&cx, &form),
+            "a",
+            "a typed character reaches the value through the listener"
+        );
+
+        dispatch_key(&mut cx, handle, "b", Some("b"));
+        assert_eq!(value(&cx, &form), "ab");
+
+        dispatch_key(&mut cx, handle, "left", None);
+        assert_eq!(caret(&cx, &form), 1, "Left moves the caret");
+
+        dispatch_key(&mut cx, handle, "x", Some("x"));
+        assert_eq!(value(&cx, &form), "axb", "typing inserts at the caret");
+
+        dispatch_key(&mut cx, handle, "backspace", None);
+        assert_eq!(
+            value(&cx, &form),
+            "ab",
+            "Backspace deletes behind the caret"
+        );
+
+        dispatch_key(&mut cx, handle, "home", None);
+        dispatch_key(&mut cx, handle, "delete", None);
+        assert_eq!(value(&cx, &form), "b", "Delete removes ahead of the caret");
+
+        assert_eq!(
+            changes(&cx, &form),
+            ["a", "ab", "axb", "ab", "b"],
+            "every edit reaches the owner through the callback, in order"
+        );
+    }
+
+    /// The other route: what paste, IME and the platform fallback call. It has to edit
+    /// and report through `on_change` with no keystroke listener involved at all.
+    #[test]
+    fn the_registered_input_handler_edits_on_the_paste_path() {
+        use gpui::TestAppContext;
+
+        let mut cx = TestAppContext::single();
+        let (form, window) = form_window(&mut cx, "paste", false);
+        focus_field(&window, &form, &mut cx);
+        let field = cx.read(|cx| form.read(cx).field.clone());
+
+        window
+            .update(&mut cx, |_, window, cx| {
+                field.update(cx, |field, cx| {
+                    field.replace_text_in_range(None, "pasted", window, cx);
+                });
+            })
+            .expect("handler edit");
+
+        assert_eq!(value(&cx, &form), "pasted");
+        assert_eq!(
+            caret(&cx, &form),
+            6,
+            "the caret follows a committed insertion"
+        );
+        assert_eq!(
+            changes(&cx, &form),
+            ["pasted"],
+            "the handler route reports to the owner too"
+        );
+    }
+
+    /// One `KeyDown`, delivered the way the backend delivers it: a `key_char` for a
+    /// character key, `None` for Backspace, arrows, Home and End. The keys are
+    /// `&'static str` because `Keystroke::parse` requires it.
+    ///
+    /// `TestAppContext::update_window` is used rather than `WindowHandle::update`
+    /// because the latter leases the root view for the whole closure, and dispatching a
+    /// key event updates that root: `cannot update ... while it is already being
+    /// updated`.
+    fn dispatch_key(
+        cx: &mut gpui::TestAppContext,
+        window: gpui::AnyWindowHandle,
+        key: &'static str,
+        key_char: Option<&'static str>,
+    ) -> gpui::DispatchEventResult {
+        use gpui::{KeyDownEvent, Keystroke, PlatformInput};
+
+        let mut keystroke = Keystroke::parse(key).expect("keystroke");
+        keystroke.key_char = key_char.map(Into::into);
+        cx.update_window(window, |_, window, cx| {
+            window.dispatch_event(
+                PlatformInput::KeyDown(KeyDownEvent {
+                    keystroke,
+                    is_held: false,
+                    prefer_character_input: false,
+                }),
+                cx,
+            )
+        })
+        .expect("dispatch")
+    }
+
+    /// A window whose only content is the field under test, plus the values the field
+    /// reported through `on_change` in the order it reported them.
     struct Form {
         field: gpui::Entity<TextInput>,
+        changes: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     }
 
     impl Render for Form {
@@ -892,9 +1035,19 @@ mod tests {
         use gpui::WindowOptions;
 
         let form = cx.update(|cx| {
-            cx.new(|cx| Form {
-                field: cx.new(|cx| TextInput::new(cx, Theme::slate(), placeholder).masked(masked)),
-            })
+            let changes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let recorded = changes.clone();
+            let field = cx.new(|cx| {
+                TextInput::new(cx, Theme::slate(), placeholder)
+                    .masked(masked)
+                    .on_change(move |value, _, _| {
+                        recorded
+                            .lock()
+                            .expect("changes lock")
+                            .push(value.to_string());
+                    })
+            });
+            cx.new(|_| Form { field, changes })
         });
         let window = cx.update(|cx| {
             cx.open_window(WindowOptions::default(), |_, _| form.clone())
@@ -920,5 +1073,10 @@ mod tests {
 
     fn caret(cx: &gpui::TestAppContext, form: &gpui::Entity<Form>) -> usize {
         cx.read(|cx| form.read(cx).field.read(cx).edit().caret())
+    }
+
+    /// The values the field reported through `on_change`, oldest first.
+    fn changes(cx: &gpui::TestAppContext, form: &gpui::Entity<Form>) -> Vec<String> {
+        cx.read(|cx| form.read(cx).changes.lock().expect("changes lock").clone())
     }
 }
