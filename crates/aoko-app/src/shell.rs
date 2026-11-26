@@ -48,7 +48,8 @@ use std::time::Instant;
 
 use gpui::prelude::*;
 use gpui::{
-    div, px, AnyElement, Context, Entity, KeyDownEvent, MouseButton, Render, SharedString, Window,
+    div, px, AnyElement, App, Context, Entity, KeyDownEvent, MouseButton, Render, SharedString,
+    Window,
 };
 
 use aoko_core::app::AppController;
