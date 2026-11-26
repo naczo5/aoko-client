@@ -1,35 +1,24 @@
-//! The Stats tab's pixels: `Aoko/MainWindow.xaml:1438-1521` over a live
+//! The Stats tab's pixels: `Aoko/MainWindow.xaml:1438-1521` over the runtime's live
 //! [`StatsTracker`].
 //!
-//! **Not mounted in Phase 2** (section 12 decision 7). Nothing in `shell.rs` calls
-//! [`render`]: the Stats tab still goes through the reduced card table in
-//! [`card_copy::STATS`], because the tracker these numbers come from is owned by the
-//! runtime — `aoko_protocol::stats::StatsTracker`, fed from `ServerMessage` — and
-//! threading it to the shell is the controller's call to sequence, not this file's.
-//! The view is correct and unmounted rather than mounted and lying.
+//! # Mounted, and reading the one copy
 //!
-//! # What the shell needs to do
+//! `shell.rs:1437-1448` is the Stats arm of the tab-body match, and it calls [`render`] with
+//! `&self.runtime.stats()`. There is deliberately no `stats` field on `Shell`: the tracker
+//! lives in [`crate::runtime::Runtime`], which the loop bodies write to through their click
+//! sink and which `Runtime::sample_playtime` advances from the shell's per-frame tick, and
+//! `Runtime::stats()` lends it as a `MutexGuard`. A field beside it would be the stale second
+//! source this wiring exists to avoid.
 //!
-//! Three edits, none of them here:
+//! "Reset Stats" reports outward through `Shell::reset_stats` (`shell.rs:828`), which calls
+//! `Runtime::reset_stats()`, repaints only when that cleared something, and leaves the next
+//! frame to compose from the cleared tracker. This file keeps nothing between frames: every
+//! number is read from the guard during `render`.
 //!
-//! 1. A `stats` field on `Shell`, holding the `StatsTracker` the runtime already owns.
-//! 2. A `TabBody::Stats` variant in [`card_copy::TabBody`] for the Stats tab to name.
-//!    That is a third variant in an enum `shell.rs` matches exhaustively, so the shell
-//!    gains an arm in the same commit or the workspace stops compiling — which is why
-//!    it is not added from this side.
-//! 3. One arm beside the Accounts and Servers arms (`shell.rs:1404-1421`):
-//!
-//!    ```ignore
-//!    Some(TabBody::Stats) => crate::views::stats_view::render(
-//!        &self.stats,
-//!        theme,
-//!        self.tab,
-//!        move |_, window, cx| {
-//!            let handle = entity.clone();
-//!            handle.update(cx, |shell, cx| shell.reset_stats(window, cx));
-//!        },
-//!    ),
-//!    ```
+//! Nothing here is waiting on a shell edit. The `TabBody::Stats` variant this needs is in
+//! [`card_copy::TabBody`], and every exhaustive match over that enum already accounts for
+//! it: the shell's render arm (`shell.rs:1438`), the two shell tests that skip the non-card
+//! tabs, and the two coverage matches in [`crate::views::bindings`].
 //!
 //! # What is painted, and from where
 //!
