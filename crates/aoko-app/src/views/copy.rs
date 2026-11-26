@@ -202,7 +202,7 @@ pub const COMBAT: &[Card] = &[
             Keybind { module: "autorod" },
             Switch { label: "Auto Rod", bind: "AutoRodEnabled" },
             Availability { text: "Available", bind: "AutoRodAvailabilityText" },
-            Combo { label: "", bind: "AutoRodSlotMode", options: &["Auto", "Slot 1", "Slot 2", "Slot 3", "Slot 4", "Slot 5", "Slot 6", "Slot 7", "Slot 8", "Slot 9", ] },
+            Combo { label: "Slot mode", bind: "AutoRodSlotMode", options: &["Auto", "Slot 1", "Slot 2", "Slot 3", "Slot 4", "Slot 5", "Slot 6", "Slot 7", "Slot 8", "Slot 9", ] },
             Check { label: "Verify forced slot contains a fishing rod", bind: "AutoRodVerifyForcedSlot", tooltip: "" },
             Note { text: "Disable verification to use the selected slot with another item." },
             Check { label: "Hold action bind to extend cast", bind: "AutoRodHoldToExtend", tooltip: "" },
@@ -487,7 +487,7 @@ pub const RISKY: &[Card] = &[
                 snap: true,
             },
             Combo {
-                label: "",
+                label: "Chance Mode",
                 bind: "ReachChanceMode",
                 options: &["Normal", "Advanced"],
             },
@@ -563,7 +563,7 @@ pub const RISKY: &[Card] = &[
                 bind: "AutoTotemEnabled",
             },
             Combo {
-                label: "",
+                label: "Mode",
                 bind: "AutoTotemMode",
                 options: &["Smart (health + elytra)", "Strict (always hold)"],
             },
@@ -586,7 +586,7 @@ pub const RISKY: &[Card] = &[
                 bind: "AutoTotemElytra",
             },
             Combo {
-                label: "",
+                label: "Behavior",
                 bind: "AutoTotemBehaviorMode",
                 options: &["Ghost (inventory only)", "Anarchy (may flag on servers)"],
             },
@@ -611,9 +611,9 @@ pub const BETA: &[Card] = &[
             Switch { label: "Kill Aura", bind: "KillAuraEnabled" },
             Availability { text: "Available", bind: "KillAuraAvailabilityText" },
             Expand { header: "Combat and targeting" },
-            Combo { label: "", bind: "KillAuraSettings.CpsMode", options: &["Normal", "Record", ] },
-            Combo { label: "", bind: "KillAuraSettings.Mode", options: &["Single", "Switch", ] },
-            Combo { label: "", bind: "KillAuraSettings.Sort", options: &["Distance", "Health", "Hurt time", "FOV", ] },
+            Combo { label: "CPS mode", bind: "KillAuraSettings.CpsMode", options: &["Normal", "Record", ] },
+            Combo { label: "Target mode", bind: "KillAuraSettings.Mode", options: &["Single", "Switch", ] },
+            Combo { label: "Sort", bind: "KillAuraSettings.Sort", options: &["Distance", "Health", "Hurt time", "FOV", ] },
             Slider { label: "Min CPS", bind: "KillAuraSettings.MinCps", min: 1.0, max: 20.0, snap: true },
             Slider { label: "Max CPS", bind: "KillAuraSettings.MaxCps", min: 1.0, max: 20.0, snap: true },
             Slider { label: "Attack range", bind: "KillAuraSettings.AttackRange", min: 3.0, max: 6.0, snap: true },
@@ -621,14 +621,14 @@ pub const BETA: &[Card] = &[
             Slider { label: "FOV", bind: "KillAuraSettings.Fov", min: 30.0, max: 360.0, snap: true },
             Slider { label: "Switch delay", bind: "KillAuraSettings.SwitchDelay", min: 0.0, max: 1000.0, snap: true },
             Expand { header: "Auto block" },
-            Combo { label: "", bind: "KillAuraSettings.AutoBlock", options: &["None", "Vanilla", "Spoof", "Hypixel", "Blink", "Interact", "Swap", "Legit", "Fake", "Morden", ] },
+            Combo { label: "Mode", bind: "KillAuraSettings.AutoBlock", options: &["None", "Vanilla", "Spoof", "Hypixel", "Blink", "Interact", "Swap", "Legit", "Fake", "Morden", ] },
             Check { label: "Require use-item held", bind: "KillAuraSettings.AutoBlockRequirePress", tooltip: "" },
             Slider { label: "Auto-block CPS", bind: "KillAuraSettings.AutoBlockCps", min: 1.0, max: 10.0, snap: true },
             Slider { label: "Block range", bind: "KillAuraSettings.AutoBlockRange", min: 3.0, max: 8.0, snap: true },
             Slider { label: "Attack tick", bind: "KillAuraSettings.AttackTick", min: 0.0, max: 5.0, snap: true },
             Expand { header: "Rotations" },
-            Combo { label: "", bind: "KillAuraSettings.Rotations", options: &["None", "Legit", "Silent", "LockView", "LiquidBounce", "Hypixel", "Grok", ] },
-            Combo { label: "", bind: "KillAuraSettings.MoveFix", options: &["None", "Silent", "Strict", ] },
+            Combo { label: "Mode", bind: "KillAuraSettings.Rotations", options: &["None", "Legit", "Silent", "LockView", "LiquidBounce", "Hypixel", "Grok", ] },
+            Combo { label: "Move fix", bind: "KillAuraSettings.MoveFix", options: &["None", "Silent", "Strict", ] },
             Slider { label: "Angle step", bind: "KillAuraSettings.AngleStep", min: 30.0, max: 180.0, snap: true },
             Slider { label: "Smoothing", bind: "KillAuraSettings.Smoothing", min: 0.0, max: 100.0, snap: true },
             Slider { label: "Hypixel smoothing", bind: "KillAuraSettings.RavenSmoothing", min: 0.0, max: 10.0, snap: true },
@@ -681,8 +681,8 @@ pub const BETA: &[Card] = &[
             Check { label: "Silverfish", bind: "KillAuraSettings.Silverfish", tooltip: "" },
             Check { label: "Visualize aim", bind: "KillAuraSettings.VisualizeAim", tooltip: "" },
             Check { label: "Smooth back", bind: "KillAuraSettings.SmoothBack", tooltip: "" },
-            Combo { label: "", bind: "KillAuraSettings.ShowTarget", options: &["None", "Default", ] },
-            Combo { label: "", bind: "KillAuraSettings.DebugLog", options: &["None", "Health", ] },
+            Combo { label: "Show target", bind: "KillAuraSettings.ShowTarget", options: &["None", "Default", ] },
+            Combo { label: "Debug", bind: "KillAuraSettings.DebugLog", options: &["None", "Health", ] },
     ],
     },
     Card {
@@ -1073,6 +1073,31 @@ pub fn all_cards() -> impl Iterator<Item = &'static Card> {
     })
 }
 
+/// Every `ComboBox` in `Aoko/MainWindow.xaml`, as `(markup line, bind, caption)`
+/// in table order. Thirteen elements: `grep -n "<ComboBox[ >]"` returns 504,
+/// 1063, 1138, 1166, 1228, 1229, 1230, 1242, 1252, 1253, 1283, 1284 and 1540.
+/// The captions are the `TextBlock` copy that sits above each one: `Slot mode`
+/// at 503, `Chance Mode` at 1062, `Mode` at 1137, `Behavior` at 1165, `CPS mode`
+/// at 1228, `Target mode` at 1229, `Sort` at 1230, `Mode` at 1242 and 1252,
+/// `Move fix` at 1253, `Show target` at 1283, `Select config` at 1532.
+/// The `Debug` caption at 1284 differs from its bind name (`DebugLog`), and the
+/// last row's `ConfigComboBox` is populated at runtime, so its options are empty.
+pub const COMBO_ROWS: [(&str, &str); 13] = [
+    ("AutoRodSlotMode", "Slot mode"),
+    ("ReachChanceMode", "Chance Mode"),
+    ("AutoTotemMode", "Mode"),
+    ("AutoTotemBehaviorMode", "Behavior"),
+    ("KillAuraSettings.CpsMode", "CPS mode"),
+    ("KillAuraSettings.Mode", "Target mode"),
+    ("KillAuraSettings.Sort", "Sort"),
+    ("KillAuraSettings.AutoBlock", "Mode"),
+    ("KillAuraSettings.Rotations", "Mode"),
+    ("KillAuraSettings.MoveFix", "Move fix"),
+    ("KillAuraSettings.ShowTarget", "Show target"),
+    ("KillAuraSettings.DebugLog", "Debug"),
+    ("ConfigSelection", "Select config"),
+];
+
 /// Counts the table must reproduce, measured from `Aoko/MainWindow.xaml`:
 /// `ModuleSwitch` 43, `DarkSlider` 72, `DarkCheckBox` 58, `KeybindButton_Click` 38.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -1164,7 +1189,23 @@ mod tests {
         assert_eq!(total.sliders, 72, "DarkSlider elements");
         assert_eq!(total.checks, 58, "DarkCheckBox elements");
         assert_eq!(total.keybinds, 38, "KeybindButton_Click buttons");
+        assert_eq!(total.combos, 13, "ComboBox elements");
         assert_eq!(total.cards, 50, "cards across the seven card-bearing tabs");
+    }
+
+    #[test]
+    fn every_combo_is_the_one_the_markup_declares() {
+        // Pins both the count and the copy: a stale count is how "15 combos"
+        // survived in a report while the table held 13 rows.
+        let combos: Vec<(&str, &str)> = all_cards()
+            .flat_map(|card| card.controls.iter())
+            .filter_map(|control| match control {
+                Control::Combo { label, bind, .. } => Some((*bind, *label)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(combos.len(), COMBO_ROWS.len());
+        assert_eq!(combos, COMBO_ROWS.to_vec());
     }
 
     #[test]
