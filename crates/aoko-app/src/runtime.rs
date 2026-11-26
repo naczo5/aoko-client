@@ -5,7 +5,7 @@
 //! set that nothing else in the process could see: 43 switches, no runtime on the other
 //! end, and `TcpBridgeTransport::connect_bridge()` with no caller.
 //!
-//! [`Runtime`] closes that gap for module state only, which is this slice's whole scope.
+//! [`crate::runtime::Runtime`] closes that gap for module state only, which is this slice's whole scope.
 //! It owns the `Arc<AppController>` and resolves the switches' catalog ids onto the
 //! controller's own flag set (`AppController::is_module_enabled` /
 //! `set_module_enabled`), so there is **one** writable copy of module state in the app.
@@ -19,10 +19,10 @@
 //!
 //! Two constructors, deliberately:
 //!
-//! * [`Runtime::probed`] asks the platform what this session can do
+//! * [`crate::runtime::Runtime::probed`] asks the platform what this session can do
 //!   (`aoko_platform::probe_capabilities`) and is the shipped path, called from
 //!   [`crate::shell::Shell::from_system`] where a window exists.
-//! * [`Runtime::headless`] takes the default report, so a unit test and the capture
+//! * [`crate::runtime::Runtime::headless`] takes the default report, so a unit test and the capture
 //!   harness never depend on the machine they run on.
 //!
 //! ```text
