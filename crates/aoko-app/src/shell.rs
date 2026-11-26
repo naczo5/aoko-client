@@ -77,6 +77,18 @@ use crate::views::stores::{NoStore, StoreBridge};
 /// The root view.
 pub struct Shell {
     theme: Theme,
+    /// Whether `--theme` pinned the palette, so the saved profile's `GuiTheme` cannot
+    /// replace it at startup.
+    ///
+    /// The managed app has no command line, so there is no rule to port: this is the
+    /// precedence a port with two palette sources needs, decided once and set by
+    /// `main`. An explicit flag wins; otherwise the saved profile wins, because a user
+    /// who picked a palette in Settings expects it to still be there after a restart.
+    ///
+    /// It governs startup only. A later, deliberate Load on the Settings card still
+    /// applies the config's palette on top of a pinned one — the pin answers "which
+    /// source wins before anything is clicked", not "may the palette ever change".
+    theme_pinned: bool,
     tab: usize,
     /// The one owner of module state: every switch reads and writes the controller
     /// inside it. See [`crate::runtime`] for why there is no second copy.
@@ -201,22 +213,43 @@ struct ChromeCache {
 }
 
 impl Shell {
-    /// A shell on the given palette, showing Combat.
+    /// A shell on the given palette, showing Combat, with no palette pinned.
     ///
-    /// In the shipped binary this is the startup path and it **loads the auto-save
-    /// profile**, exactly as `MainWindow.xaml.cs:407-412` does: the managed app read
-    /// the `config` slot once at construction and never reloaded per tab. Under
-    /// `cfg(test)` and under the `capture` feature it deliberately does no I/O, so a
-    /// unit test and a screenshot never depend on the machine's profile directory.
+    /// In the shipped binary this **loads the auto-save profile**, exactly as
+    /// `MainWindow.xaml.cs:407-412` does: the managed app read the `config` slot once at
+    /// construction and never reloaded per tab. Under `cfg(test)` and under the
+    /// `capture` feature it deliberately does no I/O, so a unit test and a screenshot
+    /// never depend on the machine's profile directory.
+    ///
+    /// The binary itself calls [`Shell::startup`], which is this shell with the
+    /// `--theme` pin answered; `new` is the same startup with nothing pinned, because a
+    /// test and a capture have no command line to read one from.
     #[must_use]
     pub fn new(theme: Theme) -> Self {
+        Self::startup(theme, false)
+    }
+
+    /// The startup shell, with `--theme`'s precedence answered by the caller.
+    ///
+    /// `theme_pinned` is true when the command line named a palette. Then that palette
+    /// stays, and the saved profile's `GuiTheme` does not replace it; when it is false
+    /// the profile's own palette is what the window paints, which is what makes a
+    /// palette chosen in Settings survive a restart. The flag is a parameter rather than
+    /// a comparison against the default, so the precedence is stated at the call site
+    /// instead of inferred here.
+    ///
+    /// Under `cfg(test)` and the `capture` feature nothing is read, so there is no
+    /// profile to adopt and the pin has nothing to decide.
+    #[must_use]
+    pub fn startup(theme: Theme, theme_pinned: bool) -> Self {
         #[cfg(all(not(test), not(feature = "capture")))]
         {
-            Self::from_system(theme)
+            Self::from_system(theme, theme_pinned)
         }
 
         #[cfg(any(test, feature = "capture"))]
         {
+            let _ = theme_pinned;
             Self::with_profiles(theme, Profiles::unavailable())
         }
     }
@@ -234,7 +267,7 @@ impl Shell {
     /// the "Open Configs Folder" row's `open_path`. `Shell::start` deliberately does
     /// not probe — three tests call it with a temporary store — so a test-built shell
     /// owns a [`Runtime::headless`] controller and the suite cannot depend on the
-    /// machine. [`Shell::new`] needs no `Context` for either step: the controller is not
+    /// machine. [`Shell::startup`] needs no `Context` for either step: the controller is not
     /// an entity, so nothing here waits for `cx.new`.
     ///
     /// The bridge reader is started here too, and only here: it dials on its own thread,
@@ -243,13 +276,20 @@ impl Shell {
     /// start and stop the automation loops — a shell built for a test never gets that far,
     /// so no test and no capture run owns an automation thread.
     #[must_use]
-    pub fn from_system(theme: Theme) -> Self {
+    pub fn from_system(theme: Theme, theme_pinned: bool) -> Self {
         let capabilities = aoko_platform::probe_capabilities();
         let mut shell = Self::start(
             theme,
             Profiles::from_system(),
             crate::views::prefs::PrefsFile::from_system(),
         );
+
+        // The profile has just landed, so it is now that the palette question can be
+        // answered: `--theme` wins when it was given, the profile's `GuiTheme` otherwise.
+        // Doing it in `with_loaded_profile` instead would make every `with_store` test
+        // read this machine's palette file, which is the property `Shell::new` keeps.
+        shell.set_theme_pinned(theme_pinned);
+        shell.adopt_profile_theme();
 
         // `CapabilityReport::open_path` is the flag the "Open Configs Folder" row is
         // keyed on: Linux needs `xdg-open` on `PATH`, and a session without it must
@@ -352,6 +392,9 @@ impl Shell {
     pub fn with_profiles(theme: Theme, profiles: Profiles) -> Self {
         let mut shell = Self {
             theme,
+            // Nothing is pinned until a caller says so: `startup` passes `--theme`'s answer,
+            // and a test or a capture starts with the palette it was handed.
+            theme_pinned: false,
             tab: 0,
             // The capture harness and every unit test land here, so the controller is
             // built without a probe; `from_system` replaces it with the probed one.
@@ -530,6 +573,38 @@ impl Shell {
     #[must_use]
     pub fn theme(&self) -> &Theme {
         &self.theme
+    }
+
+    /// Pins the palette against the saved profile, or unpins it; see [`Shell::theme_pinned`].
+    ///
+    /// The binary decides through [`Shell::startup`]'s parameter. Tests call this to drive
+    /// the startup branch itself, because a test shell has no command line to read a pin
+    /// from and no profile store to load one out of.
+    pub fn set_theme_pinned(&mut self, pinned: bool) {
+        self.theme_pinned = pinned;
+    }
+
+    /// Adopts the palette the loaded profile names, unless `--theme` pinned one.
+    ///
+    /// This is the startup half of `ApplyLoadedProfile` (`MainWindow.xaml.cs:835-848`) and
+    /// the same rule [`Shell::load_config`] applies when a config is loaded by hand: the
+    /// palette travels in the profile, so a shell that has just read one has to paint with
+    /// the name that profile carries. The managed app got this for free because it resolved
+    /// its theme from the profile it had just read; here the theme is resolved before that
+    /// read, so the read has to correct it.
+    ///
+    /// Resolved through [`Shell::palette`] — the store this shell writes palettes into —
+    /// rather than through [`palette_store::theme_for`], which builds its own store from the
+    /// machine's app-data path. That choice is what makes the rule observable: a test points
+    /// the store at a scratch file and sees a custom palette adopted without this machine's
+    /// palette directory being read at all. `load_config` still calls `theme_for`, which reads
+    /// the same file in the shipped binary; the two should become one call once the
+    /// saved-palette card makes this store the writer as well as the reader.
+    fn adopt_profile_theme(&mut self) {
+        if self.theme_pinned {
+            return;
+        }
+        self.theme = self.palette.resolve(&self.profile.gui_theme);
     }
 
     /// Replaces the palette, e.g. from the Settings tab.
@@ -6192,6 +6267,65 @@ mod tests {
             cx.read(|cx| shell.read(cx).profile().block_esp_targets.len()),
             before,
             "an empty box is still a no-op through the press path"
+        );
+    }
+
+    // ---- the startup palette precedence ----------------------------------------
+
+    /// `--theme` wins over the saved profile's palette; without one, the profile wins.
+    ///
+    /// This is the decision [`Shell::adopt_profile_theme`] makes, driven twice from the same
+    /// scratch palette file. The store is injected with [`Shell::set_palette_path`], so the
+    /// custom palette is a file this test wrote and no assertion can depend on — or disturb —
+    /// this machine's palette directory.
+    ///
+    /// It does not go through [`Shell::startup`], because that reads the profile store and
+    /// probes capabilities; what it pins is the one branch, and the call site in `from_system`
+    /// is a single line that names it.
+    #[test]
+    fn an_explicit_theme_pins_the_palette_against_the_saved_profile() {
+        let root = scratch_root();
+        let path = root.join("palettes.json");
+
+        // Written by the production writer, so the shape of the file is the file's own and
+        // not a fixture this test invented beside it.
+        let mut store = PaletteStore::at(path.clone());
+        store.draft_mut().name = "Handmade".to_owned();
+        store
+            .save_draft(false)
+            .expect("writes into the scratch root");
+        assert!(
+            store
+                .palettes()
+                .iter()
+                .any(|stored| stored.name == "Handmade"),
+            "the file really carries the palette before any shell reads it"
+        );
+
+        let mut profile = aoko_protocol::profile::Profile::default();
+        profile.gui_theme = "Handmade".to_owned();
+
+        // Unpinned, as in no `--theme` on the command line: the profile's palette is what the
+        // window paints, which is how a palette chosen in Settings survives a restart.
+        let mut unpinned = Shell::with_profile(Theme::slate(), profile.clone());
+        unpinned.set_palette_path(path.clone());
+        unpinned.adopt_profile_theme();
+        assert_eq!(
+            unpinned.theme().name,
+            "Handmade",
+            "the saved profile's custom palette is adopted when nothing pinned one"
+        );
+
+        // Pinned, as in `--theme Slate` on the command line: the profile names a custom
+        // palette and the theme does not move, which is the whole point of the flag.
+        let mut pinned = Shell::with_profile(Theme::slate(), profile);
+        pinned.set_palette_path(path);
+        pinned.set_theme_pinned(true);
+        pinned.adopt_profile_theme();
+        assert_eq!(
+            pinned.theme().name,
+            "Slate",
+            "an explicit theme leaves the saved profile unable to replace it"
         );
     }
 

@@ -56,6 +56,13 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    // Precedence between the two palette sources, decided here and nowhere else: an
+    // explicit `--theme` wins, and without one the saved profile's own palette is what the
+    // window paints — which is what makes a palette chosen in Settings survive a restart.
+    // `theme_pinned` states that fact rather than leaving the shell to infer it from the
+    // name, because `--theme Slate` and no flag at all resolve to the same theme and are
+    // not the same intent.
+    let theme_pinned = parsed.theme.is_some();
     // An unknown name falls back to Slate, the same rule `ApplyGuiTheme` uses.
     let theme =
         aoko_app::views::palette_store::theme_for(parsed.theme.as_deref().unwrap_or("Slate"));
@@ -73,7 +80,7 @@ fn main() -> ExitCode {
                 panic!("cannot install the bundled fonts: {error}");
             }
             cx.open_window(window::options(), move |_window, cx| {
-                cx.new(|_| Shell::new(theme))
+                cx.new(|_| Shell::startup(theme, theme_pinned))
             })
             .expect("open the application window");
         });
