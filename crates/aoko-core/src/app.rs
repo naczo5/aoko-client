@@ -596,6 +596,21 @@ mod tests {
             true
         }));
         assert!(!app.config_payload().fight_status);
+
+        // And a panic reset is a third way it moves, which is the case the managed host had
+        // to get right: `TriggerPanicAsync` cleared `Clicker.FightStatusEnabled`, so the
+        // frame it sent said false afterwards. Here the panic clears the profile field, and
+        // the frame follows without knowing about panics.
+        let mut toggles = crate::clicker::ModuleToggles::default();
+        app.update_profile(|profile| {
+            profile.fight_status_enabled = true;
+            crate::clicker::panic_reset(&mut toggles, profile);
+            true
+        });
+        assert!(
+            !app.config_payload().fight_status,
+            "a panic reset turns fight status off in the frame the bridge receives"
+        );
     }
 
     #[test]

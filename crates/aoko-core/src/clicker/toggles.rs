@@ -274,6 +274,11 @@ pub fn panic_reset(toggles: &mut ModuleToggles, profile: &mut Profile) {
     profile.show_module_list = false;
     profile.show_logo = false;
     profile.discord_rpc_enabled = false;
+    // `Clicker.FightStatusEnabled = false` in the managed panic (`Clicker.cs:564`). This
+    // port has no Clicker property layer, so the profile is where the flag lives, exactly
+    // as for the three above: leaving it set would keep `fightStatus` in the config frame
+    // true after a panic, which the managed host never sent.
+    profile.fight_status_enabled = false;
 }
 
 #[cfg(test)]
@@ -409,6 +414,7 @@ mod tests {
         profile.show_module_list = true;
         profile.show_logo = true;
         profile.discord_rpc_enabled = true;
+        profile.fight_status_enabled = true;
         // Dev mode survives: panic disarms the automation, it does not change the
         // developer's preferences.
         profile.dev_mode = true;
@@ -434,6 +440,7 @@ mod tests {
         assert!(!profile.show_module_list);
         assert!(!profile.show_logo);
         assert!(!profile.discord_rpc_enabled);
+        assert!(!profile.fight_status_enabled);
         assert!(profile.dev_mode);
     }
 
