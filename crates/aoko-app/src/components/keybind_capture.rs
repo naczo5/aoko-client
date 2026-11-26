@@ -338,6 +338,32 @@ mod tests {
                 let _ = window.draw(cx);
             });
         }
+
+        /// Makes the test window the active one, which is what a focus listener needs.
+        ///
+        /// A fresh test window is inactive: `Frame::new` starts with `window_active: false`
+        /// (`crates/gpui/src/window.rs:1109`) and each frame copies the platform's bit in
+        /// (`:3910`). The focus dispatch then blanks both paths of the event for an inactive
+        /// window (`:3973-3981`), and `Context::on_blur` filters on
+        /// `previous_focus_path.last() == Some(&focus_id)`
+        /// (`crates/gpui/src/app/context.rs:579-580`), which an empty path can never satisfy
+        /// — that is why no number of draws delivers a blur to an inactive window.
+        /// Activation goes through the platform callback on the foreground executor, which
+        /// is why it needs the pump before the next draw.
+        fn activate(&mut self) {
+            self.visual.update(|window, _| window.activate_window());
+            self.visual.run_until_parked();
+            // `is_window_active` reads the flag the callback writes, not the frame, so this
+            // fails loudly if activation did not take instead of leaking into an empty
+            // focus path two frames later.
+            self.visual.update(|window, _| {
+                assert!(
+                    window.is_window_active(),
+                    "the platform activation callback did not run"
+                );
+            });
+            self.draw();
+        }
     }
 
     fn probe(cx: &mut TestAppContext) -> Probe {
@@ -371,12 +397,14 @@ mod tests {
         visual.update(|window, cx| {
             let _ = window.draw(cx);
         });
-        Probe {
+        let mut probe = Probe {
             visual,
             window: handle,
             capture,
             results,
-        }
+        };
+        probe.activate();
+        probe
     }
 
     #[gpui::test]
@@ -429,7 +457,9 @@ mod tests {
         // Focus listeners are dispatched inside `Window::draw`
         // (`crates/gpui/src/window.rs:3938-3993`), not by `Window::blur` (`:2785-2800`),
         // which only clears the focus and marks the frame dirty. So the press's focus move
-        // needs a frame to be recorded, and the blur needs one to be delivered.
+        // needs a frame to be recorded, and the blur needs one to be delivered — and the
+        // window must be active, since the event's paths are blanked otherwise
+        // (`Probe::activate`).
         probe.draw();
         probe.visual.update(|window, cx| window.blur(cx));
         probe.draw();
