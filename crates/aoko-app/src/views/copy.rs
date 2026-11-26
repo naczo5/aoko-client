@@ -25,6 +25,12 @@
 //! `DarkCheckBox` checkboxes, **38** keybind buttons and **49** `ControlCardStyle`
 //! cards. The inventory's "44 switches / 75 sliders" is a slight overcount: the
 //! markup has 43 and 72 elements respectively.
+//!
+//! The checkboxes are 58 in the markup and 57 in the table: one of them is the
+//! tracked-block row's template checkbox (`MainWindow.xaml:697`), which binds a
+//! target's own `Enabled` and is painted one row per entry by [`Control::BlockEspRows`].
+//! See [`ControlCounts`] for the rule. Should an account or server template checkbox be
+//! modelled here later, the same rule applies and the number moves again.
 
 /// Which action bind a card offers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -417,8 +423,12 @@ pub const RENDER: &[Card] = &[
             Slider { label: "Max Blocks", bind: "BlockEspMaxCount", min: 1.0, max: 512.0, snap: true },
             Slider { label: "Scan Range (chunks)", bind: "BlockEspRange", min: 1.0, max: 8.0, snap: true },
             Note { text: "Tracked Blocks" },
-            Check { label: "", bind: "Enabled", tooltip: "" },
-            Button { label: "✕", tooltip: "Remove block" },
+            // One row per tracked block, not the three fixed controls the markup's
+            // `DataTemplate` (`MainWindow.xaml:695-709`) contains: the checkbox in it binds the
+            // target's own `Enabled`, which has no profile path, and the cap and swatch are per
+            // entry. The row is `crate::components::block_esp::BlockEspRow`; this variant is
+            // where the shell mounts it.
+            BlockEspRows,
             BlockEspAdd { bind: "blockesp-add" },
     ],
     },
@@ -1472,6 +1482,13 @@ pub const COMBO_ROWS: [(&str, &str); 13] = [
 
 /// Counts the table must reproduce, measured from `Aoko/MainWindow.xaml`:
 /// `ModuleSwitch` 43, `DarkSlider` 72, `DarkCheckBox` 58, `KeybindButton_Click` 38.
+///
+/// One of the 58 checkboxes is not a fixed control: `MainWindow.xaml:697` is the
+/// `DataTemplate`'s checkbox for a tracked-block row, whose `IsChecked` binds the target's
+/// `Enabled` rather than a profile path, and whose row is painted by
+/// [`Control::BlockEspRows`] once per entry. The table therefore holds 57 `Check` controls
+/// plus that one variant, and `checks` counts 57 — the markup total minus the row template,
+/// which is the rule the count is measured with rather than a number adjusted to fit.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ControlCounts {
     pub switches: usize,
@@ -1554,7 +1571,10 @@ mod tests {
     fn the_control_counts_match_the_markup() {
         // Measured with `grep -o "StaticResource <style>"` over `Aoko/MainWindow.xaml`:
         // 43 `ModuleSwitch`, 72 `DarkSlider`, 58 `DarkCheckBox`, 38
-        // `KeybindButton_Click` and 49 `ControlCardStyle` borders. Ten cards in the
+        // `KeybindButton_Click` and 49 `ControlCardStyle` borders. One of the 58
+        // checkboxes sits inside the tracked-block `DataTemplate` (`:697`), so the table
+        // models 57 fixed `Check` controls and paints that row as `BlockEspRows`; the
+        // assertion below says which is which. Ten cards in the
         // markup have no `x:Name`, so this table names them (`ModuleListCard`,
         // `DiscordRpcCard`, `BetaBannerCard`, the five Stats sections and the three
         // Settings sections); 49 named-plus-unnamed becomes 50 entries because the
@@ -1584,7 +1604,12 @@ mod tests {
 
         assert_eq!(total.switches, 43, "ModuleSwitch elements");
         assert_eq!(total.sliders, 72, "DarkSlider elements");
-        assert_eq!(total.checks, 58, "DarkCheckBox elements");
+        assert_eq!(
+            total.checks, 57,
+            "DarkCheckBox elements the table models as fixed controls: the markup's 58 minus \
+             the tracked-block row template's checkbox (`:697`), which is one row per entry and \
+             is `Control::BlockEspRows` here"
+        );
         assert_eq!(total.keybinds, 38, "KeybindButton_Click buttons");
         assert_eq!(total.combos, 13, "ComboBox elements");
         assert_eq!(total.cards, 45, "cards across the six card-bearing tabs");
