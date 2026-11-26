@@ -23,9 +23,15 @@
 //! Supervision is the third: `crate::runtime::Runtime::start_supervision` makes a module
 //! switch the trigger for `aoko_core::loops::ClickerLoops`, which owns the five automation
 //! threads, so enabling a loop-driving module starts them and turning the last one off
-//! stops them. It is off until the shipped path turns it on, and the bodies run against a
-//! backend that refuses every synthetic action: supervision is this slice, injection is the
-//! next one.
+//! stops them. It is off until the shipped path turns it on.
+//!
+//! What those bodies may touch is [`crate::runtime::select_loop_surfaces`], one pure function
+//! over the capability report. A session that can synthesise input *and* sample the pointer
+//! gets `aoko_platform`'s own `InputBackend`; a session that can inspect windows also gets
+//! `aoko_platform`'s `WindowInspector`, which is what answers "is the game focused" and "is
+//! the cursor up". Each refused capability is named once, and a session that can do neither
+//! builds no platform service at all, which is what keeps the suite and the capture harness
+//! off the OS.
 //!
 //! Two constructors, deliberately:
 //!
@@ -50,7 +56,10 @@ use aoko_core::loops::{
     ClickSink, ClickerLoopConfigs, ClickerLoops, LoopRuntime, LoopSense, NoClickSink,
 };
 use aoko_core::{Clock, Sleeper, SplitMix64, SystemClock, ThreadSleeper};
-use aoko_platform::{InputBackend, InputEvent, Key, MouseButton, MouseState, PlatformError};
+use aoko_platform::{
+    CapabilityReport, InputBackend, InputEvent, Key, MouseButton, MouseState, PlatformError,
+    WindowInspector,
+};
 use aoko_protocol::module_catalog::{self, EnabledFlag};
 
 use crate::ingest::{Ingest, IngestStatus};
@@ -62,8 +71,32 @@ use crate::ingest::{Ingest, IngestStatus};
 /// loop test that failed once can be replayed.
 const LOOP_SEED: u64 = 0x00A0_C0DE;
 
-/// Why a synthetic action is refused in this slice.
-const NO_INJECTION: &str = "injection is not wired yet (supervision slice)";
+/// Why a synthetic action is refused when this session has no platform input backend.
+///
+/// The classification, not the reason: `aoko_platform::PlatformError::unsupported` is what the
+/// loop bodies treat as "this action cannot happen here", and
+/// [`crate::runtime::select_loop_surfaces`] logs the capability that caused it.
+const NO_INJECTION: &str = "this session has no platform injection backend";
+
+/// Injection refused: the session cannot synthesise clicks, keys or movement.
+const REFUSED_SYNTHESIS: &str = "automation loops run without platform injection: \
+     CapabilityReport::input_synthesis is false, so this session cannot synthesise a click, \
+     a key press or relative movement";
+
+/// Injection refused: the session cannot sample the current pointer and key state.
+///
+/// Separate from [`REFUSED_SYNTHESIS`] on purpose: a session can move the pointer and not see
+/// whether a button is down (`input_observation` without `pointer_state_sampling` on Wayland),
+/// and a hold guard reading "not held" from a backend that cannot see the button would fire
+/// clicks nobody asked for.
+const REFUSED_SAMPLING: &str = "automation loops run without platform injection: \
+     CapabilityReport::pointer_state_sampling is false, so a hold guard cannot tell whether \
+     a trigger is down";
+
+/// Window sense refused: the session cannot see windows at all.
+const REFUSED_WINDOWS: &str = "automation loops read no window state: \
+     CapabilityReport::window_inspection is false, so no foreground window can be asked \
+     which process is focused";
 
 /// The application's runtime state: the controller, the id mapping the switches need to
 /// reach it, the bridge reader, and — on the shipped path only — the loop supervisor.
@@ -233,12 +266,15 @@ impl Runtime {
     }
 
     /// Starts the five bodies on their own threads.
+    ///
+    /// The backend and the window surface are not chosen here:
+    /// [`crate::runtime::select_loop_surfaces`] decides from the controller's capability
+    /// report, and `platform_surfaces` builds exactly what that decision allows.
     fn start_loops(&mut self) {
+        let surfaces = select_loop_surfaces(self.controller.capabilities());
+        let (input, windows) = platform_surfaces(&surfaces);
         let sense: Arc<dyn LoopSense> =
-            Arc::new(ControllerSense::new(Arc::clone(&self.controller)));
-        // Not the platform backend: this slice supervises, it does not inject. See
-        // `NoInjection` for why the loops may still run against it safely.
-        let input: Arc<dyn InputBackend> = Arc::new(NoInjection);
+            Arc::new(ControllerSense::new(Arc::clone(&self.controller), windows));
         let sink: Arc<dyn ClickSink> = Arc::new(NoClickSink);
 
         let clock = Arc::clone(&self.clock);
@@ -372,22 +408,148 @@ fn loop_for(flag: EnabledFlag) -> Option<&'static str> {
     }
 }
 
-/// The read side of a loop body, over the controller's store.
+/// One platform surface, either reachable or refused with the reasons.
+///
+/// The variant is the choice: `Platform` means the loops may reach the platform service, and
+/// `Refused` carries one line per missing capability rather than a bare `false`, because the
+/// reason is what the log, the user-facing report and the tests all need.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Surface {
+    /// The session supports this surface; the service is built when the loops start.
+    Platform,
+    /// The session does not support it, for these capabilities.
+    Refused(Vec<&'static str>),
+}
+
+impl Surface {
+    /// Whether the loops may reach the platform for this surface.
+    #[must_use]
+    pub fn is_platform(&self) -> bool {
+        matches!(self, Self::Platform)
+    }
+
+    /// The refusals, empty when the surface is reachable.
+    #[must_use]
+    pub fn refusals(&self) -> &[&'static str] {
+        match self {
+            Self::Platform => &[],
+            Self::Refused(reasons) => reasons,
+        }
+    }
+}
+
+/// What the platform allows the automation loops to touch.
+///
+/// Two surfaces, decided independently: injection is synthetic input, window sense is reading
+/// focus and the cursor. A session can have either without the other — X11 without uinput can
+/// inspect windows and inject nothing, and a Wayland session with a readable `/dev/input` can
+/// inject and not inspect — so neither implies the other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoopSurfaces {
+    /// Whether synthetic input may go through the platform's `InputBackend`.
+    pub injection: Surface,
+    /// Whether focus and cursor visibility may come from the platform's `WindowInspector`.
+    pub windows: Surface,
+}
+
+/// Chooses the platform surfaces the automation loops get, from one capability report.
+///
+/// This is the whole decision, over nothing but a [`CapabilityReport`]: no machine is read, no
+/// service is built and no clock or window is touched, so a test answers it directly and
+/// [`crate::runtime::Runtime`] has nothing left to choose. `start_loops` is the only caller,
+/// through `platform_surfaces`; no caller anywhere picks a backend by hand.
+///
+/// Injection needs both capabilities. `input_synthesis` is what moves and clicks, and
+/// `pointer_state_sampling` is what a hold guard reads before it treats a trigger as down; a
+/// backend that can click and cannot see the button is worse than one that refuses, because
+/// the loop cannot tell "held" from "not held".
+#[must_use]
+pub fn select_loop_surfaces(capabilities: &CapabilityReport) -> LoopSurfaces {
+    let injection_refusals: Vec<&'static str> = [
+        (!capabilities.input_synthesis).then_some(REFUSED_SYNTHESIS),
+        (!capabilities.pointer_state_sampling).then_some(REFUSED_SAMPLING),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    let injection = if injection_refusals.is_empty() {
+        Surface::Platform
+    } else {
+        Surface::Refused(injection_refusals)
+    };
+
+    let windows = if capabilities.window_inspection {
+        Surface::Platform
+    } else {
+        Surface::Refused(vec![REFUSED_WINDOWS])
+    };
+
+    LoopSurfaces { injection, windows }
+}
+
+/// Builds the two platform surfaces that [`select_loop_surfaces`] allows.
+///
+/// `aoko_platform::default_services` is called only when at least one surface is reachable, so
+/// a headless runtime and every test reach no platform service at all: the controller's default
+/// report refuses both. Each refusal is logged once — no injection at `warn`, because the loops
+/// run and cannot act, and no window sense at `info`, because the loops still act on the
+/// fail-closed sense.
+///
+/// The reachable surfaces are the platform's own implementations, not wrappers: nothing in this
+/// crate re-implements an input call or a window query.
+fn platform_surfaces(
+    surfaces: &LoopSurfaces,
+) -> (Arc<dyn InputBackend>, Option<Arc<dyn WindowInspector>>) {
+    let mut input: Arc<dyn InputBackend> = Arc::new(NoInjection);
+    let mut windows: Option<Arc<dyn WindowInspector>> = None;
+
+    for reason in surfaces.injection.refusals() {
+        tracing::warn!("{reason}");
+    }
+    for reason in surfaces.windows.refusals() {
+        tracing::info!("{reason}");
+    }
+
+    if !surfaces.injection.is_platform() && !surfaces.windows.is_platform() {
+        return (input, windows);
+    }
+
+    let services = aoko_platform::default_services();
+    if surfaces.injection.is_platform() {
+        // `Box<dyn InputBackend>` to `Arc<dyn InputBackend>`, the platform's backend itself.
+        input = Arc::from(services.input);
+    }
+    if surfaces.windows.is_platform() {
+        windows = Some(Arc::from(services.windows));
+    }
+    (input, windows)
+}
+
+/// The read side of a loop body, over the controller's store and, when the capability report
+/// allows it, the platform's window surface.
 ///
 /// `aoko_core::app::StoreSense` is the production implementation, but it is built over an
 /// `Arc<StateStore>` and [`AppController::store`] hands out `&StateStore`, so a
 /// `StoreSense` cannot be built here without a second store or a change in `aoko-core`.
-/// This is that read side over the controller, with the same defaults for the facts no
-/// surface sets yet: window activity and cursor visibility are `false`, and module and
-/// state-field support are `false` until the bridge's `capabilities` frame is stored (the
-/// ingest decodes it and drops it today) — exactly what `StoreSense::new` starts with.
+/// This is that read side over the controller. The store half keeps the defaults
+/// `StoreSense::new` starts with: module and state-field support stay `false` until the
+/// bridge's `capabilities` frame is stored (the ingest decodes it and drops it today).
+///
+/// The window half is [`crate::runtime::select_loop_surfaces`]'s decision: `windows` is `None`
+/// exactly when that function refused the surface, and then both window questions answer
+/// fail-closed rather than guessing.
 struct ControllerSense {
     controller: Arc<AppController>,
+    windows: Option<Arc<dyn WindowInspector>>,
 }
 
 impl ControllerSense {
-    fn new(controller: Arc<AppController>) -> Self {
-        Self { controller }
+    fn new(controller: Arc<AppController>, windows: Option<Arc<dyn WindowInspector>>) -> Self {
+        Self {
+            controller,
+            windows,
+        }
     }
 }
 
@@ -404,14 +566,49 @@ impl LoopSense for ControllerSense {
         self.controller.store().is_injected()
     }
 
+    /// `WindowDetection.IsMinecraftActive()`.
+    ///
+    /// Two of the managed host's three tests, in its order: the foreground window decides, and
+    /// the game test is `aoko_platform::describe_target` — the platform's own scorer, so no
+    /// marker list is repeated here. The managed host's first test (does the foreground match a
+    /// cached game handle) is skipped because it needs `select_best_window`, and that needs a
+    /// full `WindowInspector::enumerate`: property reads plus a process-name lookup per window,
+    /// once per tick per body. Only the focused window is asked.
+    ///
+    /// The scorer's markers are broader than game titles (`fabric`, `forge`, `quilt`, `feather`
+    /// are project words too), so a focused IDE on a mod workspace can score as the game. That
+    /// is inherited rather than introduced: the platform's `is_game_title` is private, and this
+    /// is the closest public answer to the managed title test.
     fn minecraft_active(&self) -> bool {
-        // `WindowDetection` is a later slice. False is the fail-closed answer: a loop must
-        // not believe the game is focused because nothing can check.
-        false
+        let Some(windows) = self.windows.as_deref() else {
+            return false;
+        };
+        let Ok(Some(foreground)) = windows.foreground() else {
+            return false;
+        };
+        aoko_platform::describe_target(
+            foreground.pid.unwrap_or(0),
+            Some(foreground.handle),
+            &foreground.title,
+            foreground.process_name.as_deref().unwrap_or_default(),
+            None,
+            None,
+        )
+        .is_likely_minecraft()
     }
 
+    /// `WindowDetection.IsCursorVisible()`.
+    ///
+    /// The platform answers this where it can (`GetCursorInfo` on Windows) and leaves it `None`
+    /// where it cannot, which today is the X11 backend: `WindowInspector::cursor_visible`'s
+    /// default is `None` and the Linux implementation does not override it. `None` keeps the
+    /// fail-closed `false` this sense has always answered, so a loop that gates on the cursor
+    /// cannot start acting on a guess.
     fn cursor_visible(&self) -> bool {
-        false
+        self.windows
+            .as_deref()
+            .and_then(|windows| windows.cursor_visible())
+            .unwrap_or(false)
     }
 
     fn supports_module(&self, _module: &str) -> bool {
@@ -422,19 +619,24 @@ impl LoopSense for ControllerSense {
         false
     }
 
+    /// `None`: window geometry needs `WindowInspector::client_bounds` plus a known game handle,
+    /// and the state's own viewport is what the bodies fall back to until that handle exists.
     fn framebuffer_size(&self) -> Option<(i32, i32)> {
         None
     }
 }
 
-/// The input backend this slice hands the loops.
+/// The input backend the loops get when the platform's is refused, and the one every test runs
+/// against.
 ///
-/// Injection is the next slice: nothing here may reach the OS, so every synthetic action is
-/// refused with a classified `Unsupported`, which the loop bodies log at `debug` and carry
-/// on from (`click.rs:214-216`), and the refusal is off by default
-/// (`main.rs`'s filter is `info` for our crates). Observation answers the fail-closed
-/// defaults, so a hold guard cannot read "nothing is held" from a backend that cannot see a
-/// button. Swapping this for `aoko_platform`'s backend is the whole of the injection slice.
+/// Nothing here may reach the OS, so every synthetic action is refused with a classified
+/// `Unsupported`, which the loop bodies log at `debug` and carry on from (`click.rs:214-216`),
+/// and the refusal is off by default (`main.rs`'s filter is `info` for our crates). Observation
+/// answers the fail-closed defaults, so a hold guard cannot read "nothing is held" from a
+/// backend that cannot see a button.
+///
+/// [`crate::runtime::select_loop_surfaces`] picks between this and `aoko_platform`'s own
+/// backend; no caller chooses one by hand, and a session that refuses injection keeps this one.
 struct NoInjection;
 
 impl InputBackend for NoInjection {
@@ -722,6 +924,202 @@ mod tests {
             "no supervision, no threads"
         );
         assert_eq!(runtime.loops_owned(), 0);
+    }
+
+    // ---- platform surfaces: the decision, and the sense behind it -------------------
+
+    /// A window surface that answers from fixed fields and never touches the OS.
+    ///
+    /// Every window-sense assertion below runs against this, so the suite cannot depend on
+    /// what happens to be focused on the machine running it.
+    struct FakeWindows {
+        foreground: Option<aoko_platform::WindowInfo>,
+        cursor: Option<bool>,
+    }
+
+    impl WindowInspector for FakeWindows {
+        fn enumerate(&self) -> Result<Vec<aoko_platform::WindowInfo>, PlatformError> {
+            Ok(self.foreground.iter().cloned().collect())
+        }
+
+        fn foreground(&self) -> Result<Option<aoko_platform::WindowInfo>, PlatformError> {
+            Ok(self.foreground.clone())
+        }
+
+        fn client_bounds(
+            &self,
+            _handle: aoko_platform::WindowHandle,
+        ) -> Result<aoko_platform::Rect, PlatformError> {
+            Ok(aoko_platform::Rect::default())
+        }
+
+        fn cursor_visible(&self) -> Option<bool> {
+            self.cursor
+        }
+    }
+
+    /// One top-level window, over `WindowInfo`'s public fields.
+    fn window(title: &str, process: &str) -> aoko_platform::WindowInfo {
+        aoko_platform::WindowInfo {
+            handle: aoko_platform::WindowHandle(0x51),
+            title: title.to_string(),
+            class_name: Some("LWJGL".to_string()),
+            pid: Some(4242),
+            process_name: Some(process.to_string()),
+            bounds: aoko_platform::Rect::default(),
+        }
+    }
+
+    /// A report with every OS service off names one refusal per capability, and the text says
+    /// which flag refused it — that string is what the log and the report carry.
+    #[test]
+    fn every_missing_capability_names_its_own_refusal() {
+        let surfaces = select_loop_surfaces(&CapabilityReport::transport_only(
+            aoko_platform::SessionKind::None,
+        ));
+
+        assert!(!surfaces.injection.is_platform());
+        assert!(!surfaces.windows.is_platform());
+        assert_eq!(
+            surfaces.injection.refusals().len(),
+            2,
+            "{:?}",
+            surfaces.injection.refusals()
+        );
+        assert!(surfaces
+            .injection
+            .refusals()
+            .iter()
+            .any(|reason| reason.contains("input_synthesis")));
+        assert!(surfaces
+            .injection
+            .refusals()
+            .iter()
+            .any(|reason| reason.contains("pointer_state_sampling")));
+        assert_eq!(surfaces.windows.refusals().len(), 1);
+        assert!(surfaces.windows.refusals()[0].contains("window_inspection"));
+    }
+
+    /// A session that can inject and inspect gets both platform surfaces.
+    #[test]
+    fn a_capable_session_gets_both_platform_surfaces() {
+        let mut report = CapabilityReport::transport_only(aoko_platform::SessionKind::X11);
+        report.input_synthesis = true;
+        report.pointer_state_sampling = true;
+        report.window_inspection = true;
+
+        let surfaces = select_loop_surfaces(&report);
+
+        assert_eq!(surfaces.injection, Surface::Platform);
+        assert_eq!(surfaces.windows, Surface::Platform);
+        assert!(surfaces.injection.refusals().is_empty());
+        assert!(surfaces.windows.refusals().is_empty());
+    }
+
+    /// The two surfaces are independent, and injection needs both of its capabilities.
+    ///
+    /// The first half is the Wayland shape the platform reports: readable input devices, no
+    /// pointer sampling. The second is a session that can see windows and inject nothing.
+    #[test]
+    fn injection_and_window_sense_are_decided_separately() {
+        let mut report = CapabilityReport::transport_only(aoko_platform::SessionKind::Wayland);
+        report.input_synthesis = true;
+        report.window_inspection = true;
+
+        let surfaces = select_loop_surfaces(&report);
+
+        assert!(
+            !surfaces.injection.is_platform(),
+            "sampling is still missing"
+        );
+        assert_eq!(
+            surfaces.injection.refusals().len(),
+            1,
+            "only the sampling capability refuses injection"
+        );
+        assert!(surfaces.injection.refusals()[0].contains("pointer_state_sampling"));
+        assert!(surfaces.windows.is_platform(), "window inspection is on");
+
+        let mut report = CapabilityReport::transport_only(aoko_platform::SessionKind::Wayland);
+        report.input_synthesis = true;
+        report.pointer_state_sampling = true;
+
+        let surfaces = select_loop_surfaces(&report);
+
+        assert!(surfaces.injection.is_platform());
+        assert!(!surfaces.windows.is_platform());
+    }
+
+    /// A headless runtime would take no platform surface, so it can never reach
+    /// `aoko_platform::default_services` and never touches the OS.
+    ///
+    /// This is the suite's guarantee rather than a preference: `AppController::default` is
+    /// `transport_only(SessionKind::None)`, so every test-built runtime and the capture path
+    /// refuse both surfaces before a service is built.
+    #[test]
+    fn a_headless_runtime_selects_no_platform_surface() {
+        let runtime = Runtime::headless();
+        let surfaces = select_loop_surfaces(runtime.controller().capabilities());
+
+        assert!(!surfaces.injection.is_platform());
+        assert!(!surfaces.windows.is_platform());
+        assert!(!surfaces.injection.refusals().is_empty());
+        assert!(!surfaces.windows.refusals().is_empty());
+    }
+
+    /// The window sense asks the platform surface, and fails closed when it has none.
+    ///
+    /// Nothing here clicks, moves the cursor or opens a window: the answer comes from
+    /// `FakeWindows`, so the assertions hold on a headless CI runner as well as a desktop.
+    #[test]
+    fn window_sense_reads_the_platform_surface_and_never_the_os() {
+        let controller = Arc::new(AppController::default());
+
+        // The game is focused: the platform's own scorer sees the title marker.
+        let game: Arc<dyn WindowInspector> = Arc::new(FakeWindows {
+            foreground: Some(window("Minecraft 1.8.9", "java")),
+            cursor: Some(false),
+        });
+        let sense = ControllerSense::new(Arc::clone(&controller), Some(game));
+
+        assert!(sense.minecraft_active(), "a focused game window is active");
+        assert!(!sense.cursor_visible(), "the platform answered: no cursor");
+
+        // A Java process with a window, and not the game: the scorer's confidence stays below
+        // its threshold, which is what keeps a focused IDE from reading as the game.
+        let editor: Arc<dyn WindowInspector> = Arc::new(FakeWindows {
+            foreground: Some(window("MainActivity.java - IntelliJ IDEA", "java")),
+            cursor: None,
+        });
+        let sense = ControllerSense::new(Arc::clone(&controller), Some(editor));
+
+        assert!(
+            !sense.minecraft_active(),
+            "a focused Java IDE is not the game"
+        );
+        assert!(
+            !sense.cursor_visible(),
+            "an unanswered cursor keeps the fail-closed false"
+        );
+
+        // A session with no window surface: both questions answer fail-closed.
+        let sense = ControllerSense::new(Arc::clone(&controller), None);
+
+        assert!(!sense.minecraft_active());
+        assert!(!sense.cursor_visible());
+
+        // And a platform that saw the pointer drawn is believed.
+        let drawn: Arc<dyn WindowInspector> = Arc::new(FakeWindows {
+            foreground: None,
+            cursor: Some(true),
+        });
+        let sense = ControllerSense::new(controller, Some(drawn));
+
+        assert!(!sense.minecraft_active(), "no foreground window, no game");
+        assert!(
+            sense.cursor_visible(),
+            "the platform answered: cursor drawn"
+        );
     }
 
     /// The table is anchored to the catalog, not to a list of spellings.
