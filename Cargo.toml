@@ -34,6 +34,12 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "55264441
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+
+# `Window::render_to_image` and `HeadlessAppContext::capture_screenshot` both
+# return `image::RgbaImage`. Pinned to the version gpui already resolves
+# transitively (0.25.10 in Cargo.lock) so feature unification keeps one copy;
+# otherwise the returned type is not the type you can save.
+image = { version = "0.25", features = ["png"] }
 tracing = "0.1"
 
 # Pre-declared so parallel crate owners never have to edit this file. A crate

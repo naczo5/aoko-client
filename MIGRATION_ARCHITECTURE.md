@@ -256,3 +256,20 @@ CI runs the Linux and Windows matrices; `McInjector` DLL pipelines are untouched
 - Shipping the Linux `.so` bridge.
 - Changing any user-visible protocol field, key spelling, or default value.
 - Deleting `Aoko/` or `Aoko.Tests/` before final sign-off.
+
+## 12. Phase 2 UI decisions
+
+Settled by the product owner before any Phase 2 code, because each one changes layout, capture
+semantics or workspace dependencies. Neither builder re-opens these.
+
+| # | Decision | Consequence |
+| --- | --- | --- |
+| 1 | **Bare `gpui` only.** No zed `ui`/`text` crates. | Every widget is hand-built against the pin. One theme system, no second settings/schema tree. The slider and the text field must be written from scratch either way: the pinned tree contains no slider widget and no text-input widget, since the only `TextInput` is the platform IME event type. |
+| 2 | **Opaque card over a dark scrim.** Frosted glass is dropped. | The overlay stays readable without backdrop blur, which GPUI cannot do at the pin: `Background` offers solid and 2-stop linear only. |
+| 3 | **Animations stay, gated by a client setting we own.** | Do not probe `ClientAreaAnimation`. Expose an in-app preference through `theme::motion` so one toggle governs every animated site on every platform. |
+| 4 | **One window at control geometry, loader as an in-view state.** | No destroy-and-recreate transition, so window position survives and there is no flicker. The loader is a shell state, not a second window. |
+| 5 | **Client decorations we draw.** | The title bar is ours: themed background, drag region, and our own minimise/maximise/close hit-testing, plus resize edges. It is client area, so it appears in headless captures; that is the better visual-parity outcome and it must be captured. |
+| 6 | **Bundle open font families** for UI and for monospace, shipped as assets. | Identical metrics on Windows and Linux. The drift versus the `Segoe UI` / `Consolas` baseline is accepted once rather than reflowing per platform. The families are recorded in `docs/rust/UI_INVENTORY.md` §3 and must not be re-picked per builder. |
+
+The existing `gui-*.png` artifacts are **not** parity evidence: `scripts/New-GuiScreenshots.ps1`
+misnamed two of them and never captured Stats or Settings (section 8 item 9).
