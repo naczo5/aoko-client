@@ -808,6 +808,54 @@ mod tests {
         assert_eq!(state.scroll_request(), Some(0));
     }
 
+    /// An opened overlay always ranks rows on more than one tab.
+    ///
+    /// `Shell::jump_to_row`'s window tests pick a row whose tab is *not* the shell's current
+    /// one, so that a jump that did nothing cannot pass. That property is this layer's, not
+    /// theirs: `search::rank("")` returns every entry, and `resolve_row` hides a row only when
+    /// it is dev-only (`aoko-core/src/search.rs:767`), so the list cannot come back empty and
+    /// cannot come back single-tab — the catalogue spans eight tabs, and the `Tabs` group's
+    /// destinations are never dev-only (`build_entries`, `:512`). Asserted here so a future
+    /// filter that narrows the list to one tab fails in the model rather than two frames later
+    /// in a shell test whose message blames ranking.
+    #[test]
+    fn a_ranked_list_covers_more_than_one_tab() {
+        let facts = table(true, false);
+        let tabs = |state: &CommandSearchState| {
+            state
+                .rows()
+                .iter()
+                .map(|row| row.entry.tab)
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+
+        let empty = tabs(&open_with(None, false, &facts));
+        assert!(
+            empty.len() > 1,
+            "an empty query ranks destinations on more than one tab: {empty:?}"
+        );
+        assert!(
+            empty.contains("Combat"),
+            "and the catalogue's first tab is among them"
+        );
+
+        let typed = tabs(&open_with(Some("s"), false, &facts));
+        assert!(
+            typed.len() > 1,
+            "a one-character query still spans tabs: {typed:?}"
+        );
+
+        // The destinations are what makes an empty list impossible even with DevMode off:
+        // they are the rows `build_entries` never marks dev-only.
+        assert!(
+            open_with(None, false, &facts)
+                .rows()
+                .iter()
+                .any(|row| row.entry.is_destination),
+            "the Tabs group is in the list with DevMode off"
+        );
+    }
+
     #[test]
     fn opening_twice_is_refused_so_a_keystroke_cannot_reset_the_query() {
         let facts = table(true, false);
