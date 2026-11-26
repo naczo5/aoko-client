@@ -6599,12 +6599,19 @@ mod tests {
         let field = cx
             .read(|cx| shell.read(cx).fields.token.clone())
             .expect("the token box exists after the first frame");
-        // The token box is on the Accounts tab's sign-in card, and the shell opens on Combat. A
+        // The token box belongs to the Accounts tab's *Paste* panel, and that panel is closed
+        // until it is asked for (`accounts_view.rs:236`); the shell also opens on Combat. A
         // keystroke reaches only an element the frame painted — a focus handle with no dispatch
         // node falls back to the tree's synthetic root, which carries no listeners — so the tab is
-        // selected and drawn before the field is focused. Without this the box is "focused" in the
-        // window's state and still receives nothing, which is exactly the failure this test caught.
-        cx.update(|cx| shell.update(cx, |shell, cx| shell.select_tab_named("accounts", cx)));
+        // selected, the panel opened and the frame drawn before the field is focused. Without this
+        // the box is "focused" in the window's state and still receives nothing, which is exactly
+        // the failure this test caught.
+        cx.update(|cx| {
+            shell.update(cx, |shell, cx| {
+                shell.select_tab_named("accounts", cx);
+                shell.toggle_account_panel(AccountPanel::Paste, cx);
+            })
+        });
         visual.update(|window, cx| {
             let _ = window.draw(cx);
         });
