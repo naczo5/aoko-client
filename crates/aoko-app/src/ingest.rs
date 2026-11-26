@@ -741,20 +741,29 @@ mod tests {
     /// `capabilities` frame arrives the cell has to be that frame. It names one module and
     /// leaves the other three sets empty, which this also pins: `from_payload` inherits an
     /// empty set from the fallback, so the settings, state fields and actions survive while the
-    /// module list is replaced outright rather than merged into.
+    /// module list is replaced outright rather than merged into
+    /// (`capabilities.rs:613-633`).
+    ///
+    /// The probe module is `probe-only-module` rather than a real one, and that is the whole
+    /// point of this test. The legacy fallback already advertises 21 modules including
+    /// `autoclicker` and `killaura` (`capabilities.rs:275-295`), so waiting on either of those
+    /// returned the moment the reader published its *fallback* — the wait passed before the frame
+    /// was even decoded, and the "replaced, not merged" assertion then failed against a cell the
+    /// frame had never touched. A name in neither fallback is what makes the wait wait.
     #[test]
     fn a_capability_frame_replaces_the_advertised_cell() {
         let controller = Arc::new(AppController::default());
         let (peer, _closed, _ingest, advertised) = connect_with_cell(&controller);
 
-        peer.feed(b"{\"type\":\"capabilities\",\"modules\":[\"killaura\"]}\n");
+        const PROBE: &str = "probe-only-module";
+        peer.feed(b"{\"type\":\"capabilities\",\"modules\":[\"probe-only-module\"]}\n");
 
         wait_for_advertised(&advertised, |capabilities| {
-            capabilities.supports_module("killaura")
+            capabilities.supports_module(PROBE)
         });
         let capabilities = advertised.read().expect("cell").clone();
         assert!(
-            capabilities.supports_module("killaura"),
+            capabilities.supports_module(PROBE),
             "the module the frame names is advertised"
         );
         assert!(
