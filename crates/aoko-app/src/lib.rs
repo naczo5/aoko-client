@@ -30,6 +30,8 @@ pub mod assets;
 pub mod capture;
 pub mod components;
 pub mod dialogs;
+pub mod overlay;
+pub mod picker;
 pub mod shell;
 pub mod theme;
 pub mod views;

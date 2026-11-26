@@ -20,10 +20,10 @@ pub enum ButtonVariant {
     /// `TabDangerButton`: no fill at rest, critical label, a 0.10 critical wash on
     /// hover.
     Danger,
-    /// `DarkButton`: the everyday button. Its hover is an accent overlay at full
+    /// `DarkButton` (`App.xaml:329`): the everyday button. Its hover is an accent overlay at full
     /// opacity with a white label, which is what the template's `IsMouseOver`
     /// trigger settles on.
-    Ghost,
+    Dark,
 }
 
 /// Resolved colours and metrics for one variant.
@@ -91,7 +91,7 @@ impl ButtonVariant {
                 hover_border: None,
                 pressed_opacity: 0.8,
             },
-            Self::Ghost => Spec {
+            Self::Dark => Spec {
                 background: theme.slider_background,
                 label: theme.text,
                 border: None,
@@ -180,9 +180,9 @@ mod tests {
         assert_eq!(danger.background, Color::TRANSPARENT);
         assert_eq!(danger.label, crate::theme::fixed::CRITICAL);
 
-        // Ghost's hover is the accent fill the C# storyboard reaches at opacity 1.
-        let ghost = ButtonVariant::Ghost.spec(&theme);
-        assert_eq!(ghost.hover_background, theme.accent);
+        // Dark hover is the accent fill the C# storyboard reaches at opacity 1.
+        let dark = ButtonVariant::Dark.spec(&theme);
+        assert_eq!(dark.hover_background, theme.accent);
     }
 
     #[test]
@@ -192,9 +192,9 @@ mod tests {
             ButtonVariant::Primary.spec(&theme),
             ButtonVariant::Secondary.spec(&theme),
             ButtonVariant::Danger.spec(&theme),
-            ButtonVariant::Ghost.spec(&theme),
+            ButtonVariant::Dark.spec(&theme),
         ];
-        // No two variants share a shape *and* a fill: Secondary and Ghost both sit on
+        // No two variants share a shape *and* a fill: Secondary and Dark both sit on
         // the slider-background but differ in radius and padding, which is why the key
         // is the pair and not either alone.
         for (index, spec) in specs.iter().enumerate() {

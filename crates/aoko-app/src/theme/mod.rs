@@ -544,6 +544,12 @@ fn slate() -> Theme {
 
 /// GPUI's styled helpers take `impl Into<Fill>`, so tokens get one conversion rather
 /// than every call site wrapping itself.
+impl From<Color> for gpui::Background {
+    fn from(color: Color) -> Self {
+        gpui::Background::from(Hsla::from(color))
+    }
+}
+
 impl From<Color> for Fill {
     fn from(color: Color) -> Self {
         Fill::from(Rgba::from(color))

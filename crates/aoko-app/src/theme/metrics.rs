@@ -112,14 +112,13 @@ pub mod slider {
 /// `CommandSearchOverlay.xaml.cs:24-32`. The inventory's correction matters here:
 /// `340` is the card's **minimum width**, not a module-card width, and the edge
 /// gutter is 72, not the 56 the C# comment claims.
+/// Command-search result rows.
+///
+/// The **card's** geometry is not here: `card_width`, `card_top` and
+/// `results_viewport_height` live in [`crate::views::command_search`], which is the C#
+/// `LayoutCard` port, so the 340/620/72/0.30 numbers have exactly one home. This module
+/// keeps only what the row renderer needs.
 pub mod overlay {
-    pub const CARD_MIN_WIDTH: f32 = 340.0;
-    pub const CARD_MAX_WIDTH: f32 = 620.0;
-    pub const CARD_TOP_RATIO: f32 = 0.30;
-    pub const CARD_EDGE_GUTTER: f32 = 72.0;
-    pub const RESULTS_MAX_HEIGHT: f32 = 300.0;
-    pub const RESULTS_MIN_HEIGHT: f32 = 100.0;
-    pub const RESULTS_VERTICAL_MARGIN: f32 = 12.0;
     /// Result row height (`CommandSearchOverlay.xaml:269`), radius 7, inset 10×1.
     pub const ROW_HEIGHT: f32 = 48.0;
     pub const ROW_INSET_X: f32 = 10.0;
@@ -141,54 +140,9 @@ pub mod wash {
     pub const CHIP_TINT_WARN: f32 = 0.16;
 }
 
-/// The card width for a given available width: `clamp(340, available - 2×72, 620)`.
-///
-/// Port of `LayoutCard` (`CommandSearchOverlay.xaml.cs:177`). Integer-free and pure,
-/// so it is unit-tested rather than eyeballed in a screenshot.
-#[must_use]
-pub fn overlay_card_width(available: f32) -> f32 {
-    (available - 2.0 * overlay::CARD_EDGE_GUTTER)
-        .clamp(overlay::CARD_MIN_WIDTH, overlay::CARD_MAX_WIDTH)
-}
-
-/// `CardTopRatio` as pixels, clamped so the card never starts above the window or
-/// pushes its results area out of the bottom.
-#[must_use]
-pub fn overlay_card_top(window_height: f32) -> f32 {
-    let preferred = window_height * overlay::CARD_TOP_RATIO;
-    let floor = window::TITLE_BAR_HEIGHT + 8.0;
-    let ceiling = (window_height - overlay::RESULTS_MIN_HEIGHT).max(floor);
-    preferred.clamp(floor, ceiling)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn card_width_clamps_to_the_measured_bounds() {
-        // At the 560 px window floor: 560 - 144 = 416, comfortably inside the bounds.
-        assert_eq!(overlay_card_width(560.0), 416.0);
-        // A narrow viewport clamps up to 340 rather than clipping the footer.
-        assert_eq!(overlay_card_width(420.0), overlay::CARD_MIN_WIDTH);
-        assert_eq!(overlay_card_width(1020.0), overlay::CARD_MAX_WIDTH);
-        assert_eq!(overlay_card_width(1_400.0), overlay::CARD_MAX_WIDTH);
-        // 340 + 2×72 = 484 is the width at which the card stops being clamped up.
-        assert_eq!(overlay_card_width(484.0), 340.0);
-    }
-
-    #[test]
-    fn card_top_tracks_the_ratio_within_bounds() {
-        assert!((overlay_card_top(760.0) - 228.0).abs() < 1e-3);
-        // The floor keeps it under the title bar on a very short window: 60 × 0.30 would
-        // be 18, so the floor's 32 + 8 wins.
-        assert_eq!(overlay_card_top(60.0), window::TITLE_BAR_HEIGHT + 8.0);
-        // A 160 px window prefers 48, which clears both bounds (40..=60) untouched.
-        assert_eq!(overlay_card_top(160.0), 48.0);
-        // Below ~133 px the ceiling (height − 100) falls under the floor, and the floor
-        // still wins so the card never starts above the window.
-        assert_eq!(overlay_card_top(120.0), window::TITLE_BAR_HEIGHT + 8.0,);
-    }
 
     #[test]
     fn switch_geometry_adds_up() {
@@ -199,5 +153,13 @@ mod tests {
         );
         // And vertically it is centred.
         assert_eq!((switch::TRACK_HEIGHT - switch::THUMB) / 2.0, switch::INSET);
+    }
+
+    #[test]
+    fn the_row_fits_inside_the_results_cap_without_slicing() {
+        // 300 / 48 is 6.25: six rows plus their 1 px insets fit, the seventh scrolls.
+        let rows = ((300.0 / (overlay::ROW_HEIGHT + 2.0 * overlay::ROW_INSET_Y)).floor()) as usize;
+        assert_eq!(rows, 6);
+        assert!(rows as f32 * (overlay::ROW_HEIGHT + 2.0 * overlay::ROW_INSET_Y) <= 300.0);
     }
 }
