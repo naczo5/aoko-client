@@ -115,8 +115,8 @@ impl ButtonVariant {
 /// Content-sized: the box is the label plus the variant's padding and nothing else. A
 /// call site that needs a fixed width uses [`button_sized`]; Rust has no default
 /// arguments, so the optional width is a second entry point rather than a nullable
-/// parameter — adding one here would have rewritten all forty-odd call sites for a
-/// property three of them want.
+/// parameter — adding one here would have rewritten all 32 call sites for a
+/// property one of them wants.
 pub fn button(
     id: impl Into<gpui::ElementId>,
     theme: &Theme,
