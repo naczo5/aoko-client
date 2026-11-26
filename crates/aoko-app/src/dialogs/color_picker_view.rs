@@ -12,7 +12,9 @@
 //!
 //! * **Wired.** The three RGB sliders write their channel through
 //!   [`ColorPickerState::set_channel`]; the hex field takes typing and commits on Enter
-//!   (`HexBox_KeyDown`); OK and Cancel report a [`PickResult`] with the state machine's own
+//!   (`HexBox_KeyDown`, `ColorPickerDialog.xaml.cs:170-178`) and on leaving the box
+//!   (`HexBox_LostFocus`, `:179`), both through one `CommitHex` (`:181-190`); OK and Cancel
+//!   report a [`PickResult`] with the state machine's own
 //!   [`accept`](ColorPickerState::accept) / [`cancel`](ColorPickerState::cancel), so the
 //!   caller's colour is untouched on cancel.
 //! * **Wired: pressing and dragging the square and the hue bar.** [`crate::picker`]'s two
@@ -21,10 +23,23 @@
 //!   notifies this entity; the thumb and the preview follow on the next frame. The
 //!   press-versus-move distinction is the state machine's own drag flag, so a move that
 //!   began outside the widget is ignored rather than applied.
-//! * **Not wired: the commit on focus loss.** `HexBox_LostFocus` commits the same way
-//!   Enter does. The state machine's commit is reachable and tested; the trigger needs a
-//!   blur subscription on the field's focus handle, which the view cannot register in
-//!   `Render` without leaking one subscription per frame. Enter is the wired trigger.
+//! * **The blur listener is registered once**, in the first `render` that has a window, and
+//!   held in a `Subscription`. `HexBox_LostFocus` needs a `&mut Window`, which
+//!   [`ColorPickerView::new`] does not have and `Render::render` does; registering per frame
+//!   would leak a listener per frame.
+//! * **One deviation, named: a refused entry says so.** `CommitHex` reverts in silence —
+//!   `:189` is `RefreshAll()`, with no message box and no status line — and on this surface a
+//!   box that quietly rewrites what you typed reads as a lost keystroke. So a refusal draws
+//!   one 11 px line under the field: `Not a hex colour; kept #3366CC.` in
+//!   [`crate::theme::fixed`]'s critical tone. That line is **new copy**, not an element of
+//!   `ColorPickerDialog.xaml`. The rule it enforces is the managed one: `TryParseHex`
+//!   (`:262-291`) accepts only three or six hex digits, so an empty or partial entry cannot
+//!   commit, and [`parse_hex`](crate::dialogs::color_picker::parse_hex) is that same rule.
+//!   The line is about one entry, so the next entry and every other edit of the colour (the
+//!   square, the bar, a slider) drop it.
+//! * **Not wired: nothing.** Everything the managed dialog does with the field, the square,
+//!   the bar and the two buttons is reachable here. The one thing this view cannot do is
+//!   read back a rasterised glyph, which is the pin's limit rather than a gap.
 //! * **The hex field is a child view**, per `components::text_input`'s integration rule: it
 //!   is created with a `Context` and drawn inside this view's tree, never as a window root.
 //!
@@ -37,7 +52,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::prelude::*;
-use gpui::{div, px, AnyElement, App, Context, Entity, KeyDownEvent, Render, SharedString, Window};
+use gpui::{
+    div, px, AnyElement, App, Context, Entity, KeyDownEvent, Render, SharedString, Subscription,
+    Window,
+};
 
 use crate::components::{
     button_sized, slider, text_input::TextInput, ButtonVariant, SliderGeometry,
@@ -78,6 +96,13 @@ pub struct ColorPickerView {
     /// callback has no `Context<Self>`, so this is the seam that keeps typing out of a
     /// borrow of the view.
     pending_hex: Rc<RefCell<Option<String>>>,
+    /// The one line under the field that says a refused entry was refused, and what was kept
+    /// instead. Cleared by the next report and by an accepted commit.
+    hex_notice: Option<SharedString>,
+    /// The field's blur listener, registered once on the first render — that is the one place
+    /// this view has a `&mut Window` to register it against. Registering per frame would leak
+    /// a subscription per frame.
+    hex_blur: Option<Subscription>,
     on_result: Option<Arc<ResultCallback>>,
 }
 
@@ -98,6 +123,8 @@ impl ColorPickerView {
             theme,
             hex,
             pending_hex: pending,
+            hex_notice: None,
+            hex_blur: None,
             on_result: None,
         }
     }
@@ -135,6 +162,8 @@ impl ColorPickerView {
     fn sync_hex(&mut self, cx: &mut Context<Self>) {
         if let Some(text) = self.pending_hex.borrow_mut().take() {
             self.state.set_hex_text(&text);
+            // The user is editing again, so the last refusal is stale.
+            self.hex_notice = None;
         }
 
         let current = self.state.hex_text().to_owned();
@@ -144,14 +173,29 @@ impl ColorPickerView {
         }
     }
 
-    /// `CommitHex`: adopts a parsable entry, otherwise reverts to the last valid colour.
-    /// Returns whether the entry was accepted, which the view shows in the field it already
-    /// rewrote.
+    /// `CommitHex` (`ColorPickerDialog.xaml.cs:181-190`): a parsable entry is adopted and
+    /// anything else reverts the field to the last valid colour.
+    ///
+    /// Returns whether the entry was accepted. A refusal also says so in [`Self::hex_notice`]:
+    /// the managed handler reverts in silence (`:189`, `RefreshAll()`), and a box that quietly
+    /// rewrites what you typed reads as a lost keystroke. The notice is this view's one
+    /// visible addition to the managed dialog, and the module docs name it.
+    ///
+    /// No re-entrancy guard is needed for the managed `_updating` (`:183`): writes into the
+    /// field go through [`TextInput::set_text`], which deliberately does not fire `on_change`,
+    /// so a programmatic rewrite cannot come back as another commit.
     fn commit_hex(&mut self, cx: &mut Context<Self>) -> bool {
         let accepted = self.state.commit_hex();
         let current = self.state.hex_text().to_owned();
         self.hex
             .update(cx, |field, cx| field.set_text(&current, cx));
+        self.hex_notice = if accepted {
+            None
+        } else {
+            Some(SharedString::from(format!(
+                "Not a hex colour; kept {current}."
+            )))
+        };
         cx.notify();
         accepted
     }
@@ -217,6 +261,8 @@ impl ColorPickerView {
                 f64::from(row.value),
                 move |next, _window, cx| {
                     handle.update(cx, |view, cx| {
+                        // A new edit, so the last refusal is stale.
+                        view.hex_notice = None;
                         view.state.set_channel(channel, channel_byte(next));
                         cx.notify();
                     });
@@ -243,8 +289,19 @@ fn channel_byte(value: f64) -> u8 {
 }
 
 impl Render for ColorPickerView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_hex(cx);
+
+        // `HexBox_LostFocus` (`ColorPickerDialog.xaml.cs:179`) runs the same commit as Enter,
+        // so leaving the box is enough to apply the entry. Registered once, on the first
+        // frame that has a window; a per-frame registration would leak a subscription per
+        // frame, which is why this is a stored `Option<Subscription>` and not a call here.
+        if self.hex_blur.is_none() {
+            let handle = self.hex.read(cx).focus_handle().clone();
+            self.hex_blur = Some(cx.on_blur(&handle, window, |view, _window, cx| {
+                view.commit_hex(cx);
+            }));
+        }
 
         let theme = self.theme.clone();
         let hsv = self.state.hsv();
@@ -264,6 +321,8 @@ impl Render for ColorPickerView {
                 hsv,
                 move |x, y, _window, cx| {
                     handle.update(cx, |view, cx| {
+                        // A new edit, so the last refusal is stale.
+                        view.hex_notice = None;
                         view.state.drag_sv(x, y);
                         cx.notify();
                     });
@@ -284,6 +343,8 @@ impl Render for ColorPickerView {
                 hsv,
                 move |y, _window, cx| {
                     handle.update(cx, |view, cx| {
+                        // A new edit, so the last refusal is stale.
+                        view.hex_notice = None;
                         view.state.drag_hue(y);
                         cx.notify();
                     });
@@ -365,6 +426,16 @@ impl Render for ColorPickerView {
                 ))
         };
 
+        // The one visible addition to the managed dialog: a refused hex entry says what it
+        // refused and what it kept instead of silently rewriting the box.
+        let hex_notice = self.hex_notice.clone().map(|notice| {
+            div()
+                .debug_selector(|| String::from("color-picker-hex-notice"))
+                .text_size(px(metrics::text::CAPTION))
+                .text_color(crate::theme::fixed::CRITICAL)
+                .child(notice)
+        });
+
         div()
             .id("color-picker")
             .debug_selector(|| String::from("color-picker"))
@@ -391,6 +462,7 @@ impl Render for ColorPickerView {
                     ),
             )
             .child(hex_row)
+            .children(hex_notice)
             .child(channels)
             .child(
                 div()
@@ -454,6 +526,66 @@ mod tests {
             self.visual.cx.update(|cx| {
                 field.update(cx, |field, cx| field.set_text(text, cx));
             });
+        }
+
+        /// One typed entry, as the field's `on_change` hands it over.
+        ///
+        /// The widget's own typing path is covered by `components::text_input`; what this
+        /// reproduces is the hand-off — a report that `sync_hex` drains at the start of the
+        /// next frame — so the commit under test sees exactly what a keystroke would have
+        /// produced, without depending on where a glyph landed. The notify is part of the
+        /// hand-off: without it the view is not re-rendered, so no frame drains the report.
+        fn report_hex(&mut self, text: &'static str) {
+            let view = self.view.clone();
+            self.visual.cx.update(|cx| {
+                let _ = view
+                    .read(cx)
+                    .pending_hex
+                    .borrow_mut()
+                    .replace(text.to_owned());
+                view.update(cx, |_, cx| cx.notify());
+            });
+            self.draw();
+        }
+
+        /// Focuses the hex box and then takes focus away, which is `HexBox_LostFocus`.
+        ///
+        /// Three frames, because focus listeners are dispatched inside `Window::draw`
+        /// (`crates/gpui/src/window.rs:3938-3993`): `Window::blur` only clears the focus and
+        /// marks the frame dirty (`:2785-2800`), so the draw after it is the one that
+        /// delivers the blur, and the draw after that paints what the commit wrote. The
+        /// focus move needs its own frame for the same reason — the blur listener compares
+        /// the focus path of the frame before with the one being drawn.
+        fn blur_hex(&mut self) {
+            let handle = self
+                .visual
+                .cx
+                .read(|cx| self.view.read(cx).hex.read(cx).focus_handle().clone());
+            self.visual.update(|window, cx| {
+                window.focus(&handle, cx);
+            });
+            self.draw();
+            self.visual.update(|window, cx| {
+                window.blur(cx);
+            });
+            self.draw();
+            self.draw();
+        }
+
+        fn draw(&mut self) {
+            self.visual.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+
+        fn notice(&self) -> Option<String> {
+            self.visual.cx.read(|cx| {
+                self.view
+                    .read(cx)
+                    .hex_notice
+                    .as_ref()
+                    .map(|notice| notice.as_str().to_owned())
+            })
         }
 
         fn results(&self) -> Vec<PickResult> {
@@ -581,6 +713,93 @@ mod tests {
             field,
             selected.to_hex(),
             "the hex box follows the state, which is what `sync_hex` exists for"
+        );
+    }
+
+    #[gpui::test]
+    fn losing_focus_commits_a_good_entry_and_reports_a_bad_one(cx: &mut TestAppContext) {
+        let mut probe = probe(cx);
+
+        // A typed entry, then leaving the box: `HexBox_LostFocus` runs the same commit as
+        // Enter, so the colour is adopted without a keypress.
+        probe.report_hex("#3366CC");
+        assert_eq!(probe.hex_text(), "#3366CC", "the report reached the state");
+        probe.blur_hex();
+
+        assert_eq!(
+            probe.selected(),
+            Rgb::new(0x33, 0x66, 0xCC),
+            "leaving the box committed the entry"
+        );
+        assert_eq!(probe.notice(), None, "an accepted entry needs no notice");
+        assert!(
+            probe
+                .visual
+                .debug_bounds("color-picker-hex-notice")
+                .is_none(),
+            "and draws none"
+        );
+
+        // A bad entry: the colour is the one before, the field goes back to it, and the
+        // dialog says what it kept rather than rewriting the box in silence.
+        probe.report_hex("nonsense");
+        assert_eq!(probe.hex_text(), "nonsense");
+        probe.blur_hex();
+
+        assert_eq!(
+            probe.selected(),
+            Rgb::new(0x33, 0x66, 0xCC),
+            "a refused entry commits nothing"
+        );
+        assert_eq!(
+            probe.hex_text(),
+            "#3366CC",
+            "the field is back at the last valid colour"
+        );
+        assert_eq!(
+            probe.notice().as_deref(),
+            Some("Not a hex colour; kept #3366CC."),
+            "the refusal is reported"
+        );
+        assert!(
+            probe
+                .visual
+                .debug_bounds("color-picker-hex-notice")
+                .is_some(),
+            "and the notice is on screen"
+        );
+
+        // A partial entry is a refusal too, not a commit of the digits it has.
+        probe.report_hex("#33");
+        probe.blur_hex();
+        assert_eq!(
+            probe.selected(),
+            Rgb::new(0x33, 0x66, 0xCC),
+            "two digits are not a colour"
+        );
+
+        // Typing again clears the stale complaint.
+        probe.report_hex("#00FF00");
+        assert_eq!(probe.notice(), None, "editing dismisses the notice");
+
+        // So does touching the colour any other way: the line is about the entry the field
+        // refused, so it cannot outlive it.
+        probe.report_hex("#12345");
+        probe.blur_hex();
+        assert!(probe.notice().is_some(), "five digits are refused too");
+        probe.click("color-picker-sv");
+        probe.draw();
+        assert_eq!(
+            probe.notice(),
+            None,
+            "a press on the square makes the refusal stale"
+        );
+        assert!(
+            probe
+                .visual
+                .debug_bounds("color-picker-hex-notice")
+                .is_none(),
+            "and the line goes with it"
         );
     }
 }
