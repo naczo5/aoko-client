@@ -535,7 +535,9 @@ impl Runtime {
     /// A guard rather than a copy: `StatsTracker` is not `Clone`, the view reads a dozen numbers
     /// from it, and a copy is exactly the stale second source this slice removes. The lock is
     /// held only while the caller reads.
-    #[must_use]
+    ///
+    /// No `#[must_use]`: `MutexGuard` already carries one, and saying it twice is a clippy error
+    /// rather than a stronger promise.
     pub fn stats(&self) -> MutexGuard<'_, StatsTracker> {
         self.stats.tracker()
     }
