@@ -18,10 +18,12 @@
 //! Every guard's poll interval is the managed one, because it comes back from
 //! `decide` as a `Duration` rather than being restated here.
 
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use aoko_platform::{InputBackend, MouseButton};
 use aoko_protocol::profile::ClickRandomizationMode;
+use aoko_protocol::state::GameState;
 
 use super::{ClickSink, LoopRuntime, LoopSense};
 use crate::clicker::tick::{decide, ClickConfig, TickContext, TickDecision};
@@ -137,6 +139,15 @@ fn sanitize_interval(interval_ms: f64) -> f64 {
     interval_ms.clamp(1.0, MAX_INTERVAL_MS)
 }
 
+/// The state a loop reads before the bridge has published anything.
+///
+/// A `GameState` default carries one heap string (`screenName`), so rebuilding it
+/// per loop start would be an allocation on a path that never changes its value.
+fn disconnected_state() -> &'static GameState {
+    static DISCONNECTED: OnceLock<GameState> = OnceLock::new();
+    DISCONNECTED.get_or_init(GameState::default)
+}
+
 /// Runs one click engine until the runtime is cancelled.
 ///
 /// Called on a dedicated thread through [`super::LoopHandle`]; also callable
@@ -150,13 +161,15 @@ pub fn run(
     timing: &mut AdvancedClickTimingState,
 ) {
     let mut next_deadline: Option<Instant> = None;
-    // The not-connected state, built once: no snapshot is not "do nothing", it is
-    // the managed not-connected branch (`Clicker.cs:3175-3183`), which only delays
-    // when the cursor is *visible* and falls straight through into the click logic
-    // when it is hidden. That is what keeps standalone (un-injected) clicking
+    // The not-connected state, built once per process: no snapshot is not "do nothing",
+    // it is the managed not-connected branch (`Clicker.cs:3175-3183`), which only
+    // delays when the cursor is *visible* and falls straight through into the click
+    // logic when it is hidden. That is what keeps standalone (un-injected) clicking
     // alive, and `decide` already models it from `GameState::is_connected`, so the
-    // default state is fed in rather than short-circuiting here.
-    let disconnected = aoko_protocol::state::GameState::default();
+    // default state is fed in rather than short-circuiting here. It is built once
+    // because a `String` clone per loop start is an allocation on a hot path for a
+    // value that never changes; `perf` pins the per-tick cost at zero.
+    let disconnected = disconnected_state();
 
     while !runtime.is_cancelled() {
         let now = runtime.now();
@@ -164,7 +177,7 @@ pub fn run(
         let snapshot = sense.snapshot();
         let state = snapshot
             .as_ref()
-            .map_or(&disconnected, |snapshot| &*snapshot.state);
+            .map_or(disconnected, |snapshot| &*snapshot.state);
 
         let mut guards = config.guards;
         guards.injected = sense.is_injected();

@@ -24,6 +24,12 @@ crossbeam-channel = { workspace = true }
 parking_lot = { workspace = true }
 rand = { workspace = true }
 
+[[bench]]
+# Hand-rolled timing loop, no framework: `harness = false` so `cargo bench` runs
+# `main`. Two cases do not justify pulling in criterion.
+name = "loops"
+harness = false
+
 [dev-dependencies]
 rand_chacha = { workspace = true }
 tempfile = { workspace = true }

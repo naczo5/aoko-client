@@ -7,6 +7,8 @@
 //! A value that fails to parse is ignored so the previous value survives; it is
 //! never zeroed. The one behavioural extra is the world-exit scrub.
 
+use std::collections::BTreeMap;
+
 use serde_json::{Map, Value};
 
 use crate::state::{ChestStealerState, EntityInfo, GameState, RefillState};
@@ -38,11 +40,22 @@ pub fn is_partial(node: &Value) -> bool {
     }
 }
 
+/// Decodes one field out of the borrowed document.
+///
+/// `None` means the value did not parse, so the caller keeps what it had. Nothing is
+/// copied on the way: a scalar costs no allocation and a collection costs exactly the
+/// collection it builds.
+fn parse_value<T: serde::de::DeserializeOwned>(value: &Value) -> Option<T> {
+    T::deserialize(value).ok()
+}
+
+// Parses `$key` out of `$patch` straight into `$target`. The previous value survives
+// an absent, `null`, or unparseable one.
 macro_rules! apply_scalar {
     ($patch:expr, $target:expr, $key:literal, $ty:ty) => {
         if let Some(value) = $patch.get($key) {
             if !value.is_null() {
-                if let Ok(parsed) = serde_json::from_value::<$ty>(value.clone()) {
+                if let Some(parsed) = parse_value::<$ty>(value) {
                     $target = parsed;
                 }
             }
@@ -50,38 +63,41 @@ macro_rules! apply_scalar {
     };
 }
 
-/// Applies `patch` to `previous`, returning the merged snapshot.
-#[must_use]
-pub fn apply(previous: &GameState, patch: &Map<String, Value>) -> GameState {
-    let mut merged = previous.clone();
-
+/// Merges `patch` into `state` in place.
+///
+/// This is the path the contract in `MIGRATION_ARCHITECTURE.md` section 6 names:
+/// mutate the live snapshot, then publish it behind an `Arc`. A field the patch
+/// omits is never touched, so its `String`, `Vec` or map keeps its allocation.
+/// Only a field the patch actually carries can allocate, and then only for the
+/// value it replaces.
+pub fn apply_into(state: &mut GameState, patch: &Map<String, Value>) {
     for (name, value) in patch {
         match name.as_str() {
             "type" | "partial" => {}
-            "mapped" => apply_scalar!(patch, merged.mapped, "mapped", bool),
-            "guiOpen" => apply_scalar!(patch, merged.gui_open, "guiOpen", bool),
-            "inWorld" => apply_scalar!(patch, merged.in_world, "inWorld", bool),
-            "screenName" => apply_scalar!(patch, merged.screen_name, "screenName", String),
-            "actionBar" => apply_scalar!(patch, merged.action_bar, "actionBar", String),
-            "health" => apply_scalar!(patch, merged.health, "health", f32),
-            "fov" => apply_scalar!(patch, merged.fov, "fov", f32),
+            "mapped" => apply_scalar!(patch, state.mapped, "mapped", bool),
+            "guiOpen" => apply_scalar!(patch, state.gui_open, "guiOpen", bool),
+            "inWorld" => apply_scalar!(patch, state.in_world, "inWorld", bool),
+            "screenName" => apply_scalar!(patch, state.screen_name, "screenName", String),
+            "actionBar" => apply_scalar!(patch, state.action_bar, "actionBar", String),
+            "health" => apply_scalar!(patch, state.health, "health", f32),
+            "fov" => apply_scalar!(patch, state.fov, "fov", f32),
             "viewportWidth" => {
-                apply_scalar!(patch, merged.viewport_width, "viewportWidth", i32);
+                apply_scalar!(patch, state.viewport_width, "viewportWidth", i32);
             }
             "viewportHeight" => {
-                apply_scalar!(patch, merged.viewport_height, "viewportHeight", i32);
+                apply_scalar!(patch, state.viewport_height, "viewportHeight", i32);
             }
-            "holdingBlock" => apply_scalar!(patch, merged.holding_block, "holdingBlock", bool),
+            "holdingBlock" => apply_scalar!(patch, state.holding_block, "holdingBlock", bool),
             "lookingAtBlock" => {
-                apply_scalar!(patch, merged.looking_at_block, "lookingAtBlock", bool);
+                apply_scalar!(patch, state.looking_at_block, "lookingAtBlock", bool);
             }
             "lookingAtEntity" => {
-                apply_scalar!(patch, merged.looking_at_entity, "lookingAtEntity", bool);
+                apply_scalar!(patch, state.looking_at_entity, "lookingAtEntity", bool);
             }
             "lookingAtEntityLatched" => {
                 apply_scalar!(
                     patch,
-                    merged.looking_at_entity_latched,
+                    state.looking_at_entity_latched,
                     "lookingAtEntityLatched",
                     bool
                 );
@@ -89,26 +105,26 @@ pub fn apply(previous: &GameState, patch: &Map<String, Value>) -> GameState {
             "lookingAtEntityHurtTime" => {
                 apply_scalar!(
                     patch,
-                    merged.looking_at_entity_hurt_time,
+                    state.looking_at_entity_hurt_time,
                     "lookingAtEntityHurtTime",
                     i32
                 );
             }
             "moduleStatus" => {
                 if value.is_null() {
-                    merged.module_status.clear();
-                } else if let Ok(parsed) = serde_json::from_value(value.clone()) {
-                    merged.module_status = parsed;
+                    state.module_status.clear();
+                } else if let Some(parsed) = parse_value::<BTreeMap<String, String>>(value) {
+                    state.module_status = parsed;
                 }
             }
-            "breakingBlock" => apply_scalar!(patch, merged.breaking_block, "breakingBlock", bool),
+            "breakingBlock" => apply_scalar!(patch, state.breaking_block, "breakingBlock", bool),
             "attackCooldown" => {
-                apply_scalar!(patch, merged.attack_cooldown, "attackCooldown", f32);
+                apply_scalar!(patch, state.attack_cooldown, "attackCooldown", f32);
             }
             "attackCooldownPerTick" => {
                 apply_scalar!(
                     patch,
-                    merged.attack_cooldown_per_tick,
+                    state.attack_cooldown_per_tick,
                     "attackCooldownPerTick",
                     f32
                 );
@@ -116,59 +132,51 @@ pub fn apply(previous: &GameState, patch: &Map<String, Value>) -> GameState {
             "killAuraUnavailableReason" => {
                 apply_scalar!(
                     patch,
-                    merged.kill_aura_unavailable_reason,
+                    state.kill_aura_unavailable_reason,
                     "killAuraUnavailableReason",
                     String
                 );
             }
             "killAuraHasTarget" => {
-                apply_scalar!(
-                    patch,
-                    merged.kill_aura_has_target,
-                    "killAuraHasTarget",
-                    bool
-                );
+                apply_scalar!(patch, state.kill_aura_has_target, "killAuraHasTarget", bool);
             }
             "killAuraBlocking" => {
-                apply_scalar!(patch, merged.kill_aura_blocking, "killAuraBlocking", bool);
+                apply_scalar!(patch, state.kill_aura_blocking, "killAuraBlocking", bool);
             }
-            "lastActionId" => apply_scalar!(patch, merged.last_action_id, "lastActionId", i32),
+            "lastActionId" => apply_scalar!(patch, state.last_action_id, "lastActionId", i32),
             "lastActionResult" => {
-                apply_scalar!(patch, merged.last_action_result, "lastActionResult", String);
+                apply_scalar!(patch, state.last_action_result, "lastActionResult", String);
             }
-            "stateMs" => apply_scalar!(patch, merged.state_ms, "stateMs", u64),
-            "posX" => apply_scalar!(patch, merged.pos_x, "posX", f64),
-            "posY" => apply_scalar!(patch, merged.pos_y, "posY", f64),
-            "posZ" => apply_scalar!(patch, merged.pos_z, "posZ", f64),
-            "pitch" => apply_scalar!(patch, merged.pitch, "pitch", f32),
+            "stateMs" => apply_scalar!(patch, state.state_ms, "stateMs", u64),
+            "posX" => apply_scalar!(patch, state.pos_x, "posX", f64),
+            "posY" => apply_scalar!(patch, state.pos_y, "posY", f64),
+            "posZ" => apply_scalar!(patch, state.pos_z, "posZ", f64),
+            "pitch" => apply_scalar!(patch, state.pitch, "pitch", f32),
             "entities" => {
                 if value.is_null() {
-                    merged.entities.clear();
-                } else if let Ok(parsed) = serde_json::from_value::<Vec<EntityInfo>>(value.clone())
-                {
-                    merged.entities = parsed;
+                    state.entities.clear();
+                } else if let Some(parsed) = parse_value::<Vec<EntityInfo>>(value) {
+                    state.entities = parsed;
                 }
             }
             "chestStealerState" => {
                 if value.is_null() {
-                    merged.chest_stealer_state = None;
-                } else if let Ok(parsed) =
-                    serde_json::from_value::<ChestStealerState>(value.clone())
-                {
-                    merged.chest_stealer_state = Some(parsed);
+                    state.chest_stealer_state = None;
+                } else if let Some(parsed) = parse_value::<ChestStealerState>(value) {
+                    state.chest_stealer_state = Some(parsed);
                 }
             }
             "refillState" => {
                 if value.is_null() {
-                    merged.refill_state = None;
-                } else if let Ok(parsed) = serde_json::from_value::<RefillState>(value.clone()) {
-                    merged.refill_state = Some(parsed);
+                    state.refill_state = None;
+                } else if let Some(parsed) = parse_value::<RefillState>(value) {
+                    state.refill_state = Some(parsed);
                 }
             }
             "pixelPartyTargetFound" => {
                 apply_scalar!(
                     patch,
-                    merged.pixel_party_target_found,
+                    state.pixel_party_target_found,
                     "pixelPartyTargetFound",
                     bool
                 );
@@ -176,7 +184,7 @@ pub fn apply(previous: &GameState, patch: &Map<String, Value>) -> GameState {
             "pixelPartyTargetYaw" => {
                 apply_scalar!(
                     patch,
-                    merged.pixel_party_target_yaw,
+                    state.pixel_party_target_yaw,
                     "pixelPartyTargetYaw",
                     f32
                 );
@@ -184,7 +192,7 @@ pub fn apply(previous: &GameState, patch: &Map<String, Value>) -> GameState {
             "pixelPartyTargetDist" => {
                 apply_scalar!(
                     patch,
-                    merged.pixel_party_target_dist,
+                    state.pixel_party_target_dist,
                     "pixelPartyTargetDist",
                     f32
                 );
@@ -192,7 +200,7 @@ pub fn apply(previous: &GameState, patch: &Map<String, Value>) -> GameState {
             "pixelPartyYawDelta" => {
                 apply_scalar!(
                     patch,
-                    merged.pixel_party_yaw_delta,
+                    state.pixel_party_yaw_delta,
                     "pixelPartyYawDelta",
                     f32
                 );
@@ -206,10 +214,20 @@ pub fn apply(previous: &GameState, patch: &Map<String, Value>) -> GameState {
     // leave combat/stealer targets from the previous world visible to input
     // modules for the next state notification.
     if matches!(patch.get("inWorld"), Some(Value::Bool(false))) {
-        merged.entities.clear();
-        merged.chest_stealer_state = None;
-        merged.refill_state = None;
+        state.entities.clear();
+        state.chest_stealer_state = None;
+        state.refill_state = None;
     }
+}
 
+/// Applies `patch` to `previous`, returning the merged snapshot.
+///
+/// A copy-shaped convenience over [`apply_into`] for callers that need a new value
+/// rather than to update a live one; it costs one full copy of `previous` plus
+/// whatever [`apply_into`] allocates. The transport path uses [`apply_into`].
+#[must_use]
+pub fn apply(previous: &GameState, patch: &Map<String, Value>) -> GameState {
+    let mut merged = previous.clone();
+    apply_into(&mut merged, patch);
     merged
 }

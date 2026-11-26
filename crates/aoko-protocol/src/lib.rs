@@ -19,6 +19,8 @@ pub mod module_catalog;
 pub mod netstat;
 pub mod nick_hider;
 pub mod palettes;
+#[cfg(test)]
+mod perf;
 pub mod profile;
 pub mod servers;
 pub mod state;

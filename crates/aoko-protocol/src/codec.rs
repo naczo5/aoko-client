@@ -138,17 +138,23 @@ impl Decoder {
     }
 
     fn ingest_state(&mut self, root: &Value) -> Inbound {
-        let state = if state_patch::is_partial(root) {
-            match root {
-                Value::Object(patch) => state_patch::apply(&self.state, patch),
-                _ => return Inbound::Ignored(IgnoreReason::InvalidState),
-            }
+        if state_patch::is_partial(root) {
+            // Merged into the live snapshot rather than into a copy of it: a patch
+            // that carries three scalars must not rebuild the `String`s and `Vec`s
+            // it does not mention (`MIGRATION_ARCHITECTURE.md` section 6).
+            let Value::Object(patch) = root else {
+                return Inbound::Ignored(IgnoreReason::InvalidState);
+            };
+            state_patch::apply_into(&mut self.state, patch);
         } else {
-            match serde_json::from_value::<GameState>(root.clone()) {
-                Ok(state) => state,
+            // Decoded straight out of the borrowed document. `from_value(root.clone())`
+            // would deep-copy the parsed tree first, which is a second allocation per
+            // complete frame on the bridge that sends one every interval.
+            match <GameState as serde::Deserialize>::deserialize(root) {
+                Ok(state) => self.state = state,
                 Err(_) => return Inbound::Ignored(IgnoreReason::InvalidState),
             }
-        };
+        }
 
         // The hudLayout is applied from the same parsed document, so a partial
         // frame that omits it leaves the previous layout alone.
@@ -157,13 +163,15 @@ impl Decoder {
             .filter(|node| node.is_object())
             .map(HudLayout::from_json);
 
-        let mut state = state;
-        state.is_connected = true;
-        state.last_update = Some(SystemTime::now());
+        self.state.is_connected = true;
+        self.state.last_update = Some(SystemTime::now());
 
-        self.state = state.clone();
+        // The one copy a frame still costs: `Inbound::State` carries the document
+        // by value, so the decoder keeps its own and hands the caller a clone.
+        // Publishing the decoder's state behind an `Arc` would remove it, which is
+        // a shape change recorded in `docs/performance/rust-baseline.md`.
         Inbound::State {
-            state: Box::new(state),
+            state: Box::new(self.state.clone()),
             hud_layout,
         }
     }

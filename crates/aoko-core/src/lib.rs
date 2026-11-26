@@ -40,6 +40,8 @@ pub mod clock;
 pub mod concurrency;
 pub mod discord;
 pub mod loops;
+#[cfg(test)]
+mod perf;
 pub mod refill;
 pub mod resources;
 pub mod search;

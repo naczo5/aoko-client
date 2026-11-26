@@ -7,6 +7,12 @@ license.workspace = true
 repository.workspace = true
 description = "Wire protocol, game state, profile and module catalog for the Aoko host. No OS or UI dependencies."
 
+[[bench]]
+# Hand-rolled timing loop, no framework: `harness = false` so `cargo bench` runs
+# `main`. Five cases do not justify pulling in criterion.
+name = "protocol"
+harness = false
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }

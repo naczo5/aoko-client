@@ -7,8 +7,11 @@
 //!
 //! The wordlist is pre-indexed by character length at construction, so a query
 //! scans only candidates that can possibly fit the mask instead of the whole
-//! list. `solve` also memoises the last mask, which is what makes the steady-state
-//! per-frame call free.
+//! list. `solve` memoises the last mask *and* the line it came from, which is what
+//! makes the steady-state per-frame call allocation-free: the bridge repeats the
+//! same action-bar line on every frame, so an unchanged line is answered from the
+//! memo before the normalisation pipeline runs. A memo on the mask alone is not
+//! enough, because extracting the mask is what allocates.
 
 use std::collections::HashSet;
 
@@ -22,6 +25,8 @@ pub struct GtbWordSolver {
     /// Indices into `words`, bucketed by character length.
     by_length: Vec<Vec<u32>>,
     known: HashSet<String>,
+    /// The action-bar line the memo below was built from.
+    last_action_bar: String,
     last_mask: String,
     last_matches: Vec<String>,
 }
@@ -70,14 +75,23 @@ impl GtbWordSolver {
     /// Solves a GTB action-bar line.
     ///
     /// Returns the extracted mask and up to `max_results` matching words in
-    /// wordlist order. A repeated mask returns the memoised answer.
+    /// wordlist order. An unchanged line returns the memoised answer without
+    /// running the mask pipeline, and a repeated mask returns it after one pass.
     pub fn solve(&mut self, action_bar_text: &str, max_results: usize) -> (&str, &[String]) {
+        // The steady state: the bridge re-sends the same line, so this comparison is
+        // the whole cost of a frame that changes nothing. It reads the memo only
+        // while it is valid, which is why `try_learn_solved_word` clears it.
+        if !self.last_mask.is_empty() && action_bar_text == self.last_action_bar {
+            return (&self.last_mask, &self.last_matches);
+        }
+
         let mask = extract_mask(action_bar_text);
         if mask.trim().is_empty() {
             return ("", &[]);
         }
 
         if mask == self.last_mask {
+            self.remember_action_bar(action_bar_text);
             return (&self.last_mask, &self.last_matches);
         }
 
@@ -99,9 +113,17 @@ impl GtbWordSolver {
             }
         }
 
+        self.remember_action_bar(action_bar_text);
         self.last_mask = mask;
         self.last_matches = matches;
         (&self.last_mask, &self.last_matches)
+    }
+
+    /// Records the line the current memo answers, reusing the buffer so a line that
+    /// is no longer than the longest seen costs no allocation.
+    fn remember_action_bar(&mut self, action_bar_text: &str) {
+        self.last_action_bar.clear();
+        self.last_action_bar.push_str(action_bar_text);
     }
 
     /// Learns the word that just completed a round, so the next mask that can
@@ -127,6 +149,9 @@ impl GtbWordSolver {
         }
 
         self.insert_word(&solved_word);
+        // The answered mask is now wrong: a line that repeated it must be solved
+        // again, so both halves of the memo go.
+        self.last_action_bar.clear();
         self.last_mask.clear();
         self.last_matches.clear();
         true
