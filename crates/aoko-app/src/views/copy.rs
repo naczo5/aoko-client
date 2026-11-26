@@ -1273,6 +1273,81 @@ pub const LOADER_STATUS_CONNECTED: &str = "Status: Connected & Injected";
 /// wording the managed app never draws.
 pub const LOADER_STATUS_PREFIX: &str = "Status: ";
 
+// ── The palette editor ──────────────────────────────────────────────────────────
+
+/// The swatch beside each hex box in the create-palette card, repeated for all four
+/// rows: `MainWindow.xaml:1962` (Background), `:1973` (Panel), `:1984` (Accent) and
+/// `:1995` (Text).
+pub const PALETTE_SWATCH_TOOLTIP: &str = "Click to pick a color";
+
+/// The remove button on a custom palette card, `MainWindow.xaml:1922`.
+pub const PALETTE_DELETE_TOOLTIP: &str = "Delete palette";
+
+/// The click target on a custom palette card, `MainWindow.xaml:1926`. The card itself
+/// is the button, so this is a tooltip with no label beside it.
+pub const PALETTE_APPLY_TOOLTIP: &str = "Apply palette";
+
+/// The live-palette line above the cards, `MainWindow.xaml:1904`.
+///
+/// The markup is a `Run` inside a sentence with the name following it, so the name is
+/// concatenated: `Current palette: Slate`.
+pub const PALETTE_CURRENT_PREFIX: &str = "Current palette: ";
+
+/// The name was missing, blank, over 32 characters or outside the managed charset
+/// (`MainWindow.xaml.cs:1101`, validated by `IsValidPaletteName`).
+pub const PALETTE_STATUS_NAME_INVALID: &str =
+    "Enter a palette name (letters, numbers, spaces, - or _; max 32).";
+
+/// The name collides with one of the 18 built-ins (`MainWindow.xaml.cs:1107`).
+///
+/// `{name}` is the rejected name; filled with `str::replace`, because this copy is data
+/// and `format!` needs a literal format string.
+pub const PALETTE_STATUS_NAME_BUILTIN: &str =
+    "'{name}' is a built-in palette name. Choose another.";
+
+/// One of the four hex boxes does not parse (`MainWindow.xaml.cs:1116`).
+pub const PALETTE_STATUS_COLORS_INVALID: &str =
+    "One or more colors are invalid. Use hex like #1A2B3C.";
+
+/// `$"Could not save palette: {ex.Message}"` (`MainWindow.xaml.cs:1155`).
+///
+/// A prefix rather than a whole sentence, for the same reason as
+/// [`LOADER_STATUS_PREFIX`]: the tail is an exception message, not copy this crate owns.
+pub const PALETTE_STATUS_SAVE_FAILED_PREFIX: &str = "Could not save palette: ";
+
+/// `$"Saved and applied palette '{name}'."` (`MainWindow.xaml.cs:1170`). `{name}` is the
+/// palette that was written and applied in the same click.
+pub const PALETTE_STATUS_SAVED: &str = "Saved and applied palette '{name}'.";
+
+/// `$"Could not delete palette: {ex.Message}"` (`MainWindow.xaml.cs:1193`).
+pub const PALETTE_STATUS_DELETE_FAILED_PREFIX: &str = "Could not delete palette: ";
+
+/// `$"Deleted palette '{name}'."` (`MainWindow.xaml.cs:1209`).
+pub const PALETTE_STATUS_DELETED: &str = "Deleted palette '{name}'.";
+
+/// The overwrite confirmation's body, `MainWindow.xaml.cs:1125`.
+pub const PALETTE_OVERWRITE_PROMPT: &str =
+    "A custom palette named '{name}' already exists. Overwrite it?";
+
+/// Its title, `MainWindow.xaml.cs:1126`.
+pub const PALETTE_OVERWRITE_TITLE: &str = "Overwrite Palette";
+
+/// The delete confirmation's body, `MainWindow.xaml.cs:1179`.
+pub const PALETTE_DELETE_PROMPT: &str = "Delete custom palette '{name}'?";
+
+/// Its title, `MainWindow.xaml.cs:1180`.
+pub const PALETTE_DELETE_TITLE: &str = "Delete Palette";
+
+// ── The Block ESP rows ──────────────────────────────────────────────────────────
+
+/// The colour swatch in a tracked-block row, `MainWindow.xaml:705`. The row's own
+/// swatch is the click target; there is no button beside it.
+pub const BLOCK_ESP_COLOR_TOOLTIP: &str = "Click to change color";
+
+/// The add-block box, `MainWindow.xaml:720`. The example is the managed wording, and it
+/// names both accepted forms: the namespaced id and the bare one.
+pub const BLOCK_ESP_ID_TOOLTIP: &str = "Block id, e.g. minecraft:diamond_ore or diamond_ore";
+
 /// The client-drawn title bar's minimise/maximise/close accessible names.
 pub const TITLE_BAR_MINIMISE: &str = "Minimise";
 /// Maximise.
