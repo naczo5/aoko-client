@@ -1322,6 +1322,15 @@ pub const PALETTE_STATUS_SAVED: &str = "Saved and applied palette '{name}'.";
 /// `$"Could not delete palette: {ex.Message}"` (`MainWindow.xaml.cs:1193`).
 pub const PALETTE_STATUS_DELETE_FAILED_PREFIX: &str = "Could not delete palette: ";
 
+/// A delete press named a palette the file does not contain.
+///
+/// New copy. Managed ran `RemoveAll` and then reported `Deleted palette '<name>'.`
+/// whatever came back (`MainWindow.xaml.cs:1183-1209`), so a no-op claimed success; the
+/// port names the palette and the reason instead, in the shape the config card already
+/// uses for the same case (`views/profiles.rs:380-383`).
+pub const PALETTE_STATUS_DELETE_MISSING: &str =
+    "Could not delete palette '{name}': it is not in the palette file.";
+
 /// `$"Deleted palette '{name}'."` (`MainWindow.xaml.cs:1209`).
 pub const PALETTE_STATUS_DELETED: &str = "Deleted palette '{name}'.";
 

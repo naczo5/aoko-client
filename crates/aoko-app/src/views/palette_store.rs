@@ -27,6 +27,26 @@
 //! Nothing paints this yet. The palette editor card is in the Settings table
 //! (`copy::SETTINGS`) and its rows are shell-owned `Control` variants that do not exist;
 //! this module is what those rows will read, and it deliberately imports no GPUI type.
+//!
+//! # Deviations from managed
+//!
+//! Two behaviours here are **not** ports, both because the managed behaviour is a trap
+//! rather than a quirk. Each is pinned by a test that fails if the managed behaviour is
+//! restored, and both are recorded in the migration's trade-offs section.
+//!
+//! * **The built-in name guard is case-insensitive.** `BuiltInPaletteNames.Contains`
+//!   (`MainWindow.xaml.cs:1105`) is ordinal, so managed accepted a palette named `slate`;
+//!   resolution is case-insensitive and matches the built-ins first, so the saved palette
+//!   could never be applied. A palette that is saved and unreachable is worse than a
+//!   refused name, so [`PaletteStore::save_draft`] refuses every casing and reuses the
+//!   managed sentence ([`copy::PALETTE_STATUS_NAME_BUILTIN`]). Resolution keeps the
+//!   managed order — a hand-edited file can still contain such a name, and it still
+//!   resolves the managed way.
+//! * **A delete of a name that is not in the file reports that.** Managed's `Delete` is a
+//!   `RemoveAll` followed by an unconditional `Deleted palette '<name>'.`
+//!   (`MainWindow.xaml.cs:1183-1209`), so it removed nothing and said it had. Reporting
+//!   success for a failure is the defect class this migration exists to remove, so
+//!   [`PaletteStore::delete`] refuses with [`DeleteError::NotFound`] and writes nothing.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -171,6 +191,36 @@ pub enum DraftOutcome {
     },
 }
 
+/// Why a delete press removed nothing.
+///
+/// A distinct type from [`DraftError`] because the two failures a delete can hit are not
+/// the ones a save can: a missing name, which managed did not treat as a failure at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeleteError {
+    /// No palette in the file has that name, so nothing was removed. Carries the name as
+    /// given.
+    ///
+    /// **New copy.** Managed's `RemoveAll` deleted nothing and then reported
+    /// `Deleted palette '<name>'.` (`MainWindow.xaml.cs:1183-1209`); see the module
+    /// header for why the port does not.
+    NotFound(String),
+    /// The file could not be written (`:1188-1194`), carrying the I/O message.
+    Write(String),
+}
+
+impl DeleteError {
+    /// The line the card shows for this failure.
+    #[must_use]
+    pub fn status(&self) -> String {
+        match self {
+            Self::NotFound(name) => copy::PALETTE_STATUS_DELETE_MISSING.replace("{name}", name),
+            Self::Write(message) => {
+                format!("{}{message}", copy::PALETTE_STATUS_DELETE_FAILED_PREFIX)
+            }
+        }
+    }
+}
+
 /// The palette file, the palette that is applied, and the editor's four hex drafts.
 #[derive(Debug, Clone)]
 pub struct PaletteStore {
@@ -262,6 +312,9 @@ impl PaletteStore {
     /// name, write, register, apply, clear the name box, report. `overwrite` is the
     /// answer to the question; a first press passes `false`.
     ///
+    /// One step is deliberately stricter than the managed one: the built-in refusal is
+    /// case-insensitive, so `slate` never reaches the file (see the module header).
+    ///
     /// # Errors
     /// [`DraftError`] with the copy line the card shows; nothing is written.
     pub fn save_draft(&mut self, overwrite: bool) -> Result<DraftOutcome, DraftError> {
@@ -269,7 +322,7 @@ impl PaletteStore {
         if !is_valid_name(&name) {
             return Err(DraftError::NameInvalid);
         }
-        if is_builtin_exact(&name) {
+        if is_builtin_ignoring_case(&name) {
             return Err(DraftError::NameBuiltin(name));
         }
         let palette = self.draft.build(&name).ok_or(DraftError::ColorsInvalid)?;
@@ -307,18 +360,23 @@ impl PaletteStore {
 
     /// Deletes a palette by name after the confirmation, returning the status line.
     ///
-    /// Two managed behaviours are kept rather than tidied: a name that is not in the file
-    /// is not an error (`Delete` is a `RemoveAll` followed by an unconditional status,
-    /// `:1183-1209`), and deleting the applied palette falls back to `Slate`
-    /// (`:1199-1206`).
+    /// Deleting the applied palette falls back to `Slate` (`MainWindow.xaml.cs:1199-1206`).
+    /// A name that is not in the file is **not** reported as a deletion: managed ran a
+    /// `RemoveAll` and then printed `Deleted palette '<name>'.` regardless
+    /// (`:1183-1209`), which claimed a success that did not happen. The port returns
+    /// [`DeleteError::NotFound`] and writes nothing. See the module header.
     ///
     /// # Errors
-    /// The `Could not delete palette: <reason>` line when the file cannot be written.
-    pub fn delete(&mut self, name: &str) -> Result<String, String> {
+    /// [`DeleteError::NotFound`] for a name the file does not contain, or
+    /// [`DeleteError::Write`] when the file cannot be written; nothing is written in
+    /// either case.
+    pub fn delete(&mut self, name: &str) -> Result<String, DeleteError> {
         let mut palettes = self.palettes();
+        if !palettes.iter().any(|stored| same_name(&stored.name, name)) {
+            return Err(DeleteError::NotFound(name.to_owned()));
+        }
         delete(&mut palettes, name);
-        write_palettes(&self.path, &palettes)
-            .map_err(|message| format!("{}{message}", copy::PALETTE_STATUS_DELETE_FAILED_PREFIX))?;
+        write_palettes(&self.path, &palettes).map_err(DeleteError::Write)?;
 
         if same_name(&self.current, name) {
             self.current = DEFAULT_PALETTE.to_owned();
@@ -397,22 +455,14 @@ fn is_valid_name(name: &str) -> bool {
         .all(|character| character.is_alphanumeric() || matches!(character, ' ' | '-' | '_'))
 }
 
-/// Whether the name is a built-in, compared **case-sensitively**.
+/// Whether the name is a built-in, under `OrdinalIgnoreCase`.
 ///
-/// `BuiltInPaletteNames` is a `HashSet<string>` with the default comparer
-/// (`MainWindow.xaml.cs:54-68`), so `Slate` is refused and `slate` is not. That asymmetry
-/// is managed's and it has a visible consequence: a palette stored as `slate` can never
-/// be applied, because resolution matches the built-ins first and case-insensitively.
-/// The port keeps the guard exactly as it is; making it stricter would be a product
-/// change, not a fix.
-fn is_builtin_exact(name: &str) -> bool {
-    Theme::builtin_names()
-        .iter()
-        .any(|builtin| *builtin == name)
-}
-
-/// Whether the name is a built-in under `OrdinalIgnoreCase`, the comparison
-/// `NormalizeThemeName` and the resolution order use.
+/// Used by both the save-time guard and the resolution order, which is the deviation: the
+/// managed guard is `BuiltInPaletteNames.Contains` with the default comparer
+/// (`MainWindow.xaml.cs:54-68`, `:1105`) and is therefore ordinal, so managed accepted a
+/// palette named `slate` that its own case-insensitive resolution could then never reach.
+/// Refusing every casing at save time is the fix; the module header records it. Resolution
+/// still matches the built-ins first, because a hand-edited file can contain such a name.
 fn is_builtin_ignoring_case(name: &str) -> bool {
     Theme::builtin_names()
         .iter()
@@ -645,21 +695,41 @@ mod tests {
             "Mine",
             "trimmed, like NormalizeThemeName"
         );
+    }
 
-        // The managed wart, kept and pinned: the built-in guard is case-sensitive, so
-        // `slate` is storable, and resolution matches the built-in first.
-        store.draft_mut().name = "slate".to_owned();
-        store.draft_mut().background = "#1A2B3C".to_owned();
-        store
-            .save_draft(false)
-            .expect("the guard lets a lowercase built-in through, as managed does");
-        assert_eq!(store.palettes().len(), 2);
-        assert_eq!(store.resolve("slate").name, "Slate");
-        assert_ne!(
-            store.resolve("slate").background,
-            Color::from_hex(0x1A_2B_3C),
-            "the stored palette is unreachable, which is what managed does too"
-        );
+    /// Deviation, pinned: the save-time guard is case-insensitive.
+    ///
+    /// Managed's `BuiltInPaletteNames.Contains` (`MainWindow.xaml.cs:1105`) is ordinal, so
+    /// it accepted `slate`; resolution is case-insensitive and matches the built-ins first,
+    /// so that saved palette could never apply. If someone restores the ordinal guard this
+    /// test will save a palette and then fail on the first refusal assertion.
+    #[test]
+    fn a_builtin_name_is_refused_at_save_time_in_every_casing() {
+        for name in ["Slate", "slate", "SLATE", "  sLaTe  "] {
+            let mut store = store();
+            store.draft_mut().name = name.to_owned();
+
+            let refused = store
+                .save_draft(false)
+                .expect_err(&format!("{name:?} is a built-in and must not save"));
+            assert_eq!(
+                refused,
+                DraftError::NameBuiltin(name.trim().to_owned()),
+                "the message names the palette as typed, trimmed"
+            );
+            assert_eq!(
+                refused.status(),
+                format!(
+                    "'{}' is a built-in palette name. Choose another.",
+                    name.trim()
+                )
+            );
+            assert!(
+                !store.path().exists(),
+                "{name:?} must not reach the file: a saved palette that cannot apply is worse than a refusal"
+            );
+            assert_eq!(store.current_name(), DEFAULT_PALETTE);
+        }
     }
 
     #[test]
@@ -678,8 +748,9 @@ mod tests {
         assert_eq!(resolve_in(&palettes, "   ").name, "Slate");
         assert_eq!(resolve_in(&palettes, "Gone").name, "Slate");
 
-        // A custom entry that shadows a built-in is unreachable, as managed has it:
-        // the built-ins are matched first and case-insensitively.
+        // A file edited by hand can still hold a palette that shadows a built-in, and
+        // resolution keeps the managed order: the built-ins are matched first, and
+        // case-insensitively. This is why the save-time guard refuses the name outright.
         palettes.push(CustomPalette {
             name: "slate".to_owned(),
             background: "#1A2B3C".to_owned(),
@@ -712,14 +783,45 @@ mod tests {
             "the deleted palette was applied"
         );
         assert_eq!(store.theme().name, "Slate");
+    }
 
+    /// Deviation, pinned: a delete of a name that is not saved reports the miss.
+    ///
+    /// Managed ran a `RemoveAll` that removed nothing and then printed
+    /// `Deleted palette '<name>'.` (`MainWindow.xaml.cs:1183-1209`). If someone restores
+    /// that, the first assertion fails because the press reports success again.
+    #[test]
+    fn deleting_a_name_that_is_not_saved_reports_it_and_writes_nothing() {
+        let mut store = store();
+        store.draft_mut().name = "Mine".to_owned();
+        store.save_draft(false).expect("save");
+        let before = fs::read_to_string(store.path()).expect("the file exists");
+
+        let refused = store.delete("Gone").expect_err("nothing was deleted");
+        assert_eq!(refused, DeleteError::NotFound("Gone".to_owned()));
         assert_eq!(
-            store
-                .delete("Gone")
-                .expect("a missing name is not an error"),
-            "Deleted palette 'Gone'.",
-            "managed reports the deletion unconditionally"
+            refused.status(),
+            "Could not delete palette 'Gone': it is not in the palette file."
         );
+        assert_eq!(
+            fs::read_to_string(store.path()).expect("still there"),
+            before,
+            "a refused delete does not rewrite the file"
+        );
+        assert_eq!(store.palettes().len(), 1, "the saved palette is untouched");
+        assert_eq!(
+            store.current_name(),
+            "Mine",
+            "a refused delete does not change what is applied"
+        );
+
+        // A name that differs only by case is a different question: the file is searched
+        // case-insensitively, so that one is found and removed.
+        assert_eq!(
+            store.delete("MINE").expect("case-insensitive"),
+            "Deleted palette 'MINE'."
+        );
+        assert!(store.palettes().is_empty());
     }
 
     #[test]
