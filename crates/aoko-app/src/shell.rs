@@ -2147,32 +2147,35 @@ impl Shell {
         event: &KeyDownEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> SearchKeyOutcome {
+    ) -> WindowKeyOutcome {
         let outcome = self.window_key_outcome(event, window, cx);
         match outcome {
             // `SearchKeyOutcome::Opened`'s contract: the caller focuses the query field.
-            SearchKeyOutcome::Opened => self.focus_search_query(window, cx),
+            WindowKeyOutcome::Opened => self.focus_search_query(window, cx),
             // And `Closed`'s: it restores focus, which here means handing it back to the window.
-            SearchKeyOutcome::Closed => self.blur_search_query(window, cx),
-            SearchKeyOutcome::Ignored => {}
-        }
-        if outcome != SearchKeyOutcome::Ignored {
-            cx.notify();
+            WindowKeyOutcome::Closed => self.blur_search_query(window, cx),
+            WindowKeyOutcome::Consumed => cx.notify(),
+            WindowKeyOutcome::Ignored => {}
         }
         outcome
     }
 
     /// The two controls that take a window key, in the order that decides which of them sees it.
     ///
-    /// `Opened` and `Closed` are the outcomes worth stopping propagation for: the overlay has
-    /// taken the keyboard, and letting the key travel on would also hit whatever is behind it.
-    /// Everything else is `Ignored`, and the key goes on to the element that would have had it.
+    /// Every outcome but `Ignored` stops the key at the root listener, and the reason is easy to
+    /// lose: GPUI's simulated input fills a `key_char` for `enter` (`"\n"`), `tab` (`"\t"`) and
+    /// `space` (`" "`) before the event is dispatched (`gpui/src/window.rs:6178-6201`,
+    /// `platform/keystroke.rs:268-289`), and hands that character to the platform input handler
+    /// whenever the event still propagates. A branch that acted on Enter and answered `Ignored`
+    /// therefore acted *and* typed the newline: the palette box committed `#0A0B0F` and then read
+    /// `#0A0B0F\n`, and the add box typed `stone`, which normalises to nothing, so the append
+    /// looked like it never happened. `Consumed` is the answer for a key the shell acted on.
     fn window_key_outcome(
         &mut self,
         event: &KeyDownEvent,
         window: &Window,
         cx: &mut Context<Self>,
-    ) -> SearchKeyOutcome {
+    ) -> WindowKeyOutcome {
         // Escape cancels the colour picker. That is the managed `IsCancel="True"` on the dialog's
         // Cancel button (`ColorPickerDialog.xaml:109`): WPF closed the window with
         // `DialogResult = false`, so nothing was written and nothing was said. The dialog itself
@@ -2181,7 +2184,8 @@ impl Shell {
         if self.picker.is_some() && event.keystroke.key.eq_ignore_ascii_case("escape") {
             self.picker = None;
             cx.notify();
-            return SearchKeyOutcome::Ignored;
+            // Consumed: the picker answered the key, so nothing behind it may also see it.
+            return WindowKeyOutcome::Consumed;
         }
 
         // Enter in the Block ESP add box submits. `components::TextInput` deliberately leaves
@@ -2193,7 +2197,10 @@ impl Shell {
             && self.block_add_focused(window, cx)
         {
             self.add_block_target(cx);
-            return SearchKeyOutcome::Ignored;
+            // Consumed, not `Ignored`: the submit happened, and `Ignored` would let
+            // `dispatch_keystroke` insert Enter's simulated `"\n"` into the same box afterwards,
+            // which makes `stone\n` normalise to nothing and the add look dropped.
+            return WindowKeyOutcome::Consumed;
         }
 
         // Enter in a palette box commits its hex in the canonical `#RRGGBB` form. Same route,
@@ -2201,7 +2208,9 @@ impl Shell {
         if event.keystroke.key.eq_ignore_ascii_case("enter") && !self.search.is_open() {
             if let Some(bind) = self.color_field_focused(window, cx) {
                 self.commit_color_text(bind, cx);
-                return SearchKeyOutcome::Ignored;
+                // Consumed for the same reason as the add box: the commit happened, and Enter's
+                // simulated `"\n"` must not be appended to the hex it just canonicalised.
+                return WindowKeyOutcome::Consumed;
             }
         }
 
@@ -2211,17 +2220,19 @@ impl Shell {
         // listener is what receives it.
         if self.search.is_open() && event.keystroke.key.eq_ignore_ascii_case("enter") {
             self.perform_jump(cx);
-            return SearchKeyOutcome::Closed;
+            return WindowKeyOutcome::Closed;
         }
 
         let Some(key) = search_key_of(event) else {
-            return SearchKeyOutcome::Ignored;
+            return WindowKeyOutcome::Ignored;
         };
 
         let facts = self.row_facts();
         let dev_mode = self.profile.dev_mode;
         let gate = self.search_gate(Some(window), cx);
-        self.search.handle_window_key(key, &gate, dev_mode, &facts)
+        self.search
+            .handle_window_key(key, &gate, dev_mode, &facts)
+            .into()
     }
 
     /// A click on one result row: select it, then perform the jump.
@@ -2595,8 +2606,11 @@ impl Render for Shell {
                 move |event, window, cx| {
                     let outcome =
                         handle.update(cx, |shell, cx| shell.handle_window_key(event, window, cx));
-                    // Only the two outcomes that take the keyboard stop it here.
-                    if matches!(outcome, SearchKeyOutcome::Opened | SearchKeyOutcome::Closed) {
+                    // Every outcome but `Ignored` stops the key here: the element below must not
+                    // also act on it, and `Window::dispatch_keystroke` must not hand its simulated
+                    // character to the input handler afterwards — Enter's is `"\n"`. See
+                    // [`WindowKeyOutcome`].
+                    if outcome.is_consumed() {
                         cx.stop_propagation();
                     }
                 }
@@ -4119,6 +4133,47 @@ fn keybind_label(profile: &aoko_protocol::profile::Profile, module: &'static str
 #[must_use]
 pub fn module_list_sample() -> &'static str {
     MODULE_LIST_PREVIEW_SAMPLE
+}
+
+/// What the window's one key listener did with a keystroke.
+///
+/// [`SearchKeyOutcome`] answers for the overlay. The window has three other owners — the block
+/// add box's Enter, a palette box's Enter and the colour picker's Escape — and the listener has to
+/// say whether a key it acted on may travel on down the tree. That is not cosmetic:
+/// `Window::dispatch_keystroke` (`gpui/src/window.rs:6178-6201`) gives `enter` a `key_char` of
+/// `"\n"` through `keystroke.with_simulated_ime()` (`platform/keystroke.rs:268-289`) and hands it
+/// to the platform input handler if the event still propagates, so a shell that consumed Enter
+/// without stopping propagation also typed a newline into the very box it had just submitted.
+/// `Consumed` is the answer that avoids it, and it is the same rule Tab already needs: a field
+/// that does not stop Tab types a literal tab instead of moving focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowKeyOutcome {
+    /// Nothing took it. The key travels on to the element that would have had it.
+    Ignored,
+    /// The shell acted on it. Nothing behind may see it, and its simulated character must not be
+    /// inserted anywhere.
+    Consumed,
+    /// The overlay opened; the caller focuses the query field. The key stops here.
+    Opened,
+    /// The overlay closed; the caller restores focus. The key stops here.
+    Closed,
+}
+
+impl WindowKeyOutcome {
+    /// Whether the key stops at the window listener.
+    fn is_consumed(self) -> bool {
+        !matches!(self, Self::Ignored)
+    }
+}
+
+impl From<SearchKeyOutcome> for WindowKeyOutcome {
+    fn from(outcome: SearchKeyOutcome) -> Self {
+        match outcome {
+            SearchKeyOutcome::Opened => Self::Opened,
+            SearchKeyOutcome::Closed => Self::Closed,
+            SearchKeyOutcome::Ignored => Self::Ignored,
+        }
+    }
 }
 
 /// The search key one keystroke is, or `None` when the search does not care about it.
