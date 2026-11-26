@@ -53,6 +53,7 @@ use gpui::{
 
 use aoko_core::app::AppController;
 use aoko_core::search;
+use aoko_protocol::block_esp::{self, BlockEspTargetData};
 
 use crate::components;
 use crate::components::text_input::TextInput;
@@ -119,6 +120,13 @@ pub struct Shell {
     /// context and [`Shell::new`] has none (`main.rs` calls `cx.new`, which is the
     /// components owner's file).
     fields: FormFields,
+    /// The Block ESP add box (`MainWindow.xaml:720`).
+    ///
+    /// A text field is an entity, so it exists from the first render on rather than from
+    /// [`Shell::new`]. It sits here rather than in [`FormFields`] because it is the one box the
+    /// shell submits itself — on Enter and on the button beside it — rather than a form the
+    /// account and server panels own.
+    block_add: Option<Entity<TextInput>>,
     /// The new-config name box's text (`NewConfigNameBox`, `MainWindow.xaml:1552`).
     config_name: String,
     /// Whether the session can hand a folder to the file manager
@@ -333,6 +341,7 @@ impl Shell {
             stores: Box::new(NoStore),
             profiles,
             fields: FormFields::default(),
+            block_add: None,
             config_name: String::new(),
             open_configs_folder: false,
             // Under `cfg(test)` and `capture` nothing has changed the process gate, so
@@ -599,6 +608,23 @@ impl Shell {
             }
             self.fields.config_name = Some(input);
         }
+    }
+
+    /// Creates the Block ESP add box, once.
+    ///
+    /// Called at the top of [`Render::render`] for the same reason as
+    /// [`Shell::ensure_form_fields`]: an entity needs a context and [`Shell::new`] has none. The
+    /// box is not in [`FormFields`] because nothing else owns its text — [`Shell::add_block_target`]
+    /// reads it straight off the entity, so there is no second copy to fall out of step.
+    fn ensure_block_add(&mut self, cx: &mut Context<Self>) {
+        if self.block_add.is_some() {
+            return;
+        }
+        let theme = self.theme.clone();
+        // The placeholder is empty rather than a literal: the managed box draws the
+        // `Block id, e.g. …` sentence as its tooltip, and inventing wording here is exactly
+        // what `views::copy` exists to prevent.
+        self.block_add = Some(cx.new(|cx| TextInput::new(cx, theme.clone(), "")));
     }
 
     /// Pushes the state's text into every field the user is not typing in.
@@ -1653,17 +1679,30 @@ impl Shell {
         }
     }
 
-    /// One window keystroke, mapped onto the search and performed.
+    /// One window keystroke: the two controls that take a window key, in the order that decides
+    /// which of them sees it.
     ///
     /// `Opened` and `Closed` are the outcomes worth stopping propagation for: the overlay has
     /// taken the keyboard, and letting the key travel on would also hit whatever is behind it.
     /// Everything else is `Ignored`, and the key goes on to the element that would have had it.
-    fn handle_search_key(
+    fn handle_window_key(
         &mut self,
         event: &KeyDownEvent,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> SearchKeyOutcome {
+        // Enter in the Block ESP add box submits. `components::TextInput` deliberately leaves
+        // Tab, Enter and Escape to its owner (`text_input.rs:421`), so a focused box hands the
+        // key up the tree and this listener is where it lands. It is checked before the overlay
+        // because a box with focus is a box the user is typing in.
+        if event.keystroke.key.eq_ignore_ascii_case("enter")
+            && !self.search.is_open()
+            && self.block_add_focused(window, cx)
+        {
+            self.add_block_target(cx);
+            return SearchKeyOutcome::Ignored;
+        }
+
         // Enter jumps the selected row, and only while the overlay is open. It is not a
         // `SearchKey` because the managed `Jump` is a query-field key, not a window gesture.
         // The query row is painted rather than focusable (`overlay::query_row`), so the root
@@ -1767,10 +1806,11 @@ impl Shell {
 
     /// Whether any of the shell's text fields owns the keyboard.
     ///
-    /// Read off the entities rather than a tracked flag: there are six one place
-    /// (`fields::FormFields`) and a flag beside each would be a second copy of the focus GPUI
-    /// already keeps. A new field added to `FormFields` is in this array, so the gate cannot
-    /// forget it.
+    /// Read off the entities rather than a tracked flag: six of them live in one place
+    /// ([`FormFields`]) and a flag beside each would be a second copy of the focus GPUI already
+    /// keeps. A new field added to `FormFields` is in this array, so the gate cannot forget it —
+    /// and the Block ESP add box, which is the one text field that lives on the shell instead, is
+    /// here for the same reason: a character typed into it must not open the search overlay.
     fn any_text_field_focused(&self, window: &Window, cx: &App) -> bool {
         [
             &self.fields.token,
@@ -1779,10 +1819,18 @@ impl Shell {
             &self.fields.server_address,
             &self.fields.direct_address,
             &self.fields.config_name,
+            &self.block_add,
         ]
         .into_iter()
         .flatten()
         .any(|field| field.read(cx).focus_handle().is_focused(window))
+    }
+
+    /// Whether the Block ESP add box owns the keyboard, which is what makes Enter a submit.
+    fn block_add_focused(&self, window: &Window, cx: &App) -> bool {
+        self.block_add
+            .as_ref()
+            .is_some_and(|field| field.read(cx).focus_handle().is_focused(window))
     }
 
     /// The command-search overlay, or `None` while it is closed.
@@ -1874,6 +1922,9 @@ impl Render for Shell {
         // a capture holds focus across frames, so its entity outlives the paint that drew it,
         // and this is also where a profile that changed rebuilds one.
         self.sync_keybind_captures(cx);
+        // The add-block box is an entity too, and for the same reason it is created here
+        // rather than in `Shell::new`.
+        self.ensure_block_add(cx);
 
         // The GTB helper is polled here because this is the only per-frame hook the shell
         // has: the runtime decides whether there is work (module on, link live, frame fresh,
@@ -1951,7 +2002,7 @@ impl Render for Shell {
                 let handle = entity.clone();
                 move |event, window, cx| {
                     let outcome =
-                        handle.update(cx, |shell, cx| shell.handle_search_key(event, window, cx));
+                        handle.update(cx, |shell, cx| shell.handle_window_key(event, window, cx));
                     // Only the two outcomes that take the keyboard stop it here.
                     if matches!(outcome, SearchKeyOutcome::Opened | SearchKeyOutcome::Closed) {
                         cx.stop_propagation();
@@ -2851,6 +2902,8 @@ impl Shell {
                 // "add a block to start" line would be a port invention, not a gap.
                 .into_any_element(),
 
+            Control::BlockEspAdd { bind } => self.render_block_add(bind, theme, entity),
+
             Control::PalettePreview { name } => {
                 let preview_accent = Theme::accent_by_name(name);
                 div()
@@ -2876,6 +2929,110 @@ impl Shell {
                     .into_any_element()
             }
         }
+    }
+
+    /// The Block ESP add row: the box, the button beside it, and the id hint under it.
+    ///
+    /// The hint is the tooltip painted as a dim line, which is the shape
+    /// [`Control::Check`]'s tooltip already takes in this tree; `components::TextInput` has no
+    /// tooltip of its own, so the sentence sits where a user reads it rather than on hover.
+    ///
+    /// The row carries a debug selector because it is the only handle a test has on the mount:
+    /// `components::button` gives the button an `ElementId` and no selector, the same shape that
+    /// left the rail's search button unpaintable from a test.
+    fn render_block_add(
+        &self,
+        bind: &'static str,
+        theme: &Theme,
+        entity: &Entity<Self>,
+    ) -> AnyElement {
+        let selector = block_add_selector(bind);
+
+        let field = match &self.block_add {
+            Some(field) => field.clone().into_any_element(),
+            // The entity is created in `render`, before the tree, so this is the defensive
+            // answer rather than a state a laid-out frame can be in.
+            None => div().into_any_element(),
+        };
+
+        let handle = entity.clone();
+        let add = components::button(
+            crate::reuse::stitched("blockesp-add-button-", "", bind),
+            theme,
+            ButtonVariant::Dark,
+            copy::BLOCK_ESP_ADD_LABEL,
+            move |_, _window, cx| {
+                handle.update(cx, |shell, cx| shell.add_block_target(cx));
+            },
+        );
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .debug_selector(move || selector)
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    // The box takes what the button leaves. The managed `Width` is not
+                    // recorded anywhere in this tree, so this asks for no number rather
+                    // than inventing one.
+                    .child(div().flex_1().min_w(px(0.0)).child(field))
+                    .child(add),
+            )
+            .child(
+                div()
+                    .text_size(px(metrics::text::CAPTION))
+                    .text_color(theme.dim_text)
+                    .child(copy::BLOCK_ESP_ID_TOOLTIP),
+            )
+            .into_any_element()
+    }
+
+    /// Adds the block the box names, or enables it when the list already has it.
+    ///
+    /// [`block_esp::normalize_id`] is the whole normalisation: `minecraft:diamond_ore`,
+    /// `diamond_ore` and `block.minecraft.diamond_ore` all become `diamond_ore`, so a user can
+    /// type any of the three. An empty result is the managed no-op — whitespace and punctuation
+    /// alone store nothing and leave the box as it was.
+    ///
+    /// An id already tracked is *enabled* rather than appended: a second entry with the same
+    /// registry id would paint twice and send twice. A new one is appended as
+    /// `minecraft:{id}`, with the friendly name the managed code derives from the id, the
+    /// default colour and `enabled: true`; the box is then cleared so the next add starts fresh.
+    fn add_block_target(&mut self, cx: &mut Context<Self>) {
+        let Some(field) = self.block_add.clone() else {
+            return;
+        };
+        let id = block_esp::normalize_id(Some(field.read(cx).text()));
+        if id.is_empty() {
+            return;
+        }
+
+        // The index rather than the target: the `None` arm appends, which needs the borrow to
+        // be over.
+        let existing =
+            self.profile.block_esp_targets.iter().position(|target| {
+                block_esp::normalize_id(Some(target.registry_id.as_str())) == id
+            });
+        match existing {
+            Some(index) => self.profile.block_esp_targets[index].enabled = true,
+            None => self.profile.block_esp_targets.push(BlockEspTargetData {
+                registry_id: format!("minecraft:{id}"),
+                display_name: id.replace('_', " "),
+                color_hex: block_esp::DEFAULT_COLOR_HEX.to_owned(),
+                enabled: true,
+            }),
+        }
+
+        field.update(cx, |field, cx| field.set_text("", cx));
+        // The profile is the owner the config frame is built from, so the add has to reach it
+        // before it reaches the wire.
+        self.push_profile();
+        cx.notify();
     }
 }
 
@@ -3078,6 +3235,15 @@ fn switch_debug_selector(bind: &'static str) -> Option<&'static str> {
         "DevMode" => Some("switch-DevMode"),
         _ => None,
     }
+}
+
+/// The Block ESP add row's debug selector.
+///
+/// The row is one control in one card, so the bind it carries is the whole name. A test needs
+/// the bounds to prove the row is mounted and to scroll it into view; the button inside it has
+/// an `ElementId` and no selector, so this is the only handle there is.
+fn block_add_selector(bind: &'static str) -> String {
+    format!("blockesp-add-{bind}")
 }
 
 /// Whether a control was already painted as part of the card's header.
@@ -5557,6 +5723,194 @@ mod tests {
         assert!(
             visual.debug_bounds("command-search-card").is_none(),
             "and closing it takes the card off screen"
+        );
+    }
+
+    // ---- the Block ESP add row -------------------------------------------------
+
+    /// Focuses the Block ESP add box, so a keystroke lands in it.
+    ///
+    /// The box lives on the shell rather than in `FormFields`, so a test reads it the same way
+    /// [`Shell::add_block_target`] does: off the entity.
+    fn focus_block_add(
+        cx: &mut gpui::TestAppContext,
+        shell: &Entity<Shell>,
+        visual: &mut gpui::VisualTestContext,
+    ) -> Entity<TextInput> {
+        let field = cx
+            .read(|cx| shell.read(cx).block_add.clone())
+            .expect("the add box exists after the first frame");
+        let focus = cx.read(|cx| field.read(cx).focus_handle().clone());
+        visual.update(|window, cx| window.focus(&focus, cx));
+        field
+    }
+
+    /// Puts `text` in the box the owner's way and presses Enter, which is the submit
+    /// `components::TextInput` deliberately refuses to own (`text_input.rs:421`).
+    fn submit_block_add(
+        cx: &mut gpui::TestAppContext,
+        shell: &Entity<Shell>,
+        visual: &mut gpui::VisualTestContext,
+        window: gpui::AnyWindowHandle,
+        text: &str,
+    ) {
+        use gpui::Keystroke;
+
+        let field = focus_block_add(cx, shell, visual);
+        cx.update(|cx| field.update(cx, |field, cx| field.set_text(text, cx)));
+        visual
+            .cx
+            .dispatch_keystroke(window, Keystroke::parse("enter").expect("keystroke"));
+    }
+
+    /// Enter in the add box appends one target, and typing in that box is not the search's.
+    ///
+    /// The two behaviours are one keystroke apart, so one walk covers both: the characters go to
+    /// the field — the overlay has to stay shut while a text field holds focus, which is what
+    /// adding this box to `any_text_field_focused` buys — and Enter goes to the shell because
+    /// the widget leaves it to its owner.
+    #[gpui::test]
+    fn typing_into_the_block_add_box_then_enter_adds_the_block(cx: &mut gpui::TestAppContext) {
+        use gpui::Keystroke;
+
+        let root = scratch_root();
+        let (shell, handle, mut visual) = shell_in_window(cx, &root);
+        let field = focus_block_add(cx, &shell, &mut visual);
+
+        for character in ["s", "t", "o", "n", "e"] {
+            visual
+                .cx
+                .dispatch_keystroke(handle, Keystroke::parse(character).expect("keystroke"));
+        }
+
+        assert_eq!(
+            cx.read(|cx| field.read(cx).text().to_owned()),
+            "stone",
+            "the box received the characters"
+        );
+        assert!(
+            !cx.read(|cx| shell.read(cx).search().is_open()),
+            "and the search overlay stayed shut while a text field had focus"
+        );
+
+        visual
+            .cx
+            .dispatch_keystroke(handle, Keystroke::parse("enter").expect("keystroke"));
+
+        let targets = cx.read(|cx| shell.read(cx).profile().block_esp_targets.clone());
+        let added = targets
+            .iter()
+            .find(|target| target.registry_id == "minecraft:stone")
+            .expect("Enter added the block the box named");
+        assert_eq!(added.display_name, "stone", "named from the id");
+        assert_eq!(added.color_hex, aoko_protocol::block_esp::DEFAULT_COLOR_HEX);
+        assert!(added.enabled, "a new target starts enabled");
+        assert_eq!(
+            cx.read(|cx| field.read(cx).text().to_owned()),
+            "",
+            "and the box is cleared for the next add"
+        );
+        assert_eq!(
+            cx.read(|cx| shell
+                .read(cx)
+                .controller()
+                .profile()
+                .block_esp_targets
+                .len()),
+            targets.len(),
+            "the controller is the owner the config frame is built from, so the add reached it"
+        );
+    }
+
+    /// Every id form names one block, and a second add enables rather than duplicates.
+    #[gpui::test]
+    fn adding_a_known_block_enables_it_and_stores_no_second_entry(cx: &mut gpui::TestAppContext) {
+        let root = scratch_root();
+        let (shell, handle, mut visual) = shell_in_window(cx, &root);
+
+        let before = cx.read(|cx| shell.read(cx).profile().block_esp_targets.len());
+        submit_block_add(cx, &shell, &mut visual, handle, "minecraft:Diamond_Ore");
+
+        let after = cx.read(|cx| shell.read(cx).profile().block_esp_targets.clone());
+        assert_eq!(after.len(), before + 1, "one target was appended");
+        let index = after
+            .iter()
+            .position(|target| target.registry_id == "minecraft:diamond_ore")
+            .expect("the namespaced, mixed-case form normalises to the registry id");
+        assert_eq!(after[index].display_name, "diamond ore");
+
+        // Turn it off behind the box's back, then add the bare form: the same block.
+        cx.update(|cx| {
+            shell.update(cx, |shell, _| {
+                shell.profile.block_esp_targets[index].enabled = false;
+            });
+        });
+        submit_block_add(cx, &shell, &mut visual, handle, "diamond_ore");
+
+        let after = cx.read(|cx| shell.read(cx).profile().block_esp_targets.clone());
+        assert_eq!(
+            after.len(),
+            before + 1,
+            "no second entry for the same block"
+        );
+        assert!(
+            after[index].enabled,
+            "the existing target was enabled rather than duplicated"
+        );
+    }
+
+    /// An empty or punctuation-only box stores nothing, which is the managed no-op.
+    #[gpui::test]
+    fn an_empty_block_add_box_stores_nothing(cx: &mut gpui::TestAppContext) {
+        use gpui::Keystroke;
+
+        let root = scratch_root();
+        let (shell, handle, mut visual) = shell_in_window(cx, &root);
+
+        let before = cx.read(|cx| shell.read(cx).profile().block_esp_targets.len());
+        let field = focus_block_add(cx, &shell, &mut visual);
+
+        for text in ["", "   ", ".:/"] {
+            cx.update(|cx| field.update(cx, |field, cx| field.set_text(text, cx)));
+            visual
+                .cx
+                .dispatch_keystroke(handle, Keystroke::parse("enter").expect("keystroke"));
+            assert_eq!(
+                cx.read(|cx| shell.read(cx).profile().block_esp_targets.len()),
+                before,
+                "{text:?} normalises to nothing, so it stores nothing"
+            );
+        }
+    }
+
+    /// The row is mounted on the Block ESP card, with the box and the button the spec names.
+    ///
+    /// The button inside it has an `ElementId` and no debug selector (`components::button`), so
+    /// the press is asserted through [`Shell::add_block_target`] — the function the button's
+    /// closure calls — and what the paint can prove is that the row exists at a width that holds
+    /// both, on the card's tab.
+    #[gpui::test]
+    fn the_block_add_row_is_mounted_on_the_block_esp_card(cx: &mut gpui::TestAppContext) {
+        let root = scratch_root();
+        let (shell, _, mut visual) = shell_in_window(cx, &root);
+
+        // `BlockEspCard` is on Combat, and the card sits below the fold at the test viewport.
+        scroll_into_view(&mut visual, "blockesp-add-blockEspTargets");
+        let bounds = visual
+            .debug_bounds("blockesp-add-blockEspTargets")
+            .expect("the add row paints");
+        assert!(
+            bounds.size.width > px(80.0),
+            "the row holds the box and the button side by side, so it is wider than a caption"
+        );
+
+        // The button's closure is this call, and an empty box is still a no-op through it.
+        let before = cx.read(|cx| shell.read(cx).profile().block_esp_targets.len());
+        cx.update(|cx| shell.update(cx, |shell, cx| shell.add_block_target(cx)));
+        assert_eq!(
+            cx.read(|cx| shell.read(cx).profile().block_esp_targets.len()),
+            before,
+            "an empty box is still a no-op through the press path"
         );
     }
 }

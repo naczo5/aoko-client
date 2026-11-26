@@ -210,6 +210,16 @@ pub enum Control {
     /// The Block ESP tracked-block list, whose row template is not a set of fixed
     /// controls: it is one row per saved target.
     BlockEspRows,
+    /// The add-block box and its button, `MainWindow.xaml:714-722`: a text field carrying
+    /// the block-id tooltip and the `DarkButton` whose label is [`BLOCK_ESP_ADD_LABEL`].
+    ///
+    /// One control rather than a field and a [`Control::Button`] because the box's Enter and
+    /// the button's press are the same submit, so they cannot disagree about what is added.
+    BlockEspAdd {
+        /// Managed binding path of the list the add appends to:
+        /// `Profile::block_esp_targets`.
+        bind: &'static str,
+    },
     /// One of the 18 built-in palette previews, or a custom palette card.
     PalettePreview {
         /// Palette name, verbatim.
@@ -393,7 +403,7 @@ pub const RENDER: &[Card] = &[
             Note { text: "Tracked Blocks" },
             Check { label: "", bind: "Enabled", tooltip: "" },
             Button { label: "✕", tooltip: "Remove block" },
-            Button { label: "Add", tooltip: "" },
+            BlockEspAdd { bind: "blockEspTargets" },
     ],
     },
     Card {
@@ -1357,6 +1367,13 @@ pub const BLOCK_ESP_COLOR_TOOLTIP: &str = "Click to change color";
 /// names both accepted forms: the namespaced id and the bare one.
 pub const BLOCK_ESP_ID_TOOLTIP: &str = "Block id, e.g. minecraft:diamond_ore or diamond_ore";
 
+/// The add-block button's label, the `DarkButton` at `MainWindow.xaml:722`.
+///
+/// The table carried it as a [`Control::Button`] label until the row became
+/// [`Control::BlockEspAdd`], which has no label field: the pair is one control, so the label
+/// is copy rather than row data.
+pub const BLOCK_ESP_ADD_LABEL: &str = "Add";
+
 /// The client-drawn title bar's minimise/maximise/close accessible names.
 pub const TITLE_BAR_MINIMISE: &str = "Minimise";
 /// Maximise.
@@ -1438,6 +1455,7 @@ pub fn count_controls(cards: &[Card]) -> ControlCounts {
                 | Control::Availability { .. }
                 | Control::Expand { .. }
                 | Control::BlockEspRows
+                | Control::BlockEspAdd { .. }
                 | Control::PalettePreview { .. }
                 | Control::Preference { .. } => {}
             }
