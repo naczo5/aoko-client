@@ -322,6 +322,12 @@ mod tests {
             let keystroke = Keystroke::parse(name).expect("keystroke");
             self.visual.cx.dispatch_keystroke(self.window, keystroke);
         }
+
+        fn draw(&mut self) {
+            self.visual.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
     }
 
     fn probe(cx: &mut TestAppContext) -> Probe {
@@ -410,7 +416,13 @@ mod tests {
         probe.press();
         assert!(probe.capturing());
 
+        // Focus listeners are dispatched inside `Window::draw`
+        // (`crates/gpui/src/window.rs:3938-3993`), not by `Window::blur` (`:2785-2800`),
+        // which only clears the focus and marks the frame dirty. So the press's focus move
+        // needs a frame to be recorded, and the blur needs one to be delivered.
+        probe.draw();
         probe.visual.update(|window, cx| window.blur(cx));
+        probe.draw();
 
         assert_eq!(
             probe.results(),
