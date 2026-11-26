@@ -32,6 +32,7 @@ image = { workspace = true, optional = true }
 # `aoko-core`, and the wire types out of `aoko-protocol`.
 aoko-protocol = { workspace = true }
 serde_json = { workspace = true }
+tracing = { workspace = true }
 aoko-platform = { workspace = true }
 # Not in the workspace dependency table yet: the workspace owner has to add
 # `aoko-core = { path = "crates/aoko-core" }` before this becomes

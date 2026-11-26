@@ -241,6 +241,62 @@ pub fn all_binds() -> Vec<&'static str> {
     binds
 }
 
+/// The six settings the markup binds to **two sliders each**.
+///
+/// 143 slider/check/combo controls resolve to 137 distinct bind paths because these
+/// six names appear twice in `Aoko/MainWindow.xaml`: once in the Grok-rotation panel
+/// (all of them on the single physical line 1257) and once in the always-visible
+/// movement panel at 1263-1267. Both sliders edit the same setting, so the table has
+/// one row per occurrence and the bind path is shared.
+pub const SHARED_BINDS: [(&str, &str); 6] = [
+    ("KillAuraSettings.DeadZoneSize", "1257 (Grok panel) + 1263"),
+    ("KillAuraSettings.MinTurnSpeed", "1257 + 1264"),
+    ("KillAuraSettings.MaxTurnSpeed", "1257 + 1264"),
+    ("KillAuraSettings.Acceleration", "1257 + 1265"),
+    ("KillAuraSettings.Deceleration", "1257 + 1265"),
+    ("KillAuraSettings.NoiseStrength", "1257 + 1267"),
+];
+
+/// How many slider, checkbox and combo rows the card table holds, duplicates included.
+#[must_use]
+pub fn control_count() -> usize {
+    copy::TABS
+        .iter()
+        .filter_map(|tab| match tab.body {
+            TabBody::Cards(cards) => Some(cards),
+            TabBody::Accounts | TabBody::Servers => None,
+        })
+        .flatten()
+        .flat_map(|card| card.controls.iter())
+        .filter(|&control| {
+            matches!(
+                control,
+                Control::Slider { .. } | Control::Check { .. } | Control::Combo { .. }
+            )
+        })
+        .count()
+}
+
+/// How many rows carry one bind path.
+#[must_use]
+pub fn occurrences(bind: &str) -> usize {
+    copy::TABS
+        .iter()
+        .filter_map(|tab| match tab.body {
+            TabBody::Cards(cards) => Some(cards),
+            TabBody::Accounts | TabBody::Servers => None,
+        })
+        .flatten()
+        .flat_map(|card| card.controls.iter())
+        .filter(|&control| match control {
+            Control::Slider { bind: row, .. }
+            | Control::Check { bind: row, .. }
+            | Control::Combo { bind: row, .. } => *row == bind,
+            _ => false,
+        })
+        .count()
+}
+
 /// Bind paths with no field behind them, for a given profile.
 #[must_use]
 pub fn unresolved_binds(profile: &Profile) -> Vec<&'static str> {
@@ -274,6 +330,27 @@ mod tests {
             "{} control binds have no Profile field: {missing:?}",
             missing.len()
         );
+    }
+
+    #[test]
+    fn the_six_shared_binds_reconcile_143_controls_with_137_paths() {
+        // 72 sliders + 58 checks + 13 combos, counted from the markup and pinned by
+        // `copy::tests::the_control_counts_match_the_markup`.
+        assert_eq!(control_count(), 143);
+        assert_eq!(all_binds().len(), 137);
+        assert_eq!(control_count() - all_binds().len(), SHARED_BINDS.len());
+
+        for (bind, citation) in SHARED_BINDS {
+            assert_eq!(occurrences(bind), 2, "{bind} at {citation}");
+        }
+
+        // Every path beyond the six occurs exactly once, so nothing else is shared.
+        for bind in all_binds() {
+            if SHARED_BINDS.iter().any(|(shared, _)| *shared == bind) {
+                continue;
+            }
+            assert_eq!(occurrences(bind), 1, "{bind}");
+        }
     }
 
     #[test]

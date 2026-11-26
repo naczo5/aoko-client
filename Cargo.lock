@@ -204,6 +204,7 @@ dependencies = [
  "gpui_platform",
  "image",
  "serde_json",
+ "tracing",
 ]
 
 [[package]]

@@ -28,11 +28,11 @@
 //!   [`aoko_core::clicker::toggles::ModuleToggles`] and the search index's
 //!   `toggle_property`, which is the same reverse map the overlay uses. Sliders,
 //!   checkboxes and combos resolve their `bind` path against the `Profile` through
-//!   [`crate::views::bindings`] and write it back, so [`Shell::profile_json`] is
-//!   the persisted shape and [`Shell::with_profile`] restores it. What is *not*
-//!   done: writing that JSON to disk. There is no app-data path in the migrated
-//!   crates and `main.rs` is not this builder's file, so the save call is the
-//!   owner's next step, named here rather than silently skipped.
+//!   [`crate::views::bindings`] and write it back. [`Shell::new`] is the startup
+//!   path: it opens [`crate::views::profiles::Profiles`], migrates legacy profiles,
+//!   reads the auto-save slot and applies it, and the two close paths write it
+//!   back — the same cadence as `MainWindow.xaml.cs:407-412` (load once) and
+//!   `:1861-1871` (save on exit), with `:946-970` for a named save.
 
 use std::collections::BTreeMap;
 
@@ -50,6 +50,7 @@ use crate::theme::Theme;
 use crate::views::accounts_state::{AccountPanel, AccountsState, OfflineSubmit, PasteSubmit};
 use crate::views::command_search::{CommandSearchState, KeyboardGate, RowFactTable, SearchKey};
 use crate::views::copy::{self, Card, Control, TabBody, MODULE_LIST_PREVIEW_SAMPLE};
+use crate::views::profiles::Profiles;
 use crate::views::servers_state::{AddOutcome, JoinOutcome, PingRequest, ServersState};
 use crate::views::stores::{NoStore, StoreBridge};
 
@@ -72,6 +73,11 @@ pub struct Shell {
     /// Persistence behind the two data tabs. [`NoStore`] until `aoko-core` grows
     /// an account and server store; see [`crate::views::stores`].
     stores: Box<dyn StoreBridge>,
+    /// The profile store, the config list and the Settings card's status line.
+    profiles: Profiles,
+    /// Whether the close hook has been registered on this window, so a repaint does
+    /// not box a new callback every frame.
+    close_hook_installed: bool,
     /// A join or account switch the UI asked for and nothing has consumed yet.
     ///
     /// The bridge command surface is not in this crate, so the request is parked
@@ -83,8 +89,56 @@ pub struct Shell {
 
 impl Shell {
     /// A shell on the given palette, showing Combat.
+    ///
+    /// In the shipped binary this is the startup path and it **loads the auto-save
+    /// profile**, exactly as `MainWindow.xaml.cs:407-412` does: the managed app read
+    /// the `config` slot once at construction and never reloaded per tab. Under
+    /// `cfg(test)` and under the `capture` feature it deliberately does no I/O, so a
+    /// unit test and a screenshot never depend on the machine's profile directory.
     #[must_use]
     pub fn new(theme: Theme) -> Self {
+        #[cfg(all(not(test), not(feature = "capture")))]
+        {
+            Self::from_system(theme)
+        }
+
+        #[cfg(any(test, feature = "capture"))]
+        {
+            Self::with_profiles(theme, Profiles::unavailable())
+        }
+    }
+
+    /// The startup shell: opens the profile store, migrates legacy profiles, loads
+    /// the auto-save slot and reports what happened.
+    ///
+    /// A store that cannot be opened does not stop the app and is not replaced by a
+    /// silent default: [`Profiles::store_error`] carries the classified reason and
+    /// the Settings card shows it.
+    #[must_use]
+    pub fn from_system(theme: Theme) -> Self {
+        let (profiles, profile) = Profiles::from_system();
+        if profiles.migrated() > 0 {
+            tracing::info!(
+                "copied {} legacy profile(s) into the profile directory",
+                profiles.migrated()
+            );
+        }
+
+        Self::with_profiles(theme, profiles).with_loaded_profile(profile)
+    }
+
+    /// A shell over a caller-supplied store: tests, and an app-data root chosen
+    /// elsewhere.
+    #[must_use]
+    pub fn with_store(theme: Theme, store: aoko_platform::ProfileStore) -> Self {
+        let (profiles, profile) = Profiles::with_store(store);
+        Self::with_profiles(theme, profiles).with_loaded_profile(profile)
+    }
+
+    /// A shell with no persistence, which is what the capture harness and the unit
+    /// tests run.
+    #[must_use]
+    pub fn with_profiles(theme: Theme, profiles: Profiles) -> Self {
         let mut shell = Self {
             theme,
             tab: 0,
@@ -96,6 +150,8 @@ impl Shell {
             accounts: AccountsState::new(),
             servers: ServersState::new(),
             stores: Box::new(NoStore),
+            profiles,
+            close_hook_installed: false,
             pending_join: None,
             pending_account_switch: None,
         };
@@ -105,13 +161,78 @@ impl Shell {
         shell
     }
 
-    /// A shell that starts from a saved profile.
+    /// Replaces the loaded profile, which is what applying a saved config does.
+    fn with_loaded_profile(mut self, profile: aoko_protocol::profile::Profile) -> Self {
+        self.values = crate::views::bindings::snapshot(&profile);
+        self.profile = profile;
+        self
+    }
+
+    /// A shell that starts from a saved profile, with no store attached.
     #[must_use]
     pub fn with_profile(theme: Theme, profile: aoko_protocol::profile::Profile) -> Self {
-        let mut shell = Self::new(theme);
-        shell.values = crate::views::bindings::snapshot(&profile);
-        shell.profile = profile;
-        shell
+        Self::with_profiles(theme, Profiles::unavailable()).with_loaded_profile(profile)
+    }
+
+    /// The profile store's state: the config list, the status line, the migration
+    /// count and any store error.
+    #[must_use]
+    pub fn profiles(&self) -> &Profiles {
+        &self.profiles
+    }
+
+    /// Writes the auto-save slot. The managed app does this on exit
+    /// (`MainWindow.xaml.cs:1866-1869`), which is why the close paths call it.
+    pub fn save_profile(&mut self) -> Result<(), String> {
+        let mut profile = self.profile.clone();
+        let result = self.profiles.save_auto(&mut profile);
+        self.profile = profile;
+        result
+    }
+
+    /// The Settings card's Save: writes the selected config name.
+    pub fn save_config(&mut self, name: &str) -> Result<(), String> {
+        let mut profile = self.profile.clone();
+        let result = self.profiles.save_named(name, &mut profile);
+        self.profile = profile;
+        result
+    }
+
+    /// The Settings card's Load: replaces the live settings with a saved config.
+    pub fn load_config(&mut self, name: &str) -> Result<(), String> {
+        match self.profiles.load_named(name) {
+            Ok(profile) => {
+                self.values = crate::views::bindings::snapshot(&profile);
+                self.profile = profile;
+                // The palette travels in the profile, so applying a config has to
+                // repaint with the theme it names (`ApplyLoadedProfile`,
+                // `MainWindow.xaml.cs:835-848`).
+                self.theme = Theme::by_name(&self.profile.gui_theme);
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Registers the close hook once, so a platform close (Alt+F4) saves the way
+    /// our own close button does.
+    fn ensure_close_hook(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.close_hook_installed {
+            return;
+        }
+        self.close_hook_installed = true;
+
+        let handle = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |_window, cx| {
+            if let Some(shell) = handle.upgrade() {
+                shell.update(cx, |shell, _cx| {
+                    let _ = shell.save_profile();
+                });
+            }
+            // Never block the close: the save failing is reported in the Settings
+            // card, not by trapping the user in a window they asked to close.
+            true
+        });
     }
 
     /// The settings this shell is showing.
@@ -454,6 +575,40 @@ impl Shell {
         cx.notify();
     }
 
+    // === Settings: configs ===
+
+    /// Moves the config selection by one, which is what pressing the trigger does
+    /// until a dropdown list exists.
+    pub fn select_next_config(&mut self, cx: &mut Context<Self>) {
+        self.profiles.select_next();
+        cx.notify();
+    }
+
+    /// `LoadConfigButton_Click` (`MainWindow.xaml.cs:813-831`).
+    pub fn configs_load(&mut self, cx: &mut Context<Self>) {
+        let Some(name) = self.profiles.selected().map(str::to_owned) else {
+            self.profiles.set_status("Select a config to load.");
+            cx.notify();
+            return;
+        };
+
+        let _ = self.load_config(&name);
+        cx.notify();
+    }
+
+    /// `SaveConfigButton_Click` (`MainWindow.xaml.cs:847-862`).
+    pub fn configs_save(&mut self, cx: &mut Context<Self>) {
+        let Some(name) = self.profiles.selected().map(str::to_owned) else {
+            self.profiles
+                .set_status("Select a config to overwrite, or create a new one.");
+            cx.notify();
+            return;
+        };
+
+        let _ = self.save_config(&name);
+        cx.notify();
+    }
+
     /// "Use account": gates, then parks the switch for the bridge.
     pub fn accounts_use_selected(&mut self, cx: &mut Context<Self>) {
         if self.accounts.actions().use_account {
@@ -647,7 +802,12 @@ impl Shell {
 }
 
 impl Render for Shell {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The managed app saves on exit (`MainWindow.OnClosed`, `MainWindow.xaml.cs:1861`).
+        // The hook covers a platform close; the title bar's own close button calls
+        // [`Shell::close_window`], which saves before quitting.
+        self.ensure_close_hook(window, cx);
+
         let motion = motion::motion();
         let theme = self.theme.clone();
         let entity = cx.entity();
@@ -672,7 +832,7 @@ impl Render for Shell {
             // inherits. Installing the fonts without asking for the family would leave
             // every measurement to whatever fontconfig happens to resolve.
             .font_family(crate::assets::UI_FAMILY)
-            .child(self.render_title_bar(&theme))
+            .child(self.render_title_bar(&theme, &entity))
             .child(
                 div()
                     .flex()
@@ -689,7 +849,7 @@ impl Render for Shell {
 
 impl Shell {
     /// Decision 5: the themed, draggable, hit-tested title bar.
-    fn render_title_bar(&self, theme: &Theme) -> AnyElement {
+    fn render_title_bar(&self, theme: &Theme, self_handle: &Entity<Self>) -> AnyElement {
         let close = crate::theme::fixed::CRITICAL;
         div()
             .id("title-bar")
@@ -752,7 +912,17 @@ impl Shell {
                     .cursor_pointer()
                     .text_color(close)
                     .aria_label(copy::TITLE_BAR_CLOSE)
-                    .on_click(|_, _, cx| cx.quit())
+                    .on_click({
+                        let handle = self_handle.clone();
+                        move |_, _, cx| {
+                            // Our own close is `CloseButton_Click`
+                            // (`MainWindow.xaml.cs:1384-1392`): save, then quit.
+                            handle.update(cx, |shell, _cx| {
+                                let _ = shell.save_profile();
+                            });
+                            cx.quit();
+                        }
+                    })
                     .child("\u{00d7}"),
             )
             .into_any_element()
@@ -881,6 +1051,17 @@ impl Shell {
 
         for control in card.controls {
             body = body.child(self.render_control(card, control, theme, motion, entity));
+        }
+
+        // `ConfigStatusText` (`MainWindow.xaml:1536`): the configs card owns one status
+        // line, set by `SetConfigStatus` in every config flow.
+        if card.id == "ConfigsCard" && self.profiles.status().is_visible() {
+            body = body.child(
+                div()
+                    .text_size(px(metrics::text::CAPTION))
+                    .text_color(theme.dim_text)
+                    .child(SharedString::from(self.profiles.status().message.clone())),
+            );
         }
 
         body.into_any_element()
@@ -1018,6 +1199,48 @@ impl Shell {
                 let bind: &'static str = bind;
                 let options: &'static [&'static str] = options;
 
+                // The Settings config combo is the one combo whose list is not in the
+                // copy table: `RefreshConfigList` (`MainWindow.xaml.cs:781-805`) filled
+                // it from the profile directory, so it reads the store's list here.
+                if bind == "ConfigSelection" {
+                    let names: Vec<String> = self.profiles.configs().to_vec();
+                    let current = self
+                        .profiles
+                        .selected()
+                        .map(str::to_owned)
+                        .unwrap_or_default();
+                    let handle = entity.clone();
+                    let has_names = !names.is_empty();
+                    let mut row = div().flex().flex_col().gap(px(2.0)).w_full().child(
+                        div()
+                            .text_size(px(metrics::text::CAPTION))
+                            .text_color(theme.text)
+                            .child(*label),
+                    );
+
+                    if has_names {
+                        row = row.child(components::combo(
+                            SharedString::from(format!("{}-combo-{bind}", card.id)),
+                            theme,
+                            SharedString::from(current),
+                            move |_, _, cx| {
+                                handle.update(cx, |shell, cx| shell.select_next_config(cx));
+                            },
+                        ));
+                    } else {
+                        // `ConfigComboBox` with no items: an empty trigger, exactly what a
+                        // WPF `ComboBox` with an empty `ItemsSource` paints.
+                        row = row.child(components::combo(
+                            SharedString::from(format!("{}-combo-{bind}", card.id)),
+                            theme,
+                            SharedString::from(""),
+                            |_, _, _| {},
+                        ));
+                    }
+
+                    return row.into_any_element();
+                }
+
                 // The setting is either an index or the option text; the profile decides
                 // which, so the press converts back through the same table.
                 let stored = self
@@ -1080,18 +1303,31 @@ impl Shell {
             )
             .into_any_element(),
 
-            Control::Button { label, tooltip } => components::button(
-                SharedString::from(format!("{}-{label}", card.id)),
-                theme,
-                if tooltip.is_empty() {
-                    ButtonVariant::Dark
-                } else {
-                    ButtonVariant::Danger
-                },
-                SharedString::from(*label),
-                |_, _, _| {},
-            )
-            .into_any_element(),
+            Control::Button { label, tooltip } => {
+                // The configs card's Load and Save are real actions
+                // (`LoadConfigButton_Click` `:813-831`, `SaveConfigButton_Click`
+                // `:847-862`); every other card button still needs the command
+                // surface it would call, so it stays inert rather than pretending.
+                let action: fn(&mut Shell, &mut Context<Shell>) = match (card.id, *label) {
+                    ("ConfigsCard", "Load") => Shell::configs_load,
+                    ("ConfigsCard", "Save") => Shell::configs_save,
+                    _ => |_, _| {},
+                };
+                let handle = entity.clone();
+
+                components::button(
+                    SharedString::from(format!("{}-{label}", card.id)),
+                    theme,
+                    if tooltip.is_empty() {
+                        ButtonVariant::Dark
+                    } else {
+                        ButtonVariant::Danger
+                    },
+                    SharedString::from(*label),
+                    move |_, _, cx| handle.update(cx, action),
+                )
+                .into_any_element()
+            }
 
             Control::ActionBind { which } => components::button(
                 SharedString::from(format!("{}-{which:?}", card.id)),
@@ -1310,5 +1546,77 @@ mod tests {
         assert_eq!(format_value(12.0), "12");
         assert_eq!(format_value(4.5), "4.50");
         assert_eq!(format_value(0.0), "0");
+    }
+
+    fn scratch_root() -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+        let index = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let mut path = std::env::temp_dir();
+        path.push(format!("aoko-shell-{}-{index}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("scratch dir");
+        path
+    }
+
+    #[test]
+    fn a_shell_over_a_store_starts_from_the_auto_save_slot() {
+        let root = scratch_root();
+        let store = aoko_platform::ProfileStore::new(&root);
+
+        let mut profile = aoko_protocol::profile::Profile::default();
+        profile.min_cps = 9.0;
+        store
+            .write_profile(
+                crate::views::profiles::AUTO_SAVE_NAME,
+                &aoko_protocol::profile::to_profile_json(&profile),
+            )
+            .expect("seed");
+
+        let shell = Shell::with_store(Theme::slate(), store);
+        assert_eq!(shell.value("MinCPS", 0.0), 9.0, "loaded at startup");
+        assert!(shell.profiles().has_store());
+        assert_eq!(shell.profiles().store_error(), None);
+    }
+
+    #[test]
+    fn saving_on_exit_is_what_the_next_launch_reads() {
+        let root = scratch_root();
+        let mut shell = Shell::with_store(Theme::slate(), aoko_platform::ProfileStore::new(&root));
+        assert!(shell.apply_control("MinCPS", crate::views::bindings::ControlValue::Number(11.0)));
+
+        shell.save_profile().expect("save on exit");
+
+        // A second shell over the same directory is the next launch.
+        let reloaded = Shell::with_store(Theme::slate(), aoko_platform::ProfileStore::new(&root));
+        assert_eq!(reloaded.value("MinCPS", 0.0), 11.0);
+    }
+
+    #[test]
+    fn the_configs_save_and_load_round_trip_through_the_shell() {
+        let root = scratch_root();
+        let mut shell = Shell::with_store(Theme::slate(), aoko_platform::ProfileStore::new(&root));
+
+        assert!(shell.apply_control("MinCPS", crate::views::bindings::ControlValue::Number(12.0)));
+        shell.save_config("PvP").expect("named save");
+        assert_eq!(shell.profiles().configs(), ["PvP".to_owned()]);
+
+        assert!(shell.apply_control("MinCPS", crate::views::bindings::ControlValue::Number(3.0)));
+        shell.load_config("PvP").expect("named load");
+        assert_eq!(shell.value("MinCPS", 0.0), 12.0, "the config wins");
+    }
+
+    #[test]
+    fn loading_a_config_applies_its_palette() {
+        let root = scratch_root();
+        let mut shell = Shell::with_store(Theme::slate(), aoko_platform::ProfileStore::new(&root));
+        // A real palette name: an unknown one normalises to Slate (`Theme::by_name`).
+        shell.profile.gui_theme = "Ink".to_owned();
+        shell.save_config("Dark").expect("save");
+        assert_eq!(shell.theme().name, "Slate", "saving does not repaint");
+
+        shell.load_config("Dark").expect("load");
+        assert_eq!(shell.theme().name, "Ink");
     }
 }

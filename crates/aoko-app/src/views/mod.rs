@@ -20,6 +20,7 @@ pub mod accounts_view;
 pub mod bindings;
 pub mod command_search;
 pub mod copy;
+pub mod profiles;
 pub mod relative_time;
 pub mod servers_logic;
 pub mod servers_state;
