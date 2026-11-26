@@ -144,13 +144,21 @@ const GTB_FLAG: EnabledFlag = EnabledFlag::GtbHelper;
 /// for the same number rather than a shorter guess at what the card wants to show.
 const GTB_MAX_RESULTS: usize = 200;
 
-/// The shipped wordlist, embedded rather than read.
+/// The shipped wordlist, embedded from this crate's own assets.
 ///
-/// The managed app loaded `Aoko/Data/gtb_wordlist.js` from disk; this build embeds it the same
-/// way it embeds its fonts (`crate::assets`), which is why `aoko_protocol`'s solver takes the
-/// text instead of opening a file. One copy in the repository, no data directory beside the
-/// binary, and no file I/O on any path.
-const WORDLIST_JS: &str = include_str!("../../../Aoko/Data/gtb_wordlist.js");
+/// The text is a copy of `Aoko/Data/gtb_wordlist.js` — the file the managed host loaded from
+/// disk and `Aoko/Core/GtbWordSolver.cs` read — and it lives at
+/// `crates/aoko-app/assets/gtb_wordlist.js`, beside the fonts, for two reasons:
+///
+/// * `include_str!` may not reach outside the crate directory: `cargo package` rejects a path
+///   that leaves the package, and the workspace is meant to be packageable;
+/// * the C# tree is scheduled for deletion at sign-off (`MIGRATION_ARCHITECTURE.md` section 2),
+///   and a path into it would become a compile error on the day that commit lands.
+///
+/// The asset's own header carries the provenance and the command that compares it against the
+/// managed file, which stays the source of truth until that deletion. This is the one place the
+/// two copies could drift, so the header names the comparison rather than leaving it implicit.
+const WORDLIST_JS: &str = include_str!("../assets/gtb_wordlist.js");
 
 /// The wordlist parsed once per process, however many runtimes a test builds.
 static WORDLIST: OnceLock<Vec<String>> = OnceLock::new();
