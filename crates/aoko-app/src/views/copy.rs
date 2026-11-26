@@ -1103,6 +1103,28 @@ pub const KEYBIND_PENDING: &str = "Bind: [Press key or mouse...]";
 /// (`MainWindow.xaml:525`, `:542`).
 pub const ACTION_BIND_PENDING: &str = "Action: [Press key or mouse...]";
 
+/// The key an action bind was offered is already held by a general module bind
+/// (`Aoko/MainWindow.xaml.cs:2049-2051`).
+pub const ACTION_BIND_CONFLICT: &str =
+    "Conflict: that input is already used by a general module bind.";
+
+/// The reverse outcome: the action bind took the key (`MainWindow.xaml.cs:2050`).
+pub const ACTION_BIND_UPDATED: &str = "Action bind updated.";
+
+/// The managed module-conflict sentence, verbatim (`MainWindow.xaml.cs:2071`).
+///
+/// Kept although nothing references it: it is the sentence this port deliberately departs
+/// from. Managed wrote it into the AutoRod row's status line, so a conflict about a module
+/// appeared under the wrong control; [`MODULE_BIND_CONFLICT_NAMED`] replaces it.
+pub const MODULE_BIND_CONFLICT: &str = "Conflict: that input is used by an action bind.";
+
+/// A module bind was refused because something else already holds the key.
+///
+/// `{key}`, `{holder}` and `{requested}` are filled with `str::replace` rather than
+/// `format!`, because this copy is data and `format!` requires a literal format string.
+pub const MODULE_BIND_CONFLICT_NAMED: &str =
+    "Conflict: {key} is already bound to {holder}, so {requested} was left unchanged.";
+
 // ── The nine tabs ───────────────────────────────────────────────────────────────
 
 /// What a tab renders.
