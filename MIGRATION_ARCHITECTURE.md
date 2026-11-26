@@ -256,6 +256,8 @@ Recorded here rather than hidden.
 
 13. **Injection requires the title rule and the JVM check together, never a score.** `aoko_platform::is_game_window` is the managed `GameTitles` rule and is the single home of it. The scorer that `describe_target` feeds is not a substitute: its marker list contains `fabric`, `forge`, `quilt` and `feather`, so a focused IDE on a mod workspace can score as the game, and with supervision starting from `Shell::from_system` a saved profile would then aim synthetic clicks at an editor. The gate is `is_game_window(&foreground) && foreground.is_jvm()`, and a test pins the IDE case showing the scorer says "likely Minecraft" while the composition says no.
 
+14. **A refused hex entry says so.** `HexBox_LostFocus` (`ColorPickerDialog.xaml.cs:179`) calls `RefreshAll()` on a parse failure, so a bad entry silently reverts and the user is left believing the field took the value. The port keeps the previous colour, as managed does, and adds one 11 px line under the field: `Not a hex colour; kept #3366CC.` The notice belongs to a single entry and is dropped by the next edit from any other control. This is new copy with no managed analogue, which is the point: silently discarding input is the class of defect this migration exists to remove, and a two-word label costs nothing.
+
 ## 10. Verification commands
 
 ```bash
