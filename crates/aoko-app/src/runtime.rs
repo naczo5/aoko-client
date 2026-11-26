@@ -509,44 +509,32 @@ pub fn select_loop_surfaces(capabilities: &CapabilityReport) -> LoopSurfaces {
     LoopSurfaces { injection, windows }
 }
 
-/// The managed host's game-title rule, `WindowDetection.WindowTarget.IsGameTitle`.
-///
-/// `Aoko/Core/WindowDetection.cs:57` holds the titles (`Minecraft`, `Lunar Client`, `Badlion`) and
-/// `:181` compares them as ordinal, case-insensitive substrings. The three literals are folded to
-/// lowercase here and nothing else is added: a bare `lunar` is deliberately not enough, because
-/// the managed literal is `Lunar Client`.
-///
-/// **This is the one copy in the crate, and it exists to be deleted.** The platform owner is
-/// exposing the same rule as `aoko_platform::is_game_window`, which is title-only by design;
-/// [`game_is_foreground`] adds the launcher test on top, so when that function commits this body
-/// becomes `aoko_platform::is_game_window(&window)` and the composition stays. Until then it must
-/// not drift: `a_game_title_rule_matches_the_managed_titles` pins the three literals.
-#[must_use]
-pub fn is_game_title(title: &str) -> bool {
-    let lower = title.to_lowercase();
-    lower.contains("minecraft") || lower.contains("lunar client") || lower.contains("badlion")
-}
-
 /// Whether the game is the foreground window, confirmed strictly enough to gate injection.
 ///
-/// Both halves of the managed test are required, not one score against one threshold:
+/// The platform's rule composed with the launcher test, both required:
 ///
-/// * the owning process must be a Java launcher — `java`, `javaw`, `java.exe`, `javaw.exe`, which
-///   is `WindowInfo::is_jvm` (`WindowDetection.WindowTarget.IsJvm`);
-/// * the title must name the game — [`is_game_title`].
+/// * `aoko_platform::is_game_window(&foreground)` — the managed `GameTitles` rule (`Minecraft`,
+///   `Lunar Client`, `Badlion`, ordinal substring), now the one copy in the workspace:
+///   `select_best_window` uses the same function;
+/// * `foreground.is_jvm()` — the owning process is `java`, `javaw`, `java.exe` or `javaw.exe`,
+///   `WindowDetection.WindowTarget.IsJvm`.
 ///
-/// `aoko_platform::describe_target(..).is_likely_minecraft()` is deliberately not used: its
-/// markers include project words (`fabric`, `forge`, `quilt`, `feather`), so a focused editor on
-/// a mod workspace scores as the game, and a click gated on a confidence score would type into
-/// code. Requiring the title half as well closes that case: `fabric-mod-template - IntelliJ IDEA`
-/// is a Java process, so it passes the launcher test and fails the title test.
+/// Neither half is safe alone, which is why the pair is the gate rather than either one. The title
+/// rule answers `true` for an editor literally titled `Minecraft` — `window.rs` says so in the
+/// builder's own note — and `is_jvm` is `false` there, so the pair refuses. The launcher test alone
+/// answers `true` for any bare Java process, and the title rule refuses that.
 ///
-/// One residual case is worth stating rather than hiding: this is still a title test, so a Java
-/// IDE whose window title contains a game word — a project called `minecraft-plugin`, say —
-/// satisfies both halves. Closing it needs the managed host's stronger first test (the foreground
-/// equals a known game window, i.e. `select_best_window` over a full enumeration) or a rule that
-/// excludes IDE windows, and neither exists in `aoko_platform` today. Inventing an IDE blocklist
-/// here would be the drift [`is_game_title`] exists to avoid, so it is reported instead.
+/// The pair also replaces the score this module used to run:
+/// `describe_target(..).is_likely_minecraft()` counts `fabric`, `forge`, `quilt` and `feather`, so
+/// a focused IDE on a mod workspace passed it. `fabric-mod-template - IntelliJ IDEA` is a Java
+/// process, so it passes the launcher half and fails the title half.
+///
+/// One residual is worth stating rather than hiding: this is still a title test, so a *Java* IDE
+/// whose window title contains a game title — a project called `minecraft-plugin`, say — satisfies
+/// both halves. Closing it needs the managed host's cached-handle test (the foreground equals a
+/// known game window, i.e. `select_best_window` over a full enumeration), which no public platform
+/// function offers today; an IDE blocklist here would be the drift `is_game_window` exists to
+/// avoid, so it is reported instead.
 ///
 /// A missing window surface, a foreground the backend cannot read, and a window with no process
 /// name all answer `false`: this is the guard, so it fails closed.
@@ -555,7 +543,7 @@ pub fn game_is_foreground(windows: &dyn WindowInspector) -> bool {
     let Ok(Some(foreground)) = windows.foreground() else {
         return false;
     };
-    foreground.is_jvm() && is_game_title(&foreground.title)
+    aoko_platform::is_game_window(&foreground) && foreground.is_jvm()
 }
 
 /// The platform input backend, gated on the game being confirmed foreground.
@@ -757,23 +745,32 @@ impl LoopSense for ControllerSense {
 
     /// `WindowDetection.IsCursorVisible()`.
     ///
-    /// **Linux cannot answer this.** The platform returns the cursor's visibility where it can
-    /// (Windows uses `GetCursorInfo`), and `WindowInspector::cursor_visible` defaults to `None`
-    /// with no override in `linux/window.rs`, so on X11 there is nothing to read. `None` keeps
-    /// the fail-closed `false` this sense has always answered: `triggerbot` acts on
-    /// `!cursor_visible`, so guessing "hidden" would make it click while a menu is open, and
-    /// `aim`/`pixel-party` require the cursor, so guessing "visible" would make those act in the
-    /// game view.
+    /// **Linux cannot answer this, and `None` is its normal answer.** `LinuxWindowInspector`
+    /// overrides the default to return `None` explicitly: `XQueryPointer` never reports
+    /// visibility, `XFixes` exposes no getter, the game hides the pointer with a client-side
+    /// `XDefineCursor` whose only trace is cursor-image pixels, and Wayland exposes nothing.
+    /// `CapabilityReport::notes` names the limit on every Linux session, so this is a reported
+    /// platform limit rather than an emergency path.
     ///
-    /// What makes the fail-closed half safe is not this method: it is [`game_is_foreground`] in
-    /// [`ForegroundGated`], which refuses every acting call unless the game is the confirmed
-    /// foreground window. A wrong cursor answer can therefore only stop a loop, never aim one at
-    /// another application.
+    /// `None` therefore maps to `true`: assume the cursor is drawn. Every consumer reads `false`
+    /// as permission — `loops/triggerbot.rs` fires on `!cursor_visible`;
+    /// `clicker/tick.rs` reads a GUI flag with a hidden cursor as a ghosted GUI and skips the
+    /// menu block; `loops/aim.rs` and `loops/pixel_party.rs` only take their GUI branch when the
+    /// cursor is visible — so `true` parks the triggerbot, blocks menus and takes the GUI path.
+    /// `false` would do the opposite on all four. The managed host returns `false` for a failing
+    /// `GetCursorInfo` because that is a rare Windows failure; a backend that can *never* answer
+    /// must not copy the permissive value.
+    ///
+    /// `an_unanswered_cursor_parks_the_consumers` pins those consequences, not the mapping.
+    /// [`ForegroundGated`] still refuses every acting call unless the game is the confirmed
+    /// foreground window, so neither direction of this guess can aim a loop at another
+    /// application.
     fn cursor_visible(&self) -> bool {
         self.windows
             .as_deref()
             .and_then(|windows| windows.cursor_visible())
-            .unwrap_or(false)
+            // "Cannot tell" is `true` on purpose: see the doc above.
+            .unwrap_or(true)
     }
 
     fn supports_module(&self, _module: &str) -> bool {
@@ -1300,15 +1297,19 @@ mod tests {
             "a focused Java IDE is not the game"
         );
         assert!(
-            !sense.cursor_visible(),
-            "an unanswered cursor keeps the fail-closed false"
+            sense.cursor_visible(),
+            "an unanswered cursor means assume drawn, not hidden"
         );
 
-        // A session with no window surface: both questions answer fail-closed.
+        // A session with no window surface: nothing can confirm the game, and the cursor
+        // answers the conservative value.
         let sense = ControllerSense::new(Arc::clone(&controller), None);
 
         assert!(!sense.minecraft_active());
-        assert!(!sense.cursor_visible());
+        assert!(
+            sense.cursor_visible(),
+            "no surface at all is still \"cannot tell\", so still drawn"
+        );
 
         // And a platform that saw the pointer drawn is believed.
         let drawn: Arc<dyn WindowInspector> = Arc::new(FakeWindows {
@@ -1321,6 +1322,77 @@ mod tests {
         assert!(
             sense.cursor_visible(),
             "the platform answered: cursor drawn"
+        );
+    }
+
+    /// An unanswered cursor must read as "drawn", and this pins the consumers' consequences.
+    ///
+    /// `None` is the normal Linux answer — `LinuxWindowInspector` overrides `cursor_visible` to
+    /// return it and the capability notes say so — so the fallback is the common case there, not
+    /// an emergency. Every consumer treats `false` as permission, which is why it cannot be the
+    /// fallback: `clicker/tick.rs` skips the menu block for a GUI it thinks is ghosted, and
+    /// `loops/triggerbot.rs` fires on `!cursor_visible`. The assertions below are the real
+    /// decisions those bodies make, not the mapping.
+    #[test]
+    fn an_unanswered_cursor_parks_the_consumers() {
+        use aoko_core::clicker::tick::{
+            decide, ClickConfig, TickContext, TickDecision, MENU_BLOCK_POLL,
+        };
+        use aoko_protocol::state::GameState;
+
+        let controller = Arc::new(AppController::default());
+        let unanswered: Arc<dyn WindowInspector> = Arc::new(FakeWindows {
+            foreground: Some(window("Minecraft 1.8.9", "java")),
+            cursor: None,
+        });
+        let sense = ControllerSense::new(controller, Some(unanswered));
+
+        assert!(sense.cursor_visible(), "cannot tell means assume drawn");
+
+        // The clicker with a chest GUI open: a drawn cursor blocks the click, and the old `false`
+        // would have read the GUI as ghosted and gone through it.
+        let state = GameState {
+            is_connected: true,
+            gui_open: true,
+            screen_name: "GuiChest".to_string(),
+            ..GameState::default()
+        };
+        let config = ClickConfig::default();
+
+        let decision = decide(
+            &state,
+            &config,
+            TickContext {
+                minecraft_active: sense.minecraft_active(),
+                cursor_visible: sense.cursor_visible(),
+            },
+            true,
+        );
+        assert_eq!(
+            decision,
+            TickDecision::Wait(MENU_BLOCK_POLL),
+            "a menu must block the click"
+        );
+
+        let inverted = decide(
+            &state,
+            &config,
+            TickContext {
+                minecraft_active: sense.minecraft_active(),
+                cursor_visible: false,
+            },
+            true,
+        );
+        assert_ne!(
+            inverted,
+            TickDecision::Wait(MENU_BLOCK_POLL),
+            "the old fallback skipped the menu block, which is why it was wrong"
+        );
+
+        // The triggerbot's own guard is `minecraft_active() && !cursor_visible()`.
+        assert!(
+            !(sense.minecraft_active() && !sense.cursor_visible()),
+            "the triggerbot must park on a cursor nobody can see"
         );
     }
 
@@ -1377,32 +1449,12 @@ mod tests {
         }
     }
 
-    /// The title rule is the platform's private one, copied once, so it is pinned here: a drift
-    /// before `aoko_platform` exposes it would quietly widen or narrow the injection guard.
-    #[test]
-    fn a_game_title_rule_matches_the_managed_titles() {
-        for title in [
-            "Minecraft",
-            "Minecraft 1.8.9",
-            "Lunar Client v3.2.1",
-            "Badlion Client",
-        ] {
-            assert!(is_game_title(title), "{title} names the game");
-        }
-
-        for title in [
-            "",
-            "Visual Studio Code",
-            "MainActivity.java - IntelliJ IDEA",
-            "fabric-mod-template - IntelliJ IDEA",
-            "Lunaris Notes",
-            "lunar",
-        ] {
-            assert!(!is_game_title(title), "{title} does not name the game");
-        }
-    }
-
-    /// The confirmation needs both halves: neither a Java process nor a game title is enough.
+    /// The confirmation needs both halves of the managed rule: a game title and a Java launcher.
+    ///
+    /// The pair is what makes it safe. `aoko_platform::is_game_window` is a title test, so it
+    /// answers `true` for an editor literally titled `Minecraft`, and `is_jvm` is what refuses
+    /// that window; `is_jvm` alone answers `true` for any Java process, and the title rule is
+    /// what refuses that one.
     #[test]
     fn the_foreground_needs_a_java_launcher_and_a_game_title() {
         fn confirmed(title: &str, process: &str) -> bool {
@@ -1415,10 +1467,15 @@ mod tests {
 
         assert!(confirmed("Minecraft 1.8.9", "java"));
         assert!(confirmed("Lunar Client v3.2.1", "javaw.exe"));
+        assert!(confirmed("Badlion Client 1.8.9", "javaw"));
 
         assert!(
             !confirmed("Minecraft 1.8.9", "explorer.exe"),
             "a game title in a non-Java process is not the game"
+        );
+        assert!(
+            !confirmed("Minecraft", "code"),
+            "an editor titled Minecraft is exactly why the pair needs is_jvm"
         );
         assert!(
             !confirmed("fabric-mod-template - IntelliJ IDEA", "java"),
