@@ -1,7 +1,7 @@
 //! Guards the frozen copies of the managed host in `tests/fixtures/managed/`.
 //!
-//! Six tests keep pinning what the managed C# host did — the config subscriptions it
-//! wired, the flag it carried to the native bridges, the fight-status mapping, the panic
+//! Five tests keep pinning what the managed C# host did — the config subscriptions it
+//! wired, the flag it carried to the native bridges, the config payload keys, the panic
 //! reset. Those pins used to read `Aoko/Core/*.cs` at run time, which meant they would
 //! have panicked inside `read_to_string` on the commit that deletes `Aoko/`. The files
 //! are copied into `tests/fixtures/managed/` and read with `include_str!`, so they are
@@ -12,13 +12,10 @@
 //! `tests/fixtures/managed/README.md` states the rule.
 
 const GAME_STATE_CLIENT_CS: &str = include_str!("fixtures/managed/GameStateClient.cs");
-const PROFILE_CS: &str = include_str!("fixtures/managed/Profile.cs");
 const CLICKER_CS: &str = include_str!("fixtures/managed/Clicker.cs");
 
 /// `Aoko/Core/GameStateClient.cs` at `011984b`, content hash as captured.
 const GAME_STATE_CLIENT_DIGEST: u64 = 0x30e4_518b_4d86_6a06;
-/// `Aoko/Core/Profile.cs` at `011984b`, content hash as captured.
-const PROFILE_DIGEST: u64 = 0x4b5b_4f4d_98cf_adb2;
 /// `Aoko/Core/Clicker.cs` at `011984b`, content hash as captured.
 const CLICKER_DIGEST: u64 = 0x9964_783f_60e1_f15d;
 
@@ -48,7 +45,6 @@ fn frozen_managed_fixtures_are_unchanged_since_capture() {
             GAME_STATE_CLIENT_CS,
             GAME_STATE_CLIENT_DIGEST,
         ),
-        ("Profile.cs", PROFILE_CS, PROFILE_DIGEST),
         ("Clicker.cs", CLICKER_CS, CLICKER_DIGEST),
     ] {
         assert!(!text.is_empty(), "{name} is empty");

@@ -1,29 +1,34 @@
 //! Port of `Aoko.Tests/FightStatusWiringTests.cs`.
 //!
 //! The managed suite mixed four source pins with one live toggle. The pins on
-//! `Profile.cs`/`GameStateClient.cs`/`bridge_capabilities.h` are kept because they
-//! describe the wire and the profile key, both owned here. `LocalToggle` and
-//! `Panic_Reset` drive `Clicker`/`InputHooks`, which belong to `aoko-core`, so their
-//! contract is pinned as source text instead.
+//! `GameStateClient.cs` and `bridge_capabilities.h` are kept because they describe the
+//! wire, which is still ours to match. `LocalToggle` and `Panic_Reset` drive
+//! `Clicker`/`InputHooks`, which belong to `aoko-core`, so their contract is pinned as
+//! source text instead.
 //!
-//! The three managed files are read from the frozen copies in `tests/fixtures/managed/`
-//! and compiled in with `include_str!`; only `bridge_capabilities.h` is still read from
-//! the repository, because the native bridge is still shipped and still writes the wire.
-//! See that directory's README before touching either the fixtures or these pins.
+//! The managed files are read from the frozen copies in `tests/fixtures/managed/` and
+//! compiled in with `include_str!`; only `bridge_capabilities.h` is still read from the
+//! repository, because the native bridge is still shipped and still writes the wire. See
+//! that directory's README before touching either the fixtures or these pins.
+//!
+//! One pin was retired with the copies rather than kept: `Profile.cs` carried a
+//! `ProfileManager` <-> `Clicker.FightStatusEnabled` mapping that this port never had, so
+//! the test certified managed history instead of our code. Its only still-live fact — the
+//! `fightstatus` keybind default — is asserted against `Profile::default()` below, and the
+//! profile-to-payload wiring it was standing in for now has a real test in `aoko-core`
+//! (`the_config_payload_carries_the_profile_fight_status`).
 
 use aoko_protocol::capabilities::BridgeCapabilities;
 use aoko_protocol::config_payload::ConfigPayload;
 use aoko_protocol::hud::HudLayout;
 use aoko_protocol::profile::{load_profile_from_json, to_profile_json, Profile};
 
-/// `Aoko/Core/Profile.cs`, frozen at the commit named in
+/// `Aoko/Core/GameStateClient.cs`, frozen at the commit named in
 /// `tests/fixtures/managed/README.md`.
 ///
 /// `include_str!` rather than a runtime read: the evidence lives inside the crate now, so
 /// deleting `Aoko/` cannot take it, and removing the fixture is a compile error instead of
 /// a panic inside `read_to_string` on the sign-off commit.
-const PROFILE_CS: &str = include_str!("fixtures/managed/Profile.cs");
-/// `Aoko/Core/GameStateClient.cs`, frozen the same way.
 const GAME_STATE_CLIENT_CS: &str = include_str!("fixtures/managed/GameStateClient.cs");
 /// `Aoko/Core/Clicker.cs`, frozen the same way.
 const CLICKER_CS: &str = include_str!("fixtures/managed/Clicker.cs");
@@ -32,16 +37,6 @@ const CLICKER_CS: &str = include_str!("fixtures/managed/Clicker.cs");
 fn native_file(relative: &str) -> String {
     let path = format!("{}/../../{relative}", env!("CARGO_MANIFEST_DIR"));
     std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{path}: {error}"))
-}
-
-#[test]
-fn profile_manager_maps_fight_status_both_directions() {
-    // Source pin for the two directions the managed host wires, plus the keybind map.
-    let source = PROFILE_CS;
-
-    assert!(source.contains("FightStatusEnabled = clicker.FightStatusEnabled"));
-    assert!(source.contains("clicker.FightStatusEnabled = profile.FightStatusEnabled"));
-    assert!(source.contains("[\"fightstatus\"]      = 0"));
 }
 
 #[test]
@@ -122,11 +117,21 @@ fn capability_fallbacks_advertise_fight_status() {
     }
 }
 
+/// The managed panic reset, pinned as text because the behaviour now belongs to `aoko-core`.
+///
+/// **The two hosts carry fight status differently, and a reader of the C# below needs to
+/// know which line of ours it means.** The managed host keeps one `Clicker.FightStatusEnabled`
+/// flag: `LocalToggle` flips it through `InputHooks.ToggleModule` and `TriggerPanicAsync`
+/// clears it, which is the `FightStatusEnabled = false;` this test finds. This port has no
+/// such flag. Fight status here is the `"fightstatus"` module key, and the panic reset is
+/// that key appearing in `PANIC_OFF` in `aoko-core/src/clicker/toggles.rs`, cleared by
+/// `panic_reset`. So the line of ours this pin corresponds to is the `"fightstatus"` entry
+/// in that list, not a field anywhere.
+///
+/// The pin is kept because the managed file is the only written record of *what* the reset
+/// does; it is not evidence that a `FightStatusEnabled` flag exists in this port.
 #[test]
 fn local_toggle_and_panic_reset_are_pinned_in_the_managed_host() {
-    // `LocalToggle` flips `Clicker.FightStatusEnabled` through `InputHooks.ToggleModule`,
-    // and `TriggerPanicAsync` clears it. Both live in `aoko-core`; the pins keep the
-    // contract visible from the crate that owns the flag.
     let clicker = CLICKER_CS;
     let start = clicker
         .find("public async Task TriggerPanicAsync()")

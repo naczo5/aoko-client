@@ -1,12 +1,11 @@
 # Frozen managed-host fixtures
 
-These are **evidence, not source**. Three files copied out of `Aoko/Core/` so that the
+These are **evidence, not source**. Two files copied out of `Aoko/Core/` so that the
 protocol tests can keep pinning what the managed host did after `Aoko/` is deleted.
 
 | File | Copied from | Last commit touching it there | Blob at `011984b` | Bytes | Lines | SHA-256 at capture |
 | --- | --- | --- | --- | ---: | ---: | --- |
 | `GameStateClient.cs` | `Aoko/Core/GameStateClient.cs` | `f1a9f5f` | `21ffba8` | 66926 | 1677 | `02c5558dc90c054be022b1d9842be75a646655bdcf5b561b74647edfb7225e19` |
-| `Profile.cs` | `Aoko/Core/Profile.cs` | `117e035` | `ffd7900` | 43430 | 977 | `f7948cf004e2bb4274c078952605719b9d2aaddea5fc67fda65bafc925c19ea3` |
 | `Clicker.cs` | `Aoko/Core/Clicker.cs` | `b01a2b1` | `10c8a92` | 106214 | 3360 | `70d0cf294e3b368deeebf06f4026f621a0743442aa8ecaa369586c06369e8245` |
 
 The copies were taken from the working tree at `011984b` and verified byte-identical to
@@ -20,6 +19,17 @@ Two things about the bytes, so nobody "fixes" them:
   the copy above was taken from an LF tree. `tests/frozen_managed_fixtures.rs` hashes
   content with carriage returns dropped for exactly that reason.
 - No assertion reads a line ending, a byte count or a file size. They read text.
+
+## Retired: `Profile.cs`
+
+`Aoko/Core/Profile.cs` was captured with these two and then dropped, together with the
+test that read it (`profile_manager_maps_fight_status_both_directions`). Its assertions
+pinned a `ProfileManager` <-> `Clicker.FightStatusEnabled` mapping this port never had, so
+they certified managed history rather than our code; the one fact left — the
+`fightstatus` keybind default — is asserted against `Profile::default()` in
+`tests/fight_status_wiring.rs`. The wiring the pin was standing in for (profile field to
+config payload) now has a real test in `aoko-core`,
+`the_config_payload_carries_the_profile_fight_status`.
 
 ## These files must not be edited
 
