@@ -417,7 +417,7 @@ mod tests {
                 &self.state,
                 self.motion,
                 window.viewport_size(),
-                |_, _, _| {},
+                |_, _, _, _| {},
             )
         }
     }
