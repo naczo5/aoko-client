@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 use gpui::prelude::*;
 use gpui::{
     canvas, div, px, relative, AnyElement, App, Bounds, ElementId, IntoElement, MouseButton,
-    Pixels, SharedString,
+    Pixels, SharedString, Window,
 };
 
 use crate::theme::{metrics, Theme};
@@ -163,17 +163,39 @@ impl Default for DragCoalescer {
     }
 }
 
+/// The publish callback, behind an `Rc` because the drag and the release handler both
+/// hold it. `dyn` keeps the component's own type from growing a second generic.
+type OnChange = Rc<dyn Fn(f64, &mut Window, &mut App)>;
+
 /// A slider. `on_change` fires at most once per [`COALESCE_INTERVAL`] during a drag,
 /// plus once on release when the final value differs from the last published one.
+///
+/// # Calling it
+///
+/// The callback takes `&mut Window` and `&mut App` so a call site can reach the entity
+/// that owns the value instead of faking one:
+///
+/// ```ignore
+/// let handle = entity.clone();
+/// components::slider(name, &theme, geometry, value, move |next, _window, cx| {
+///     handle.update(cx, |shell, cx| shell.set_value(bind, next, cx));
+/// })
+/// ```
+///
+/// `handle.update` is the form that works from `render`, where the caller holds only an
+/// [`Entity`](gpui::Entity). A method that already has a `Context<Self>` can pass
+/// `cx.processor(|this: &mut Self, next: f64, _window, cx| ...)` instead, which produces
+/// this exact signature (`Context::processor` takes its payload by value, unlike
+/// `Context::listener`, which takes `&E`).
 pub fn slider(
     name: impl Into<SharedString>,
     theme: &Theme,
     geometry: SliderGeometry,
     value: f64,
-    on_change: impl Fn(f64) + 'static,
+    on_change: impl Fn(f64, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let name: SharedString = name.into();
-    let on_change: Rc<dyn Fn(f64)> = Rc::new(on_change);
+    let on_change: OnChange = Rc::new(on_change);
     let coalescer = Rc::new(RefCell::new(DragCoalescer::new()));
     let dragging = Rc::new(Cell::new(false));
     // The row's own rectangle, captured in a canvas prepaint: `MouseDownEvent::position`
@@ -184,7 +206,7 @@ pub fn slider(
         let bounds = bounds.clone();
         let coalescer = coalescer.clone();
         let on_change = on_change.clone();
-        move |x: Pixels| {
+        move |x: Pixels, window: &mut Window, cx: &mut App| {
             let rect = bounds.get();
             let width = rect.size.width.max(px(1.0));
             let local = (x - rect.origin.x) / width;
@@ -192,7 +214,7 @@ pub fn slider(
                 .borrow_mut()
                 .push(elapsed(), geometry.value_at(local))
             {
-                on_change(value);
+                on_change(value, window, cx);
             }
         }
     };
@@ -200,27 +222,27 @@ pub fn slider(
     let down = {
         let publish = publish.clone();
         let dragging = dragging.clone();
-        move |event: &gpui::MouseDownEvent, _window: &mut gpui::Window, _cx: &mut App| {
+        move |event: &gpui::MouseDownEvent, window: &mut Window, cx: &mut App| {
             dragging.set(true);
-            publish(event.position.x);
+            publish(event.position.x, window, cx);
         }
     };
     let moved = {
         let publish = publish.clone();
         let dragging = dragging.clone();
-        move |event: &gpui::MouseMoveEvent, _window: &mut gpui::Window, _cx: &mut App| {
+        move |event: &gpui::MouseMoveEvent, window: &mut Window, cx: &mut App| {
             if dragging.get() {
-                publish(event.position.x);
+                publish(event.position.x, window, cx);
             }
         }
     };
     let up = {
         let coalescer = coalescer.clone();
         let dragging = dragging.clone();
-        move |_event: &gpui::MouseUpEvent, _window: &mut gpui::Window, _cx: &mut App| {
+        move |_event: &gpui::MouseUpEvent, window: &mut Window, cx: &mut App| {
             dragging.set(false);
             if let Some(value) = coalescer.borrow_mut().flush() {
-                on_change(value);
+                on_change(value, window, cx);
             }
         }
     };
