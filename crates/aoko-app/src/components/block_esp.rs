@@ -1,8 +1,8 @@
 //! One row of the Block ESP tracked-block list.
 //!
-//! The managed row is the `ItemsControl`'s item template at `MainWindow.xaml:695-712`: a
+//! The managed row is the `ItemsControl`'s item template at `MainWindow.xaml:695-710`: a
 //! `DockPanel` at `Margin="6,3"` holding a bare `CheckBox` (`:698`), the block name
-//! (`:708`), a 22×14 colour swatch with a 1 px `SliderFgBrush` edge (`:703`) and a 22 px
+//! (`:707`), a 22×14 colour swatch with a 1 px `SliderFgBrush` edge (`:702`) and a 22 px
 //! `DarkButton` whose content is `✕` (`:699`). The two tooltips are
 //! [`copy::BLOCK_ESP_REMOVE_TOOLTIP`] and [`copy::BLOCK_ESP_COLOR_TOOLTIP`]; the glyph is
 //! [`copy::REMOVE_GLYPH`]. No string is written here.

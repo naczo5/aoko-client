@@ -52,7 +52,7 @@
 //!   [`PaletteStore::delete`] refuses with [`DeleteError::NotFound`] and writes nothing.
 //! * **A saved card's swatches are what applying the palette paints.** Managed built them with
 //!   `ParseHexOr(palette.Panel, Colors.Black)` and three siblings
-//!   (`MainWindow.xaml.cs:1049-1052`), so a hand-edited role painted black on the card while
+//!   (`MainWindow.xaml.cs:1052-1055`), so a hand-edited role painted black on the card while
 //!   the apply fell back to a derived shade. [`PaletteStore::rows`] resolves through
 //!   [`Theme::from_custom`] — the chain `RegisterPalette` uses — so the preview cannot
 //!   disagree with the click.
@@ -241,10 +241,10 @@ pub enum DraftOutcome {
 /// (`MainWindow.xaml:1917-1935`, the `DataTemplate` of `CustomPalettesItems`).
 ///
 /// The four colours are resolved through [`Theme::from_custom`], which is the same fallback
-/// chain `RegisterPalette` (`MainWindow.xaml.cs:1005-1032`) uses when the palette is
+/// chain `RegisterPalette` (`MainWindow.xaml.cs:1004-1042`) uses when the palette is
 /// applied, so the card previews what a click on it would paint. Managed built the same four
 /// swatches from `ParseHexOr(..., Colors.Black)` / `ParseHexOr(..., Colors.Gray)`
-/// (`:1049-1052`): a stored role that does not parse painted black, so a palette with a
+/// (`:1052-1055`): a stored role that does not parse painted black, so a palette with a
 /// corrupt `panel` previewed a colour it would never paint. See the module header, and
 /// `a_corrupt_role_previews_what_applying_would_paint`, which fails if the black fallback
 /// returns.
@@ -268,7 +268,7 @@ pub struct DeleteOutcome {
     /// `Deleted palette '<name>'.` (`MainWindow.xaml.cs:1209`).
     pub status: String,
     /// The palette that replaced the applied one when the removed palette was applied —
-    /// `Slate` (`:1199-1206`) — and `None` when what is applied did not move.
+    /// `Slate` (`:1202-1207`) — and `None` when what is applied did not move.
     ///
     /// The caller persists it to the profile's `GuiTheme`, because the profile is the file the
     /// applied name lives in; [`PaletteStore::current_name`] already reflects the same name.
@@ -508,7 +508,7 @@ impl PaletteStore {
 
     /// Deletes a palette by name after the confirmation.
     ///
-    /// Deleting the applied palette falls back to `Slate` (`MainWindow.xaml.cs:1199-1206`), so
+    /// Deleting the applied palette falls back to `Slate` (`MainWindow.xaml.cs:1202-1207`), so
     /// the outcome names that fallback and the caller writes it to the profile's `GuiTheme`;
     /// returning only the status line would leave the profile pointing at a palette that is no
     /// longer in the file. A name that is not in the file is **not** reported as a deletion:
