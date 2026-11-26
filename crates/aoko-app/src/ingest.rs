@@ -28,11 +28,18 @@
 //!
 //! # The config frame
 //!
-//! The link is not read-only any more: on connect, and whenever the controller's payload
-//! changes, the reader writes the managed `config` frame. The payload is
-//! `AppController::config_payload`, so `fightStatus` and every `keybind*` stay the profile's,
-//! and `ConfigPayload::to_line` is the protocol's encoder — this crate assembles no payload of
-//! its own.
+//! The link is not read-only any more: on connect, and whenever the controller's frame
+//! changes, the reader writes the managed `config` frame. The frame is the controller's
+//! (`AppController::config_frame`), both halves of it: `fightStatus` and every `keybind*` come
+//! from the profile, and the layout half is `Profile::hud_layout` parsed into a `HudLayout`, so
+//! a HUD the user moved is the HUD that ships. `ConfigFrame::to_line` is the protocol's encoder
+//! — this crate assembles neither half.
+//!
+//! The compare is on the frame, so moving one HUD element is a change even though the payload
+//! is identical, and it happens through a read guard the controller lends rather than a clone.
+//! That guard is dropped before the socket write, which is not stylistic: holding a read lock
+//! on the frame cache across a stalled write would block every profile write on the UI thread
+//! behind it.
 //!
 //! **One writer, and it is the reader.** `Transport` gives a single `&mut self` for both
 //! directions, so a second thread would have to share the transport behind a lock — and the
@@ -60,12 +67,10 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use aoko_core::app::AppController;
+use aoko_core::app::{AppController, ConfigFrame};
 use aoko_platform::TcpBridgeTransport;
 use aoko_protocol::codec::{Decoder, Inbound, Pump, TransportClient};
-use aoko_protocol::config_payload::ConfigPayload;
 use aoko_protocol::diagnostics::ManagedTransportDiagnostics;
-use aoko_protocol::hud::HudLayout;
 use aoko_protocol::transport::{Transport, TransportError};
 
 /// Ticks per second the transport diagnostics are counted against.
@@ -182,16 +187,16 @@ fn pump<T: Transport>(mut client: TransportClient<T>, controller: &AppController
     let store = controller.store();
     store.set_connected(true);
 
-    // What the link has been told, and the layout its frame carries. Both live on this
-    // thread, which is the only writer: see the module docs.
-    let mut sent: Option<ConfigPayload> = None;
-    let hud = HudLayout::default();
+    // What the link has been told. It lives on this thread, which is the only writer: see the
+    // module docs. The frame carries the HUD layout as well as the payload, because a layout
+    // the controller hands back is the one the user moved.
+    let mut sent: Option<ConfigFrame> = None;
 
     loop {
         // Before every read, so a config write can never land inside one. A profile edit made
         // on the UI thread is picked up here on the next iteration; while nothing changes
-        // this is a profile read and a field compare, not an encode.
-        if let Err(error) = sync_config(&mut client, controller, &mut sent, &hud) {
+        // this is one guard on the controller's cached frame and a compare, not an encode.
+        if let Err(error) = sync_config(&mut client, controller, &mut sent) {
             tracing::warn!("bridge config write failed: {error}");
             break;
         }
@@ -220,34 +225,39 @@ fn pump<T: Transport>(mut client: TransportClient<T>, controller: &AppController
     store.set_connected(false);
 }
 
-/// Writes the `config` frame when the controller's payload differs from the one on the wire.
+/// Writes the `config` frame when the controller's frame differs from the one on the wire.
 ///
-/// The payload is the controller's (`AppController::config_payload`), so `fightStatus` and
-/// every `keybind*` come from the profile and this never assembles a payload of its own;
-/// [`ConfigPayload::to_line`] is the protocol's encoder. The compare is on the payload value
-/// rather than the encoded line, so an idle tick costs a profile read and a field compare
-/// where encoding costs a ~4 KB `String`.
+/// The frame is the controller's (`AppController::config_frame`), both halves of it: the
+/// payload is the profile's `fightStatus` and every `keybind*`, and the layout is
+/// `Profile::hud_layout` parsed into a `HudLayout`. Nothing here assembles either half, which
+/// also closes the gap this function used to have — it encoded a customised HUD against
+/// `HudLayout::default()` because nothing converted the profile's blob.
 ///
-/// `to_line` also takes the HUD layout, and this passes the default. That is a gap rather
-/// than a choice: `Profile::hud_layout` stores the managed JSON blob and nothing converts it
-/// to a `HudLayout`, so a customised HUD would be sent as the default layout.
-/// `HudLayout::from_json` is the missing call, and it belongs beside `config_payload` in
-/// `aoko-core`, which is where the rest of the frame is filled.
+/// The compare is on the `ConfigFrame` value rather than the encoded line: `PartialEq` spans
+/// both halves, so a HUD-only edit is a change and an idle tick costs one guard on the
+/// controller's cached frame plus a compare, where encoding costs a ~4 KB `String`. The clone
+/// happens only on the send path, so the compare path stays allocation-free.
+///
+/// The guard is dropped before `send_line`, deliberately. It is a read lock on the controller's
+/// frame cache, and holding it across a stalled socket write would block every profile write on
+/// the UI thread behind it: a UI freeze caused by a config send. The ordering is a correctness
+/// requirement, not style.
 fn sync_config<T: Transport>(
     client: &mut TransportClient<T>,
     controller: &AppController,
-    sent: &mut Option<ConfigPayload>,
-    hud: &HudLayout,
+    sent: &mut Option<ConfigFrame>,
 ) -> Result<(), TransportError> {
-    let payload = controller.config_payload();
-    if sent.as_ref() == Some(&payload) {
+    let frame = controller.config_frame();
+    if sent.as_ref().is_some_and(|sent| sent == &*frame) {
         return Ok(());
     }
 
-    let line = payload.to_line(hud);
+    let line = frame.to_line();
+    let keep = (*frame).clone();
+    drop(frame);
     client.send_line(&line)?;
     tracing::debug!(bytes = line.len(), "bridge config frame sent");
-    *sent = Some(payload);
+    *sent = Some(keep);
     Ok(())
 }
 
@@ -584,7 +594,7 @@ mod tests {
         tick(&controller, &peer, 19.0);
         wait_for_lines(&peer, 2);
 
-        // Two more ticks. Each one syncs before its read and finds the payload it already
+        // Two more ticks. Each one syncs before its read and finds the frame it already
         // sent; by the time `tick` returns, that sync has run.
         tick(&controller, &peer, 18.0);
         tick(&controller, &peer, 17.0);
@@ -593,6 +603,52 @@ mod tests {
             peer.sent_lines().len(),
             2,
             "the connect frame and the one change, and nothing on an idle tick"
+        );
+
+        closed.store(true, Ordering::SeqCst);
+        ingest.join();
+    }
+
+    /// A HUD-only edit is written, which a payload-only compare cannot see.
+    ///
+    /// The layout is the frame's other half: `Profile::hud_layout` is in no field of
+    /// `ConfigPayload`, so a sender comparing payloads sends nothing when a user moves one HUD
+    /// element and the customised layout never reaches the bridge. The payload is asserted
+    /// unchanged on the second frame, so the send can only be the layout's.
+    #[test]
+    fn a_hud_only_edit_is_written() {
+        use aoko_protocol::hud::{element_id, HudLayout};
+        use aoko_protocol::profile::Profile;
+
+        let controller = Arc::new(AppController::default());
+        let (peer, closed, ingest) = connect(&controller);
+        wait_for_lines(&peer, 1);
+
+        // One element moved, stored the way the profile stores it (`Profile::hud_layout`).
+        let mut stored = Profile::hud_layout_map(&HudLayout::new());
+        let moved = stored
+            .get_mut(element_id::MODULE_LIST)
+            .expect("the layout map carries every known element");
+        moved.x = 0.42;
+        controller.update_profile(|profile| {
+            profile.hud_layout = Some(stored);
+            true
+        });
+
+        tick(&controller, &peer, 20.0);
+        let lines = wait_for_lines(&peer, 2);
+
+        let frame = json(&lines[1]);
+        assert_eq!(frame["type"].as_str(), Some("config"));
+        assert_eq!(
+            frame["fightStatus"].as_bool(),
+            Some(false),
+            "the payload half is what connect already sent, so the payload did not change"
+        );
+        assert_eq!(
+            frame["hudLayout"][element_id::MODULE_LIST]["x"].as_f64(),
+            Some(0.42),
+            "the layout half carries the element the user moved"
         );
 
         closed.store(true, Ordering::SeqCst);
