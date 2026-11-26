@@ -34,6 +34,35 @@
 //! Copy is verbatim from the XAML: `up/down navigate`, `enter jump`, `f2 toggle` and
 //! `UNAVAILABLE`. The keybind chip keeps `Consolas`'s role by using the bundled
 //! monospace family through [`crate::assets::MONO_FAMILY`].
+//!
+//! # Motion: there is no animation here to gate
+//!
+//! Decision 3 makes one toggle govern every animated site, and this module paints no
+//! animation: the card, the scrim and every row are drawn at their settled size, colour
+//! and opacity on every frame. The managed overlay had four (`theme::motion`:
+//! `OVERLAY_CARD_IN` 140 ms at `CommandSearchOverlay.xaml.cs:150`, `OVERLAY_SCRIM` 180 ms
+//! at `:153`, `OVERLAY_CLOSE` 100 ms at `:104`, `OVERLAY_RECARD` 120 ms at `:221`), all
+//! opacity on `CardVisual` / `Scrim` plus a 6 px `CardSlide.Y`, and none of them is
+//! ported. The only animated sites in this crate are `components::switch` and
+//! `components::progress`, and both consult the gate the same way: each branches on
+//! `motion.enabled()` and returns a static frame when it is off.
+//!
+//! So [`overlay`] takes a `Motion` and does not read it, which is the seam for the
+//! entrance rather than a gate being bypassed: a user with animations off needs no special
+//! path here, because the settled paint is what `Motion::STILL` asks for — and that is the
+//! managed answer too, where `!ClientAreaAnimation` returns straight to the settled state
+//! instead of playing anything (`:98-101` for the close, `:148-149` for the open). The
+//! mount that ports the entrance must spend the seam the way the switch does: branch on
+//! `motion.enabled()` for a static frame, or wrap the scrim and card in
+//! `with_animation(id, Animation::new(motion.duration(OVERLAY_SCRIM)), ..)` and read
+//! `motion.progress(t)` inside.
+//!
+//! `the_overlay_paints_the_same_card_under_either_motion_setting` is what catches an
+//! entrance that forgets the gate: the managed card slides 6 px, so an ungated slide moves
+//! the painted box and the test's bounds comparison fails.
+//!
+//! [`row_element`] takes no `Motion` at all: rows never animated in the managed overlay,
+//! and a parameter nothing reads is worse than a signature the mount has to extend.
 
 use gpui::prelude::*;
 use gpui::{
@@ -57,10 +86,15 @@ const CHROME: f32 = 108.0;
 ///
 /// `on_row` receives the clicked row index; the caller owns what a click means (select,
 /// jump, or toggle), and whether the overlay closes.
+///
+/// `_motion` is the animation gate, accepted and not read: this view has no animation to
+/// gate yet, and the module docs say what the mount must do with it. It is named with a
+/// leading underscore so the signature does not promise a behaviour the file does not
+/// have.
 pub fn overlay(
     theme: &Theme,
     state: &CommandSearchState,
-    motion: Motion,
+    _motion: Motion,
     viewport: Size<Pixels>,
     on_row: impl Fn(usize, &ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
@@ -81,7 +115,6 @@ pub fn overlay(
             row,
             index,
             selected == Some(index),
-            motion,
             move |event, window, cx| callback(index, event, window, cx),
         ));
     }
@@ -101,6 +134,9 @@ pub fn overlay(
         .flex()
         .flex_col()
         .w(px(card_width))
+        // The one stable handle on the card's box: the window test compares it under both
+        // motion settings, and the mount asserts against it once the entrance exists.
+        .debug_selector(|| String::from("command-search-card"))
         .rounded(px(metrics::radius::OVERLAY_CARD))
         .border_1()
         .border_color(fixed::GLASS_HAIRLINE)
@@ -190,12 +226,14 @@ fn query_row(theme: &Theme, state: &CommandSearchState) -> AnyElement {
 
 /// One result row: 48 px, radius 7, inset 10×1, a hover wash and a stronger selected
 /// wash, and an accent rule on the selected row.
+///
+/// No `Motion`: the managed overlay animated the card and the scrim, never a row, so this
+/// painter is static by construction rather than by a gate that always says no.
 pub fn row_element(
     theme: &Theme,
     row: &Row,
     index: usize,
     selected: bool,
-    _motion: Motion,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let card = theme.panel;
@@ -364,6 +402,84 @@ fn legend(theme: &Theme, state: &CommandSearchState) -> AnyElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::{Context, Render, TestAppContext, VisualTestContext, WindowOptions};
+
+    /// The overlay in a window, with the motion setting a test can flip.
+    struct OverlayProbe {
+        state: CommandSearchState,
+        motion: Motion,
+    }
+
+    impl Render for OverlayProbe {
+        fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            overlay(
+                &Theme::slate(),
+                &self.state,
+                self.motion,
+                window.viewport_size(),
+                |_, _, _| {},
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn the_overlay_paints_the_same_card_under_either_motion_setting(cx: &mut TestAppContext) {
+        let probe = cx.update(|cx| {
+            cx.new(|_| OverlayProbe {
+                state: CommandSearchState::new(),
+                motion: Motion::ANIMATED,
+            })
+        });
+        let window = cx.update(|cx| {
+            cx.open_window(WindowOptions::default(), |_, _| probe.clone())
+                .expect("test window")
+        });
+        let mut visual = VisualTestContext::from_window(window.into(), cx);
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let animated = visual
+            .debug_bounds("command-search-card")
+            .expect("the card records its box in a debug build");
+        assert!(
+            f32::from(animated.size.width) > 0.0 && f32::from(animated.size.height) > 0.0,
+            "the card has a box to compare"
+        );
+
+        // Flip the gate the way the settings toggle does. Nothing in this view animates, so
+        // the settled card is the same card: an entrance that lands without consulting the
+        // gate is what this comparison catches, and under either setting what is asserted
+        // here is the frame a user with animations off sees. GPUI's test frames expose
+        // geometry rather than opacity, which is the limit of what this can check.
+        visual.update(|_, cx| {
+            probe.update(cx, |probe, cx| {
+                probe.motion = Motion::STILL;
+                cx.notify();
+            });
+        });
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let still = visual
+            .debug_bounds("command-search-card")
+            .expect("the card is still laid out");
+
+        assert_eq!(
+            (
+                f32::from(animated.origin.x),
+                f32::from(animated.origin.y),
+                f32::from(animated.size.width),
+                f32::from(animated.size.height),
+            ),
+            (
+                f32::from(still.origin.x),
+                f32::from(still.origin.y),
+                f32::from(still.size.width),
+                f32::from(still.size.height),
+            ),
+            "the gate changes nothing, because there is no animation here to gate"
+        );
+    }
 
     #[test]
     fn the_card_is_never_narrower_than_the_footer_needs() {
