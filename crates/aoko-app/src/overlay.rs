@@ -68,6 +68,19 @@
 //! makes GPUI redraw while the ring is up; the shadow clock in the state is not needed for
 //! that and no `cx.notify` loop belongs in the shell for it.
 //!
+//! `with_animation` is a second gate, and the two are kept deliberately. It consults
+//! [`App::reduce_motion`] itself: with that set, the animator runs once at the oneshot's
+//! **end** state and no frames are scheduled (`gpui/src/elements/animation.rs:326-333` at
+//! the pin). [`App::reduce_motion`] and [`Motion`] are not the same flag and never were —
+//! `Motion` is the managed `ClientAreaAnimation` the Settings card owns, while
+//! `reduce_motion` is GPUI's platform-level setting, which nothing in this tree sets
+//! except the capture harness (`capture.rs:394`, for deterministic frames). So the double
+//! gate is not redundant, and it is not interchangeable: the [`Motion`] check upstream
+//! returns `None`, so no ring element exists at all — which is what a test can assert and
+//! what the managed early return does — whereas `reduce_motion` alone would still mount the
+//! element and paint it at opacity 0. Under capture the ring is therefore present and
+//! invisible, which is why a screenshot settles the timeline and a window test does not.
+//!
 //! `the_overlay_paints_the_same_card_under_either_motion_setting` is what catches an
 //! entrance that forgets the gate: the managed card slides 6 px, so an ungated slide moves
 //! the painted box and the test's bounds comparison fails.
@@ -77,8 +90,8 @@
 
 use gpui::prelude::*;
 use gpui::{
-    div, px, Animation, AnyElement, App, ClickEvent, Entity, Hsla, IntoElement, Pixels,
-    SharedString, Size, Window,
+    div, px, Animation, AnimationExt, AnyElement, App, ClickEvent, Entity, Hsla, IntoElement,
+    Pixels, SharedString, Size, Window,
 };
 
 use crate::assets::MONO_FAMILY;
@@ -351,7 +364,9 @@ fn query_row(
 /// `cx.notify` loop belongs in the shell for it. The opacity still comes from
 /// [`command_search::CardPulse::opacity_at`], the one curve shared with the keyframes, and
 /// the gate is read first — `Motion::STILL` paints no ring at all, which is the managed
-/// `!ClientAreaAnimation` early return (`:1786-1788`).
+/// `!ClientAreaAnimation` early return (`:1786-1788`). `with_animation` gates on
+/// [`App::reduce_motion`] as well; that is a different flag from [`Motion`] and the two are
+/// kept on purpose — see the module's motion section for why one is not the other.
 pub fn card_pulse_ring(
     theme: &Theme,
     state: &CommandSearchState,
