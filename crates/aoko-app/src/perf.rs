@@ -124,10 +124,16 @@ mod tests {
     /// is not reachable through the pin's builder API without writing raw `Element`
     /// impls, which is a redesign rather than a fix.
     ///
+    /// Moved from 1006 to 946 when the keybind buttons stopped being painted as button
+    /// chrome per bind: each binding is now one `KeybindCapture` entity reused across
+    /// frames, so the 40 header and action buttons cost an element clone rather than a
+    /// fresh row, label and handlers. Sixty allocations a frame is that difference, not a
+    /// cache that grew somewhere else.
+    ///
     /// Treat this as a budget: if a change to the UI legitimately moves it, update the
     /// constant in the same commit and say why. If it moves on its own, something in
     /// `render` started allocating.
-    const SHELL_FRAME_ALLOCATIONS: usize = 1006;
+    const SHELL_FRAME_ALLOCATIONS: usize = 946;
 
     fn warm_shell() -> (VisualTestContext, Entity<Shell>) {
         let cx = TestAppContext::single();

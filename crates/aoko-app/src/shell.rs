@@ -849,15 +849,17 @@ impl Shell {
     /// Drops the status line the binding's last capture wrote.
     ///
     /// A capture that loses focus stores nothing, so the outcome on the row is stale: taking
-    /// the line away is how the row reads the explanatory copy again.
+    /// the line away is how the row reads the explanatory copy again. The repaint is
+    /// unconditional, and that is the half that matters on screen: the button also has to go
+    /// back to its resting label, and the label lives on the capture entity, so the frame is
+    /// what paints it. A conditional notify here left the button reading
+    /// `Bind: [Press key or mouse...]` after focus moved away.
     fn clear_capture_status(&mut self, target: KeyTarget, cx: &mut Context<Self>) {
-        let cleared = match target {
-            KeyTarget::Module(_) => self.keybind_conflict.take().is_some(),
-            KeyTarget::Action(which) => self.action_status[status_slot(which)].take().is_some(),
-        };
-        if cleared {
-            cx.notify();
+        match target {
+            KeyTarget::Module(_) => self.keybind_conflict = None,
+            KeyTarget::Action(which) => self.action_status[status_slot(which)] = None,
         }
+        cx.notify();
     }
 
     /// The capture button for one binding, as the tree paints it.
@@ -4601,6 +4603,14 @@ mod tests {
             })
         });
         press_autoclicker_keybind(&mut visual);
+        // The press moves focus, and GPUI dispatches focus listeners inside `Window::draw`
+        // rather than in `focus`/`blur` themselves (`window.rs:3938-3993`), which is the same
+        // requirement the component's own blur test records. So the focus move needs a frame
+        // before the blur can end the capture, or the abandonment is never delivered and the
+        // button stays on its pending label.
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
         let capturing = cx.read(|cx| {
             shell
                 .read(cx)
@@ -4856,14 +4866,16 @@ mod tests {
             0,
             "and leaves the other action alone"
         );
+        // The profile carries every module id at `0` by default (`default_module_keys`), so
+        // the assertion is that no key holds the action's key, not that the map has no
+        // entry: `autoclicker` is present and still unbound.
         assert!(
             cx.read(|cx| shell
                 .read(cx)
                 .profile()
                 .module_keys
-                .get("autoclicker")
-                .copied())
-                .is_none(),
+                .values()
+                .all(|key| *key != 0x70)),
             "an action key never lands in `module_keys`"
         );
 

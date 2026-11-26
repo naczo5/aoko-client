@@ -1316,6 +1316,11 @@ mod tests {
         // Settings sections); 49 named-plus-unnamed becomes 50 entries because the
         // Stats tab's action row and the histogram are separate cards in the
         // markup's layout and the settings panel has three named sections.
+        //
+        // The loop below walks the six `TabBody::Cards` tabs, so it counts 45 of those
+        // 50: Stats is a view now, not a card list a tab paints, and its five cards live
+        // in `STATS` for [`crate::views::stats_view`]. Both halves are pinned together
+        // below, so neither can lose a card without this failing.
         let counts = count_controls(&[]);
         assert_eq!(counts, ControlCounts::default());
 
@@ -1338,7 +1343,12 @@ mod tests {
         assert_eq!(total.checks, 58, "DarkCheckBox elements");
         assert_eq!(total.keybinds, 38, "KeybindButton_Click buttons");
         assert_eq!(total.combos, 13, "ComboBox elements");
-        assert_eq!(total.cards, 50, "cards across the seven card-bearing tabs");
+        assert_eq!(total.cards, 45, "cards across the six card-bearing tabs");
+        assert_eq!(
+            total.cards + STATS.len(),
+            50,
+            "cards in the markup: the six tabs' 45 plus the Stats view's five"
+        );
     }
 
     #[test]
