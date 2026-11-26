@@ -341,20 +341,25 @@ impl AppController {
 
     /// The `config` frame this host would send right now.
     ///
-    /// Only the fields the profile owns are filled from live state; everything else is
-    /// still the managed `Clicker` default that `ConfigPayload::default` documents, because
-    /// aoko-core does not own the clicker's property surface yet.
+    /// The fields the profile owns are filled from live state: `fightStatus` from
+    /// [`Profile::fight_status_enabled`], and every `keybind*` field from
+    /// [`Profile::module_keys`], which is the store the managed host read through
+    /// `InputHooks.GetModuleKey(module)`. Everything else is still the managed `Clicker`
+    /// default that `ConfigPayload::default` documents, because aoko-core does not own the
+    /// clicker's property surface yet.
     ///
-    /// `fightStatus` is [`Profile::fight_status_enabled`], never a second copy kept on the
-    /// payload: the managed host sent `clicker.FightStatusEnabled`, and `ProfileManager`
-    /// loaded that field from the profile, so the profile is the one owner of the truth and
-    /// this is the one direction it flows.
+    /// All of it is one direction: the profile is the owner of the truth, this copies it out,
+    /// and nothing writes a payload field back. A module the profile has no bind for sends
+    /// `0`, which is the managed "unbound".
     #[must_use]
     pub fn config_payload(&self) -> ConfigPayload {
-        ConfigPayload {
-            fight_status: self.profile.read().fight_status_enabled,
+        let profile = self.profile.read();
+        let mut payload = ConfigPayload {
+            fight_status: profile.fight_status_enabled,
             ..ConfigPayload::default()
-        }
+        };
+        payload.fill_keybinds(|module| profile.module_keys.get(module).copied().unwrap_or(0));
+        payload
     }
 }
 
@@ -611,6 +616,78 @@ mod tests {
             !app.config_payload().fight_status,
             "a panic reset turns fight status off in the frame the bridge receives"
         );
+    }
+
+    /// The same rule for the rest of the config frame: the managed host read every keybind
+    /// through `InputHooks.GetModuleKey(module)` (`GameStateClient.cs:1509-1539`), so each of
+    /// the 31 frame keybinds is the profile's bind, never the payload's own default.
+    #[test]
+    fn the_config_payload_carries_the_profile_keybinds() {
+        // Every module the managed host sent a bind for, in the order it read them, paired
+        // with the key that carries it. Distinct codes below mean a field left at its
+        // default, a field wired to its neighbour's module, and a wrong wire key all fail.
+        const BINDS: [(&str, &str); 31] = [
+            ("autoclicker", "keybindAutoclicker"),
+            ("rightclick", "keybindRightClick"),
+            ("aimassist", "keybindAimAssist"),
+            ("triggerbot", "keybindTriggerbot"),
+            ("killaura", "keybindKillAura"),
+            ("speedbridge", "keybindSpeedBridge"),
+            ("gtbhelper", "keybindGtbHelper"),
+            ("nametags", "keybindNametags"),
+            ("closestplayer", "keybindClosestPlayer"),
+            ("fightstatus", "keybindFightStatus"),
+            ("chestesp", "keybindChestEsp"),
+            ("cheststealer", "keybindChestStealer"),
+            ("refill", "keybindRefill"),
+            ("blockesp", "keybindBlockEsp"),
+            ("bedplates", "keybindBedPlates"),
+            ("pixelpartyassist", "keybindPixelPartyAssist"),
+            ("autorod", "keybindAutoRod"),
+            ("throwpot", "keybindThrowpot"),
+            ("autoheal", "keybindAutoheal"),
+            ("autotool", "keybindAutoTool"),
+            ("fireballwarning", "keybindFireballWarning"),
+            ("fastplace", "keybindFastPlace"),
+            ("nohurtcam", "keybindNoHurtCam"),
+            ("sprint", "keybindSprint"),
+            ("tnttimer", "keybindTntTimer"),
+            ("wtap", "keybindWTap"),
+            ("jumpreset", "keybindJumpReset"),
+            ("hitselect", "keybindHitSelect"),
+            ("trajectories", "keybindTrajectories"),
+            ("murdermystery", "keybindMurderMystery"),
+            ("breakprogress", "keybindBreakProgress"),
+        ];
+
+        let app = AppController::default();
+
+        // A default profile produces the managed default, which is key 0 for all 31.
+        let line = app.config_payload().to_line(&HudLayout::default());
+        for (module, key) in BINDS {
+            assert!(
+                line.contains(&format!("\"{key}\":0")),
+                "{key} must default to the unbound key for {module}"
+            );
+        }
+
+        assert!(app.update_profile(|profile| {
+            for (index, (module, _)) in BINDS.iter().enumerate() {
+                profile
+                    .module_keys
+                    .insert((*module).to_owned(), 100 + index as i32);
+            }
+            true
+        }));
+
+        let line = app.config_payload().to_line(&HudLayout::default());
+        for (index, (module, key)) in BINDS.iter().enumerate() {
+            let code = 100 + index as i32;
+            assert!(
+                line.contains(&format!("\"{key}\":{code}")),
+                "{module} must reach {key} as {code}"
+            );
+        }
     }
 
     #[test]

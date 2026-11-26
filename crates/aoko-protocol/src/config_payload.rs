@@ -13,7 +13,8 @@
 //! this crate deliberately does not duplicate those defaults. A caller that sends
 //! `ConfigPayload::default()` unchanged is sending defaults rather than state; the
 //! builder that reads live state is `aoko_core::app::AppController::config_payload`,
-//! which is where fields like `fightStatus` come from the profile.
+//! which is where `fightStatus` and every `keybind*` field come from the profile.
+//! The keybind table is [`ConfigPayload::fill_keybinds`], one line per field.
 
 use crate::hud::HudLayout;
 
@@ -1108,6 +1109,52 @@ impl ConfigPayload {
         hud_layout.write_wire(&mut out);
         out.push_str("}\n");
         out
+    }
+
+    /// Fills every `keybind*` field from `module_key`, one line per field, in the order
+    /// `GameStateClient.cs` read them (`GameStateClient.cs:1509-1539`, frozen at
+    /// `tests/fixtures/managed/GameStateClient.cs`).
+    ///
+    /// The managed host asked `InputHooks.GetModuleKey(module)` for each bind it sent. The
+    /// store behind that call is `Profile::module_keys` in this port, and
+    /// `aoko_core::app::AppController::config_payload` is the caller that passes it in, so the
+    /// profile stays the owner and this method is one direction only: it copies in and writes
+    /// nothing back.
+    ///
+    /// A new `keybind*` field needs a line here, or it silently keeps its struct default of `0`
+    /// and never carries the profile's bind.
+    pub fn fill_keybinds(&mut self, module_key: impl Fn(&str) -> i32) {
+        self.keybind_autoclicker = module_key("autoclicker");
+        self.keybind_right_click = module_key("rightclick");
+        self.keybind_aim_assist = module_key("aimassist");
+        self.keybind_triggerbot = module_key("triggerbot");
+        self.keybind_kill_aura = module_key("killaura");
+        self.keybind_speed_bridge = module_key("speedbridge");
+        self.keybind_gtb_helper = module_key("gtbhelper");
+        self.keybind_nametags = module_key("nametags");
+        self.keybind_closest_player = module_key("closestplayer");
+        self.keybind_fight_status = module_key("fightstatus");
+        self.keybind_chest_esp = module_key("chestesp");
+        self.keybind_chest_stealer = module_key("cheststealer");
+        self.keybind_refill = module_key("refill");
+        self.keybind_block_esp = module_key("blockesp");
+        self.keybind_bed_plates = module_key("bedplates");
+        self.keybind_pixel_party_assist = module_key("pixelpartyassist");
+        self.keybind_auto_rod = module_key("autorod");
+        self.keybind_throwpot = module_key("throwpot");
+        self.keybind_autoheal = module_key("autoheal");
+        self.keybind_auto_tool = module_key("autotool");
+        self.keybind_fireball_warning = module_key("fireballwarning");
+        self.keybind_fast_place = module_key("fastplace");
+        self.keybind_no_hurt_cam = module_key("nohurtcam");
+        self.keybind_sprint = module_key("sprint");
+        self.keybind_tnt_timer = module_key("tnttimer");
+        self.keybind_w_tap = module_key("wtap");
+        self.keybind_jump_reset = module_key("jumpreset");
+        self.keybind_hit_select = module_key("hitselect");
+        self.keybind_trajectories = module_key("trajectories");
+        self.keybind_murder_mystery = module_key("murdermystery");
+        self.keybind_break_progress = module_key("breakprogress");
     }
 }
 
