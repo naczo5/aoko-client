@@ -68,7 +68,7 @@ use crate::views::command_search::{
 };
 use crate::views::copy::{self, Card, Control, TabBody, MODULE_LIST_PREVIEW_SAMPLE};
 use crate::views::forms::FormFields;
-use crate::views::palette_store::PaletteDraft;
+use crate::views::palette_store::{self, PaletteDraft, PaletteStore};
 use crate::views::prefs::ClientPrefs;
 use crate::views::profiles::{CreateOutcome, Profiles};
 use crate::views::servers_state::{AddOutcome, JoinOutcome, PingRequest, ServersState};
@@ -128,19 +128,31 @@ pub struct Shell {
     /// shell submits itself — on Enter and on the button beside it — rather than a form the
     /// account and server panels own.
     block_add: Option<Entity<TextInput>>,
+    /// The palette file, the applied name, and the create-palette card's four hex drafts.
+    ///
+    /// The one owner of those four strings, for the same reason [`Shell::profile`] is the one
+    /// owner of its fields: the boxes, the swatches and the Add press all read and write the
+    /// draft, and nothing else holds a copy of it.
+    ///
+    /// It is plain owned UI state — no `Arc`, no `RwLock` — because nothing off this thread has
+    /// any use for a palette. That is what makes the repaint borrow free: [`Shell::ensure_color_fields`]
+    /// reads `self.palette.draft()` to seed each box once, which is a borrow of one field of the
+    /// view it is already borrowing, and a borrow cannot block a writer the way a guard can. The
+    /// store's own file reads (`palettes`, `resolve`, `save_draft`) happen on the same thread and
+    /// never inside a paint.
+    palette: PaletteStore,
     /// The four palette-editor hex boxes, by managed box name.
     ///
-    /// The typed text lives in the widget, the way the account and server forms live in
-    /// `FormFields`: the palette draft is not mounted on the shell yet
-    /// (`views::palette_store::PaletteStore` owns it, and it arrives with the saved-palette card),
-    /// so a struct here holding four hexes would be the second writable copy this migration keeps
-    /// finding.
+    /// The box is a mirror of the draft field, written through [`Shell::set_color_text`] on every
+    /// edit and seeded from the draft once, here. A field typed into needs an entity, and the
+    /// entity is the only text this view keeps: the draft below is where the value lives.
     color_fields: HashMap<&'static str, Entity<TextInput>>,
-    /// The colour each swatch last parsed, by managed box name.
+    /// The colour each swatch last parsed out of its box, by managed box name.
     ///
-    /// A memo of the last successful parse, not a second copy of the text: an edit that does not
-    /// parse leaves the swatch on the colour it had, so a half-typed `#0A` cannot flash it. Seeded
-    /// from [`PaletteDraft::default`], which is the markup's own four initial values.
+    /// A memo of the last successful parse, not a second copy of the text: the draft keeps an
+    /// invalid entry visible so the user can fix it (`PaletteDraft`'s own rule), and the swatch
+    /// keeps the colour it had rather than flashing empty. Seeded from the draft's own defaults,
+    /// so the first frame paints what the managed card paints.
     swatches: HashMap<&'static str, Color>,
     /// The new-config name box's text (`NewConfigNameBox`, `MainWindow.xaml:1552`).
     config_name: String,
@@ -357,6 +369,12 @@ impl Shell {
             profiles,
             fields: FormFields::default(),
             block_add: None,
+            // Seeded without reading the file: `from_system` only resolves the path, and `at`
+            // touches nothing. The reads are `palettes()`/`resolve()`, the write is
+            // `save_draft()`, and no constructor calls any of them — which is what keeps a unit
+            // test and a screenshot off the machine's palette directory.
+            palette: PaletteStore::from_system()
+                .unwrap_or_else(|_| PaletteStore::at(std::path::PathBuf::new())),
             color_fields: HashMap::new(),
             swatches: HashMap::new(),
             config_name: String::new(),
@@ -484,6 +502,22 @@ impl Shell {
     #[must_use]
     pub fn profile(&self) -> &aoko_protocol::profile::Profile {
         &self.profile
+    }
+
+    /// The palette store: the file, the applied palette and the editor's draft.
+    #[must_use]
+    pub fn palette(&self) -> &PaletteStore {
+        &self.palette
+    }
+
+    /// Points the palette store at an explicit file, for a test or a capture.
+    ///
+    /// The seam [`Profiles::with_store`] gives the profile side: a test that saves a draft
+    /// should write into its scratch root rather than this machine's palette file. It builds a
+    /// fresh store, so the draft returns to [`PaletteDraft::default`] — which is why it belongs
+    /// before the first frame and not in the middle of an edit.
+    pub fn set_palette_path(&mut self, path: impl Into<std::path::PathBuf>) {
+        self.palette = PaletteStore::at(path);
     }
 
     /// The profile as the JSON `aoko-protocol` writes, ready to save.
@@ -646,8 +680,12 @@ impl Shell {
 
     /// Creates the four palette-editor boxes, once each.
     ///
-    /// The seed is [`PaletteDraft::default`], the markup's own four initial hexes, and the first
-    /// paint parses it into the swatch memo so the card looks right before anything is typed.
+    /// The seed is the store's draft — the one owner of those four strings — and the first paint
+    /// parses it into the swatch memo, so the card shows the draft's colours before anything is
+    /// typed.
+    ///
+    /// The placeholder is empty: the managed `HexBox` has no placeholder in `views/copy.rs`, and
+    /// inventing one is what that file exists to prevent. A recorded gap, not an omission.
     fn ensure_color_fields(&mut self, cx: &mut Context<Self>) {
         let theme = self.theme.clone();
         for bind in COLOR_FIELDS {
@@ -655,8 +693,10 @@ impl Shell {
                 continue;
             }
 
-            let seed = draft_seed(bind);
-            if let Some(color) = Color::parse_hex(&seed) {
+            let seed = draft_field(self.palette.draft(), bind)
+                .cloned()
+                .unwrap_or_default();
+            if let Some(color) = palette_store::parse_entry(&seed) {
                 self.swatches.insert(bind, color);
             }
 
@@ -677,32 +717,43 @@ impl Shell {
         }
     }
 
-    /// Parses one palette box and remembers the colour, leaving the swatch alone when it does not.
+    /// The one write path for a palette row's text: the box's `on_change`, the Enter commit and
+    /// the colour picker all land here.
     ///
-    /// The one write path for a row's colour: the box's `on_change` calls it, and so will the
-    /// colour picker the swatch opens. An edit that does not parse is ignored rather than stored,
-    /// which is what keeps a half-typed hex off the swatch.
+    /// The draft is the owner, so the text is stored even when it does not parse: `PaletteDraft`
+    /// deliberately keeps an invalid entry visible so it can be fixed, and the Add press is where
+    /// it is refused. The swatch's memo only moves on a successful parse, so a half-typed `#0A`
+    /// leaves the colour it had rather than flashing empty.
+    ///
+    /// [`palette_store::parse_entry`] is the tolerant reader the Add press itself uses, so a form
+    /// the swatch accepts is a form the press accepts — `#123`, `123` and `#123456` all land.
     fn set_color_text(&mut self, bind: &'static str, text: &str, cx: &mut Context<Self>) {
-        let Some(color) = Color::parse_hex(text) else {
-            return;
-        };
-        if self.swatches.get(bind) == Some(&color) {
-            return;
+        if let Some(stored) = draft_field_mut(self.palette.draft_mut(), bind) {
+            if stored.as_str() != text {
+                stored.clear();
+                stored.push_str(text);
+            }
         }
-        self.swatches.insert(bind, color);
+
+        if let Some(color) = palette_store::parse_entry(text) {
+            if self.swatches.get(bind) != Some(&color) {
+                self.swatches.insert(bind, color);
+            }
+        }
         cx.notify();
     }
 
     /// Writes one palette box back in the canonical `#RRGGBB` form, when it parses.
     ///
     /// Enter is the commit gesture. Normalising on every keystroke would rewrite the text under
-    /// the caret, so a user typing `#0a0b0f` could never finish the string they started.
+    /// the caret, so a user typing `#0a0b0f` could never finish the string they started. A box
+    /// that does not parse keeps exactly what was typed, which is what lets it be fixed.
     fn commit_color_text(&mut self, bind: &'static str, cx: &mut Context<Self>) {
         let Some(field) = self.color_fields.get(bind).cloned() else {
             return;
         };
         let text = field.read(cx).text().to_owned();
-        let Some(color) = Color::parse_hex(&text) else {
+        let Some(color) = palette_store::parse_entry(&text) else {
             return;
         };
 
@@ -3134,7 +3185,7 @@ impl Shell {
 
         let handle = entity.clone();
         let add = components::button(
-            crate::reuse::stitched("blockesp-add-button-", "", bind),
+            crate::reuse::stitched(bind, "-", "button"),
             theme,
             ButtonVariant::Dark,
             copy::BLOCK_ESP_ADD_LABEL,
@@ -3179,7 +3230,13 @@ impl Shell {
     /// An id already tracked is *enabled* rather than appended: a second entry with the same
     /// registry id would paint twice and send twice. A new one is appended as
     /// `minecraft:{id}`, with the friendly name the managed code derives from the id, the
-    /// default colour and `enabled: true`; the box is then cleared so the next add starts fresh.
+    /// default colour and `enabled: true`.
+    ///
+    /// The box is then cleared so the next add starts fresh, which is managed behaviour rather
+    /// than an assumption: `MainWindow.xaml.cs:2013-2014` empties `BlockEspAddBox` at the end of
+    /// `AddBlockEspFromBox`, on both the enable and the append branch, and the empty no-op at
+    /// `:1998-1999` returns before it — so whitespace alone leaves what you typed, and a real id
+    /// does not.
     fn add_block_target(&mut self, cx: &mut Context<Self>) {
         let Some(field) = self.block_add.clone() else {
             return;
@@ -3416,11 +3473,13 @@ fn switch_debug_selector(bind: &'static str) -> Option<&'static str> {
 
 /// The Block ESP add row's debug selector.
 ///
-/// The row is one control in one card, so the bind it carries is the whole name. A test needs
-/// the bounds to prove the row is mounted and to scroll it into view; the button inside it has
-/// an `ElementId` and no selector, so this is the only handle there is.
+/// The bind the row carries is a port-only identity, `blockesp-add`, and not the name of the
+/// profile list the add appends to, so it needs no role prefix to read as the row it is: the
+/// selector is exactly that name and the button inside it is `blockesp-add-button`. A test needs
+/// the bounds to prove the row is mounted and to scroll it into view; the button has an
+/// `ElementId` and no selector, so this is the only handle there is.
 fn block_add_selector(bind: &'static str) -> String {
-    format!("blockesp-add-{bind}")
+    bind.to_owned()
 }
 
 /// The four create-palette colour rows, in the markup's order.
@@ -3434,21 +3493,31 @@ const COLOR_FIELDS: [&str; 4] = [
     "PaletteTextBox",
 ];
 
-/// The hex a palette box starts from, which is [`PaletteDraft::default`]'s value for it.
+/// The draft field one palette box edits, by managed name.
 ///
-/// This match is the seam that wants to be `PaletteDraft::get(bind)` in
-/// [`crate::views::palette_store`]: four managed names and four draft fields are exactly the
-/// pairing that file owns, and the palette card's own save needs the mirror of it. Until then the
-/// pairing lives here rather than a second set of initial hexes, so the first frame and the
-/// managed card cannot disagree about what a fresh draft says.
-fn draft_seed(bind: &str) -> String {
-    let draft = PaletteDraft::default();
+/// The four names and the four draft fields are exactly the pairing
+/// [`crate::views::palette_store`] owns, so this is the seam that wants to be
+/// `PaletteDraft::get(bind)` there (with the writable mirror beside it). Until then the pairing
+/// lives here once, rather than a second set of initial hexes beside it: the box, the swatch and
+/// the eventual picker all read the one string the draft holds.
+fn draft_field<'a>(draft: &'a PaletteDraft, bind: &str) -> Option<&'a String> {
     match bind {
-        "PaletteBgBox" => draft.background,
-        "PalettePanelBox" => draft.panel,
-        "PaletteAccentBox" => draft.accent,
-        "PaletteTextBox" => draft.text,
-        _ => String::new(),
+        "PaletteBgBox" => Some(&draft.background),
+        "PalettePanelBox" => Some(&draft.panel),
+        "PaletteAccentBox" => Some(&draft.accent),
+        "PaletteTextBox" => Some(&draft.text),
+        _ => None,
+    }
+}
+
+/// The writable half of [`draft_field`].
+fn draft_field_mut<'a>(draft: &'a mut PaletteDraft, bind: &str) -> Option<&'a mut String> {
+    match bind {
+        "PaletteBgBox" => Some(&mut draft.background),
+        "PalettePanelBox" => Some(&mut draft.panel),
+        "PaletteAccentBox" => Some(&mut draft.accent),
+        "PaletteTextBox" => Some(&mut draft.text),
+        _ => None,
     }
 }
 
@@ -5036,7 +5105,12 @@ mod tests {
         use gpui::WindowOptions;
 
         let shell = cx.update(|cx| {
-            cx.new(|_| Shell::with_store(Theme::slate(), aoko_platform::ProfileStore::new(root)))
+            let mut shell =
+                Shell::with_store(Theme::slate(), aoko_platform::ProfileStore::new(root));
+            // The palette file lives in the scratch root too, so a test that ever saves a draft
+            // cannot write into this machine's palette directory.
+            shell.set_palette_path(root.join("palettes.json"));
+            cx.new(|_| shell)
         });
         let window = cx.update(|cx| {
             cx.open_window(WindowOptions::default(), |_, _| shell.clone())
@@ -6102,9 +6176,9 @@ mod tests {
         let (shell, _, mut visual) = shell_in_window(cx, &root);
 
         // `BlockEspCard` is on Combat, and the card sits below the fold at the test viewport.
-        scroll_into_view(&mut visual, "blockesp-add-blockEspTargets");
+        scroll_into_view(&mut visual, "blockesp-add");
         let bounds = visual
-            .debug_bounds("blockesp-add-blockEspTargets")
+            .debug_bounds("blockesp-add")
             .expect("the add row paints");
         assert!(
             bounds.size.width > px(80.0),
@@ -6158,8 +6232,8 @@ mod tests {
     ///
     /// The swatch's box is the only part a test can measure, so 22x22 is the geometry assertion
     /// and the seed is the model assertion: the first frame has to match what the managed card
-    /// shows before anything is typed, and it gets there by parsing
-    /// `PaletteDraft::default` rather than by holding a second set of hexes.
+    /// shows before anything is typed, and it gets there by parsing the shell's
+    /// [`PaletteStore`] draft rather than by holding a second set of hexes.
     #[gpui::test]
     fn a_palette_colour_row_paints_a_swatch_and_a_box(cx: &mut gpui::TestAppContext) {
         let root = scratch_root();
@@ -6182,10 +6256,13 @@ mod tests {
             "the caption and the box are in the same row"
         );
 
-        let draft = PaletteDraft::default();
+        // The seed is the store's draft, so the assertion reads it from the shell rather than
+        // from a `PaletteDraft::default()` of the test's own: a second copy here would pass even
+        // if the card seeded from somewhere else.
+        let seed = cx.read(|cx| shell.read(cx).palette().draft().background.clone());
         assert_eq!(
             swatch_of(cx, &shell, "PaletteBgBox"),
-            Color::parse_hex(&draft.background).expect("the draft's own default"),
+            palette_store::parse_entry(&seed).expect("the draft's own default"),
             "the first frame paints the draft's background, not a literal of our own"
         );
     }
@@ -6220,8 +6297,15 @@ mod tests {
         );
         assert_eq!(
             swatch_of(cx, &shell, "PaletteBgBox"),
-            Color::parse_hex("#123456").expect("six digits parse"),
+            palette_store::parse_entry("123456").expect("six digits parse"),
             "every keystroke re-parses, so the swatch follows the box"
+        );
+        // The draft is the owner and stores the text as typed: no `#` was added, because
+        // canonicalising per keystroke would rewrite the string under the caret.
+        assert_eq!(
+            cx.read(|cx| shell.read(cx).palette().draft().background.clone()),
+            "123456",
+            "the box's text is the store's, exactly as typed"
         );
 
         // The repaint reaches the paint: the swatch is still the swatch.
@@ -6233,6 +6317,42 @@ mod tests {
             .expect("the swatch still paints");
         assert_eq!(bounds.size.width, px(22.0), "22 wide after the change");
         assert_eq!(bounds.size.height, px(22.0), "and 22 tall");
+    }
+
+    /// A form the palette card's Add press accepts is a form the swatch accepts, because there
+    /// is one tolerant reader and not two.
+    ///
+    /// [`palette_store::parse_entry`] is the function [`PaletteStore::save_draft`] validates
+    /// with: it expands a three-digit hex and takes it without the `#`. The shell imports it
+    /// rather than keeping a strict six-digit parse of its own, so a user who types `123` gets a
+    /// coloured swatch instead of the refusal a second copy would give — the defect where the
+    /// swatch paints a colour the press then rejects. If this fails, the two readers have
+    /// diverged.
+    #[gpui::test]
+    fn the_swatch_accepts_what_the_add_press_accepts(cx: &mut gpui::TestAppContext) {
+        use gpui::Keystroke;
+
+        let root = scratch_root();
+        let (shell, handle, mut visual) = shell_in_window(cx, &root);
+        let field = focus_color_field(cx, &shell, &mut visual, "PaletteAccentBox");
+
+        cx.update(|cx| field.update(cx, |field, cx| field.set_text("", cx)));
+        for character in ["1", "2", "3"] {
+            visual
+                .cx
+                .dispatch_keystroke(handle, Keystroke::parse(character).expect("keystroke"));
+        }
+
+        assert_eq!(
+            swatch_of(cx, &shell, "PaletteAccentBox"),
+            palette_store::parse_entry("123").expect("the shared reader expands it"),
+            "three digits parse, so the swatch took the value the Add press would"
+        );
+        assert_eq!(
+            cx.read(|cx| shell.read(cx).palette().draft().accent.clone()),
+            "123",
+            "and the draft kept the short form the user typed rather than the expansion"
+        );
     }
 
     /// Enter writes the box back as `#RRGGBB`, which is the form the palette file stores.
@@ -6256,8 +6376,13 @@ mod tests {
             );
             assert_eq!(
                 swatch_of(cx, &shell, "PaletteTextBox"),
-                Color::parse_hex("#0A0B0F").expect("parses"),
+                palette_store::parse_entry("#0A0B0F").expect("parses"),
                 "and the swatch ends on that colour"
+            );
+            assert_eq!(
+                cx.read(|cx| shell.read(cx).palette().draft().text.clone()),
+                "#0A0B0F",
+                "{text:?} reaches the store in the canonical form"
             );
         }
     }

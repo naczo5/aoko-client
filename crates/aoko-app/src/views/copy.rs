@@ -216,8 +216,12 @@ pub enum Control {
     /// One control rather than a field and a [`Control::Button`] because the box's Enter and
     /// the button's press are the same submit, so they cannot disagree about what is added.
     BlockEspAdd {
-        /// Managed binding path of the list the add appends to:
-        /// `Profile::block_esp_targets`.
+        /// Port-only identity of the control, `blockesp-add`; it is not a binding path.
+        ///
+        /// Deliberately not the name of the profile list the add appends to
+        /// (`Profile::block_esp_targets`). A selector named after a data field reads as if it
+        /// addresses that data, and this one addresses a box and a button: the write-through
+        /// lives in `Shell::add_block_target`, and nothing keys a lookup off this string.
         bind: &'static str,
     },
     /// A palette editor colour row, `MainWindow.xaml:1958-2001`: an 11 px caption, a 22×22
@@ -415,7 +419,7 @@ pub const RENDER: &[Card] = &[
             Note { text: "Tracked Blocks" },
             Check { label: "", bind: "Enabled", tooltip: "" },
             Button { label: "✕", tooltip: "Remove block" },
-            BlockEspAdd { bind: "blockEspTargets" },
+            BlockEspAdd { bind: "blockesp-add" },
     ],
     },
     Card {
