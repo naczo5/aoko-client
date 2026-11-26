@@ -19,6 +19,9 @@
 //! `Profile::AutoSaveConfigName` is `"config"` (`Profile.cs:371`); the store's
 //! `list_profiles` excludes it from the user-facing list.
 
+use std::fs;
+use std::io::ErrorKind;
+
 use aoko_platform::PlatformError;
 use aoko_platform::ProfileStore;
 use aoko_protocol::profile::{load_profile_from_json, to_profile_json, Profile};
@@ -58,6 +61,10 @@ pub struct Profiles {
     migrated: usize,
     configs: Vec<String>,
     selection: usize,
+    /// The config the user pressed Delete on, waiting for the in-card confirmation.
+    delete_armed: Option<String>,
+    /// The config a Create would overwrite, waiting for the in-card confirmation.
+    create_pending: Option<String>,
 }
 
 impl Profiles {
@@ -294,6 +301,159 @@ impl Profiles {
         };
     }
 
+    /// The config waiting for the in-card Delete confirmation, if any.
+    #[must_use]
+    pub fn delete_armed(&self) -> Option<&str> {
+        self.delete_armed.as_deref()
+    }
+
+    /// The name a Create would overwrite, waiting for its own confirmation.
+    #[must_use]
+    pub fn create_pending_name(&self) -> Option<&str> {
+        self.create_pending.as_deref()
+    }
+
+    /// Arms the Delete confirmation.
+    ///
+    /// The managed app asked in a `MessageBox` (`DeleteConfigButton_Click`,
+    /// `MainWindow.xaml.cs:864-893`); the card asks in place, so the armed name is
+    /// state — which is also what makes the confirmation testable.
+    pub fn request_delete(&mut self, name: &str) {
+        self.delete_armed = Some(name.to_owned());
+    }
+
+    /// Disarms the confirmation without deleting.
+    pub fn cancel_delete(&mut self) {
+        self.delete_armed = None;
+    }
+
+    /// The confirmation's own Delete.
+    pub fn confirm_delete(&mut self) -> Result<(), String> {
+        let Some(name) = self.delete_armed.take() else {
+            let message = "Select a config to delete.".to_owned();
+            self.set_status(message.clone());
+            return Err(message);
+        };
+        self.delete(&name)
+    }
+
+    /// Deletes one config.
+    ///
+    /// `ProfileStore` has no delete, so the path comes from `profile_path` — which
+    /// sanitises the name — and the file is removed here. A missing file is a
+    /// failure rather than a quiet success: the managed `DeleteProfile`
+    /// (`Profile.cs:556-561`) returns without touching the disk and the caller then
+    /// reports "Deleted config", which is exactly the kind of lie this port removes.
+    ///
+    /// Deleting the **last** config is allowed: the list empties, the trigger shows
+    /// nothing selected, and Load/Save/Delete report "Select a config to ...". The
+    /// auto-save slot is separate (`list_profiles` hides it), so the current settings
+    /// are still saved on exit and a restart restores them; nothing else is lost.
+    pub fn delete(&mut self, name: &str) -> Result<(), String> {
+        let display = display_name(name);
+        if display.is_empty() {
+            let message = "Select a config to delete.".to_owned();
+            self.set_status(message.clone());
+            return Err(message);
+        }
+        if display.eq_ignore_ascii_case(AUTO_SAVE_NAME) {
+            let message = format!("'{display}' is a reserved name. Choose another.");
+            self.set_status(message.clone());
+            return Err(message);
+        }
+
+        let Some(path) = self.path(&display) else {
+            let message = format!("Could not delete '{display}': not a config name.");
+            self.set_status(message.clone());
+            self.refresh();
+            return Err(message);
+        };
+
+        match fs::remove_file(&path) {
+            Ok(()) => {
+                self.refresh();
+                self.set_status(format!("Deleted config '{display}'."));
+                Ok(())
+            }
+            Err(error) => {
+                let reason = match error.kind() {
+                    ErrorKind::NotFound => "it no longer exists".to_owned(),
+                    _ => error.to_string(),
+                };
+                let message = format!("Could not delete '{display}': {reason}");
+                self.set_status(message.clone());
+                self.refresh();
+                Err(message)
+            }
+        }
+    }
+
+    /// Creates a named config from the current settings.
+    ///
+    /// The refusals are the managed ones, in the managed order and wording
+    /// (`CreateConfigButton_Click`, `MainWindow.xaml.cs:894-933`): an empty or fully
+    /// sanitised-away name, then the reserved auto-save name, then the overwrite
+    /// confirmation the managed app asked in a `MessageBox`. `overwrite` is the
+    /// caller saying the user confirmed; without it an existing name is untouched.
+    pub fn create(&mut self, raw: &str, profile: &mut Profile, overwrite: bool) -> CreateOutcome {
+        let name = display_name(raw);
+        if name.is_empty() {
+            let message =
+                "Enter a valid config name (letters, numbers, spaces, - or _).".to_owned();
+            self.set_status(message.clone());
+            return CreateOutcome::Refused(message);
+        }
+        if name.eq_ignore_ascii_case(AUTO_SAVE_NAME) {
+            let message = format!("'{name}' is a reserved name. Choose another.");
+            self.set_status(message.clone());
+            return CreateOutcome::Refused(message);
+        }
+
+        let exists = self
+            .store
+            .as_ref()
+            .is_some_and(|store| store.profile_exists(&name));
+        if exists && !overwrite {
+            // The card's own prompt row carries the managed `MessageBox` copy and the
+            // two buttons, so the status line stays free for the outcome.
+            self.create_pending = Some(name.clone());
+            return CreateOutcome::Overwrite(name);
+        }
+        self.create_pending = None;
+
+        profile.name = name.clone();
+        match self.write(&name, profile) {
+            Ok(()) => {
+                self.refresh();
+                self.select(&name);
+                self.set_status(format!("Created config '{name}'."));
+                CreateOutcome::Created(name)
+            }
+            Err(error) => {
+                let message = format!("Could not save config: {error}");
+                self.set_status(message.clone());
+                CreateOutcome::Refused(message)
+            }
+        }
+    }
+
+    /// Forgets a pending overwrite, for Cancel on the in-card prompt. The status line
+    /// is left alone: cancelling says nothing the user did not just do.
+    pub fn cancel_create(&mut self) {
+        self.create_pending = None;
+    }
+
+    /// The directory the attached store reads and writes, for "Open Configs Folder".
+    #[must_use]
+    pub fn directory(&self) -> Option<String> {
+        self.store.as_ref().map(describe)
+    }
+
+    /// The on-disk path for a sanitised name, or `None` when there is no store.
+    fn path(&self, name: &str) -> Option<std::path::PathBuf> {
+        self.store.as_ref()?.profile_path(name)
+    }
+
     /// Copies legacy profiles and returns how many were written.
     fn migrate(&self) -> Result<usize, PlatformError> {
         match self.store.as_ref() {
@@ -329,6 +489,18 @@ impl Profiles {
             .write_profile(name, &json)
             .map_err(|error| error.user_facing())
     }
+}
+
+/// What pressing Create produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CreateOutcome {
+    /// Written and selected.
+    Created(String),
+    /// The name exists untouched: the card shows the overwrite prompt, and a
+    /// confirmed second call passes `overwrite = true`.
+    Overwrite(String),
+    /// Refused; the status line already carries the reason.
+    Refused(String),
 }
 
 /// The name a profile is shown and saved under, sanitised the way the protocol does
@@ -546,5 +718,186 @@ mod tests {
             "Invalid config name."
         );
         assert_eq!(display_name(""), "");
+    }
+
+    #[test]
+    fn create_refuses_a_name_that_sanitises_to_nothing() {
+        let root = scratch();
+        let (mut profiles, _) = Profiles::with_store(store_at(&root));
+        let mut profile = Profile::default();
+
+        assert_eq!(
+            profiles.create("   ", &mut profile, false),
+            CreateOutcome::Refused(
+                "Enter a valid config name (letters, numbers, spaces, - or _).".to_owned()
+            )
+        );
+        assert_eq!(
+            profiles.status().message,
+            "Enter a valid config name (letters, numbers, spaces, - or _)."
+        );
+        assert!(profiles.configs().is_empty());
+    }
+
+    #[test]
+    fn create_refuses_the_reserved_auto_save_name() {
+        let root = scratch();
+        let (mut profiles, _) = Profiles::with_store(store_at(&root));
+        let mut profile = Profile::default();
+
+        assert_eq!(
+            profiles.create("Config", &mut profile, false),
+            CreateOutcome::Refused("'Config' is a reserved name. Choose another.".to_owned())
+        );
+        assert!(!store_at(&root).profile_exists(AUTO_SAVE_NAME));
+    }
+
+    #[test]
+    fn create_writes_the_named_config_and_selects_it() {
+        let root = scratch();
+        let (mut profiles, _) = Profiles::with_store(store_at(&root));
+        let mut profile = Profile::default();
+        profile.gui_theme = "Ink".to_owned();
+
+        assert_eq!(
+            profiles.create("  PvP  ", &mut profile, false),
+            CreateOutcome::Created("PvP".to_owned())
+        );
+        assert_eq!(profiles.status().message, "Created config 'PvP'.");
+        assert_eq!(profiles.selected(), Some("PvP"));
+        assert_eq!(profiles.create_pending_name(), None);
+
+        let text = store_at(&root).read_profile("PvP").expect("written");
+        let loaded = load_profile_from_json(&text).expect("parses");
+        assert_eq!(loaded.gui_theme, "Ink", "the live settings were written");
+    }
+
+    #[test]
+    fn create_asks_before_overwriting_and_writes_only_when_confirmed() {
+        let root = scratch();
+        let (mut profiles, _) = Profiles::with_store(store_at(&root));
+        let mut first = Profile::default();
+        first.gui_theme = "Ink".to_owned();
+        profiles.save_named("PvP", &mut first).expect("seed");
+
+        let mut second = Profile::default();
+        second.gui_theme = "Coral".to_owned();
+        assert_eq!(
+            profiles.create("PvP", &mut second, false),
+            CreateOutcome::Overwrite("PvP".to_owned())
+        );
+        assert_eq!(profiles.create_pending_name(), Some("PvP"));
+
+        // Confirmation is required before the file changes.
+        let text = store_at(&root).read_profile("PvP").expect("still there");
+        assert_eq!(
+            load_profile_from_json(&text).expect("parses").gui_theme,
+            "Ink"
+        );
+
+        assert_eq!(
+            profiles.create("PvP", &mut second, true),
+            CreateOutcome::Created("PvP".to_owned())
+        );
+        let text = store_at(&root).read_profile("PvP").expect("overwritten");
+        assert_eq!(
+            load_profile_from_json(&text).expect("parses").gui_theme,
+            "Coral"
+        );
+        assert_eq!(profiles.create_pending_name(), None);
+    }
+
+    #[test]
+    fn cancelling_the_overwrite_prompt_leaves_the_file_alone() {
+        let root = scratch();
+        let (mut profiles, _) = Profiles::with_store(store_at(&root));
+        let mut profile = Profile::default();
+        profiles.save_named("PvP", &mut profile).expect("seed");
+
+        let _ = profiles.create("PvP", &mut profile, false);
+        profiles.cancel_create();
+        assert_eq!(profiles.create_pending_name(), None);
+        assert!(store_at(&root).profile_exists("PvP"));
+    }
+
+    #[test]
+    fn the_delete_confirmation_removes_the_file_only_when_confirmed() {
+        let root = scratch();
+        let (mut profiles, _) = Profiles::with_store(store_at(&root));
+        for name in ["Alpha", "Beta"] {
+            let mut profile = Profile::default();
+            profiles.save_named(name, &mut profile).expect("seed");
+        }
+
+        profiles.request_delete("Alpha");
+        assert_eq!(profiles.delete_armed(), Some("Alpha"));
+        assert!(
+            store_at(&root).profile_exists("Alpha"),
+            "arming is not deleting"
+        );
+
+        profiles.cancel_delete();
+        assert_eq!(profiles.delete_armed(), None);
+        assert!(store_at(&root).profile_exists("Alpha"));
+
+        profiles.request_delete("Alpha");
+        profiles.confirm_delete().expect("deleted");
+        assert!(!store_at(&root).profile_exists("Alpha"));
+        assert_eq!(profiles.status().message, "Deleted config 'Alpha'.");
+        assert_eq!(profiles.configs(), ["Beta".to_owned()]);
+    }
+
+    #[test]
+    fn deleting_the_last_config_empties_the_list_and_the_selection() {
+        let root = scratch();
+        let (mut profiles, _) = Profiles::with_store(store_at(&root));
+        let mut profile = Profile::default();
+        profiles.save_named("Only", &mut profile).expect("seed");
+
+        profiles.request_delete("Only");
+        profiles.confirm_delete().expect("deleted");
+
+        assert!(profiles.configs().is_empty());
+        assert_eq!(profiles.selected(), None, "the trigger shows nothing");
+        assert_eq!(profiles.status().message, "Deleted config 'Only'.");
+
+        // The auto-save slot is separate, so the live settings still survive a
+        // restart; deleting every named config is not a reset.
+        profiles.save_auto(&mut profile).expect("auto-save slot");
+        assert!(store_at(&root).profile_exists(AUTO_SAVE_NAME));
+        assert!(
+            !profiles.configs().contains(&AUTO_SAVE_NAME.to_owned()),
+            "the internal slot never appears in the list"
+        );
+    }
+
+    #[test]
+    fn delete_reports_a_file_that_is_already_gone_instead_of_claiming_success() {
+        let root = scratch();
+        let (mut profiles, _) = Profiles::with_store(store_at(&root));
+        let mut profile = Profile::default();
+        profiles.save_named("PvP", &mut profile).expect("seed");
+
+        let path = store_at(&root).profile_path("PvP").expect("path");
+        std::fs::remove_file(path).expect("removed behind the store's back");
+
+        let error = profiles.delete("PvP").unwrap_err();
+        assert_eq!(error, "Could not delete 'PvP': it no longer exists");
+        assert_eq!(profiles.status().message, error);
+        assert!(profiles.configs().is_empty(), "the list matches the disk");
+    }
+
+    #[test]
+    fn delete_refuses_the_reserved_auto_save_slot() {
+        let root = scratch();
+        let (mut profiles, _) = Profiles::with_store(store_at(&root));
+        let mut profile = Profile::default();
+        profiles.save_auto(&mut profile).expect("auto-save slot");
+
+        assert_eq!(
+            profiles.delete(AUTO_SAVE_NAME).unwrap_err(),
+            "'config' is a reserved name. Choose another."
+        );
+        assert!(store_at(&root).profile_exists(AUTO_SAVE_NAME));
     }
 }

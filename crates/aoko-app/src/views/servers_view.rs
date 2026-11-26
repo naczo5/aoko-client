@@ -7,11 +7,12 @@
 use gpui::prelude::*;
 use gpui::{div, px, AnyElement, Entity, MouseButton, SharedString};
 
-use crate::components::{self, ButtonVariant, ChipTone, FieldVariant};
+use crate::components::{self, ButtonVariant, ChipTone};
 use crate::shell::Shell;
 use crate::theme::metrics;
 use crate::theme::Theme;
 use crate::views::accounts_state::StatusTone;
+use crate::views::forms::FormFields;
 use crate::views::servers_logic::{ServerRowState, ServerStatusTone};
 use crate::views::servers_state::ServersState;
 
@@ -152,6 +153,7 @@ fn render_row(
 /// The tab body.
 pub fn render(
     state: &ServersState,
+    fields: &FormFields,
     theme: &Theme,
     entity: &Entity<Shell>,
     tab_index: usize,
@@ -183,20 +185,11 @@ pub fn render(
             .items_center()
             .gap(px(8.0))
             .w_full()
-            .child(div().flex_1().child(components::field(
-                "servers-direct-address",
-                theme,
-                FieldVariant::Panel,
-                state.direct_address(),
-                "host or host:port",
-                state.direct_focused(),
-                {
-                    let handle = entity.clone();
-                    move |_, _, cx| {
-                        handle.update(cx, |shell, cx| shell.focus_direct_address(true, cx));
-                    }
-                },
-            )))
+            .child(
+                div()
+                    .flex_1()
+                    .child(FormFields::element(&fields.direct_address)),
+            )
             .child(components::button(
                 "servers-direct-join",
                 theme,
@@ -224,31 +217,8 @@ pub fn render(
     if state.add_open() {
         body = body.child(
             components::card(theme)
-                .child(components::field(
-                    "servers-add-name",
-                    theme,
-                    FieldVariant::Panel,
-                    state.add_name(),
-                    copy::NAME_LABEL,
-                    false,
-                    |_, _, _| {},
-                ))
-                .child(components::field(
-                    "servers-add-address",
-                    theme,
-                    FieldVariant::Panel,
-                    state.add_address(),
-                    copy::ADDRESS_LABEL,
-                    state.add_address_focused(),
-                    {
-                        let handle = entity.clone();
-                        move |_, _, cx| {
-                            handle.update(cx, |shell, cx| {
-                                shell.focus_add_address(true, cx);
-                            });
-                        }
-                    },
-                ))
+                .child(FormFields::element(&fields.server_name))
+                .child(FormFields::element(&fields.server_address))
                 .child(
                     div()
                         .flex()

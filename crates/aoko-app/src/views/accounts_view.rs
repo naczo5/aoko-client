@@ -4,10 +4,10 @@
 //! The state machine does the deciding; this file only lays out what it decided.
 //! Two consequences of the pin show up here and are not bugs:
 //!
-//! * **No text input.** `components::field` draws the box, the text, the
-//!   placeholder and the caret, but editing is `EntityInputHandler` and does not
-//!   exist yet (`UI_INVENTORY.md` row 9). The panels therefore paint and focus but
-//!   cannot take keystrokes.
+//! * **The text fields are real.** `components::text_input` is attached to the paste
+//!   box and the offline-name box, so both take keystrokes; the widget's own limits
+//!   (no selection, no IME composition underline, no click-to-caret) are documented
+//!   on [`crate::components::text_input`].
 //! * **No file dialog.** "Import file" has nowhere to go without one; the press is
 //!   wired to the shell so the state machine records the refusal the managed code
 //!   records when the dialog throws.
@@ -15,11 +15,12 @@
 use gpui::prelude::*;
 use gpui::{div, px, AnyElement, Entity, MouseButton, SharedString};
 
-use crate::components::{self, ButtonVariant, ChipTone, FieldVariant};
+use crate::components::{self, ButtonVariant, ChipTone};
 use crate::shell::Shell;
 use crate::theme::metrics;
 use crate::theme::Theme;
 use crate::views::accounts_state::{AccountPanel, AccountRowState, AccountsState, StatusTone};
+use crate::views::forms::FormFields;
 
 /// The tab's own copy, verbatim from `AccountsView.xaml`.
 pub mod copy {
@@ -161,6 +162,7 @@ fn render_card(
 /// The tab body. `tab_index` scopes the scroll id so two tabs cannot share one.
 pub fn render(
     state: &AccountsState,
+    fields: &FormFields,
     theme: &Theme,
     entity: &Entity<Shell>,
     tab_index: usize,
@@ -232,7 +234,6 @@ pub fn render(
 
     // === Paste panel ===
     if state.paste_open() {
-        let handle = entity.clone();
         body = body.child(
             components::card(theme)
                 .child(
@@ -241,19 +242,7 @@ pub fn render(
                         .text_color(theme.text)
                         .child(copy::PASTE_TITLE),
                 )
-                .child(components::field(
-                    "accounts-paste-box",
-                    theme,
-                    FieldVariant::Panel,
-                    state.paste_text(),
-                    copy::PASTE_PLACEHOLDER,
-                    state.paste_focused(),
-                    move |_, _, cx| {
-                        handle.update(cx, |shell, cx| {
-                            shell.focus_account_field(AccountPanel::Paste, true, cx);
-                        });
-                    },
-                ))
+                .child(div().w_full().child(FormFields::element(&fields.token)))
                 .child(validation_line(state.paste_validation()))
                 .child(
                     div()
@@ -290,7 +279,6 @@ pub fn render(
 
     // === Offline panel ===
     if state.panel() == AccountPanel::Offline {
-        let handle = entity.clone();
         body = body.child(
             components::card(theme)
                 .child(
@@ -299,19 +287,11 @@ pub fn render(
                         .text_color(theme.text)
                         .child(copy::OFFLINE_TITLE),
                 )
-                .child(components::field(
-                    "accounts-offline-name",
-                    theme,
-                    FieldVariant::Panel,
-                    state.offline_name(),
-                    "",
-                    state.offline_focused(),
-                    move |_, _, cx| {
-                        handle.update(cx, |shell, cx| {
-                            shell.focus_account_field(AccountPanel::Offline, true, cx);
-                        });
-                    },
-                ))
+                .child(
+                    div()
+                        .w_full()
+                        .child(FormFields::element(&fields.offline_name)),
+                )
                 .child(
                     div()
                         .text_size(px(metrics::text::CAPTION))

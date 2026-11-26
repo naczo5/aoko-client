@@ -43,6 +43,7 @@ use aoko_core::clicker::toggles::{self, ModuleToggles};
 use aoko_core::search;
 
 use crate::components;
+use crate::components::text_input::TextInput;
 use crate::components::ButtonVariant;
 use crate::theme::metrics;
 use crate::theme::motion::{self, Motion};
@@ -50,7 +51,8 @@ use crate::theme::Theme;
 use crate::views::accounts_state::{AccountPanel, AccountsState, OfflineSubmit, PasteSubmit};
 use crate::views::command_search::{CommandSearchState, KeyboardGate, RowFactTable, SearchKey};
 use crate::views::copy::{self, Card, Control, TabBody, MODULE_LIST_PREVIEW_SAMPLE};
-use crate::views::profiles::Profiles;
+use crate::views::forms::FormFields;
+use crate::views::profiles::{CreateOutcome, Profiles};
 use crate::views::servers_state::{AddOutcome, JoinOutcome, PingRequest, ServersState};
 use crate::views::stores::{NoStore, StoreBridge};
 
@@ -75,6 +77,16 @@ pub struct Shell {
     stores: Box<dyn StoreBridge>,
     /// The profile store, the config list and the Settings card's status line.
     profiles: Profiles,
+    /// The six text fields. Created on the first render, because an entity needs a
+    /// context and [`Shell::new`] has none (`main.rs` calls `cx.new`, which is the
+    /// components owner's file).
+    fields: FormFields,
+    /// The new-config name box's text (`NewConfigNameBox`, `MainWindow.xaml:1552`).
+    config_name: String,
+    /// Whether the session can hand a folder to the file manager
+    /// (`CapabilityReport::open_path`). False until [`Shell::from_system`] probes it,
+    /// so the button cannot claim a capability this build has not checked.
+    open_configs_folder: bool,
     /// Whether the close hook has been registered on this window, so a repaint does
     /// not box a new callback every frame.
     close_hook_installed: bool,
@@ -124,7 +136,21 @@ impl Shell {
             );
         }
 
-        Self::with_profiles(theme, profiles).with_loaded_profile(profile)
+        let mut shell = Self::with_profiles(theme, profiles).with_loaded_profile(profile);
+        // `CapabilityReport::open_path` is the flag the "Open Configs Folder" row is
+        // keyed on: Linux needs `xdg-open` on `PATH`, and a session without it must
+        // not look like it can reveal the folder.
+        shell.open_configs_folder = aoko_platform::probe_capabilities().open_path;
+        shell
+    }
+
+    /// Sets whether this session can reveal a folder in the file manager.
+    ///
+    /// The startup path fills this from `aoko_platform::probe_capabilities()`; tests
+    /// say it outright so their result does not depend on whether the machine has
+    /// `xdg-open`.
+    pub fn set_open_folder_supported(&mut self, supported: bool) {
+        self.open_configs_folder = supported;
     }
 
     /// A shell over a caller-supplied store: tests, and an app-data root chosen
@@ -151,6 +177,9 @@ impl Shell {
             servers: ServersState::new(),
             stores: Box::new(NoStore),
             profiles,
+            fields: FormFields::default(),
+            config_name: String::new(),
+            open_configs_folder: false,
             close_hook_installed: false,
             pending_join: None,
             pending_account_switch: None,
@@ -256,7 +285,203 @@ impl Shell {
     /// Replaces the palette, e.g. from the Settings tab.
     pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
         self.theme = theme;
+        // The fields carry their own copy of the palette, so they are recreated on
+        // the next render. Their values live in the state machines, which is why
+        // dropping the entities loses nothing.
+        self.fields.clear();
         cx.notify();
+    }
+
+    // === Text fields ===
+
+    /// Creates whichever text fields do not exist yet, wired to the state they view.
+    ///
+    /// Called at the top of [`Render::render`], which is the first point with both a
+    /// `Context<Shell>` and the theme. Each field is created once; [`Self::sync`]
+    /// pushes state changes back into it.
+    fn ensure_form_fields(&mut self, cx: &mut Context<Self>) {
+        let theme = self.theme.clone();
+
+        if self.fields.token.is_none() {
+            let value = self.accounts.paste_text().to_owned();
+            let handle = cx.entity();
+            let input = cx.new(|cx| {
+                TextInput::new(
+                    cx,
+                    theme.clone(),
+                    crate::views::accounts_view::copy::PASTE_PLACEHOLDER,
+                )
+                .masked(true)
+                .on_change(move |text, _window, cx| {
+                    let text = text.to_string();
+                    handle.update(cx, |shell, cx| shell.set_token_text(text, cx));
+                })
+            });
+            if !value.is_empty() {
+                input.update(cx, |input, cx| input.set_text(value, cx));
+            }
+            self.fields.token = Some(input);
+        }
+
+        if self.fields.offline_name.is_none() {
+            let value = self.accounts.offline_name().to_owned();
+            let handle = cx.entity();
+            let input = cx.new(|cx| {
+                TextInput::new(cx, theme.clone(), "").on_change(move |text, _window, cx| {
+                    let text = text.to_string();
+                    handle.update(cx, |shell, cx| shell.set_offline_name_text(text, cx));
+                })
+            });
+            if !value.is_empty() {
+                input.update(cx, |input, cx| input.set_text(value, cx));
+            }
+            self.fields.offline_name = Some(input);
+        }
+
+        if self.fields.server_name.is_none() {
+            let value = self.servers.add_name().to_owned();
+            let handle = cx.entity();
+            let input = cx.new(|cx| {
+                TextInput::new(
+                    cx,
+                    theme.clone(),
+                    crate::views::servers_view::copy::NAME_LABEL,
+                )
+                .on_change(move |text, _window, cx| {
+                    let text = text.to_string();
+                    handle.update(cx, |shell, cx| shell.set_server_name_text(text, cx));
+                })
+            });
+            if !value.is_empty() {
+                input.update(cx, |input, cx| input.set_text(value, cx));
+            }
+            self.fields.server_name = Some(input);
+        }
+
+        if self.fields.server_address.is_none() {
+            let value = self.servers.add_address().to_owned();
+            let handle = cx.entity();
+            let input = cx.new(|cx| {
+                TextInput::new(
+                    cx,
+                    theme.clone(),
+                    crate::views::servers_view::copy::ADDRESS_LABEL,
+                )
+                .on_change(move |text, _window, cx| {
+                    let text = text.to_string();
+                    handle.update(cx, |shell, cx| shell.set_server_address_text(text, cx));
+                })
+            });
+            if !value.is_empty() {
+                input.update(cx, |input, cx| input.set_text(value, cx));
+            }
+            self.fields.server_address = Some(input);
+        }
+
+        if self.fields.direct_address.is_none() {
+            let value = self.servers.direct_address().to_owned();
+            let handle = cx.entity();
+            let input = cx.new(|cx| {
+                TextInput::new(cx, theme.clone(), "host or host:port").on_change(
+                    move |text, _window, cx| {
+                        let text = text.to_string();
+                        handle.update(cx, |shell, cx| shell.set_direct_address_text(text, cx));
+                    },
+                )
+            });
+            if !value.is_empty() {
+                input.update(cx, |input, cx| input.set_text(value, cx));
+            }
+            self.fields.direct_address = Some(input);
+        }
+
+        if self.fields.config_name.is_none() {
+            let value = self.config_name.clone();
+            let handle = cx.entity();
+            let input = cx.new(|cx| {
+                TextInput::new(cx, theme.clone(), "").on_change(move |text, _window, cx| {
+                    let text = text.to_string();
+                    handle.update(cx, |shell, cx| shell.set_config_name_text(text, cx));
+                })
+            });
+            if !value.is_empty() {
+                input.update(cx, |input, cx| input.set_text(value, cx));
+            }
+            self.fields.config_name = Some(input);
+        }
+    }
+
+    /// Pushes the state's text into every field the user is not typing in.
+    fn sync_form_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        crate::views::forms::sync(&self.fields.token, self.accounts.paste_text(), window, cx);
+        crate::views::forms::sync(
+            &self.fields.offline_name,
+            self.accounts.offline_name(),
+            window,
+            cx,
+        );
+        crate::views::forms::sync(
+            &self.fields.server_name,
+            self.servers.add_name(),
+            window,
+            cx,
+        );
+        crate::views::forms::sync(
+            &self.fields.server_address,
+            self.servers.add_address(),
+            window,
+            cx,
+        );
+        crate::views::forms::sync(
+            &self.fields.direct_address,
+            self.servers.direct_address(),
+            window,
+            cx,
+        );
+        crate::views::forms::sync(&self.fields.config_name, &self.config_name, window, cx);
+    }
+
+    /// The token box wrote a character: mirror it into the accounts state, which is
+    /// what `submit_paste` reads.
+    pub fn set_token_text(&mut self, text: String, cx: &mut Context<Self>) {
+        self.accounts.set_paste_text(text);
+        cx.notify();
+    }
+
+    /// The offline username box.
+    pub fn set_offline_name_text(&mut self, text: String, cx: &mut Context<Self>) {
+        self.accounts.set_offline_name(text);
+        cx.notify();
+    }
+
+    /// The add form's name box.
+    pub fn set_server_name_text(&mut self, text: String, cx: &mut Context<Self>) {
+        self.servers.set_add_name(text);
+        cx.notify();
+    }
+
+    /// The add form's address box.
+    pub fn set_server_address_text(&mut self, text: String, cx: &mut Context<Self>) {
+        self.servers.set_add_address(text);
+        cx.notify();
+    }
+
+    /// The direct-join box.
+    pub fn set_direct_address_text(&mut self, text: String, cx: &mut Context<Self>) {
+        self.servers.set_direct_address(text);
+        cx.notify();
+    }
+
+    /// The new-config name box.
+    pub fn set_config_name_text(&mut self, text: String, cx: &mut Context<Self>) {
+        self.config_name = text;
+        cx.notify();
+    }
+
+    /// The new-config name, for tests and for the Create handler.
+    #[must_use]
+    pub fn config_name(&self) -> &str {
+        &self.config_name
     }
 
     /// Index of the visible tab.
@@ -609,6 +834,86 @@ impl Shell {
         cx.notify();
     }
 
+    /// `CreateConfigButton_Click` (`MainWindow.xaml.cs:894-933`). The name comes from
+    /// the card's field and the profile is the same live snapshot Save writes.
+    pub fn configs_create(&mut self, cx: &mut Context<Self>) {
+        let raw = self.config_name.clone();
+        let mut profile = self.profile.clone();
+        let outcome = self.profiles.create(&raw, &mut profile, false);
+        self.profile = profile;
+        if matches!(outcome, CreateOutcome::Created(_)) {
+            self.config_name.clear();
+        }
+        cx.notify();
+    }
+
+    /// The overwrite prompt's confirm: the managed `MessageBox` answer, in place.
+    pub fn configs_overwrite_confirmed(&mut self, cx: &mut Context<Self>) {
+        let Some(name) = self.profiles.create_pending_name().map(str::to_owned) else {
+            return;
+        };
+        let mut profile = self.profile.clone();
+        let _ = self.profiles.create(&name, &mut profile, true);
+        self.profile = profile;
+        self.config_name.clear();
+        cx.notify();
+    }
+
+    /// The overwrite prompt's Cancel.
+    pub fn configs_overwrite_cancelled(&mut self, cx: &mut Context<Self>) {
+        self.profiles.cancel_create();
+        cx.notify();
+    }
+
+    /// "Delete": arms the in-card confirmation the managed app asked for in a
+    /// `MessageBox` (`DeleteConfigButton_Click`, `MainWindow.xaml.cs:864-893`).
+    pub fn configs_request_delete(&mut self, cx: &mut Context<Self>) {
+        match self.profiles.selected().map(str::to_owned) {
+            Some(name) => self.profiles.request_delete(&name),
+            None => self.profiles.set_status("Select a config to delete."),
+        }
+        cx.notify();
+    }
+
+    /// The confirmation's own Delete.
+    pub fn configs_confirm_delete(&mut self, cx: &mut Context<Self>) {
+        let _ = self.profiles.confirm_delete();
+        cx.notify();
+    }
+
+    /// The confirmation's Cancel: the file stays.
+    pub fn configs_cancel_delete(&mut self, cx: &mut Context<Self>) {
+        self.profiles.cancel_delete();
+        cx.notify();
+    }
+
+    /// `OpenConfigsFolderButton_Click` (`MainWindow.xaml.cs:969-985`), keyed on
+    /// `CapabilityReport::open_path` instead of assuming a launcher exists.
+    pub fn configs_open_folder(&mut self, cx: &mut Context<Self>) {
+        if !self.open_configs_folder {
+            self.profiles.set_status(
+                "Could not open configs folder: no file manager launcher in this session.",
+            );
+            cx.notify();
+            return;
+        }
+
+        match self.profiles.directory() {
+            Some(dir) => {
+                if let Err(error) = aoko_platform::open_path(std::path::Path::new(&dir)) {
+                    self.profiles.set_status(format!(
+                        "Could not open configs folder: {}",
+                        error.user_facing()
+                    ));
+                }
+            }
+            None => self
+                .profiles
+                .set_status("Could not open configs folder: no profile store is open."),
+        }
+        cx.notify();
+    }
+
     /// "Use account": gates, then parks the switch for the bridge.
     pub fn accounts_use_selected(&mut self, cx: &mut Context<Self>) {
         if self.accounts.actions().use_account {
@@ -808,18 +1113,33 @@ impl Render for Shell {
         // [`Shell::close_window`], which saves before quitting.
         self.ensure_close_hook(window, cx);
 
+        // The text fields are entities, so they exist only from the first render on;
+        // `Shell::new` has no context to create them with. Syncing here is what makes
+        // a state change (an add form prefill, a cleared form) reach the widget
+        // without every mutator remembering to push it.
+        self.ensure_form_fields(cx);
+        self.sync_form_fields(window, cx);
+
         let motion = motion::motion();
         let theme = self.theme.clone();
         let entity = cx.entity();
 
         let body = match copy::TABS.get(self.tab).map(|tab| tab.body) {
             Some(TabBody::Cards(cards)) => self.render_cards(cards, &theme, motion, &entity),
-            Some(TabBody::Accounts) => {
-                crate::views::accounts_view::render(&self.accounts, &theme, &entity, self.tab)
-            }
-            Some(TabBody::Servers) => {
-                crate::views::servers_view::render(&self.servers, &theme, &entity, self.tab)
-            }
+            Some(TabBody::Accounts) => crate::views::accounts_view::render(
+                &self.accounts,
+                &self.fields,
+                &theme,
+                &entity,
+                self.tab,
+            ),
+            Some(TabBody::Servers) => crate::views::servers_view::render(
+                &self.servers,
+                &self.fields,
+                &theme,
+                &entity,
+                self.tab,
+            ),
             None => div().flex_1().into_any_element(),
         };
 
@@ -1067,6 +1387,137 @@ impl Shell {
         body.into_any_element()
     }
 
+    /// The Delete button plus, when armed, the in-card confirmation.
+    ///
+    /// The managed surface was a `YesNo` `MessageBox` (`DeleteConfigButton_Click`,
+    /// `MainWindow.xaml.cs:864-893`). A card cannot host a modal, so the message is
+    /// the managed string verbatim and the buttons name the action instead of saying
+    /// Yes/No, which only makes sense next to a dialog's title.
+    fn configs_delete_row(
+        &self,
+        button: AnyElement,
+        theme: &Theme,
+        entity: &Entity<Self>,
+    ) -> AnyElement {
+        let Some(name) = self.profiles.delete_armed() else {
+            return button;
+        };
+
+        let handle = entity.clone();
+        let confirm = components::button(
+            "configs-delete-confirm",
+            theme,
+            ButtonVariant::Danger,
+            "Delete",
+            move |_, _, cx| handle.update(cx, |shell, cx| shell.configs_confirm_delete(cx)),
+        );
+        let handle = entity.clone();
+        let cancel = components::button(
+            "configs-delete-cancel",
+            theme,
+            ButtonVariant::Secondary,
+            "Cancel",
+            move |_, _, cx| handle.update(cx, |shell, cx| shell.configs_cancel_delete(cx)),
+        );
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .w_full()
+            .child(button)
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0))
+                    .w_full()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(metrics::text::CAPTION))
+                            .text_color(theme.text)
+                            .child(SharedString::from(format!(
+                                "Delete config '{name}'? This cannot be undone."
+                            ))),
+                    )
+                    .child(confirm)
+                    .child(cancel),
+            )
+            .into_any_element()
+    }
+
+    /// The Create row: the name field and the button, plus the overwrite
+    /// confirmation when the name already exists (`CreateConfigButton_Click`,
+    /// `MainWindow.xaml.cs:894-933`).
+    fn configs_create_row(
+        &self,
+        button: AnyElement,
+        theme: &Theme,
+        entity: &Entity<Self>,
+    ) -> AnyElement {
+        let mut body = div().flex().flex_col().gap(px(4.0)).w_full().child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .w_full()
+                .child(
+                    div()
+                        .flex_1()
+                        .child(FormFields::element(&self.fields.config_name)),
+                )
+                .child(button),
+        );
+
+        if let Some(name) = self.profiles.create_pending_name() {
+            let handle = entity.clone();
+            let overwrite = components::button(
+                "configs-overwrite-confirm",
+                theme,
+                ButtonVariant::Danger,
+                "Overwrite",
+                move |_, _, cx| {
+                    handle.update(cx, |shell, cx| shell.configs_overwrite_confirmed(cx))
+                },
+            );
+            let handle = entity.clone();
+            let cancel = components::button(
+                "configs-overwrite-cancel",
+                theme,
+                ButtonVariant::Secondary,
+                "Cancel",
+                move |_, _, cx| {
+                    handle.update(cx, |shell, cx| shell.configs_overwrite_cancelled(cx))
+                },
+            );
+
+            body = body.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0))
+                    .w_full()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(metrics::text::CAPTION))
+                            .text_color(theme.text)
+                            .child(SharedString::from(format!(
+                                "Config '{name}' already exists. Overwrite it?"
+                            ))),
+                    )
+                    .child(overwrite)
+                    .child(cancel),
+            );
+        }
+
+        body.into_any_element()
+    }
+
     fn render_control(
         &self,
         card: &Card,
@@ -1304,18 +1755,23 @@ impl Shell {
             .into_any_element(),
 
             Control::Button { label, tooltip } => {
-                // The configs card's Load and Save are real actions
+                // The configs card's buttons are real actions: Load and Save
                 // (`LoadConfigButton_Click` `:813-831`, `SaveConfigButton_Click`
-                // `:847-862`); every other card button still needs the command
-                // surface it would call, so it stays inert rather than pretending.
+                // `:847-862`), Delete and Create with their confirmations, and Open
+                // Configs Folder (`:969-985`). Every other card button still needs the
+                // command surface it would call, so it stays inert rather than
+                // pretending.
                 let action: fn(&mut Shell, &mut Context<Shell>) = match (card.id, *label) {
                     ("ConfigsCard", "Load") => Shell::configs_load,
                     ("ConfigsCard", "Save") => Shell::configs_save,
+                    ("ConfigsCard", "Delete") => Shell::configs_request_delete,
+                    ("ConfigsCard", "Create") => Shell::configs_create,
+                    ("ConfigsCard", "Open Configs Folder") => Shell::configs_open_folder,
                     _ => |_, _| {},
                 };
                 let handle = entity.clone();
 
-                components::button(
+                let button = components::button(
                     SharedString::from(format!("{}-{label}", card.id)),
                     theme,
                     if tooltip.is_empty() {
@@ -1326,7 +1782,16 @@ impl Shell {
                     SharedString::from(*label),
                     move |_, _, cx| handle.update(cx, action),
                 )
-                .into_any_element()
+                .into_any_element();
+
+                if card.id != "ConfigsCard" {
+                    return button;
+                }
+                match *label {
+                    "Delete" => self.configs_delete_row(button, theme, entity),
+                    "Create" => self.configs_create_row(button, theme, entity),
+                    _ => button,
+                }
             }
 
             Control::ActionBind { which } => components::button(
@@ -1618,5 +2083,294 @@ mod tests {
 
         shell.load_config("Dark").expect("load");
         assert_eq!(shell.theme().name, "Ink");
+    }
+
+    #[gpui::test]
+    fn the_config_create_and_delete_actions_run_through_the_shell(cx: &mut gpui::TestAppContext) {
+        let root = scratch_root();
+        let handle = cx.update(|cx| {
+            cx.new(|_| Shell::with_store(Theme::slate(), aoko_platform::ProfileStore::new(&root)))
+        });
+
+        // Create: the name is sanitised, the config appears, the field clears.
+        cx.update(|cx| {
+            handle.update(cx, |shell, cx| {
+                shell.set_config_name_text("  Arena  ".to_owned(), cx);
+                shell.configs_create(cx);
+            })
+        });
+        let created = cx.read(|cx| {
+            let shell = handle.read(cx);
+            (
+                shell.profiles().configs().to_vec(),
+                shell.config_name().to_owned(),
+                shell.profiles().status().message.clone(),
+            )
+        });
+        assert_eq!(created.0, ["Arena".to_owned()]);
+        assert_eq!(created.1, "", "the name box clears after a create");
+        assert_eq!(created.2, "Created config 'Arena'.");
+
+        // Delete asks before it removes anything.
+        cx.update(|cx| handle.update(cx, |shell, cx| shell.configs_request_delete(cx)));
+        assert_eq!(
+            cx.read(|cx| handle.read(cx).profiles().delete_armed().map(str::to_owned)),
+            Some("Arena".to_owned())
+        );
+        assert!(aoko_platform::ProfileStore::new(&root).profile_exists("Arena"));
+
+        cx.update(|cx| handle.update(cx, |shell, cx| shell.configs_cancel_delete(cx)));
+        assert!(aoko_platform::ProfileStore::new(&root).profile_exists("Arena"));
+
+        cx.update(|cx| handle.update(cx, |shell, cx| shell.configs_request_delete(cx)));
+        cx.update(|cx| handle.update(cx, |shell, cx| shell.configs_confirm_delete(cx)));
+        assert!(!aoko_platform::ProfileStore::new(&root).profile_exists("Arena"));
+        assert_eq!(
+            cx.read(|cx| handle.read(cx).profiles().status().message.clone()),
+            "Deleted config 'Arena'."
+        );
+
+        // With the last config gone nothing is selected, and Delete says so.
+        cx.update(|cx| handle.update(cx, |shell, cx| shell.configs_request_delete(cx)));
+        assert_eq!(
+            cx.read(|cx| handle.read(cx).profiles().status().message.clone()),
+            "Select a config to delete."
+        );
+    }
+
+    #[gpui::test]
+    fn creating_over_an_existing_name_asks_then_overwrites(cx: &mut gpui::TestAppContext) {
+        let root = scratch_root();
+        let handle = cx.update(|cx| {
+            cx.new(|_| Shell::with_store(Theme::slate(), aoko_platform::ProfileStore::new(&root)))
+        });
+
+        cx.update(|cx| {
+            handle.update(cx, |shell, cx| {
+                shell.set_config_name_text("Arena".to_owned(), cx);
+                shell.configs_create(cx);
+            })
+        });
+
+        // A blank name reports the managed refusal rather than doing nothing.
+        cx.update(|cx| {
+            handle.update(cx, |shell, cx| {
+                shell.set_config_name_text("   ".to_owned(), cx);
+                shell.configs_create(cx);
+            })
+        });
+        assert_eq!(
+            cx.read(|cx| handle.read(cx).profiles().status().message.clone()),
+            "Enter a valid config name (letters, numbers, spaces, - or _)."
+        );
+
+        // Same name again: the prompt, not a write.
+        cx.update(|cx| {
+            handle.update(cx, |shell, cx| {
+                shell.set_config_name_text("Arena".to_owned(), cx);
+                shell.profile.gui_theme = "Ink".to_owned();
+                shell.configs_create(cx);
+            })
+        });
+        assert_eq!(
+            cx.read(|cx| handle
+                .read(cx)
+                .profiles()
+                .create_pending_name()
+                .map(str::to_owned)),
+            Some("Arena".to_owned())
+        );
+        let on_disk = aoko_platform::ProfileStore::new(&root)
+            .read_profile("Arena")
+            .expect("still there");
+        assert_eq!(
+            aoko_protocol::profile::load_profile_from_json(&on_disk)
+                .expect("parses")
+                .gui_theme,
+            "Slate",
+            "unconfirmed means untouched"
+        );
+
+        cx.update(|cx| handle.update(cx, |shell, cx| shell.configs_overwrite_confirmed(cx)));
+        assert_eq!(
+            cx.read(|cx| handle
+                .read(cx)
+                .profiles()
+                .create_pending_name()
+                .map(str::to_owned)),
+            None
+        );
+        let on_disk = aoko_platform::ProfileStore::new(&root)
+            .read_profile("Arena")
+            .expect("overwritten");
+        assert_eq!(
+            aoko_protocol::profile::load_profile_from_json(&on_disk)
+                .expect("parses")
+                .gui_theme,
+            "Ink"
+        );
+        assert_eq!(
+            cx.read(|cx| handle.read(cx).profiles().status().message.clone()),
+            "Created config 'Arena'."
+        );
+    }
+
+    #[gpui::test]
+    fn the_open_folder_button_reports_the_missing_capability(cx: &mut gpui::TestAppContext) {
+        let root = scratch_root();
+        let handle = cx.update(|cx| {
+            cx.new(|_| Shell::with_store(Theme::slate(), aoko_platform::ProfileStore::new(&root)))
+        });
+
+        // Tests do not probe the session (`Shell::from_system` does), so the button
+        // must report rather than attempt a launch.
+        cx.update(|cx| handle.update(cx, |shell, cx| shell.configs_open_folder(cx)));
+        assert_eq!(
+            cx.read(|cx| handle.read(cx).profiles().status().message.clone()),
+            "Could not open configs folder: no file manager launcher in this session."
+        );
+    }
+
+    #[gpui::test]
+    fn the_text_fields_are_created_once_and_seeded_from_the_state(cx: &mut gpui::TestAppContext) {
+        let handle = cx.update(|cx| {
+            cx.new(|_| {
+                let mut shell = Shell::new(Theme::slate());
+                shell.accounts.set_paste_text("seed token");
+                shell.accounts.set_offline_name("Steve");
+                shell.servers.set_add_name("Arena");
+                shell.servers.set_add_address("play.example.net");
+                shell.servers.set_direct_address("host:25565");
+                shell.config_name = "MyConfig".to_owned();
+                shell
+            })
+        });
+
+        cx.update(|cx| handle.update(cx, |shell, cx| shell.ensure_form_fields(cx)));
+        let seeded = cx.read(|cx| {
+            let shell = handle.read(cx);
+            (
+                shell
+                    .fields
+                    .token
+                    .as_ref()
+                    .expect("token")
+                    .read(cx)
+                    .text()
+                    .to_owned(),
+                shell
+                    .fields
+                    .offline_name
+                    .as_ref()
+                    .expect("offline")
+                    .read(cx)
+                    .text()
+                    .to_owned(),
+                shell
+                    .fields
+                    .server_name
+                    .as_ref()
+                    .expect("name")
+                    .read(cx)
+                    .text()
+                    .to_owned(),
+                shell
+                    .fields
+                    .server_address
+                    .as_ref()
+                    .expect("address")
+                    .read(cx)
+                    .text()
+                    .to_owned(),
+                shell
+                    .fields
+                    .direct_address
+                    .as_ref()
+                    .expect("direct")
+                    .read(cx)
+                    .text()
+                    .to_owned(),
+                shell
+                    .fields
+                    .config_name
+                    .as_ref()
+                    .expect("config")
+                    .read(cx)
+                    .text()
+                    .to_owned(),
+            )
+        });
+        assert_eq!(
+            seeded,
+            (
+                "seed token".to_owned(),
+                "Steve".to_owned(),
+                "Arena".to_owned(),
+                "play.example.net".to_owned(),
+                "host:25565".to_owned(),
+                "MyConfig".to_owned(),
+            ),
+            "a field starts from the state it views"
+        );
+
+        // Recreating them per frame would drop focus and the caret, so a second call
+        // must hand back the same entities.
+        let before = cx.read(|cx| handle.read(cx).fields.token.clone().expect("token"));
+        cx.update(|cx| handle.update(cx, |shell, cx| shell.ensure_form_fields(cx)));
+        let after = cx.read(|cx| handle.read(cx).fields.token.clone().expect("token"));
+        assert_eq!(before, after);
+
+        // The widget's change path writes back into the state it views.
+        cx.update(|cx| handle.update(cx, |shell, cx| shell.set_token_text("typed".to_owned(), cx)));
+        assert_eq!(
+            cx.read(|cx| handle.read(cx).accounts().paste_text().to_owned()),
+            "typed"
+        );
+    }
+
+    #[gpui::test]
+    fn typing_in_the_config_name_box_reaches_the_shell(cx: &mut gpui::TestAppContext) {
+        use gpui::{Keystroke, WindowOptions};
+
+        let root = scratch_root();
+        let handle = cx.update(|cx| {
+            cx.new(|cx| {
+                let mut shell =
+                    Shell::with_store(Theme::slate(), aoko_platform::ProfileStore::new(&root));
+                shell.select_tab_named("settings", cx);
+                shell.ensure_form_fields(cx);
+                shell
+            })
+        });
+
+        let window = cx.update(|cx| {
+            cx.open_window(WindowOptions::default(), |_, _| handle.clone())
+                .expect("test window")
+        });
+
+        let focus = cx.read(|cx| {
+            handle
+                .read(cx)
+                .fields
+                .config_name
+                .as_ref()
+                .expect("config field")
+                .read(cx)
+                .focus_handle()
+                .clone()
+        });
+        window
+            .update(cx, |_, window, cx| window.focus(&focus, cx))
+            .expect("focus the config name box");
+
+        let window_handle: gpui::AnyWindowHandle = window.into();
+        for key in ["p", "v", "p"] {
+            cx.dispatch_keystroke(window_handle, Keystroke::parse(key).expect("keystroke"));
+        }
+        assert_eq!(
+            cx.read(|cx| handle.read(cx).config_name().to_owned()),
+            "pvp",
+            "the widget's on_change writes into the shell's config name"
+        );
     }
 }
