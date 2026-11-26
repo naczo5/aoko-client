@@ -10,13 +10,35 @@
 //! [`aoko_app::capture`]. Without the `capture` feature the flag explains itself rather
 //! than pretending the build is complete: `Window::render_to_image` and the headless
 //! renderer are `test-support`-gated at the pin.
+//!
+//! # Logging
+//!
+//! Phase 1 stopped swallowing errors and started returning them with a classification.
+//! Returning them is not the same as showing them: until a subscriber exists, every
+//! `warn!`/`error!`/`debug!` in `aoko-core`, `aoko-platform` and the shell is written
+//! into a void. [`init_logging`] is the one place a subscriber is installed.
 
 use std::process::ExitCode;
 
 use aoko_app::{args, assets, shell::Shell, theme::Theme, window};
 use gpui::AppContext as _;
 
+/// The filter used when `RUST_LOG` is unset, and why.
+///
+/// `warn` for everything, `info` for our own four crates. The errors Phase 1 stopped
+/// swallowing are `warn`/`error`, so they show without configuration; our own `info`
+/// records are few and describe state a user would otherwise have to guess (today:
+/// whether legacy profiles were migrated); dependency `info`/`debug` output from wgpu,
+/// naga, calloop and x11 is exactly what a desktop run must not print, because it
+/// drowns the lines that matter. `RUST_LOG` replaces this filter wholesale, so
+/// `RUST_LOG=debug` still gives everything.
+#[cfg(not(any(test, feature = "capture")))]
+const DEFAULT_FILTER: &str =
+    "warn,aoko_app=info,aoko_platform=info,aoko_core=info,aoko_protocol=info";
+
 fn main() -> ExitCode {
+    init_logging();
+
     let parsed = match args::parse(std::env::args().skip(1)) {
         Ok(parsed) => parsed,
         Err(error) => {
@@ -57,6 +79,53 @@ fn main() -> ExitCode {
 
     ExitCode::SUCCESS
 }
+
+/// Installs the process-wide subscriber, once, before anything can log.
+///
+/// Tests install nothing at all (`cfg(test)`): a global subscriber would be installed by
+/// whichever test got there first, and a test that asserts on output would become
+/// order-dependent on the test runner.
+///
+/// A capture build installs nothing *unless* `RUST_LOG` is set. A capture is a render,
+/// not a session: its table goes on stdout and its evidence is nine PNGs, so a stray
+/// `warn!` interleaved with them makes the run harder to read. The gate is runtime rather
+/// than `cfg` because a capture that swallows a `warn!` is exactly when someone wants to
+/// see it, and `RUST_LOG` is the switch they already know; a capture with no `RUST_LOG`
+/// installs no subscriber and prints nothing but its table.
+///
+/// `try_init`, not `init`: a second install (a harness, a child process, a re-entrant
+/// `main`) must not panic. Whichever install lands first wins.
+#[cfg(not(test))]
+fn init_logging() {
+    use tracing_subscriber::EnvFilter;
+
+    let configured = EnvFilter::try_from_default_env();
+
+    #[cfg(feature = "capture")]
+    let filter = match configured {
+        Ok(filter) => filter,
+        // Quiet unless asked: a capture with no `RUST_LOG` installs no subscriber.
+        Err(_) => return,
+    };
+
+    #[cfg(not(feature = "capture"))]
+    let filter = configured.unwrap_or_else(|_| {
+        // Unset, or set to something `EnvFilter` cannot parse: fall back rather than
+        // refuse to start, because losing logs must never cost the application.
+        EnvFilter::new(DEFAULT_FILTER)
+    });
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        // stderr, never stdout: `--help`, `--version` and the capture table own stdout,
+        // and a caller parsing them should not have to strip log lines first.
+        .with_writer(std::io::stderr)
+        .try_init();
+}
+
+/// The test harness stays quiet. See the documented variant above.
+#[cfg(test)]
+fn init_logging() {}
 
 #[cfg(feature = "capture")]
 fn capture(out_dir: std::path::PathBuf, theme: Theme) -> ExitCode {
