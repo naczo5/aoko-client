@@ -35,10 +35,7 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 aoko-platform = { workspace = true }
-# Not in the workspace dependency table yet: the workspace owner has to add
-# `aoko-core = { path = "crates/aoko-core" }` before this becomes
-# `{ workspace = true }`. Requested, not worked around.
-aoko-core = { path = "../aoko-core" }
+aoko-core = { workspace = true }
 
 [dev-dependencies]
 # `TestAppContext` and the TestPlatform window live behind `gpui/test-support`

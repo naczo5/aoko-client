@@ -304,7 +304,7 @@ enum Outcome {
 ///
 /// `Entity<TextInput>` is an element because `impl<V: Render> IntoElement for Entity<V>`
 /// exists at `gpui/src/view.rs:112`. The callback takes `&mut Window` and `&mut App` in
-/// the same shape as [`super::slider`], so it can reach the entity that owns the form.
+/// the same shape as [`super::slider::slider`], so it can reach the entity that owns the form.
 /// `Context::processor` produces exactly this shape where a `Context<Self>` is in hand.
 ///
 /// The field must be a **child** view, not a window's root: a key listener updates the

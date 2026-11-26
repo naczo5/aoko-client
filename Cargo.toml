@@ -80,6 +80,7 @@ libc = "0.2"
 
 aoko-protocol = { path = "crates/aoko-protocol" }
 aoko-platform = { path = "crates/aoko-platform" }
+aoko-core = { path = "crates/aoko-core" }
 
 [profile.release]
 opt-level = 3
