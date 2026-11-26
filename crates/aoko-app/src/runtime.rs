@@ -61,16 +61,20 @@
 //! runtime.set_module_enabled("autototem", true);
 //! assert!(runtime.controller().is_module_enabled(EnabledFlag::AutoTotem));
 //! ```
+//!
+//! The stats tracker is the fourth piece, and the one the Stats tab reads: `StatsTracker` is
+//! owned here, fed by the loops' own `ClickSink` — which is where the managed host records a
+//! click (`Clicker.cs:3270`) — and reset through `crate::runtime::Runtime::reset_stats`, so the
+//! view has no copy of its own to go stale. No message carries a click or a CPS value, so the
+//! ingest path feeds nothing and this file says so where the sink is defined.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Instant;
 
 use aoko_core::app::{AppController, StateSnapshot};
 use aoko_core::chest_stealer::FRESH_STATE_MS;
 use aoko_core::clicker::toggles;
-use aoko_core::loops::{
-    ClickSink, ClickerLoopConfigs, ClickerLoops, LoopRuntime, LoopSense, NoClickSink,
-};
+use aoko_core::loops::{ClickSink, ClickerLoopConfigs, ClickerLoops, LoopRuntime, LoopSense};
 use aoko_core::{Clock, Sleeper, SplitMix64, SystemClock, ThreadSleeper};
 use aoko_platform::{
     CapabilityReport, InputBackend, InputEvent, Key, MouseButton, MouseState, PlatformError,
@@ -78,6 +82,7 @@ use aoko_platform::{
 };
 use aoko_protocol::gtb::{parse_wordlist_js, GtbWordSolver};
 use aoko_protocol::module_catalog::{self, EnabledFlag};
+use aoko_protocol::stats::StatsTracker;
 
 use crate::ingest::{Ingest, IngestStatus};
 
@@ -202,6 +207,44 @@ impl GtbHelper {
     }
 }
 
+/// The click feed the loop supervisor writes and the Stats tab reads.
+///
+/// `aoko_core::loops::ClickSink::record_click` is the production seam, and the loops already
+/// call it once per accepted click: the five bodies take an `Arc<dyn ClickSink>` when they
+/// start, so handing them this one is the whole feed. That is also where the managed host
+/// records a click — `Clicker.cs:3270`, `StatsTracker.Instance.RecordClick(cps, leftButton)`,
+/// one line before `PerformClick`.
+///
+/// **Why not the ingest path:** nothing on the wire carries a click count or a CPS value.
+/// `aoko_protocol::codec::Inbound` has `State`, `Capabilities`, `CommandResult` and `Ignored`,
+/// and `GameState` has no click field, so there is no decoded message a tracker could be fed
+/// from. The `ClickSink` is not a second feed path — it is the managed one.
+struct StatsFeed {
+    tracker: Mutex<StatsTracker>,
+}
+
+impl StatsFeed {
+    fn new() -> Self {
+        Self {
+            tracker: Mutex::new(StatsTracker::new()),
+        }
+    }
+
+    /// The tracker, ignoring poisoning.
+    ///
+    /// A loop body that panicked while holding the lock must not take the Stats tab down with
+    /// it: the numbers are statistics, not state anything else is derived from.
+    fn tracker(&self) -> MutexGuard<'_, StatsTracker> {
+        self.tracker.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl ClickSink for StatsFeed {
+    fn record_click(&self, cps: f32, left_button: bool) {
+        self.tracker().record_click(cps, left_button);
+    }
+}
+
 /// The application's runtime state: the controller, the id mapping the switches need to
 /// reach it, the bridge reader, and — on the shipped path only — the loop supervisor.
 pub struct Runtime {
@@ -221,6 +264,11 @@ pub struct Runtime {
     sleeper: Arc<dyn Sleeper>,
     /// The GTB helper, `None` until a line passes the guards and the module is on.
     gtb: Option<GtbHelper>,
+    /// The click feed: the sink the loops record into and the tracker the Stats tab reads.
+    ///
+    /// One object, so there is one copy of the numbers. `Arc` because the loops hold the sink
+    /// on their own threads; `Mutex` because `StatsTracker` records through `&mut self`.
+    stats: Arc<StatsFeed>,
 }
 
 impl Runtime {
@@ -252,6 +300,7 @@ impl Runtime {
             clock,
             sleeper,
             gtb: None,
+            stats: Arc::new(StatsFeed::new()),
         }
     }
 
@@ -421,6 +470,36 @@ impl Runtime {
         self.gtb.as_ref().map_or(0, |helper| helper.solves)
     }
 
+    /// The Stats tab's tracker, borrowed.
+    ///
+    /// A guard rather than a copy: `StatsTracker` is not `Clone`, the view reads a dozen numbers
+    /// from it, and a copy is exactly the stale second source this slice removes. The lock is
+    /// held only while the caller reads.
+    #[must_use]
+    pub fn stats(&self) -> MutexGuard<'_, StatsTracker> {
+        self.stats.tracker()
+    }
+
+    /// The sink the loop bodies record into.
+    ///
+    /// The same object the supervisor was handed, so a test can feed a click through the
+    /// production path without starting a thread.
+    #[must_use]
+    pub fn click_sink(&self) -> Arc<dyn ClickSink> {
+        Arc::clone(&self.stats)
+    }
+
+    /// `StatsTracker.Reset` (`MainWindow.xaml.cs:1978`), through the one owner of the tracker.
+    ///
+    /// Returns whether there was anything to clear, so a caller can repaint only on a real
+    /// change.
+    pub fn reset_stats(&self) -> bool {
+        let mut tracker = self.stats.tracker();
+        let had_samples = tracker.total_clicks() > 0;
+        tracker.reset();
+        had_samples
+    }
+
     /// Turns module switches into loop lifecycle and starts what is already enabled.
     ///
     /// `Shell::from_system` is the only caller, so the shipped path supervises and every
@@ -488,7 +567,8 @@ impl Runtime {
         let (input, windows) = platform_surfaces(&surfaces);
         let sense: Arc<dyn LoopSense> =
             Arc::new(ControllerSense::new(Arc::clone(&self.controller), windows));
-        let sink: Arc<dyn ClickSink> = Arc::new(NoClickSink);
+        // The one click feed: the sink the bodies record into, which is `StatsFeed`.
+        let sink: Arc<dyn ClickSink> = Arc::clone(&self.stats);
 
         let clock = Arc::clone(&self.clock);
         let sleeper = Arc::clone(&self.sleeper);
@@ -1652,6 +1732,71 @@ mod tests {
             "a menu is not gameplay for any other consumer either"
         );
         assert_eq!(runtime.gtb_solves(), 0);
+    }
+
+    // ---- stats tracker --------------------------------------------------------------
+
+    /// A click reaches the tracker through the sink the loop bodies use, the view's own text
+    /// carries it, and a reset through the runtime clears it.
+    ///
+    /// The feed is `ClickSink::record_click`, which is what `click-left`/`click-right` call and
+    /// what `Clicker.cs:3270` calls. The ingest path is asserted to *not* feed it, because no
+    /// decoded message carries a click or a CPS value: a future attempt to wire one from there
+    /// has to delete that assertion first.
+    ///
+    /// The view half is the model, not the pixels: GPUI at the pin exposes no readback of
+    /// rasterised glyphs, which is why `stats_view`'s own suite pins text through
+    /// `StatsTexts::of` and geometry through a mounted window. This asserts the same model the
+    /// Stats tab draws from.
+    #[test]
+    fn a_click_reaches_the_stats_tracker_and_a_reset_clears_it() {
+        use crate::views::stats_view::StatsTexts;
+
+        let runtime = Runtime::headless();
+
+        // A decoded state frame moves the store, not the tracker.
+        let now = Instant::now();
+        runtime.controller().store().set_connected(true);
+        runtime.controller().store().publish(
+            aoko_protocol::state::GameState {
+                in_world: true,
+                ..aoko_protocol::state::GameState::default()
+            },
+            now,
+        );
+        assert_eq!(
+            runtime.stats().total_clicks(),
+            0,
+            "a state frame carries no click count for a tracker to read"
+        );
+
+        let sink = runtime.click_sink();
+        sink.record_click(8.5, true);
+        sink.record_click(9.5, true);
+        sink.record_click(11.0, false);
+
+        assert_eq!(runtime.stats().total_clicks(), 3);
+        assert_eq!(runtime.stats().left_clicks(), 2);
+        assert_eq!(runtime.stats().right_clicks(), 1);
+
+        let texts = StatsTexts::of(&runtime.stats());
+        assert_eq!(texts.clicks, "3");
+        assert_eq!(texts.clicks_split, "L 2  R 1");
+        assert_eq!(texts.samples, "3 samples");
+
+        assert!(runtime.reset_stats(), "three clicks were there to clear");
+        assert_eq!(runtime.stats().total_clicks(), 0);
+        assert_eq!(runtime.stats().left_clicks(), 0);
+        assert_eq!(runtime.stats().right_clicks(), 0);
+        assert_eq!(
+            StatsTexts::of(&runtime.stats()).clicks,
+            "0",
+            "the view reads the cleared tracker, not a cached number"
+        );
+        assert!(
+            !runtime.reset_stats(),
+            "a second reset has nothing to clear"
+        );
     }
 
     /// An unanswered cursor must read as "drawn", and this pins the consumers' consequences.

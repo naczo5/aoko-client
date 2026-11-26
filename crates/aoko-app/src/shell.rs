@@ -811,6 +811,18 @@ impl Shell {
         self.runtime.set_module_enabled(module_id, on);
     }
 
+    /// `ResetStatsButton_Click` (`MainWindow.xaml.cs:1978`): clears the runtime's tracker.
+    ///
+    /// The shell holds no tracker of its own — the runtime owns the numbers and the view reads
+    /// them through it — so the button is one call to the owner and then a repaint. That is
+    /// what makes the reset observable: the next frame composes from the cleared tracker
+    /// rather than from a copy the view kept.
+    pub fn reset_stats(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.runtime.reset_stats() {
+            cx.notify();
+        }
+    }
+
     /// The command-search state.
     ///
     /// **Not mounted in Phase 2** (section 12 decision 7): nothing calls
@@ -1410,6 +1422,20 @@ impl Render for Shell {
         let entity = cx.entity();
 
         let body = match copy::TABS.get(self.tab).map(|tab| tab.body) {
+            // The Stats tab draws `views::stats_view`, which reads the runtime's tracker, so
+            // it is not a card table however the table spells it. `is_stats_body` holds the
+            // reason the key is the slice and not a `TabBody` variant.
+            Some(body) if is_stats_body(body) => {
+                let handle = cx.entity();
+                crate::views::stats_view::render(
+                    &self.runtime.stats(),
+                    theme,
+                    self.tab,
+                    move |_, window, cx| {
+                        handle.update(cx, |shell, cx| shell.reset_stats(window, cx));
+                    },
+                )
+            }
             Some(TabBody::Cards(cards)) => self.render_cards(cards, theme, motion, &entity),
             Some(TabBody::Accounts) => crate::views::accounts_view::render(
                 &self.accounts,
@@ -2481,6 +2507,17 @@ enum SwitchTarget {
     Profile(&'static str),
 }
 
+/// Whether a tab body is the Stats tab, which `render` mounts on `stats_view`.
+///
+/// The table spells the Stats tab as a `Cards(STATS)` row because `TabBody` belongs to
+/// `views/copy.rs` and a fourth variant would need arms in `views/bindings.rs`, which this
+/// slice does not own. Keying on the table's own `STATS` slice keeps the decision inside
+/// `copy.rs`'s vocabulary — no hard-coded index, no name string — and the Stats test fails if
+/// the row is ever reordered, renamed or duplicated.
+fn is_stats_body(body: TabBody) -> bool {
+    matches!(body, TabBody::Cards(cards) if std::ptr::eq(cards, copy::STATS))
+}
+
 /// Which of the two a switch's bind names. Never falls back to the card.
 fn switch_target(bind: &'static str) -> SwitchTarget {
     match module_for_bind(bind) {
@@ -2694,6 +2731,58 @@ mod tests {
                 .expect("every tab has a name");
             assert_eq!(position, index);
         }
+    }
+
+    /// The Stats row is the one `render` mounts on `views::stats_view`, and the numbers that
+    /// view composes are the runtime's — before a reset and after it.
+    ///
+    /// Painted glyphs are not readable at the pin: GPUI exposes no text readback, which is why
+    /// `stats_view`'s own suite pins `StatsTexts::of` against the tracker and geometry through
+    /// a mounted window. This test does the same two halves one level up — the shell's row
+    /// selects the view, and `StatsTexts` fed by the shell's runtime carries the clicked count
+    /// — so a wrong number fails without a window and a wrong row fails without a render.
+    ///
+    /// The clicks are recorded through `Runtime::click_sink`, the object the loop bodies hold,
+    /// so this is the production path and not a test-only setter.
+    #[test]
+    fn the_stats_tab_is_the_row_this_mounts() {
+        use crate::views::stats_view::StatsTexts;
+
+        let stats_tab = copy::TABS
+            .iter()
+            .position(|tab| tab.name == "Stats")
+            .expect("a Stats tab");
+        assert!(
+            is_stats_body(copy::TABS[stats_tab].body),
+            "the row render keys on is the Stats one"
+        );
+        assert!(!is_stats_body(copy::TABS[0].body), "Combat keeps its cards");
+        assert_eq!(
+            copy::TABS
+                .iter()
+                .filter(|tab| is_stats_body(tab.body))
+                .count(),
+            1,
+            "exactly one row is the Stats view"
+        );
+
+        let shell = Shell::new(Theme::slate());
+        let sink = shell.runtime.click_sink();
+        sink.record_click(8.5, true);
+        sink.record_click(11.0, false);
+
+        let texts = StatsTexts::of(&shell.runtime.stats());
+        assert_eq!(texts.clicks, "2", "the tab draws the runtime's count");
+        assert_eq!(texts.clicks_split, "L 1  R 1");
+
+        assert!(
+            shell.runtime.reset_stats(),
+            "two clicks were there to clear"
+        );
+
+        let texts = StatsTexts::of(&shell.runtime.stats());
+        assert_eq!(texts.clicks, "0", "the tab draws the cleared count");
+        assert_eq!(texts.samples, "0 samples");
     }
 
     #[test]
