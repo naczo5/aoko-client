@@ -28,11 +28,16 @@ Every distinct widget the app draws, its first real use, the WPF mechanism, and 
 `Style`/`ControlTemplate` is declared; the style declaration is given in the mechanism column.
 
 Instance counts, for sizing the component library (`grep -o` over `Aoko/MainWindow.xaml` and the
-`Aoko/Views/` files): **49** `ControlCardStyle` cards, **75** `DarkSlider` sliders, **58**
-`DarkCheckBox` checkboxes, **44** `ModuleSwitch` toggles, **54** `DarkButton` buttons, **14**
+`Aoko/Views/` files): **50** `ControlCardStyle` cards, **72** `DarkSlider` sliders, **58**
+`DarkCheckBox` checkboxes, **43** `ModuleSwitch` toggles, **54** `DarkButton` buttons, **13**
 `DarkComboBox` dropdowns, **38** `KeybindButton_Click` keybind buttons, **8** `TabPrimaryButton`, plus
 `PreviewCardButtonStyle`, `TabSecondaryButton`, `TabDangerButton` and the overlay's `EscChipStyle`.
 That is ~340 call sites behind ~15 builder functions — which is why the split in §7 is worth having.
+
+Four of these were re-derived during Phase 2 and the original figures were overcounts: cards 49 -> 50,
+sliders 75 -> 72, switches 44 -> 43, dropdowns 14 -> 13. `ConfigComboBox` exists as a style key but is
+referenced nowhere, and every one of the 13 `<ComboBox` openings carries `DarkComboBox`. The eight
+`TabPrimaryButton` uses all live in `AccountsView.xaml` and `ServersView.xaml`, not the shell.
 
 | # | Widget | First real use | WPF mechanism | GPUI equivalent | Risk |
 | --- | --- | --- | --- | --- | --- |
