@@ -40,7 +40,7 @@ pub mod switch;
 pub mod text_input;
 pub mod tooltip;
 
-pub use button::{button, ButtonVariant};
+pub use button::{button, button_sized, ButtonVariant};
 pub use card::card;
 pub use checkbox::checkbox;
 pub use chip::{chip, ChipTone};
