@@ -143,7 +143,7 @@ mod tests {
     use aoko_protocol::state::GameState;
 
     use super::*;
-    use crate::app::StateSnapshot;
+    use crate::app::{StateSnapshot, StateStore};
     use crate::clicker::AdvancedClickTimingState;
     use crate::clock::{Clock, Sleeper, SplitMix64};
     use crate::concurrency::CancelToken;
@@ -389,6 +389,38 @@ mod tests {
             allocations,
             Allocations::NONE,
             "a guard tick must not touch the allocator"
+        );
+    }
+
+    #[test]
+    fn publishing_a_shared_state_costs_the_snapshot_box_and_no_copy() {
+        // The ingest side hands the codec's `Arc` straight to the store, so publishing a
+        // frame costs the snapshot the store owns and nothing else. `publish` wraps an
+        // owned state in a fresh `Arc` first, which is the copy this entry point exists to
+        // avoid; a change that made this path unwrap and re-wrap would add one allocation
+        // per frame here.
+        let state = Arc::new(GameState {
+            is_connected: true,
+            health: 20.0,
+            ..GameState::default()
+        });
+        let store = StateStore::new();
+        let at = Instant::now();
+
+        // Warm-up so the store's own machinery is not being measured on its first use.
+        store.publish_shared(Arc::clone(&state), at);
+        let ((), allocations) = measure(|| store.publish_shared(Arc::clone(&state), at));
+
+        assert_eq!(
+            allocations.count, 1,
+            "one snapshot box, no state copy: {allocations}"
+        );
+        // Identity, not a refcount: this is true exactly when the store kept the
+        // snapshot it was handed instead of copying the state into a new one.
+        let stored = store.snapshot().expect("a state was published");
+        assert!(
+            Arc::ptr_eq(&stored.state, &state),
+            "the store must share the snapshot it was handed"
         );
     }
 }

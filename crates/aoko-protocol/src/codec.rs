@@ -17,6 +17,7 @@
 //! * `commandResult` is last-wins on duplicate keys, which `serde_json` gives us.
 
 use serde_json::Value;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use crate::capabilities::BridgeCapabilities;
@@ -44,11 +45,11 @@ pub enum IgnoreReason {
 pub enum Inbound {
     /// A complete or merged state frame, plus any `hudLayout` echo.
     ///
-    /// Boxed because `GameState` is by far the largest thing on the wire: a state
-    /// frame every frame interval would otherwise make every `Inbound` — and every
-    /// `Pump` — pay for it by value.
+    /// The state is shared behind an `Arc`, not carried by value: handing a frame out
+    /// is an atomic increment, and the cost of the next merge depends on whether
+    /// anybody still holds this one (see `docs/performance/rust-baseline.md`).
     State {
-        state: Box<GameState>,
+        state: Arc<GameState>,
         hud_layout: Option<HudLayout>,
     },
     Capabilities(BridgeCapabilities),
@@ -62,7 +63,8 @@ pub enum Inbound {
 /// Decodes inbound lines against the last state and the current capabilities.
 #[derive(Debug, Clone)]
 pub struct Decoder {
-    state: GameState,
+    /// The live snapshot. Owned uniquely between merges, shared while a frame is out.
+    state: Arc<GameState>,
     capabilities: BridgeCapabilities,
     injected_version: String,
 }
@@ -80,15 +82,19 @@ impl Decoder {
         let injected_version = injected_version.into();
         let capabilities = BridgeCapabilities::for_version_fallback(Some(&injected_version));
         Self {
-            state: GameState::default(),
+            state: Arc::new(GameState::default()),
             capabilities,
             injected_version,
         }
     }
 
+    /// The state the next line will be merged into.
+    ///
+    /// Borrowed, not shared: a caller that needs to keep it across a frame should
+    /// take the snapshot the [`Inbound::State`] frame hands out instead.
     #[must_use]
     pub fn state(&self) -> &GameState {
-        &self.state
+        self.state.as_ref()
     }
 
     #[must_use]
@@ -139,19 +145,33 @@ impl Decoder {
 
     fn ingest_state(&mut self, root: &Value) -> Inbound {
         if state_patch::is_partial(root) {
-            // Merged into the live snapshot rather than into a copy of it: a patch
-            // that carries three scalars must not rebuild the `String`s and `Vec`s
-            // it does not mention (`MIGRATION_ARCHITECTURE.md` section 6).
             let Value::Object(patch) = root else {
                 return Inbound::Ignored(IgnoreReason::InvalidState);
             };
-            state_patch::apply_into(&mut self.state, patch);
+            // Merged in place while this decoder is the snapshot's only owner, which is
+            // what a pump loop nobody holds a frame behind looks like. A reader that is
+            // still holding the previous frame makes the snapshot shared, and
+            // `Arc::make_mut` then copies once so that reader's value cannot change
+            // under it. Both costs are pinned in `perf` and in the baseline doc; a patch
+            // that carries three scalars still never rebuilds the `String`s and `Vec`s it
+            // does not mention (`MIGRATION_ARCHITECTURE.md` section 6).
+            let state = Arc::make_mut(&mut self.state);
+            state_patch::apply_into(&mut *state, patch);
+            state.is_connected = true;
+            state.last_update = Some(SystemTime::now());
         } else {
             // Decoded straight out of the borrowed document. `from_value(root.clone())`
             // would deep-copy the parsed tree first, which is a second allocation per
             // complete frame on the bridge that sends one every interval.
             match <GameState as serde::Deserialize>::deserialize(root) {
-                Ok(state) => self.state = state,
+                Ok(mut decoded) => {
+                    decoded.is_connected = true;
+                    decoded.last_update = Some(SystemTime::now());
+                    // A complete document replaces the snapshot outright, so it needs no
+                    // mutation of a possibly shared one: the decoded value moves into the
+                    // `Arc` that is published.
+                    self.state = Arc::new(decoded);
+                }
                 Err(_) => return Inbound::Ignored(IgnoreReason::InvalidState),
             }
         }
@@ -163,15 +183,10 @@ impl Decoder {
             .filter(|node| node.is_object())
             .map(HudLayout::from_json);
 
-        self.state.is_connected = true;
-        self.state.last_update = Some(SystemTime::now());
-
-        // The one copy a frame still costs: `Inbound::State` carries the document
-        // by value, so the decoder keeps its own and hands the caller a clone.
-        // Publishing the decoder's state behind an `Arc` would remove it, which is
-        // a shape change recorded in `docs/performance/rust-baseline.md`.
+        // Sharing the snapshot costs one atomic increment. The copy a frame used to cost
+        // is now only paid by a merge that has to break the sharing.
         Inbound::State {
-            state: Box::new(self.state.clone()),
+            state: Arc::clone(&self.state),
             hud_layout,
         }
     }

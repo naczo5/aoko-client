@@ -7,6 +7,9 @@
 //!   when the line has to leave that buffer.
 //! - Patch merging mutates in place; a packet must not deep-copy the `String`s and
 //!   maps it does not carry.
+//! - A decoded frame hands out the decoder's snapshot behind an `Arc`, so publishing
+//!   one costs an atomic increment and a merge copies only while a reader still holds
+//!   the previous snapshot.
 //! - The GTB solver indexes the wordlist once, and a repeated query touches no
 //!   allocator at all.
 //!
@@ -150,6 +153,7 @@ static ALLOCATOR: CountingAllocator = CountingAllocator;
 mod tests {
     use std::collections::BTreeMap;
     use std::io::Read;
+    use std::sync::Arc;
 
     use serde::Deserialize as _;
     use serde_json::Value;
@@ -361,54 +365,84 @@ mod tests {
     }
 
     #[test]
-    fn one_partial_frame_costs_its_parse_plus_exactly_one_state_copy() {
-        // What the codec may charge per packet: parsing the document it was handed,
-        // and the single copy that lets the decoder keep a state while the frame
-        // carries one. Two deep copies would mean the merge rebuilt a snapshot it
-        // already had.
+    fn a_partial_frame_costs_exactly_its_parse_when_the_last_frame_is_released() {
+        // What the codec may charge per packet now that the snapshot is shared: parsing
+        // the document it was handed, and nothing else. The pump loop drops each frame
+        // before it reads the next, so the decoder is the snapshot's only owner when the
+        // merge runs and `Arc::make_mut` mutates it in place. A copy here would mean the
+        // frame was cloned on the way out, which is the cost this shape removed.
         let line = r#"{"type":"state","partial":true,"health":19.5,"posX":12.0,"stateMs":7}"#;
         let mut decoder = Decoder::new();
         // Warm-up puts the decoder in the state the measurement sees: `is_connected`
-        // set and `last_update` stamped, so both clones have the same content.
+        // set and `last_update` stamped, and no frame left alive.
         let _ = decoder.ingest(line);
 
         let (_, parsed) = measure(|| serde_json::from_str::<Value>(line).expect("valid json"));
-        let (_, copied) = measure(|| GameState::clone(decoder.state()));
         let (frame, total) = measure(|| decoder.ingest(line));
 
         assert!(matches!(frame, Inbound::State { .. }));
         assert_eq!(
-            total,
-            parsed.plus(copied).plus(Allocations {
-                count: 1,
-                bytes: std::mem::size_of::<GameState>(),
-            }),
-            "a partial frame costs its parse, one state copy and the frame box"
+            total, parsed,
+            "a partial frame into an unshared snapshot costs its parse and no copy"
         );
     }
 
     #[test]
-    fn one_complete_frame_costs_its_parse_plus_exactly_one_state_copy() {
+    fn a_partial_frame_costs_one_copy_while_a_reader_still_holds_the_last_snapshot() {
+        // The other side of copy-on-write: a reader that keeps the snapshot it was given
+        // must not see it change underneath, so the merge copies once before mutating.
+        // That copy is the whole reason the steady state can be free, and a shape that
+        // lost it would be mutating a value another thread is reading.
+        let warm = r#"{"type":"state","partial":true,"health":19.5,"posX":12.0,"stateMs":7}"#;
+        let measured = r#"{"type":"state","partial":true,"health":11.0,"posX":12.0,"stateMs":8}"#;
+        let mut decoder = Decoder::new();
+        let _ = decoder.ingest(warm);
+        let held = decoder.ingest(warm);
+
+        let (_, parsed) = measure(|| serde_json::from_str::<Value>(measured).expect("valid json"));
+        let (_, copied) = measure(|| GameState::clone(decoder.state()));
+        let (_, total) = measure(|| decoder.ingest(measured));
+
+        assert_eq!(
+            total,
+            parsed.plus(copied),
+            "a merge into a shared snapshot costs its parse plus exactly one state copy"
+        );
+        assert_eq!(decoder.state().health, 11.0);
+        match held {
+            Inbound::State { state, .. } => assert_eq!(
+                state.health, 19.5,
+                "the held snapshot must not change under its reader"
+            ),
+            other => panic!("unexpected frame: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_complete_frame_costs_its_parse_and_decode_plus_one_shared_snapshot() {
         // The legacy bridge sends a complete, untyped document every interval, so this
-        // path is as hot as the partial one. It must not pay a second copy of the
-        // parsed tree on the way in, which is what `from_value(root.clone())` did.
+        // path is as hot as the partial one. It must pay neither a second copy of the
+        // parsed tree (which is what `from_value(root.clone())` did) nor a copy of the
+        // decoded state: the value moves into the `Arc` the frame carries, so the only
+        // allocation beyond the parse and the decode is that `Arc`.
         let line = r#"{"mapped":true,"inWorld":true,"screenName":"GuiChest","health":20,"viewportWidth":1600,"entities":[{"name":"Zombie","dist":3.5}]}"#;
         let mut decoder = Decoder::new();
         let _ = decoder.ingest(line);
 
         let (root, parsed) = measure(|| serde_json::from_str::<Value>(line).expect("valid json"));
-        let (_, copied) = measure(|| GameState::clone(decoder.state()));
-        let (frame, ingest) = measure(|| decoder.ingest(line));
         let (_, decoded) = measure(|| GameState::deserialize(&root));
+        // A stand-in state so the probe counts only the `Arc` allocation itself, not the
+        // default state's own string.
+        let probe = GameState::default();
+        let (_, shared) = measure(move || Arc::new(probe));
+
+        let (frame, ingest) = measure(|| decoder.ingest(line));
 
         assert!(matches!(frame, Inbound::State { .. }));
         assert_eq!(
             ingest,
-            parsed.plus(decoded).plus(copied).plus(Allocations {
-                count: 1,
-                bytes: std::mem::size_of::<GameState>(),
-            }),
-            "a complete frame costs one parse, one decode, one state copy and the box"
+            parsed.plus(decoded).plus(shared),
+            "a complete frame costs one parse, one decode and one shared snapshot"
         );
     }
 }

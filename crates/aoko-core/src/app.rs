@@ -62,11 +62,22 @@ impl StateStore {
 
     /// Publishes a decoded state. The previous snapshot is dropped as soon as the
     /// last reader finishes with it.
+    ///
+    /// A caller that already has the state shared — the ingest side, holding the `Arc`
+    /// a codec frame carries — should use [`Self::publish_shared`], which skips the
+    /// re-wrap this performs.
     pub fn publish(&self, state: GameState, at: Instant) {
-        self.current.store(Some(Arc::new(StateSnapshot {
-            state: Arc::new(state),
-            at,
-        })));
+        self.publish_shared(Arc::new(state), at);
+    }
+
+    /// Publishes a state that is already shared.
+    ///
+    /// This is the zero-copy path: the decoder owns the snapshot and hands it out, so
+    /// publishing costs the one `Arc<StateSnapshot>` the store holds and no copy of the
+    /// state. Unwrapping and re-wrapping it here would put the copy back on every frame.
+    pub fn publish_shared(&self, state: Arc<GameState>, at: Instant) {
+        self.current
+            .store(Some(Arc::new(StateSnapshot { state, at })));
     }
 
     /// Current snapshot, `None` before the first update.
