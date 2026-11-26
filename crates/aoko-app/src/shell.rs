@@ -332,7 +332,17 @@ impl Shell {
     }
 
     /// Replaces the loaded profile, which is what applying a saved config does.
-    fn with_loaded_profile(mut self, profile: aoko_protocol::profile::Profile) -> Self {
+    ///
+    /// This is one of the two places a profile is *loaded*, so it is where the load-time half
+    /// of the action-bind rule runs
+    /// ([`aoko_protocol::profile::Profile::normalize_action_binds`]): the module binds
+    /// are applied first and win, and a dedicated Auto Rod or Throwpot key that duplicates one
+    /// is cleared, as `Profile.cs:889-899` clears it on apply. A profile whose action binds are
+    /// distinct changes nothing — the function returns false and the values are untouched — so
+    /// the return is not needed here. The snapshot is taken after normalisation, because a
+    /// cleared key has to paint as `Unbound` rather than as the key the file survives with.
+    fn with_loaded_profile(mut self, mut profile: aoko_protocol::profile::Profile) -> Self {
+        profile.normalize_action_binds();
         self.values = crate::views::bindings::snapshot(&profile);
         self.profile = profile;
         // The frame is built from the controller, not from this shell: a shell that starts
@@ -360,6 +370,10 @@ impl Shell {
         let mut profile = self.profile.clone();
         let result = self.profiles.save_auto(&mut profile);
         self.profile = profile;
+        // The store stamps the profile's name before it writes (`save_auto`), so the copy it
+        // hands back is not always the one that went in. A write site that keeps the stamped
+        // copy without telling the controller leaves the two out of step from the first save.
+        self.push_profile();
         result
     }
 
@@ -368,13 +382,17 @@ impl Shell {
         let mut profile = self.profile.clone();
         let result = self.profiles.save_named(name, &mut profile);
         self.profile = profile;
+        // Same as [`Shell::save_profile`]: `save_named` sets `profile.name` on the way through.
+        self.push_profile();
         result
     }
 
     /// The Settings card's Load: replaces the live settings with a saved config.
     pub fn load_config(&mut self, name: &str) -> Result<(), String> {
         match self.profiles.load_named(name) {
-            Ok(profile) => {
+            Ok(mut profile) => {
+                // The load-time half of the action-bind rule; see `with_loaded_profile`.
+                profile.normalize_action_binds();
                 self.values = crate::views::bindings::snapshot(&profile);
                 self.profile = profile;
                 // The palette travels in the profile, so applying a config has to
@@ -897,10 +915,29 @@ impl Shell {
     /// frame from its own copy. Nothing else pushes between them, so every write that changes
     /// the profile calls this, or the bridge keeps the old value for the life of the link.
     ///
+    /// Why two copies rather than one: the controller lends no profile, only clones it.
+    /// `AppController::profile` returns `self.profile.read().clone()`, and it and
+    /// `update_profile` are the whole read/write surface — a mapped `RwLockReadGuard`
+    /// would need an accessor in `aoko-core`, which this slice may not add. Reading through the
+    /// clone in the paint would allocate a whole profile once per capture label, and there is
+    /// one of those per key target in `key_targets`, rebuilt every frame by
+    /// `sync_keybind_captures`, so the borrow costs the allocation budget rather than this
+    /// function.
+    ///
+    /// Every write site calls this. They are [`Shell::apply_control`] (every slider, checkbox,
+    /// combo and module switch), [`Shell::apply_captured_key`], [`Shell::with_loaded_profile`],
+    /// [`Shell::load_config`], [`Shell::save_profile`], [`Shell::save_config`],
+    /// [`Shell::configs_create`] and [`Shell::configs_overwrite_confirmed`]; the last four
+    /// because the store stamps `profile.name` on the copy it hands back. A grep for
+    /// `self.profile = ` and `&mut self.profile` in this file lists the current assignments,
+    /// and `every_catalog_bind_leaves_the_controllers_copy_equal` fails on a bind that goes
+    /// through `apply_control` and forgets.
+    ///
     /// `update_profile` rather than `replace_profile`: the latter normalises the action binds
     /// on the copy it is handed (`Profile::normalize_action_binds`), which is the rule for
-    /// *applying a saved config*, not for a live edit. Assigning keeps the two copies equal,
-    /// so what the UI shows is what the wire carries.
+    /// *applying a saved config*, not for a live edit. Normalisation runs on the two load
+    /// paths instead, so the copy pushed here is already the normalised one. Assigning keeps
+    /// the two copies equal, so what the UI shows is what the wire carries.
     fn push_profile(&mut self) {
         let profile = self.profile.clone();
         self.runtime.controller().update_profile(move |active| {
@@ -942,13 +979,13 @@ impl Shell {
         }
 
         let before = self.value(bind, f64::NAN).to_bits();
-        if crate::views::bindings::write(
-            &mut self.profile,
+        // Through `apply_control`, like every other control: that is the one place that
+        // refreshes the snapshot and hands the profile to the controller, and a second copy of
+        // that sequence here was the shape that let a write reach the card and not the wire.
+        if !self.apply_control(
             bind,
             crate::views::bindings::ControlValue::Number(index as f64),
         ) {
-            self.values = crate::views::bindings::snapshot(&self.profile);
-        } else {
             self.draft.insert(bind, index as f64);
         }
         if self.value(bind, f64::NAN).to_bits() != before {
@@ -1218,6 +1255,9 @@ impl Shell {
         let mut profile = self.profile.clone();
         let outcome = self.profiles.create(&raw, &mut profile, false);
         self.profile = profile;
+        // `create` stamps `profile.name`; the controller's copy has to follow, as in
+        // [`Shell::save_profile`].
+        self.push_profile();
         if matches!(outcome, CreateOutcome::Created(_)) {
             self.config_name.clear();
         }
@@ -1232,6 +1272,8 @@ impl Shell {
         let mut profile = self.profile.clone();
         let _ = self.profiles.create(&name, &mut profile, true);
         self.profile = profile;
+        // The overwrite path stamps the name too; see [`Shell::configs_create`].
+        self.push_profile();
         self.config_name.clear();
         cx.notify();
     }
@@ -3158,6 +3200,10 @@ mod tests {
 
         let mut shell = Shell::new(Theme::slate());
         assert!(!shell.profile().fight_status_enabled);
+        assert!(
+            !shell.controller().config_payload().fight_status,
+            "the frame the link would send starts on the profile's default"
+        );
 
         assert!(
             shell.apply_control("FightStatusEnabled", ControlValue::Toggle(true)),
@@ -3173,6 +3219,202 @@ mod tests {
             shell.controller().config_payload().fight_status,
             "so the frame the reader sends carries it"
         );
+        assert!(
+            !shell.controller().store().is_connected(),
+            "with no reconnect: the payload moved on the controller the live link already reads"
+        );
+    }
+
+    /// Every bind the catalogue declares writes the controller's copy too.
+    ///
+    /// Push-on-change is the design, so its failure mode is a write site that forgets the push:
+    /// the value reaches the card and the saved file and not the wire, silently. This is the
+    /// net for that. It drives every bind in [`crate::views::bindings::all_binds`] through the
+    /// same `apply_control` a click goes through and asserts the copies agree after each one,
+    /// so a bind added to the catalogue later is covered by existing rather than by memory.
+    #[test]
+    fn every_catalog_bind_leaves_the_controllers_copy_equal() {
+        use crate::views::bindings::{self, ControlValue};
+
+        let mut shell = Shell::new(Theme::slate());
+        let binds = bindings::all_binds();
+        assert!(
+            binds.len() > 80,
+            "the catalogue is the net, so it has to be wide: {} binds",
+            binds.len()
+        );
+
+        let mut written = 0;
+        for bind in binds {
+            let Some(current) = bindings::snapshot(shell.profile()).get(bind).cloned() else {
+                continue;
+            };
+            // A different value of the same kind, so a field that clamps or refuses still
+            // exercises its path; whether it accepted is not what is asserted here.
+            let changed = match current {
+                ControlValue::Toggle(on) => ControlValue::Toggle(!on),
+                ControlValue::Number(number) => ControlValue::Number(number + 1.0),
+                ControlValue::Index(index) => ControlValue::Index(index + 1),
+                ControlValue::Text(text) => ControlValue::Text(format!("{text}x")),
+            };
+            let before = shell.profile().clone();
+            shell.apply_control(bind, changed);
+            assert_eq!(
+                *shell.profile(),
+                shell.controller().profile(),
+                "`{bind}` wrote the shell's copy and not the controller's"
+            );
+            if *shell.profile() != before {
+                written += 1;
+            }
+        }
+        assert!(
+            written > 20,
+            "the sweep has to write, not skip: {written} binds changed"
+        );
+    }
+
+    /// A captured key survives the Settings card's save and load, on both copies.
+    ///
+    /// The capture test below proves the key reaches the profile, the button and the saved
+    /// slot. This is the other direction: a load has to put it back, and the controller is the
+    /// copy the `config` frame reads, so a load that only fixed the UI would leave the bridge
+    /// running the previous key until the next restart.
+    #[gpui::test]
+    fn a_captured_key_survives_a_save_and_a_load(cx: &mut gpui::TestAppContext) {
+        use gpui::Keystroke;
+
+        let root = scratch_root();
+        let (shell, handle, mut visual) = shell_in_window(cx, &root);
+        let target = KeyTarget::Module("autoclicker");
+
+        press_autoclicker_keybind(&mut visual);
+        visual
+            .cx
+            .dispatch_keystroke(handle, Keystroke::parse("f1").expect("keystroke"));
+        cx.update(|cx| {
+            shell.update(cx, |shell, _cx| {
+                shell.save_config("RoundTrip").expect("named save")
+            });
+        });
+
+        // A second key, so the load has something to undo rather than nothing to do. The click
+        // path is proven above; what this test is about is the load, so the write can go
+        // straight to the profile's writer.
+        cx.update(|cx| {
+            shell.update(cx, |shell, cx| {
+                shell.apply_captured_key(KeyTarget::Module("autoclicker"), 0x71, cx)
+            });
+        });
+        assert_eq!(
+            cx.read(|cx| shell
+                .read(cx)
+                .profile()
+                .module_keys
+                .get("autoclicker")
+                .copied()),
+            Some(0x71),
+            "the second key took"
+        );
+
+        cx.update(|cx| {
+            shell.update(cx, |shell, _cx| {
+                shell.load_config("RoundTrip").expect("named load")
+            });
+        });
+
+        assert_eq!(
+            cx.read(|cx| shell
+                .read(cx)
+                .profile()
+                .module_keys
+                .get("autoclicker")
+                .copied()),
+            Some(0x70),
+            "the load put the saved key back"
+        );
+        assert_eq!(
+            cx.read(|cx| shell
+                .read(cx)
+                .controller()
+                .profile()
+                .module_keys
+                .get("autoclicker")
+                .copied()),
+            Some(0x70),
+            "and the controller's copy, which the config frame reads"
+        );
+        assert_eq!(
+            cx.read(|cx| shell
+                .read(cx)
+                .controller()
+                .config_payload()
+                .keybind_autoclicker),
+            0x70,
+            "so the frame carries the saved key after a load, with no reconnect"
+        );
+
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(
+            capture_label(&shell, cx, target),
+            "Bind: F1",
+            "the button follows the profile the load replaced"
+        );
+    }
+
+    /// Loading runs the load-time half of the action-bind rule: a module bind wins over a
+    /// dedicated action key that duplicates it, and a distinct key is left alone.
+    ///
+    /// `Profile::normalize_action_binds` had no caller in the app, so the rule only existed on
+    /// the managed side and in its own tests. Both load paths call it now, and the assertion
+    /// that matters is the controller's copy: a cleared key that stayed in the controller would
+    /// keep the duplicated bind on the wire.
+    #[test]
+    fn loading_clears_a_duplicated_action_bind_and_keeps_a_distinct_one() {
+        // The startup path: the saved slot is read into `with_loaded_profile`.
+        let mut colliding = aoko_protocol::profile::Profile::default();
+        colliding.module_keys.insert("autoclicker".to_owned(), 0x70);
+        colliding.auto_rod_action_key = 0x70;
+        let shell = Shell::with_profile(Theme::slate(), colliding);
+        assert_eq!(
+            shell.profile().auto_rod_action_key,
+            0,
+            "the module bind wins, as `Profile.cs:889-899` makes it win on apply"
+        );
+        assert_eq!(
+            shell.profile().module_keys.get("autoclicker").copied(),
+            Some(0x70),
+            "and the general bind is kept"
+        );
+        assert_eq!(
+            *shell.profile(),
+            shell.controller().profile(),
+            "the controller got the normalised copy, not the file's"
+        );
+
+        // The Settings card path: a distinct action bind is not a collision, so it survives.
+        let root = scratch_root();
+        let store = aoko_platform::ProfileStore::new(&root);
+        let mut distinct = aoko_protocol::profile::Profile::default();
+        distinct.module_keys.insert("autoclicker".to_owned(), 0x70);
+        distinct.auto_rod_action_key = 0x71;
+        store
+            .write_profile(
+                "Distinct",
+                &aoko_protocol::profile::to_profile_json(&distinct),
+            )
+            .expect("seed");
+
+        let mut shell = Shell::with_store(Theme::slate(), aoko_platform::ProfileStore::new(&root));
+        shell.load_config("Distinct").expect("named load");
+        assert_eq!(
+            shell.profile().auto_rod_action_key,
+            0x71,
+            "a distinct action bind survives a load unchanged"
+        );
+        assert_eq!(*shell.profile(), shell.controller().profile());
     }
 
     #[test]
@@ -4059,6 +4301,15 @@ mod tests {
                 .copied()),
             Some(0x70),
             "and the controller's copy, which the config frame fills `keybindAutoclicker` from"
+        );
+        assert_eq!(
+            cx.read(|cx| shell
+                .read(cx)
+                .controller()
+                .config_payload()
+                .keybind_autoclicker),
+            0x70,
+            "and the frame itself, so a captured key reaches the wire with no reconnect"
         );
 
         // The paint the write scheduled is what rebuilds the button.
