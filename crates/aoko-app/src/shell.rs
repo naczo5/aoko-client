@@ -445,6 +445,8 @@ impl Shell {
                 .unwrap_or_else(|_| PaletteStore::at(std::path::PathBuf::new())),
             color_fields: HashMap::new(),
             swatches: HashMap::new(),
+            // Closed: a picker exists only between a swatch press and the report that ends it.
+            picker: None,
             config_name: String::new(),
             open_configs_folder: false,
             // Under `cfg(test)` and `capture` nothing has changed the process gate, so
