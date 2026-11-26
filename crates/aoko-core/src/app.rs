@@ -176,7 +176,11 @@ impl UiSnapshot {
 /// The coordinator.
 #[derive(Debug)]
 pub struct AppController {
-    store: StateStore,
+    /// Held behind an `Arc` so [`AppController::store_handle`] can hand the ingest side
+    /// and the loops the same store. Every store method takes `&self` and its state is
+    /// atomics plus an `ArcSwapOption`, so sharing it changes no publish semantics: there
+    /// is still exactly one store and one writer at a time.
+    store: Arc<StateStore>,
     profile: RwLock<Profile>,
     modules: RwLock<Vec<EnabledFlag>>,
     capabilities: CapabilityReport,
@@ -188,7 +192,7 @@ impl AppController {
     #[must_use]
     pub fn new(capabilities: CapabilityReport) -> Self {
         Self {
-            store: StateStore::new(),
+            store: Arc::new(StateStore::new()),
             profile: RwLock::new(Profile::default()),
             modules: RwLock::new(Vec::new()),
             capabilities,
@@ -199,6 +203,18 @@ impl AppController {
     #[must_use]
     pub fn store(&self) -> &StateStore {
         &self.store
+    }
+
+    /// The same store, shared.
+    ///
+    /// For the consumers that outlive a borrow of the controller: the ingest worker
+    /// thread and the automation loops hold their own handle, so they read the store
+    /// without keeping the controller alive and without a second store that would
+    /// publish to nobody. It is the same allocation [`Self::store`] points at, not a
+    /// clone of the state.
+    #[must_use]
+    pub fn store_handle(&self) -> Arc<StateStore> {
+        Arc::clone(&self.store)
     }
 
     /// Capability report this controller was built with.
