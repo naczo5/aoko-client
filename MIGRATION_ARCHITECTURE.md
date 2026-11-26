@@ -197,6 +197,12 @@ Binding on every crate, measured in Phase 3.
 - Polling: adaptive backoff, cached PID metadata, no aggressive `/proc` sweeps when idle or unfocused.
 - Budgets: obey `docs/performance/STATE_FIELD_BUDGETS.md` and `docs/DEV_PERFORMANCE_AND_RELIABILITY_PLAN.md`; never request a state field nothing reads.
 
+Three clauses above are met in the steady state and not in every case. They are recorded here so the list is not read as a claim that all of it is finished; `docs/performance/rust-baseline.md` holds the measurements.
+
+- **`Inbound::State` still boxes `GameState`**, so every state frame pays exactly one state copy. Measured: 1 allocation for a partial frame, 7 allocations / 667 bytes for a fully populated one. Closing it means sharing the decoder's snapshot behind an `Arc`, which changes a public shape, so it is a Phase 4 candidate rather than done.
+- **A first-time GTB line still normalises through 19 allocations.** The steady state — a repeated action-bar line — is 0, which is what a per-tick budget can be held to. Closing the cold line means threading reusable scratch buffers through `extract_mask`, a redesign of code that is parity-tested against the C# original.
+- **`ensure_form_fields` clones the theme once per frame**, 1 allocation. Moving the clone inside its two creation branches lowers the measured Combat budget from 1006 to 1005. Left in place because the budget is an exact assertion and a number should move with a measurement, not with an intention.
+
 ## 7. GPUI pinning
 
 GPUI is consumed as a git dependency pinned to a single zed revision, not as a floating branch and not from crates.io.
