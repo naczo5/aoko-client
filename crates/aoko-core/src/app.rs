@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 
 use aoko_platform::{BridgeSupport, CapabilityReport, SessionKind, WindowInfo};
 use aoko_protocol::config_payload::ConfigPayload;
+use aoko_protocol::hud::HudLayout;
 use aoko_protocol::module_catalog::{self, EnabledFlag};
 use aoko_protocol::profile::Profile;
 use aoko_protocol::state::GameState;
@@ -339,7 +340,35 @@ impl AppController {
         }
     }
 
-    /// The `config` frame this host would send right now.
+    /// The `config` frame this host would send right now: the payload and the HUD layout it
+    /// carries.
+    ///
+    /// The frame is more than [`config_payload`](Self::config_payload) because the encoding
+    /// takes a `HudLayout`, and the layout lives on the profile as the managed JSON blob. This
+    /// is where `Profile::to_hud_layout` is applied, so a user who moved the HUD sends the
+    /// layout they moved instead of the canonical default. A profile with no stored
+    /// `hudLayout` — the default profile, and any profile older than the field — parses to
+    /// `HudLayout::new`, which is the managed `BuildDefaults`.
+    ///
+    /// One profile read covers both halves, so a settings change landing mid-send cannot pair
+    /// a new payload with the old layout.
+    ///
+    /// The parse is per call rather than cached: `Profile::to_hud_layout` rebuilds the blob as
+    /// `serde_json` values for `HudLayout::from_json`, which costs `1 + 5n` allocations for `n`
+    /// stored elements — 36 for a complete seven-element layout, none for the default. Because
+    /// [`ConfigFrame`] compares both halves, a sender that keeps the frame it sent pays that
+    /// once per tick and sees a HUD-only change; a sender that compares
+    /// [`config_payload`](Self::config_payload) pays nothing per tick and cannot see one.
+    #[must_use]
+    pub fn config_frame(&self) -> ConfigFrame {
+        let profile = self.profile.read();
+        ConfigFrame {
+            payload: Self::payload(&profile),
+            hud_layout: profile.to_hud_layout(),
+        }
+    }
+
+    /// The payload half of the `config` frame: everything but the HUD layout.
     ///
     /// The fields the profile owns are filled from live state: `fightStatus` from
     /// [`Profile::fight_status_enabled`], and every `keybind*` field from
@@ -351,15 +380,48 @@ impl AppController {
     /// All of it is one direction: the profile is the owner of the truth, this copies it out,
     /// and nothing writes a payload field back. A module the profile has no bind for sends
     /// `0`, which is the managed "unbound".
+    ///
+    /// A sender needs [`config_frame`](Self::config_frame), not this alone: the payload does
+    /// not carry the layout, and encoding it against a default layout is the defect that method
+    /// exists to close.
     #[must_use]
     pub fn config_payload(&self) -> ConfigPayload {
-        let profile = self.profile.read();
+        Self::payload(&self.profile.read())
+    }
+
+    /// The payload the profile produces.
+    ///
+    /// Shared by [`config_payload`](Self::config_payload) and
+    /// [`config_frame`](Self::config_frame) so the frame's two halves cannot drift apart.
+    fn payload(profile: &Profile) -> ConfigPayload {
         let mut payload = ConfigPayload {
             fight_status: profile.fight_status_enabled,
             ..ConfigPayload::default()
         };
         payload.fill_keybinds(|module| profile.module_keys.get(module).copied().unwrap_or(0));
         payload
+    }
+}
+
+/// One `config` frame: the payload the profile produces and the HUD layout it carries.
+///
+/// [`ConfigPayload`] holds no layout — [`ConfigPayload::to_line`] takes it as an argument — so
+/// a sender that keeps only the payload encodes the canonical HUD for a user who moved theirs.
+/// Keeping the halves together makes the frame the thing that is compared and sent, and
+/// `PartialEq` spans both, so moving a HUD element counts as a change.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConfigFrame {
+    /// The scalar half, exactly as [`AppController::config_payload`] returns it.
+    pub payload: ConfigPayload,
+    /// The layout parsed from the profile, as the frame carries it.
+    pub hud_layout: HudLayout,
+}
+
+impl ConfigFrame {
+    /// The frame as the single line the bridges parse.
+    #[must_use]
+    pub fn to_line(&self) -> String {
+        self.payload.to_line(&self.hud_layout)
     }
 }
 
@@ -389,7 +451,7 @@ mod tests {
     use crate::testing::VirtualClock;
     use aoko_platform::Rect;
     use aoko_platform::WindowHandle;
-    use aoko_protocol::hud::HudLayout;
+    use aoko_protocol::hud::{element_id, HudElementLayout};
 
     fn transport_only() -> CapabilityReport {
         CapabilityReport::transport_only(SessionKind::None)
@@ -688,6 +750,66 @@ mod tests {
                 "{module} must reach {key} as {code}"
             );
         }
+    }
+
+    /// The gap the app builder found: `to_line` takes a `HudLayout` and nothing converted
+    /// `Profile::hud_layout`, so a customised HUD shipped the canonical default.
+    #[test]
+    fn the_config_frame_carries_the_profile_hud_layout() {
+        let default_frame = AppController::default().config_frame();
+
+        // The default's module list sits at the top right, and a default profile — no stored
+        // blob — sends exactly that, which is the managed `BuildDefaults`.
+        assert!(default_frame
+            .to_line()
+            .contains("\"modulelist\":{\"x\":0.985,\"y\":0.02,\"scale\":1}"));
+        assert_eq!(
+            default_frame.hud_layout,
+            HudLayout::new(),
+            "a default profile must send the managed default layout"
+        );
+        assert_eq!(
+            default_frame.to_line(),
+            default_frame.payload.to_line(&HudLayout::new()),
+            "and encode it exactly as the default layout encodes"
+        );
+
+        // A customised one sends what the user set, not the default.
+        let app = AppController::default();
+        let mut layout = HudLayout::new();
+        layout.set(
+            element_id::MODULE_LIST,
+            HudElementLayout::new(0.25, 0.4, 1.5),
+        );
+        assert!(app.update_profile(|profile| {
+            profile.hud_layout = Some(Profile::hud_layout_map(&layout));
+            true
+        }));
+
+        let frame = app.config_frame();
+        assert_eq!(
+            frame.hud_layout, layout,
+            "the stored blob has to round-trip back to the layout the user set"
+        );
+        assert!(
+            frame
+                .to_line()
+                .contains("\"modulelist\":{\"x\":0.25,\"y\":0.4,\"scale\":1.5}"),
+            "the customised element has to reach the wire, not just the profile"
+        );
+        assert_ne!(
+            frame.to_line(),
+            default_frame.to_line(),
+            "a moved HUD must not encode to the default layout"
+        );
+
+        // The sender compares frames, so a HUD-only change has to read as one: the payload is
+        // identical here, and only the layout differs.
+        assert_eq!(frame.payload, default_frame.payload);
+        assert_ne!(
+            frame, default_frame,
+            "a moved HUD must reach the bridge even when the payload is unchanged"
+        );
     }
 
     #[test]
