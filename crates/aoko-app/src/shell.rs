@@ -41,8 +41,9 @@
 //!   built by a test or by the capture harness owns a headless runtime and never dials;
 //!   `Shell::runtime` hands the status to whoever draws it.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashMap};
+use std::hash::Hash;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use gpui::prelude::*;
@@ -82,6 +83,11 @@ pub struct Shell {
     profile: aoko_protocol::profile::Profile,
     /// Every profile-backed control value, by bind path, resolved once.
     values: BTreeMap<String, crate::views::bindings::ControlValue>,
+    /// The capture button behind every keybind and action bind, keyed by what it writes.
+    ///
+    /// An entity per button rather than a fresh one per frame: a capture holds focus and a
+    /// listening state across paints, so the button has to outlive the frame that drew it.
+    captures: HashMap<KeyTarget, HeldCapture>,
     search: CommandSearchState,
     accounts: AccountsState,
     servers: ServersState,
@@ -294,6 +300,7 @@ impl Shell {
             draft: BTreeMap::new(),
             profile: aoko_protocol::profile::Profile::default(),
             values: BTreeMap::new(),
+            captures: HashMap::new(),
             search: CommandSearchState::new(),
             accounts: AccountsState::new(),
             servers: ServersState::new(),
@@ -631,10 +638,134 @@ impl Shell {
 
     /// The saved virtual key for one module, or `0` when the profile has none.
     ///
-    /// The render path asks for this rather than for the formatted label: the label is a
-    /// pure function of the key, so [`crate::reuse::by_number`] can memoise it.
+    /// The render path asks for this rather than for the formatted label: a capture button is
+    /// built once per key, so the label is a pure function of what this returns.
     fn module_key(&self, module: &'static str) -> i32 {
         self.profile.module_keys.get(module).copied().unwrap_or(0)
+    }
+
+    // ---- keybind capture -------------------------------------------------------------
+
+    /// Creates the capture button for every binding, and rebuilds any whose label no longer
+    /// matches the profile.
+    ///
+    /// Called from `render` before the tree is assembled, which is where
+    /// [`Shell::ensure_form_fields`] creates its entities too: an entity needs a context and
+    /// [`Shell::new`] has none. One pass over 40 targets whose only work is a key comparison,
+    /// so a frame that changed nothing builds nothing.
+    ///
+    /// The rebuild is deliberately not done from inside a capture's own callback — that would
+    /// drop the entity from within its update. The callback writes the profile and notifies;
+    /// the next paint sees the mismatch and replaces the button, so the label on screen is
+    /// always the label of the key the profile holds.
+    fn sync_keybind_captures(&mut self, cx: &mut Context<Self>) {
+        for &target in key_targets() {
+            self.ensure_capture(target, cx);
+        }
+    }
+
+    /// One capture button, built or rebuilt from the profile's current key.
+    fn ensure_capture(&mut self, target: KeyTarget, cx: &mut Context<Self>) {
+        let vk = self.capture_key(target);
+        if self.captures.get(&target).is_some_and(|held| held.vk == vk) {
+            return;
+        }
+
+        let theme = self.theme.clone();
+        let handle = cx.entity().downgrade();
+        let (name, width, rest, pending) = match target {
+            KeyTarget::Module(module) => (
+                SharedString::from(format!("capture-keybind-{module}")),
+                KEYBIND_WIDTH,
+                SharedString::from(keybind_label(&self.profile, module)),
+                SharedString::from(KEYBIND_PENDING),
+            ),
+            KeyTarget::Action(which) => (
+                SharedString::from(format!("capture-action-{}", which.id())),
+                ACTION_BIND_WIDTH,
+                SharedString::from(action_bind_label(&self.profile, which)),
+                SharedString::from(ACTION_BIND_PENDING),
+            ),
+        };
+
+        let capture = cx.new(move |cx| {
+            components::KeybindCapture::new(cx, theme, name, width, rest, pending).on_capture(
+                move |result, _window, cx| {
+                    // `Abandoned` is the one outcome with nothing to store: a capture that
+                    // lost focus leaves the profile exactly as it was. `Key(0)` is Escape,
+                    // which is a value — the managed unbind — and does get written.
+                    let Some(vk) = result.virtual_key() else {
+                        return;
+                    };
+                    if let Some(shell) = handle.upgrade() {
+                        shell.update(cx, |shell, cx| shell.apply_captured_key(target, vk, cx));
+                    }
+                },
+            )
+        });
+
+        self.captures.insert(target, HeldCapture { vk, capture });
+    }
+
+    /// The profile's key for one binding, `0` when it has none.
+    ///
+    /// The same read [`crate::views::keybind_text`] formats: an absent `module_keys` entry is
+    /// `0`, which is the managed `GetModuleKey` and reads as `Unbound`.
+    fn capture_key(&self, target: KeyTarget) -> i32 {
+        match target {
+            KeyTarget::Module(module) => self.module_key(module),
+            KeyTarget::Action(copy::ActionBind::AutoRod) => self.profile.auto_rod_action_key,
+            KeyTarget::Action(copy::ActionBind::Throwpot) => self.profile.throwpot_action_key,
+        }
+    }
+
+    /// Writes one captured key into the profile.
+    ///
+    /// The profile is the single owner: this is the same copy [`crate::views::bindings`]'
+    /// controls write and [`Shell::save_profile`] persists, and there is no pending-key field
+    /// beside it. A module key lands in `module_keys` (a map, so the entry is created here)
+    /// and an action bind in its own field.
+    ///
+    /// Escape arrives as `0`, which is the managed unbind, and a stored `0` reads `Unbound` —
+    /// so an escape is persisted rather than treated as a cancel. The managed capture also
+    /// refuses a key another bind already holds (`InputHooks.SetModuleKey`,
+    /// `SetAutoRodActionKey`, `SetThrowpotActionKey`) with a status line; that refusal is not
+    /// ported here, and `Profile::normalize_action_binds` is the load-time half of the rule.
+    fn apply_captured_key(&mut self, target: KeyTarget, vk: i32, cx: &mut Context<Self>) {
+        match target {
+            KeyTarget::Module(module) => {
+                self.profile.module_keys.insert(module.to_owned(), vk);
+            }
+            KeyTarget::Action(copy::ActionBind::AutoRod) => {
+                self.profile.auto_rod_action_key = vk;
+            }
+            KeyTarget::Action(copy::ActionBind::Throwpot) => {
+                self.profile.throwpot_action_key = vk;
+            }
+        }
+        // What rebuilds the label: the next paint sees a key that no longer matches the one
+        // the button was built from. See `sync_keybind_captures`.
+        cx.notify();
+    }
+
+    /// The capture button for one binding, as the tree paints it.
+    ///
+    /// [`Shell::sync_keybind_captures`] built it earlier in the same `render`, so the lookup
+    /// cannot miss; an empty element is the defensive answer rather than a panic in a paint.
+    fn render_capture(&self, target: KeyTarget) -> AnyElement {
+        match self.captures.get(&target) {
+            Some(held) => held.capture.clone().into_any_element(),
+            None => div().into_any_element(),
+        }
+    }
+
+    /// The capture button a binding renders, for the tests that read the label it paints.
+    ///
+    /// GPUI has no text readback, so the label assertion goes through the entity the button
+    /// draws rather than through painted glyphs.
+    #[cfg(test)]
+    fn capture_entity(&self, target: KeyTarget) -> Option<Entity<components::KeybindCapture>> {
+        self.captures.get(&target).map(|held| held.capture.clone())
     }
 
     /// Shows one tab by index; out of range is ignored.
@@ -1411,6 +1542,10 @@ impl Render for Shell {
         // without every mutator remembering to push it.
         self.ensure_form_fields(cx);
         self.sync_form_fields(window, cx);
+        // One capture button per keybind and action bind, built before the tree is assembled:
+        // a capture holds focus across frames, so its entity outlives the paint that drew it,
+        // and this is also where a profile that changed rebuilds one.
+        self.sync_keybind_captures(cx);
 
         // The GTB helper is polled here because this is the only per-frame hook the shell
         // has: the runtime decides whether there is work (module on, link live, frame fresh,
@@ -1787,18 +1922,16 @@ impl Shell {
         if let Some(module) = card_module(card) {
             // `DockPanel` docks the button right and gives it `Width="140"`
             // (`MainWindow.xaml:359`); the row's 8 px gap is that button's
-            // `Margin="8,0,0,0"`. `button_sized` sets the width on the button itself, as
-            // WPF's `Width` does, so the fill is 140 px rather than the label's width.
+            // `Margin="8,0,0,0"`. The capture's own box sets 140, as WPF's `Width` does, so
+            // the fill is 140 px rather than the label's width.
             let mut slot = div().ml_auto();
             if let Some(selector) = keybind_debug_selector(card.id) {
                 slot = slot.debug_selector(move || selector.to_owned());
             }
-            row = row.child(slot.child(keybind_button(
-                card.id,
-                self.module_key(module),
-                theme,
-                entity,
-            )));
+            // The slot stays the shell's so the 140 px geometry test keeps a stable
+            // selector; the button inside it is the capture, which is what makes a press
+            // start listening (`KeybindButton_Click`, `MainWindow.xaml.cs:1943-1952`).
+            row = row.child(slot.child(self.render_capture(KeyTarget::Module(module))));
         }
 
         row.into_any_element()
@@ -2238,9 +2371,10 @@ impl Shell {
                 column.into_any_element()
             }
 
-            Control::Keybind { module } => {
-                keybind_button(card.id, self.module_key(module), theme, entity)
-            }
+            // The header arm paints this control on every card that has one
+            // (`control_is_header`), so this is the same capture, reached by the same
+            // target rather than by a second button.
+            Control::Keybind { module } => self.render_capture(KeyTarget::Module(*module)),
 
             Control::Button { label, tooltip } => {
                 // The configs card's buttons are real actions: Load and Save
@@ -2282,9 +2416,9 @@ impl Shell {
                 }
             }
 
-            // **Inert in Phase 2** (decision 7 debt), same reason as the keybind buttons:
-            // `AutoRodActionBindButton_Click` (`MainWindow.xaml.cs:1954-1963`) starts the
-            // key capture, and there is no capture surface to start.
+            // `AutoRodActionBindButton_Click` / `ThrowpotActionBindButton_Click`
+            // (`MainWindow.xaml.cs:1954-1963`) start the same one-key capture the header
+            // buttons do, and so does this arm: the target is the action field, not a card.
             //
             // Both buttons are `Style="{StaticResource DarkButton}"
             // HorizontalAlignment="Left" Width="210" Margin="0,10,0,0"`
@@ -2301,21 +2435,8 @@ impl Shell {
                 if let Some(selector) = action_bind_debug_selector(card.id, *which) {
                     slot = slot.debug_selector(move || selector.to_owned());
                 }
-                slot.child(components::button_sized(
-                    crate::reuse::stitched(card.id, "-", which.id()),
-                    theme,
-                    ButtonVariant::Dark,
-                    // The label is a function of the saved key, nothing else, so it is
-                    // memoised by that key instead of formatted per frame.
-                    crate::reuse::by_number(
-                        "action-label",
-                        action_vk(&self.profile, *which),
-                        || action_bind_label(&self.profile, *which),
-                    ),
-                    210.0,
-                    |_, _, _| {},
-                ))
-                .into_any_element()
+                slot.child(self.render_capture(KeyTarget::Action(*which)))
+                    .into_any_element()
             }
 
             Control::Availability { text, bind } => div()
@@ -2589,48 +2710,72 @@ fn control_is_header(control: &Control, header: Option<copy::CardHeader>) -> boo
     }
 }
 
-/// The 140-wide keybind button the managed header docks right.
+/// The header keybind button's `Width="140"` (`MainWindow.xaml:359`).
+const KEYBIND_WIDTH: f32 = 140.0;
+
+/// The action-bind buttons' `Width="210"` (`MainWindow.xaml:525`, `:542`).
+const ACTION_BIND_WIDTH: f32 = 210.0;
+
+/// The managed pending-capture copy for a module key.
 ///
-/// **Inert in Phase 2** (section 12 decision 7 debt). `KeybindButton_Click`
-/// (`MainWindow.xaml.cs:1943-1952`) starts the global key capture; this crate has no
-/// capture surface yet, so the handler is a documented no-op rather than a second capture
-/// path, and the button keeps the managed copy so a reader can see it is the same control.
-fn keybind_button(
-    card_id: &'static str,
+/// `SetKeybindButtonContent` (`MainWindow.xaml.cs:2143-2156`) swaps it in while the button
+/// listens, which is the label [`components::KeybindCapture`] reads while capturing. The two
+/// rest labels come from [`crate::views::keybind_text`]; these two live here because
+/// `views/copy.rs` carries no constant for them and `views/` is not this slice's to edit.
+const KEYBIND_PENDING: &str = "Bind: [Press key or mouse...]";
+
+/// The same copy for an action bind (`MainWindow.xaml.cs:2135-2140`).
+const ACTION_BIND_PENDING: &str = "Action: [Press key or mouse...]";
+
+/// One capturable binding: a card header's module key, or one of the two action binds.
+///
+/// A target names a field; it never holds the key. [`Shell::capture_key`] reads the profile,
+/// so there is no second copy of the value to fall out of step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyTarget {
+    /// `Profile::module_keys` under this catalogue id, from `Control::Keybind`.
+    Module(&'static str),
+    /// `Profile::auto_rod_action_key` or `Profile::throwpot_action_key`.
+    Action(copy::ActionBind),
+}
+
+impl Hash for KeyTarget {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // `ActionBind` derives no `Hash` and `views/copy.rs` is not this slice's to edit;
+        // its `id()` is injective, so the variant plus that name is the whole key.
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Self::Module(module) => module.hash(state),
+            Self::Action(which) => which.id().hash(state),
+        }
+    }
+}
+
+/// A capture button together with the key its label was built from.
+struct HeldCapture {
+    /// The virtual key the label was built from.
+    ///
+    /// A cache, not a copy of the value: [`Shell::profile`] owns the number, and a mismatch
+    /// here is what rebuilds the button so its label follows the profile.
     vk: i32,
-    theme: &Theme,
-    _entity: &Entity<Shell>,
-) -> AnyElement {
-    components::button::button_sized(
-        crate::reuse::stitched(card_id, "-keybind", ""),
-        theme,
-        ButtonVariant::Secondary,
-        // `Bind: {key}` depends on the saved key and nothing else, so it is memoised by
-        // the key. Formatting it here allocated a `String` per keybind button per frame.
-        crate::reuse::by_number("keybind-label", action_vk_of(vk), || {
-            crate::views::keybind_text::button_label(vk)
-        }),
-        140.0,
-        |_, _, _| {},
-    )
-    .into_any_element()
+    capture: Entity<components::KeybindCapture>,
 }
 
-/// A virtual key as the unsigned key [`crate::reuse::by_number`] memoises on.
-fn action_vk_of(vk: i32) -> u64 {
-    u64::from(vk as u32)
-}
-
-/// The saved action key for one action-bind button.
-fn action_vk(
-    profile: &aoko_protocol::profile::Profile,
-    which: crate::views::copy::ActionBind,
-) -> u64 {
-    let vk = match which {
-        crate::views::copy::ActionBind::AutoRod => profile.auto_rod_action_key,
-        crate::views::copy::ActionBind::Throwpot => profile.throwpot_action_key,
-    };
-    action_vk_of(vk)
+/// Every capturable binding in the table: one per keybind control, then the two actions.
+///
+/// Built once. The table is `'static`, so the list is too, and the per-frame work is one key
+/// comparison per button rather than a walk of every card's controls.
+fn key_targets() -> &'static [KeyTarget] {
+    static TARGETS: OnceLock<Vec<KeyTarget>> = OnceLock::new();
+    TARGETS.get_or_init(|| {
+        let mut targets: Vec<KeyTarget> = copy::all_cards()
+            .filter_map(|card| card_module(card))
+            .map(KeyTarget::Module)
+            .collect();
+        targets.push(KeyTarget::Action(copy::ActionBind::AutoRod));
+        targets.push(KeyTarget::Action(copy::ActionBind::Throwpot));
+        targets
+    })
 }
 
 /// The catalogue module a card's keybind button names.
@@ -2659,8 +2804,8 @@ fn module_for_bind(bind: &'static str) -> Option<&'static str> {
 /// ``Action: {FormatVirtualKey(InputHooks.AutoRodActionKey)}`` from
 /// `Profile::auto_rod_action_key` / `Profile::throwpot_action_key`, so the button follows
 /// the saved key the same way the keybind button follows `Profile::module_keys`. The
-/// pending-capture branch (`Action: [Press key or mouse...]`) needs the capture surface
-/// this phase does not have.
+/// pending-capture branch is [`ACTION_BIND_PENDING`], which the capture reads while it
+/// listens.
 fn action_bind_label(
     profile: &aoko_protocol::profile::Profile,
     which: crate::views::copy::ActionBind,
@@ -2672,7 +2817,7 @@ fn action_bind_label(
     crate::views::keybind_text::action_label(vk)
 }
 
-/// The keybind button's rest label for a whole profile.
+/// A module keybind button's rest label for a whole profile.
 ///
 /// The XAML button has no `Content` (`MainWindow.xaml:359`): every label comes from
 /// `SetKeybindButtonContent` (`MainWindow.xaml.cs:2143-2156`), which composes
@@ -2681,10 +2826,8 @@ fn action_bind_label(
 /// `Bind: Unbound`. See [`crate::views::keybind_text`] for the format and the one
 /// branch (`Key` enum names) that is not ported.
 ///
-/// Test-only: `render` goes through [`Shell::module_key`] and
-/// [`crate::reuse::by_number`] so the label is built once per key rather than once per
-/// frame, and this is the same composition written out for the tests that pin it.
-#[cfg(test)]
+/// [`Shell::ensure_capture`] builds a capture's label with this and the tests pin the same
+/// function, so what a button paints and what a test expects cannot drift apart.
 fn keybind_label(profile: &aoko_protocol::profile::Profile, module: &'static str) -> String {
     let vk = profile.module_keys.get(module).copied().unwrap_or(0);
     crate::views::keybind_text::button_label(vk)
@@ -3737,6 +3880,302 @@ mod tests {
             action_bind_label(&profile, copy::ActionBind::Throwpot),
             "Action: Unbound",
             "and the other action keeps its own key"
+        );
+    }
+
+    // ---- keybind capture -------------------------------------------------------------
+
+    /// The label a capture button paints, read from the entity the button draws.
+    ///
+    /// GPUI exposes no text readback, so this is the string the button would paint — the same
+    /// choice `StatsTexts` makes for the Stats view. A missing entity is a failure, not a
+    /// skip: it means the render built no button for that binding.
+    fn capture_label(
+        shell: &Entity<Shell>,
+        cx: &mut gpui::TestAppContext,
+        target: KeyTarget,
+    ) -> String {
+        cx.read(|cx| {
+            shell
+                .read(cx)
+                .capture_entity(target)
+                .expect("the render built a capture for this binding")
+                .read(cx)
+                .label()
+                .to_string()
+        })
+    }
+
+    /// A shell with a store under `root`, on a window, painted once.
+    ///
+    /// The three capture tests need the same four things: a store so a save can be read back,
+    /// an entity so the app can be read from a test, a window so a click and a keystroke have
+    /// somewhere to land, and one paint so the buttons exist.
+    fn shell_in_window(
+        cx: &mut gpui::TestAppContext,
+        root: &std::path::Path,
+    ) -> (
+        Entity<Shell>,
+        gpui::AnyWindowHandle,
+        gpui::VisualTestContext,
+    ) {
+        use gpui::WindowOptions;
+
+        let shell = cx.update(|cx| {
+            cx.new(|_| Shell::with_store(Theme::slate(), aoko_platform::ProfileStore::new(root)))
+        });
+        let window = cx.update(|cx| {
+            cx.open_window(WindowOptions::default(), |_, _| shell.clone())
+                .expect("test window")
+        });
+        let handle: gpui::AnyWindowHandle = window.into();
+        let mut visual = gpui::VisualTestContext::from_window(handle, cx);
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        (shell, handle, visual)
+    }
+
+    /// Presses the AutoClicker card's keybind button, which is what starts a capture.
+    fn press_autoclicker_keybind(visual: &mut gpui::VisualTestContext) {
+        use gpui::Modifiers;
+
+        let bounds = visual
+            .debug_bounds("keybind-AutoClickerCard")
+            .expect("the header's keybind button is painted");
+        visual.simulate_click(bounds.center(), Modifiers::default());
+    }
+
+    /// A key captured on a keybind button lands in the profile, on the button, and on disk.
+    ///
+    /// The press and the keystroke are the real ones — a click on the button the tree painted,
+    /// then `dispatch_keystroke` to the window the capture focused — so nothing here calls
+    /// `apply_captured_key` directly. The label is read after the repaint the write schedules,
+    /// because that repaint is what rebuilds the button.
+    #[gpui::test]
+    fn a_captured_key_reaches_the_profile_the_button_and_the_saved_file(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::Keystroke;
+
+        let root = scratch_root();
+        let (shell, handle, mut visual) = shell_in_window(cx, &root);
+        let target = KeyTarget::Module("autoclicker");
+
+        assert_eq!(
+            capture_label(&shell, cx, target),
+            "Bind: Unbound",
+            "an untouched profile binds nothing"
+        );
+
+        press_autoclicker_keybind(&mut visual);
+        let keystroke = Keystroke::parse("f1").expect("keystroke");
+        visual.cx.dispatch_keystroke(handle, keystroke);
+
+        assert_eq!(
+            cx.read(|cx| shell
+                .read(cx)
+                .profile()
+                .module_keys
+                .get("autoclicker")
+                .copied()),
+            Some(0x70),
+            "the capture wrote the module key through the profile"
+        );
+
+        // The paint the write scheduled is what rebuilds the button.
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(
+            capture_label(&shell, cx, target),
+            "Bind: F1",
+            "the button follows the profile it just wrote"
+        );
+
+        cx.update(|cx| {
+            shell.update(cx, |shell, _cx| shell.save_profile().expect("save on exit"));
+        });
+
+        // A second shell over the same directory is the next launch.
+        let reloaded = Shell::with_store(Theme::slate(), aoko_platform::ProfileStore::new(&root));
+        assert_eq!(
+            reloaded.profile().module_keys.get("autoclicker").copied(),
+            Some(0x70),
+            "a reload of the saved slot carries the captured key"
+        );
+    }
+
+    /// Escape is the managed unbind, not a cancel: it writes `0` and the button reads Unbound.
+    ///
+    /// The profile starts bound at F7, so the assertion can tell "wrote 0" from "never wrote":
+    /// an absent entry and a stored zero both read Unbound, and only the stored zero proves the
+    /// escape was persisted.
+    #[gpui::test]
+    fn escape_writes_the_managed_unbind(cx: &mut gpui::TestAppContext) {
+        use gpui::Keystroke;
+
+        let mut profile = aoko_protocol::profile::Profile::default();
+        profile
+            .module_keys
+            .insert(String::from("autoclicker"), 0x76);
+        let shell = cx.update(|cx| cx.new(|_| Shell::with_profile(Theme::slate(), profile)));
+        let window = cx.update(|cx| {
+            cx.open_window(gpui::WindowOptions::default(), |_, _| shell.clone())
+                .expect("test window")
+        });
+        let handle: gpui::AnyWindowHandle = window.into();
+        let mut visual = gpui::VisualTestContext::from_window(handle, cx);
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let target = KeyTarget::Module("autoclicker");
+        assert_eq!(capture_label(&shell, cx, target), "Bind: F7");
+
+        press_autoclicker_keybind(&mut visual);
+        visual
+            .cx
+            .dispatch_keystroke(handle, Keystroke::parse("escape").expect("keystroke"));
+
+        assert_eq!(
+            cx.read(|cx| shell
+                .read(cx)
+                .profile()
+                .module_keys
+                .get("autoclicker")
+                .copied()),
+            Some(0),
+            "escape stores the managed `finalVk = 0` rather than leaving the key alone"
+        );
+
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(
+            capture_label(&shell, cx, target),
+            "Bind: Unbound",
+            "a stored zero is the unbound form"
+        );
+    }
+
+    /// A capture that loses focus writes nothing at all.
+    ///
+    /// `Captured::Abandoned` carries no virtual key, so the handler returns before it touches
+    /// the profile — the bound key and the label are exactly what they were.
+    #[gpui::test]
+    fn losing_focus_leaves_the_profile_alone(cx: &mut gpui::TestAppContext) {
+        let mut profile = aoko_protocol::profile::Profile::default();
+        profile
+            .module_keys
+            .insert(String::from("autoclicker"), 0x76);
+        let shell = cx.update(|cx| cx.new(|_| Shell::with_profile(Theme::slate(), profile)));
+
+        let window = cx.update(|cx| {
+            cx.open_window(gpui::WindowOptions::default(), |_, _| shell.clone())
+                .expect("test window")
+        });
+        let handle: gpui::AnyWindowHandle = window.into();
+        let mut visual = gpui::VisualTestContext::from_window(handle, cx);
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let target = KeyTarget::Module("autoclicker");
+        press_autoclicker_keybind(&mut visual);
+        let capturing = cx.read(|cx| {
+            shell
+                .read(cx)
+                .capture_entity(target)
+                .expect("a capture for the header")
+                .read(cx)
+                .is_capturing()
+        });
+        assert!(capturing, "the press started a capture");
+
+        visual.update(|window, cx| window.blur(cx));
+
+        assert_eq!(
+            cx.read(|cx| shell
+                .read(cx)
+                .profile()
+                .module_keys
+                .get("autoclicker")
+                .copied()),
+            Some(0x76),
+            "focus loss is not a key: the bound key is untouched"
+        );
+
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(
+            capture_label(&shell, cx, target),
+            "Bind: F7",
+            "and the button still shows the key the profile holds"
+        );
+    }
+
+    /// Every keybind and action-bind button is a capture, and the action binds write their
+    /// own fields.
+    ///
+    /// The count is the managed one: 38 `Control::Keybind` rows and the two action binds. The
+    /// write goes through the same entry point the widget's callback uses, so a target that
+    /// named the wrong field would fail here rather than in a screenshot.
+    #[gpui::test]
+    fn every_binding_gets_a_capture_and_the_actions_write_their_own_fields(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let modules = key_targets()
+            .iter()
+            .filter(|target| matches!(target, KeyTarget::Module(_)))
+            .count();
+        assert_eq!(modules, 38, "one per `Control::Keybind` row in the table");
+        assert_eq!(key_targets().len(), 40, "and the two action binds");
+
+        let root = scratch_root();
+        let (shell, _handle, mut visual) = shell_in_window(cx, &root);
+        for &target in key_targets() {
+            assert!(
+                cx.read(|cx| shell.read(cx).capture_entity(target).is_some()),
+                "the first paint built no capture for {target:?}"
+            );
+        }
+
+        cx.update(|cx| {
+            shell.update(cx, |shell, cx| {
+                shell.apply_captured_key(KeyTarget::Action(copy::ActionBind::Throwpot), 0x70, cx);
+            });
+        });
+
+        assert_eq!(
+            cx.read(|cx| shell.read(cx).profile().throwpot_action_key),
+            0x70,
+            "the throwpot bind writes its own field"
+        );
+        assert_eq!(
+            cx.read(|cx| shell.read(cx).profile().auto_rod_action_key),
+            0,
+            "and leaves the other action alone"
+        );
+        assert!(
+            cx.read(|cx| shell
+                .read(cx)
+                .profile()
+                .module_keys
+                .get("autoclicker")
+                .copied())
+                .is_none(),
+            "an action key never lands in `module_keys`"
+        );
+
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(
+            capture_label(&shell, cx, KeyTarget::Action(copy::ActionBind::Throwpot)),
+            "Action: F1",
+            "the action button follows the field it wrote"
         );
     }
 
