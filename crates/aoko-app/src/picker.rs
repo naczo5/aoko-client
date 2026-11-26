@@ -56,7 +56,7 @@ pub const HUE_THUMB: f32 = 4.0;
 /// caller can write its own state and repaint.
 ///
 /// The three callbacks are named rather than written out at each binding: the same shapes
-/// appear in [`crate::components::slider`] and the colour dialog, and a reader comparing
+/// appear in [`mod@crate::components::slider`] and the colour dialog, and a reader comparing
 /// them should see three documented types instead of a repeated `Rc<dyn Fn(..)>`.
 pub type DragCallback = dyn Fn(f32, f32, &mut Window, &mut App);
 
