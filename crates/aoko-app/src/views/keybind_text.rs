@@ -16,9 +16,14 @@
 //! check against, and a remembered name would be a wrong label. A vk outside the explicit
 //! branches formats as its decimal value here, which is what .NET prints for an unnamed
 //! enum member, and the difference for *named* members is recorded as a gap rather than
-//! guessed. Nothing writes a key yet either: [`crate::components::keybind_capture`] exists,
-//! but no surface mounts it until the shell wires it, so every module key in every profile
-//! is still absent and every button reads `Bind: Unbound`.
+//! guessed. A key is written by `Shell::apply_captured_key`, from what
+//! [`crate::components::keybind_capture`] reports: a captured virtual key lands in
+//! `Profile::module_keys` for the 38 module buttons, and in `Profile::auto_rod_action_key` /
+//! `throwpot_action_key` for the two action binds. Escape arrives as `0` — the managed
+//! unbind, `MainWindow.xaml.cs:2042` — and is stored, which is why a cleared binding reads
+//! `Bind: Unbound` rather than reverting to its old key. A capture that loses focus reports
+//! [`Captured::Abandoned`](crate::components::keybind_capture::Captured::Abandoned) and
+//! writes nothing, so the label and the profile behind it cannot disagree.
 //!
 //! [`virtual_key`] is the inverse: the key name GPUI reports for a pressed key, mapped back
 //! to the Windows vk the profile stores. Its names are the ones the Linux backends produce

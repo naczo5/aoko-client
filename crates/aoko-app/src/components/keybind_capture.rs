@@ -35,12 +35,22 @@
 //!
 //! # Mounting
 //!
-//! Nothing in the shell mounts this yet (decision 7): the 38 keybind buttons and the two
-//! action binds still render their documented-inert handler. The call site is one line per
-//! button, in `Shell::render_card_header` / `render_control`'s `ActionBind` arm: build the
-//! entity with `KeybindCapture::new`, `.on_capture(...)` into the runtime's
-//! `set_module_enabled`-style write, and pass `.focus_handle()` where the shell currently
-//! draws `keybind_button`.
+//! Mounted, all 40. `Shell::sync_keybind_captures` builds one capture entity per binding
+//! before the tree is assembled, and `Shell::render_capture` paints it in the card header
+//! (`Shell::render_card_header`) and in both arms of `Shell::render_control` that carry a
+//! binding: `Control::Keybind` for the 38 module keys and `Control::ActionBind` for the two
+//! action rows. The width is the XAML's, 140 for a header and 210 for an action bind.
+//!
+//! What a capture writes is not this type's business: it hands a [`Captured`] to the
+//! caller's `on_capture` and keeps no key. `Shell::apply_captured_key` stores it on the
+//! profile — `Profile::module_keys` for a module, `auto_rod_action_key` /
+//! `throwpot_action_key` for an action bind — and `Shell::ensure_capture` rebuilds only the
+//! button whose key changed, so the label on screen follows the profile rather than a
+//! second copy of the number. `KeyTarget` names that field, which is what keeps the read
+//! and the write on the same one.
+//!
+//! The capture's own scope is one key: it never reads or writes the profile, never decides
+//! whether a key is free, and never keeps a key after the callback returns.
 
 use std::sync::Arc;
 

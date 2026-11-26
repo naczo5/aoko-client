@@ -1086,6 +1086,23 @@ pub const STATS_PEAK_PREFIX: &str = "Peak ";
 /// Suffix after the sample count in the histogram caption.
 pub const STATS_SAMPLES_SUFFIX: &str = " samples";
 
+// ── Keybind capture ────────────────────────────────────────────────────────
+
+/// What a module keybind button reads while it is capturing.
+///
+/// `SetKeybindButtonContent` (`Aoko/MainWindow.xaml.cs:2143-2156`) swaps it in for
+/// ``Bind: {FormatVirtualKey(InputHooks.GetModuleKey(module))}``; the rest-state half of the
+/// pair is [`crate::views::keybind_text::button_label`], which is where the managed rule
+/// lives. The button it labels is the 140 px header one (`MainWindow.xaml:359`).
+pub const KEYBIND_PENDING: &str = "Bind: [Press key or mouse...]";
+
+/// The same copy for an action bind (`MainWindow.xaml.cs:2135-2140`).
+///
+/// `Action: [Press key or mouse...]` is the pending half of
+/// [`crate::views::keybind_text::action_label`]; the button is the 210 px one
+/// (`MainWindow.xaml:525`, `:542`).
+pub const ACTION_BIND_PENDING: &str = "Action: [Press key or mouse...]";
+
 // ── The nine tabs ───────────────────────────────────────────────────────────────
 
 /// What a tab renders.
