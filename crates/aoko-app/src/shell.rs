@@ -88,6 +88,21 @@ pub struct Shell {
     /// An entity per button rather than a fresh one per frame: a capture holds focus and a
     /// listening state across paints, so the button has to outlive the frame that drew it.
     captures: HashMap<KeyTarget, HeldCapture>,
+    /// The line the keybind area shows after a refused module capture.
+    ///
+    /// The module rule is managed (`InputHooks.cs:124-134`), but where managed reports it is
+    /// not: it writes it into the Auto Rod row's status line (`MainWindow.xaml.cs:2071`), so a
+    /// module's conflict appears under a control it is not about. Here the line sits with the
+    /// keybind buttons, names both bindings, and is replaced by the next module capture's
+    /// outcome — a deliberate, user-visible deviation recorded in the trade-offs.
+    keybind_conflict: Option<SharedString>,
+    /// What each action row says about its last capture, indexed by [`status_slot`].
+    ///
+    /// `None` until that row has an outcome to report, and the explanatory sentence stays in
+    /// the card's `Note` either way. Managed replaces that sentence in place
+    /// (`MainWindow.xaml.cs:2049-2059`), which is the wart this avoids: nothing here is
+    /// overwritten, so the copy comes back by the line being dropped.
+    action_status: [Option<SharedString>; 2],
     search: CommandSearchState,
     accounts: AccountsState,
     servers: ServersState,
@@ -306,6 +321,8 @@ impl Shell {
             profile: aoko_protocol::profile::Profile::default(),
             values: BTreeMap::new(),
             captures: HashMap::new(),
+            keybind_conflict: None,
+            action_status: [None, None],
             search: CommandSearchState::new(),
             accounts: AccountsState::new(),
             servers: ServersState::new(),
@@ -707,13 +724,13 @@ impl Shell {
                 SharedString::from(format!("capture-keybind-{module}")),
                 KEYBIND_WIDTH,
                 SharedString::from(keybind_label(&self.profile, module)),
-                SharedString::from(KEYBIND_PENDING),
+                SharedString::from(copy::KEYBIND_PENDING),
             ),
             KeyTarget::Action(which) => (
                 SharedString::from(format!("capture-action-{}", which.id())),
                 ACTION_BIND_WIDTH,
                 SharedString::from(action_bind_label(&self.profile, which)),
-                SharedString::from(ACTION_BIND_PENDING),
+                SharedString::from(copy::ACTION_BIND_PENDING),
             ),
         };
 
@@ -721,9 +738,14 @@ impl Shell {
             components::KeybindCapture::new(cx, theme, name, width, rest, pending).on_capture(
                 move |result, _window, cx| {
                     // `Abandoned` is the one outcome with nothing to store: a capture that
-                    // lost focus leaves the profile exactly as it was. `Key(0)` is Escape,
-                    // which is a value — the managed unbind — and does get written.
+                    // lost focus leaves the profile exactly as it was, and it also takes the
+                    // last outcome's line away, because that line no longer describes what
+                    // just happened. `Key(0)` is Escape, which is a value — the managed
+                    // unbind — and does get written.
                     let Some(vk) = result.virtual_key() else {
+                        if let Some(shell) = handle.upgrade() {
+                            shell.update(cx, |shell, cx| shell.clear_capture_status(target, cx));
+                        }
                         return;
                     };
                     if let Some(shell) = handle.upgrade() {
@@ -748,7 +770,7 @@ impl Shell {
         }
     }
 
-    /// Writes one captured key into the profile.
+    /// Writes one captured key into the profile, or refuses it and says why.
     ///
     /// The profile is the single owner: this is the same copy [`crate::views::bindings`]'
     /// controls write and [`Shell::save_profile`] persists, and there is no pending-key field
@@ -756,28 +778,86 @@ impl Shell {
     /// and an action bind in its own field.
     ///
     /// Escape arrives as `0`, which is the managed unbind, and a stored `0` reads `Unbound` —
-    /// so an escape is persisted rather than treated as a cancel. The managed capture also
-    /// refuses a key another bind already holds (`InputHooks.SetModuleKey`,
-    /// `SetAutoRodActionKey`, `SetThrowpotActionKey`) with a status line; that refusal is not
-    /// ported here, and `Profile::normalize_action_binds` is the load-time half of the rule.
+    /// so an escape is persisted rather than treated as a cancel. A key another binding
+    /// already holds is refused before the profile is touched, which is
+    /// [`InputHooks.SetModuleKey`] and `SetAutoRodActionKey`/`SetThrowpotActionKey`
+    /// (`InputHooks.cs:124-156`); [`keybind_holder`] is the whole rule, and
+    /// `Profile::normalize_action_binds` is the load-time half of it.
     fn apply_captured_key(&mut self, target: KeyTarget, vk: i32, cx: &mut Context<Self>) {
-        match target {
-            KeyTarget::Module(module) => {
-                self.profile.module_keys.insert(module.to_owned(), vk);
-            }
-            KeyTarget::Action(copy::ActionBind::AutoRod) => {
-                self.profile.auto_rod_action_key = vk;
-            }
-            KeyTarget::Action(copy::ActionBind::Throwpot) => {
-                self.profile.throwpot_action_key = vk;
+        // A module capture's outcome supersedes the line the previous one wrote, whatever it
+        // said, so a refusal cannot outlive the attempt that caused it.
+        if matches!(target, KeyTarget::Module(_)) {
+            self.keybind_conflict = None;
+        }
+
+        match keybind_holder(&self.profile, target, vk) {
+            Some(holder) => self.refuse_captured_key(target, holder, vk),
+            None => {
+                match target {
+                    KeyTarget::Module(module) => {
+                        self.profile.module_keys.insert(module.to_owned(), vk);
+                    }
+                    KeyTarget::Action(copy::ActionBind::AutoRod) => {
+                        self.profile.auto_rod_action_key = vk;
+                    }
+                    KeyTarget::Action(copy::ActionBind::Throwpot) => {
+                        self.profile.throwpot_action_key = vk;
+                    }
+                }
+                if let KeyTarget::Action(which) = target {
+                    self.action_status[status_slot(which)] =
+                        Some(SharedString::from(copy::ACTION_BIND_UPDATED));
+                }
+                // The keybinds are the case a user notices: the `config` frame carries every
+                // one of them, and the controller is the copy it is built from.
+                self.push_profile();
             }
         }
-        // The keybinds are the case a user notices: the `config` frame carries every one of
-        // them, and the controller is the copy it is built from.
-        self.push_profile();
+
         // What rebuilds the label: the next paint sees a key that no longer matches the one
         // the button was built from. See `sync_keybind_captures`.
         cx.notify();
+    }
+
+    /// Records a refusal on the status line that belongs to the binding that asked.
+    ///
+    /// A module's conflict reads in the keybind area and names both bindings; an action row's
+    /// reads under its own button, in the managed words. The profile is untouched either way,
+    /// which is what keeps a refused key out of the `config` frame.
+    fn refuse_captured_key(&mut self, target: KeyTarget, holder: KeybindHolder, vk: i32) {
+        match (target, holder) {
+            (KeyTarget::Module(module), KeybindHolder::Action(action)) => {
+                // Filled with `replace` rather than `format!`: the copy lives in `views/copy.rs`
+                // as data, and `format!` takes a literal format string.
+                let line = copy::MODULE_BIND_CONFLICT_NAMED
+                    .replace("{key}", &crate::views::keybind_text::format_virtual_key(vk))
+                    .replace("{holder}", action_bind_name(action))
+                    .replace("{requested}", module_label(module));
+                self.keybind_conflict = Some(SharedString::from(line));
+            }
+            (KeyTarget::Action(which), KeybindHolder::Module(_)) => {
+                self.action_status[status_slot(which)] =
+                    Some(SharedString::from(copy::ACTION_BIND_CONFLICT));
+            }
+            // The two kinds are disjoint by target: `keybind_holder` answers an action for a
+            // module and a module for an action, so this pair is unreachable.
+            (KeyTarget::Module(_), KeybindHolder::Module(_))
+            | (KeyTarget::Action(_), KeybindHolder::Action(_)) => {}
+        }
+    }
+
+    /// Drops the status line the binding's last capture wrote.
+    ///
+    /// A capture that loses focus stores nothing, so the outcome on the row is stale: taking
+    /// the line away is how the row reads the explanatory copy again.
+    fn clear_capture_status(&mut self, target: KeyTarget, cx: &mut Context<Self>) {
+        let cleared = match target {
+            KeyTarget::Module(_) => self.keybind_conflict.take().is_some(),
+            KeyTarget::Action(which) => self.action_status[status_slot(which)].take().is_some(),
+        };
+        if cleared {
+            cx.notify();
+        }
     }
 
     /// The capture button for one binding, as the tree paints it.
@@ -1894,6 +1974,21 @@ impl Shell {
             .p(px(12.0))
             .gap(px(12.0));
 
+        // The keybind area's one status line: a refused module capture names the key, the
+        // binding that holds it and the module that asked. Above the cards rather than in one
+        // of them, because the conflict is between a module bind and an action bind and
+        // managed's choice of the Auto Rod row puts it under a control it is not about.
+        if let Some(conflict) = &self.keybind_conflict {
+            body = body.child(
+                div()
+                    .id(SharedString::from("keybind-conflict"))
+                    .debug_selector(|| "keybind-conflict".to_owned())
+                    .text_size(px(metrics::text::CAPTION))
+                    .text_color(theme.dim_text)
+                    .child(conflict.clone()),
+            );
+        }
+
         for card in cards {
             body = body.child(self.render_card(card, theme, motion, entity));
         }
@@ -2513,8 +2608,26 @@ impl Shell {
                 if let Some(selector) = action_bind_debug_selector(card.id, *which) {
                     slot = slot.debug_selector(move || selector.to_owned());
                 }
-                slot.child(self.render_capture(KeyTarget::Action(*which)))
-                    .into_any_element()
+                let button = self.render_capture(KeyTarget::Action(*which));
+                // The row's own outcome, under its own button. A line of its own rather than a
+                // rewrite of the explanatory `Note` the card paints next, so the explanation is
+                // never lost: the line appears with an outcome and is dropped by the next.
+                slot = match &self.action_status[status_slot(*which)] {
+                    None => slot.child(button),
+                    Some(status) => {
+                        let id = format!("action-status-{}", which.id());
+                        let selector = id.clone();
+                        slot.flex().flex_col().gap(px(6.0)).child(button).child(
+                            div()
+                                .id(SharedString::from(id))
+                                .debug_selector(move || selector.clone())
+                                .text_size(px(metrics::text::CAPTION))
+                                .text_color(theme.dim_text)
+                                .child(status.clone()),
+                        )
+                    }
+                };
+                slot.into_any_element()
             }
 
             Control::Availability { text, bind } => div()
@@ -2794,17 +2907,6 @@ const KEYBIND_WIDTH: f32 = 140.0;
 /// The action-bind buttons' `Width="210"` (`MainWindow.xaml:525`, `:542`).
 const ACTION_BIND_WIDTH: f32 = 210.0;
 
-/// The managed pending-capture copy for a module key.
-///
-/// `SetKeybindButtonContent` (`MainWindow.xaml.cs:2143-2156`) swaps it in while the button
-/// listens, which is the label [`components::KeybindCapture`] reads while capturing. The two
-/// rest labels come from [`crate::views::keybind_text`]; these two live here because
-/// `views/copy.rs` carries no constant for them and `views/` is not this slice's to edit.
-const KEYBIND_PENDING: &str = "Bind: [Press key or mouse...]";
-
-/// The same copy for an action bind (`MainWindow.xaml.cs:2135-2140`).
-const ACTION_BIND_PENDING: &str = "Action: [Press key or mouse...]";
-
 /// One capturable binding: a card header's module key, or one of the two action binds.
 ///
 /// A target names a field; it never holds the key. [`Shell::capture_key`] reads the profile,
@@ -2864,6 +2966,85 @@ fn card_module(card: &Card) -> Option<&'static str> {
     })
 }
 
+/// The slot one action bind's status occupies in [`Shell::action_status`].
+///
+/// A two-element array rather than a map: `ActionBind` derives no `Hash` and `views/copy.rs`
+/// is not this slice's to edit, and a slot turns the read into an index.
+const fn status_slot(which: copy::ActionBind) -> usize {
+    match which {
+        copy::ActionBind::AutoRod => 0,
+        copy::ActionBind::Throwpot => 1,
+    }
+}
+
+/// What a refused capture collided with.
+enum KeybindHolder {
+    /// A module's general bind, by the catalogue id the profile stores.
+    Module(String),
+    /// One of the two action binds.
+    Action(copy::ActionBind),
+}
+
+/// Which binding already holds the key a capture asked for, or `None` when nothing does.
+///
+/// `InputHooks.cs:124-156`, verbatim: `SetModuleKey` refuses a key either action bind holds,
+/// `SetAutoRodActionKey` and `SetThrowpotActionKey` refuse a key any general module bind
+/// holds, and a key of `0` — Escape, the managed unbind — never conflicts, so unbinding always
+/// lands. The two directions are disjoint, which is why a holder names a module or an action
+/// and never both.
+fn keybind_holder(
+    profile: &aoko_protocol::profile::Profile,
+    target: KeyTarget,
+    vk: i32,
+) -> Option<KeybindHolder> {
+    if vk <= 0 {
+        return None;
+    }
+
+    match target {
+        KeyTarget::Module(_) => [
+            (copy::ActionBind::AutoRod, profile.auto_rod_action_key),
+            (copy::ActionBind::Throwpot, profile.throwpot_action_key),
+        ]
+        .into_iter()
+        .find(|(_, key)| *key == vk)
+        .map(|(which, _)| KeybindHolder::Action(which)),
+        KeyTarget::Action(_) => profile
+            .module_keys
+            .iter()
+            .find(|(_, key)| **key == vk)
+            .map(|(module, _)| KeybindHolder::Module(module.clone())),
+    }
+}
+
+/// The name a card's header paints, which is the label a conflict line has to read.
+fn header_label(card: &Card) -> Option<&'static str> {
+    match copy::card_header(card) {
+        Some(copy::CardHeader::Switch { label, .. } | copy::CardHeader::Text(label)) => Some(label),
+        None => None,
+    }
+}
+
+/// The name a module's card shows, so a conflict line and the header cannot disagree.
+fn module_label(module: &'static str) -> &'static str {
+    copy::all_cards()
+        .find(|card| card_module(card) == Some(module))
+        .and_then(header_label)
+        .unwrap_or(module)
+}
+
+/// The name an action bind's row shows (`Auto Rod`, `Throwpot`), read from its card.
+fn action_bind_name(which: copy::ActionBind) -> &'static str {
+    copy::all_cards()
+        .find(|card| {
+            card.controls.iter().any(
+                |control| matches!(control, Control::ActionBind { which: held } if *held == which),
+            )
+        })
+        .and_then(header_label)
+        .unwrap_or(which.id())
+}
+
 /// The module a switch's managed binding path belongs to.
 ///
 /// The search index already carries the pairing (`SearchEntry::toggle_property`),
@@ -2882,7 +3063,7 @@ fn module_for_bind(bind: &'static str) -> Option<&'static str> {
 /// ``Action: {FormatVirtualKey(InputHooks.AutoRodActionKey)}`` from
 /// `Profile::auto_rod_action_key` / `Profile::throwpot_action_key`, so the button follows
 /// the saved key the same way the keybind button follows `Profile::module_keys`. The
-/// pending-capture branch is [`ACTION_BIND_PENDING`], which the capture reads while it
+/// pending-capture branch is [`copy::ACTION_BIND_PENDING`], which the capture reads while it
 /// listens.
 fn action_bind_label(
     profile: &aoko_protocol::profile::Profile,
@@ -4411,6 +4592,14 @@ mod tests {
         });
 
         let target = KeyTarget::Module("autoclicker");
+        // A stale refusal line is showing before the capture starts; abandoning it takes the
+        // line away, so the area reads its own state rather than an outcome that no longer
+        // applies.
+        cx.update(|cx| {
+            shell.update(cx, |shell, _cx| {
+                shell.keybind_conflict = Some(SharedString::from("stale"));
+            })
+        });
         press_autoclicker_keybind(&mut visual);
         let capturing = cx.read(|cx| {
             shell
@@ -4442,6 +4631,186 @@ mod tests {
             capture_label(&shell, cx, target),
             "Bind: F7",
             "and the button still shows the key the profile holds"
+        );
+        assert!(
+            cx.read(|cx| shell.read(cx).keybind_conflict.is_none()),
+            "focus loss also drops the line the last refusal wrote"
+        );
+    }
+
+    /// A module bind refuses a key the action binds hold, and the line names both bindings.
+    ///
+    /// `InputHooks.SetModuleKey` (`InputHooks.cs:124-134`) refuses it. Where managed reports it
+    /// is the wart: it writes the reason into the Auto Rod row's status line
+    /// (`MainWindow.xaml.cs:2071`), which is a control the conflict is not about. Here the line
+    /// belongs to the keybind area and says which two bindings collided.
+    #[gpui::test]
+    fn a_module_bind_refuses_a_key_an_action_bind_holds(cx: &mut gpui::TestAppContext) {
+        let mut profile = aoko_protocol::profile::Profile::default();
+        profile.auto_rod_action_key = 0x70; // F1
+        let shell = cx.update(|cx| cx.new(|_| Shell::with_profile(Theme::slate(), profile)));
+
+        cx.update(|cx| {
+            shell.update(cx, |shell, cx| {
+                shell.apply_captured_key(KeyTarget::Module("autoclicker"), 0x70, cx)
+            });
+        });
+
+        let (module_key, line, row) = cx.read(|cx| {
+            let shell = shell.read(cx);
+            (
+                shell.module_key("autoclicker"),
+                shell.keybind_conflict.clone(),
+                shell.action_status[status_slot(copy::ActionBind::AutoRod)].clone(),
+            )
+        });
+        assert_eq!(module_key, 0, "the refused key is not stored");
+        assert!(
+            row.is_none(),
+            "and the Auto Rod row says nothing: the conflict is not its own"
+        );
+        let line = line.expect("the refusal left a line").to_string();
+        assert!(line.contains("F1"), "the line names the key: {line}");
+        assert!(
+            line.contains("Auto Rod"),
+            "and the action bind that holds it: {line}"
+        );
+        assert!(
+            line.contains("AutoClicker"),
+            "and the module that asked for it: {line}"
+        );
+    }
+
+    /// An action bind refuses a key a module holds, in the managed words, on its own row.
+    #[gpui::test]
+    fn an_action_bind_refuses_a_key_a_module_holds(cx: &mut gpui::TestAppContext) {
+        let mut profile = aoko_protocol::profile::Profile::default();
+        profile
+            .module_keys
+            .insert(String::from("autoclicker"), 0x70);
+        let shell = cx.update(|cx| cx.new(|_| Shell::with_profile(Theme::slate(), profile)));
+
+        cx.update(|cx| {
+            shell.update(cx, |shell, cx| {
+                shell.apply_captured_key(KeyTarget::Action(copy::ActionBind::Throwpot), 0x70, cx)
+            });
+        });
+
+        let (throwpot, status, conflict) = cx.read(|cx| {
+            let shell = shell.read(cx);
+            (
+                shell.profile().throwpot_action_key,
+                shell.action_status[status_slot(copy::ActionBind::Throwpot)].clone(),
+                shell.keybind_conflict.clone(),
+            )
+        });
+        assert_eq!(throwpot, 0, "the refused key is not stored");
+        assert_eq!(
+            status.expect("the row said why").to_string(),
+            copy::ACTION_BIND_CONFLICT,
+            "the managed line, under the button it is about"
+        );
+        assert!(
+            conflict.is_none(),
+            "an action row's refusal is not the keybind area's line"
+        );
+    }
+
+    /// A free key lands on an action row, which says so; Escape still unbinds.
+    ///
+    /// The managed accepted line is the row's, and the unbind is the case the refusal must
+    /// never catch: `0` is Escape, which `InputHooks` lets through for both bind kinds.
+    #[gpui::test]
+    fn an_accepted_action_bind_says_so_and_escape_still_unbinds(cx: &mut gpui::TestAppContext) {
+        let shell = cx.update(|cx| cx.new(|_| Shell::new(Theme::slate())));
+        let target = KeyTarget::Action(copy::ActionBind::AutoRod);
+
+        cx.update(|cx| {
+            shell.update(cx, |shell, cx| shell.apply_captured_key(target, 0x71, cx));
+        });
+        let (key, status, controller_key) = cx.read(|cx| {
+            let shell = shell.read(cx);
+            (
+                shell.profile().auto_rod_action_key,
+                shell.action_status[status_slot(copy::ActionBind::AutoRod)].clone(),
+                shell.controller().profile().auto_rod_action_key,
+            )
+        });
+        assert_eq!(key, 0x71, "the free key landed");
+        assert_eq!(
+            status.expect("the row said so").to_string(),
+            copy::ACTION_BIND_UPDATED
+        );
+        assert_eq!(
+            controller_key, 0x71,
+            "and reached the copy the config frame is built from"
+        );
+        assert_eq!(
+            cx.read(|cx| action_bind_label(shell.read(cx).profile(), copy::ActionBind::AutoRod)),
+            "Action: F2",
+            "the label follows the profile, which is the path it already read"
+        );
+
+        cx.update(|cx| {
+            shell.update(cx, |shell, cx| shell.apply_captured_key(target, 0, cx));
+        });
+        assert_eq!(
+            cx.read(|cx| shell.read(cx).profile().auto_rod_action_key),
+            0,
+            "Escape is a value the refusal does not catch"
+        );
+        assert_eq!(
+            cx.read(|cx| action_bind_label(shell.read(cx).profile(), copy::ActionBind::AutoRod)),
+            "Action: Unbound",
+            "and the label reads the unbound form"
+        );
+    }
+
+    /// Both status lines are painted, on the bindings they are about.
+    #[gpui::test]
+    fn the_refusal_lines_paint_on_the_bindings_they_are_about(cx: &mut gpui::TestAppContext) {
+        let root = scratch_root();
+        let (shell, _handle, mut visual) = shell_in_window(cx, &root);
+
+        cx.update(|cx| {
+            shell.update(cx, |shell, cx| {
+                shell.profile.auto_rod_action_key = 0x70;
+                shell.apply_captured_key(KeyTarget::Module("autoclicker"), 0x70, cx);
+            });
+        });
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let area = visual
+            .debug_bounds("keybind-conflict")
+            .expect("the keybind area paints the refusal line");
+        assert!(
+            f32::from(area.size.width) > 0.0,
+            "the line has width to paint"
+        );
+
+        // The Auto Rod row is on its own tab, and its line paints under its own button.
+        let tab = test_tab_of("AutoRodCard");
+        cx.update(|cx| shell.update(cx, |shell, cx| shell.select_tab_named(tab, cx)));
+        cx.update(|cx| {
+            shell.update(cx, |shell, cx| {
+                shell
+                    .profile
+                    .module_keys
+                    .insert(String::from("autoclicker"), 0x71);
+                shell.apply_captured_key(KeyTarget::Action(copy::ActionBind::AutoRod), 0x71, cx);
+            });
+        });
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        scroll_into_view(&mut visual, "action-bind-AutoRod");
+        let row = visual
+            .debug_bounds("action-status-AutoRod")
+            .expect("the row paints its own outcome");
+        assert!(
+            f32::from(row.size.height) > 0.0,
+            "the line has height to paint"
         );
     }
 
