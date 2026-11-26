@@ -40,6 +40,12 @@ thiserror = "2"
 # transitively (0.25.10 in Cargo.lock) so feature unification keeps one copy;
 # otherwise the returned type is not the type you can save.
 image = { version = "0.25", features = ["png"] }
+
+# The whole workspace logs through `tracing` but nothing installs a subscriber,
+# so every classification and `debug!` we produce lands nowhere. This is the
+# dependency that makes it visible; it returns to the manifest with the code that
+# consumes it, exactly as recorded when the unused declarations were removed.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing = "0.1"
 
 # Pre-declared so parallel crate owners never have to edit this file. A crate
