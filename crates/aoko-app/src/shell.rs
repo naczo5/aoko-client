@@ -35,6 +35,11 @@
 //!   exit), with `:946-970` for a named save. Decision 3's animation setting is
 //!   *not* in the profile: it lives in [`crate::views::prefs`], because `Profile` is
 //!   a bridge wire type.
+//! * **The bridge link.** [`crate::shell::Shell::from_system`] is the only place that
+//!   starts the reader (`crate::ingest::Ingest`), and it starts it on a worker thread,
+//!   so a missing bridge is a warning line rather than a stalled first frame. A shell
+//!   built by a test or by the capture harness owns a headless runtime and never dials;
+//!   `Shell::runtime` hands the status to whoever draws it.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -170,6 +175,9 @@ impl Shell {
     /// owns a [`Runtime::headless`] controller and the suite cannot depend on the
     /// machine. [`Shell::new`] needs no `Context` for either step: the controller is not
     /// an entity, so nothing here waits for `cx.new`.
+    ///
+    /// The bridge reader is started here too, and only here: it dials on its own thread,
+    /// so a bridge that is not running costs a `warn!` instead of a stalled first frame.
     #[must_use]
     pub fn from_system(theme: Theme) -> Self {
         let capabilities = aoko_platform::probe_capabilities();
@@ -184,6 +192,8 @@ impl Shell {
         // not look like it can reveal the folder.
         shell.open_configs_folder = capabilities.open_path;
         shell.runtime = Runtime::new(Arc::new(AppController::new(capabilities)));
+        // Nothing else connects the store to a bridge; see `crate::ingest`.
+        shell.runtime.connect_bridge();
         shell
     }
 
@@ -657,6 +667,15 @@ impl Shell {
     #[must_use]
     pub fn controller(&self) -> &Arc<AppController> {
         self.runtime.controller()
+    }
+
+    /// The runtime owner: the controller plus the bridge link behind it.
+    ///
+    /// A status line reads `runtime().ingest_status()` for connected, state age and
+    /// freshness; nothing in this view draws it yet.
+    #[must_use]
+    pub fn runtime(&self) -> &Runtime {
+        &self.runtime
     }
 
     /// A control value: the session override, else the profile, else `default`.

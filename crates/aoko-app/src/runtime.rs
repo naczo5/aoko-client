@@ -1,4 +1,5 @@
-//! The runtime owner: the one `AppController` the shell reads and writes.
+//! The runtime owner: the one `AppController` the shell reads and writes, plus the
+//! optional bridge reader that feeds it.
 //!
 //! Before this module, `aoko_core::app::AppController` had no reference outside
 //! `aoko-core`. The shell kept its own `ModuleToggles`, so every module switch wrote a
@@ -13,9 +14,12 @@
 //! `aoko-core`, but `aoko-app` constructs none: a grep for `ModuleToggles` in this crate
 //! finds no instance.
 //!
-//! Nothing here opens a socket, starts a thread or drives a loop. A switch flip is
-//! observable through the controller with no bridge present, which is the property the
-//! slice asked to be proved.
+//! The bridge link is the second half: `crate::runtime::Runtime::connect_bridge` hands the
+//! controller to a `crate::ingest::Ingest` worker, which decodes wire lines and publishes
+//! `GameState` into the store, and `crate::runtime::Runtime::ingest_status` reports what
+//! that store holds. Nothing dials by itself — the shipped path asks for it once, a
+//! test-built runtime never does — so a switch flip is still observable with no bridge
+//! present.
 //!
 //! Two constructors, deliberately:
 //!
@@ -32,24 +36,34 @@
 //! ```
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use aoko_core::app::AppController;
 use aoko_core::clicker::toggles;
 use aoko_protocol::module_catalog::{self, EnabledFlag};
 
+use crate::ingest::{Ingest, IngestStatus};
+
 /// The application's runtime state: the controller, plus the id mapping the switches
 /// need to reach it.
 pub struct Runtime {
     controller: Arc<AppController>,
+    /// The bridge reader, `None` until `connect_bridge` is called and on every
+    /// runtime a test builds.
+    ingest: Option<Ingest>,
 }
 
 impl Runtime {
     /// A runtime over a controller the caller built.
     ///
     /// This is the seam a test uses to hold the same controller the UI writes through.
+    /// It builds no bridge reader: `connect_bridge` is the only thing that dials.
     #[must_use]
     pub fn new(controller: Arc<AppController>) -> Self {
-        Self { controller }
+        Self {
+            controller,
+            ingest: None,
+        }
     }
 
     /// A runtime that probes nothing.
@@ -81,6 +95,36 @@ impl Runtime {
     #[must_use]
     pub fn controller(&self) -> &Arc<AppController> {
         &self.controller
+    }
+
+    /// Starts the bridge reader on its own thread, once.
+    ///
+    /// Idempotent so a startup path that runs twice (a reload, a second window) cannot
+    /// attach two readers to one store and interleave their `connected` writes. The dial
+    /// itself happens on the worker (`crate::ingest::Ingest::spawn`), so this call returns
+    /// without waiting for a bridge that is not there.
+    pub fn connect_bridge(&mut self) {
+        if self.ingest.is_some() {
+            return;
+        }
+        self.ingest = Some(Ingest::spawn(Arc::clone(&self.controller)));
+    }
+
+    /// What the bridge link currently reports.
+    ///
+    /// Read out of the controller's store, so it is the same truth the rest of the app
+    /// sees; nothing in this crate keeps a second "connected" flag. `fresh` is
+    /// `aoko_core::app::UiSnapshot::is_state_fresh`, i.e. the age is inside
+    /// `aoko_core::chest_stealer::FRESH_STATE_MS`.
+    #[must_use]
+    pub fn ingest_status(&self) -> IngestStatus {
+        let now = Instant::now();
+        let store = self.controller.store();
+        IngestStatus {
+            connected: store.is_connected(),
+            state_age: store.age(now),
+            fresh: self.controller.ui_snapshot(now).is_state_fresh(),
+        }
     }
 
     /// Whether one module's switch is on, by catalog id (case-insensitive).
@@ -163,6 +207,7 @@ fn flag_for(module_id: &str) -> Option<EnabledFlag> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     /// The suite must not depend on the machine: a headless runtime reports that it
     /// probed nothing, and its module state still works.
@@ -242,5 +287,68 @@ mod tests {
         runtime.set_module_enabled("pixelpartyautolook", true);
         assert!(!runtime.module_enabled("pixelpartyautolook"));
         assert_eq!(runtime.enabled_count(), 1);
+    }
+
+    /// A runtime a test builds must not touch the network, and must say so rather than
+    /// waiting on a dial.
+    ///
+    /// The structural half is the decisive one: `ingest` is `None`, so no reader thread
+    /// exists that could connect later, and `connect_bridge` is the only thing that
+    /// starts one — the shipped path, never this constructor. The elapsed bound is the
+    /// only way to observe "does not block" directly: on a machine with a bridge, a
+    /// synchronous dial would succeed, and on one without it, a refused connect could
+    /// still stall a loaded loopback stack. Two seconds is far above either.
+    #[test]
+    fn a_headless_runtime_opens_no_socket() {
+        let started = Instant::now();
+        let runtime = Runtime::headless();
+        let status = runtime.ingest_status();
+
+        assert!(runtime.ingest.is_none(), "headless builds no bridge reader");
+        assert!(!status.connected, "nothing connected, nothing claimed");
+        assert_eq!(status.state_age, None, "no frame has arrived");
+        assert!(!status.fresh, "a state that does not exist is not fresh");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "constructing a runtime must not dial"
+        );
+    }
+
+    /// The status is the store's own truth, and freshness is measured from the frame's
+    /// arrival instant rather than from when the question is asked.
+    #[test]
+    fn status_reports_what_the_store_holds() {
+        use aoko_protocol::state::GameState;
+
+        let runtime = Runtime::headless();
+        let store = runtime.controller().store();
+
+        store.set_connected(true);
+        // Stamped in the future, so the age saturates to zero: the fresh branch is then a
+        // fact rather than a race against the 300 ms window.
+        store.publish(
+            GameState::default(),
+            Instant::now() + Duration::from_secs(1),
+        );
+
+        let status = runtime.ingest_status();
+        assert!(status.connected);
+        assert_eq!(status.state_age, Some(Duration::ZERO));
+        assert!(status.fresh);
+
+        // A second in the past is outside the window whatever the scheduler does.
+        store.publish(
+            GameState::default(),
+            Instant::now() - Duration::from_secs(1),
+        );
+
+        let status = runtime.ingest_status();
+        assert!(
+            status
+                .state_age
+                .is_some_and(|age| age >= Duration::from_secs(1)),
+            "the age is measured from the publish instant"
+        );
+        assert!(!status.fresh, "an old frame is stale by definition");
     }
 }

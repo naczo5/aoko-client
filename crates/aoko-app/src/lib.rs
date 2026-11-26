@@ -77,6 +77,9 @@ pub mod assets;
 pub mod capture;
 pub mod components;
 pub mod dialogs;
+/// The bridge reader: one worker thread that decodes wire lines into the controller's
+/// store, plus the status the shell reports.
+pub mod ingest;
 pub mod overlay;
 /// Allocation accounting. Test-only: the module installs the global allocator used to
 /// count a frame's allocations, and nothing in the shipped binary needs it.
