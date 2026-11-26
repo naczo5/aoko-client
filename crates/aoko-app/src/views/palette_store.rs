@@ -478,14 +478,15 @@ fn same_name(left: &str, right: &str) -> bool {
     left.to_lowercase() == right.to_lowercase()
 }
 
-/// `TryParseHex` (`MainWindow.xaml.cs:1227-1253`): `#RGB`, `#RRGGBB`, and either form
-/// without the `#`.
+/// `TryParseHex` (`MainWindow.xaml.cs:1227-1253`) for a palette entry: `#RGB`, `#RRGGBB`,
+/// either form without the `#`, any case.
 ///
-/// Trims, accepts one optional leading `#`, expands the three-digit shorthand by doubling
-/// each digit, and rejects anything that is not six digits after that. Unlike
-/// [`Color::parse_hex`] it rejects the 8-digit ARGB form, because a palette file stores
-/// opaque colours only and the managed parser rejects anything that is not six digits once
-/// the shorthand is expanded.
+/// The rule itself is [`Color::parse_hex`] — one implementation in the workspace, so a change
+/// to the tolerance cannot land on one path only. What is kept here is the single difference
+/// the palette box needs, and it reads as one: the 8-digit ARGB form is **refused**, because
+/// a palette file stores opaque `#RRGGBB` only and `TryParseHex` refuses anything that is not
+/// six digits once the shorthand is expanded. The guard is digit-shaped on purpose — the
+/// alpha in `#FFAABBCC` is opaque and it is still not a palette entry.
 ///
 /// Public because a consumer outside this store has to accept exactly what
 /// [`PaletteStore::save_draft`] accepts. The colour swatch in the shell's
@@ -495,19 +496,13 @@ fn same_name(left: &str, right: &str) -> bool {
 /// defect where a swatch paints a colour the press rejects.
 #[must_use]
 pub fn parse_entry(text: &str) -> Option<Color> {
-    // One `#`, like `TryParseHex`: a second is the typo the managed parser refuses, and
-    // accepting it would make the same text mean one thing here and another on the C# side.
     let trimmed = text.trim();
-    let digits = trimmed.strip_prefix('#').unwrap_or(trimmed);
-    let expanded: String = if digits.len() == 3 {
-        digits.chars().flat_map(|digit| [digit, digit]).collect()
-    } else {
-        digits.to_owned()
-    };
-    if expanded.len() != 6 {
+    let body = trimmed.strip_prefix('#').unwrap_or(trimmed);
+    if body.chars().count() == 8 {
         return None;
     }
-    Color::parse_hex(&expanded)
+
+    Color::parse_hex(trimmed)
 }
 
 /// A stored palette's nine roles, borrowed for [`Theme::from_custom`].
@@ -677,6 +672,37 @@ mod tests {
             parse_entry("#FF1A2B3C"),
             None,
             "the ARGB form is not a palette colour"
+        );
+    }
+
+    /// The property is *agreement*: the rule lives once in `theme`, and this box differs from
+    /// it on exactly one thing, the alpha form a palette entry must not carry.
+    #[test]
+    fn the_entry_parser_agrees_with_the_theme_parser_except_on_argb() {
+        for text in ["#abc", "#AABBCC", "abc", "  #AABBCC  "] {
+            assert_eq!(
+                parse_entry(text),
+                Color::parse_hex(text),
+                "{text:?} must parse the same through both"
+            );
+        }
+
+        assert_eq!(parse_entry("##abc"), None);
+        assert_eq!(
+            Color::parse_hex("##abc"),
+            None,
+            "the second # is refused by both, so neither path repairs the typo"
+        );
+
+        assert_eq!(
+            parse_entry("#FF1A2B3C"),
+            None,
+            "the one difference: a palette entry has no alpha channel"
+        );
+        assert_eq!(
+            Color::parse_hex("#FF1A2B3C"),
+            Some(Color::rgba(0x1A, 0x2B, 0x3C, 0xFF)),
+            "which the theme parser does accept — the guard is the whole difference"
         );
     }
 

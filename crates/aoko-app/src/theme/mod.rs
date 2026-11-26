@@ -62,19 +62,38 @@ impl Color {
         Self { a, ..self }
     }
 
-    /// Parses `#RRGGBB` and `#AARRGGBB`.
+    /// Parses `#RGB`, `#RRGGBB` and `#AARRGGBB`, with or without the leading `#`.
     ///
     /// The 8-digit form is WPF's ARGB order, which is what the C# parses with
-    /// `ColorConverter.ConvertFromString` for the overlay literals.
+    /// `ColorConverter.ConvertFromString` for the overlay literals. The 3-digit shorthand is
+    /// `TryParseHex`'s (`MainWindow.xaml.cs:1237-1241`), which doubles each digit before it
+    /// parses; `ColorConverter` accepts it as well, so both authorities the C# consults
+    /// agree and this is the workspace's only implementation of the rule.
     ///
     /// One leading `#` is stripped, not every one. `TryParseHex` removes a single `#`
     /// (`MainWindow.xaml.cs:1233-1234`) and then fails on a second, so repairing `##RRGGBB`
     /// here would paint a colour the managed side refuses from the same text — and this
     /// parser is reached from the dialogs' hex entries, where that typo arrives.
+    ///
+    /// `#RGBA`/`#ARGB` (the 4-digit form) is deliberately absent: no managed path accepts it,
+    /// because `TryParseHex` only expands three digits and then insists on six.
     #[must_use]
     pub fn parse_hex(text: &str) -> Option<Self> {
         let trimmed = text.trim();
         let digits = trimmed.strip_prefix('#').unwrap_or(trimmed);
+
+        // `#RGB`, doubled into `#RRGGBB` the way `TryParseHex` does it. The recursion is on a
+        // six-character string, so it terminates; every digit is one of the originals, which
+        // is why the shorthand is always opaque.
+        if digits.chars().count() == 3 {
+            let mut doubled = String::with_capacity(6);
+            for character in digits.chars() {
+                doubled.push(character);
+                doubled.push(character);
+            }
+            return Self::parse_hex(&doubled);
+        }
+
         let parsed = u32::from_str_radix(digits, 16).ok()?;
         match digits.len() {
             6 => Some(Self::from_hex(parsed)),
@@ -756,12 +775,27 @@ mod tests {
         assert_eq!(Color::parse_hex("##9C020711"), None);
         assert_eq!(Color::parse_hex("###C7625A"), None);
 
-        // 3-digit shorthand is `TryParseHex`'s rule and lives in the two ports of it that
-        // need it (`views::palette_store::parse_entry`, `dialogs::color_picker::parse_hex`);
-        // this parser's contract is the 6- and 8-digit forms its own doc names. Asserted,
-        // not assumed, so the gap stays visible.
-        assert_eq!(Color::parse_hex("#abc"), None);
-        assert_eq!(Color::parse_hex("abc"), None);
+        // The 3-digit shorthand: `TryParseHex` doubles each digit (`MainWindow.xaml.cs:1237-1241`)
+        // and `ColorConverter` accepts it, so a hand-edited role of `#abc` paints the same
+        // colour on both hosts instead of falling back to a derived shade here.
+        assert_eq!(Color::parse_hex("#abc"), Some(Color::from_hex(0xAA_BB_CC)));
+        assert_eq!(Color::parse_hex("abc"), Some(Color::from_hex(0xAA_BB_CC)));
+        assert_eq!(
+            Color::parse_hex("  #fBd  "),
+            Some(Color::from_hex(0xFF_BB_DD)),
+            "shorthand is case-insensitive and trims like the long form"
+        );
+        assert_eq!(
+            Color::parse_hex("#abc"),
+            Color::parse_hex("#AABBCC"),
+            "expanding shorthand is the same colour as spelling it out"
+        );
+        assert_eq!(Color::parse_hex("##abc"), None, "one #, as above");
+        assert_eq!(
+            Color::parse_hex("#abcd"),
+            None,
+            "the 4-digit ARGB form is not accepted"
+        );
     }
 
     #[test]

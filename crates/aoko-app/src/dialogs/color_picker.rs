@@ -15,6 +15,8 @@
 //! two-stop linear only at the pin, so the saturation/value square is custom paint
 //! in the view and this module only supplies the numbers it paints from.
 
+use crate::theme::Color;
+
 /// Width of the saturation/value square, from `SvWidth`.
 pub const SV_WIDTH: f32 = 220.0;
 /// Height of the saturation/value square, from `SvHeight`.
@@ -41,6 +43,14 @@ impl Rgb {
     #[must_use]
     pub fn to_hex(self) -> String {
         format!("#{:02X}{:02X}{:02X}", self.r, self.g, self.b)
+    }
+}
+
+impl From<Color> for Rgb {
+    /// The picker has no alpha channel, so a [`Color`] maps to its three channels. Kept here
+    /// rather than in `theme` because it exists for this dialog's delegation and nowhere else.
+    fn from(color: Color) -> Self {
+        Self::new(color.r, color.g, color.b)
     }
 }
 
@@ -118,34 +128,21 @@ pub fn rgb_to_hsv(rgb: Rgb) -> Hsv {
 }
 
 /// `TryParseHex`: `#RGB`, `#RRGGBB`, with or without the hash, any case.
+///
+/// The rule is [`Color::parse_hex`], so this module expands nothing of its own and a change
+/// to the tolerance cannot land on the picker's path alone. What stays here is the refusal of
+/// the 8-digit ARGB form: the hex field writes back `#RRGGBB`, and `TryParseHex` refuses
+/// anything that is not six digits once the shorthand is expanded, so `#FFAABBCC` is not an
+/// entry this box accepts however opaque its alpha is.
 #[must_use]
 pub fn parse_hex(text: &str) -> Option<Rgb> {
     let trimmed = text.trim();
-    if trimmed.is_empty() {
+    let body = trimmed.strip_prefix('#').unwrap_or(trimmed);
+    if body.chars().count() == 8 {
         return None;
     }
 
-    let digits = trimmed.strip_prefix('#').unwrap_or(trimmed);
-    let expanded = if digits.chars().count() == 3 {
-        let mut out = String::with_capacity(6);
-        for character in digits.chars() {
-            out.push(character);
-            out.push(character);
-        }
-        out
-    } else {
-        digits.to_owned()
-    };
-
-    if expanded.chars().count() != 6 || !expanded.is_ascii() {
-        return None;
-    }
-
-    let r = u8::from_str_radix(&expanded[0..2], 16).ok()?;
-    let g = u8::from_str_radix(&expanded[2..4], 16).ok()?;
-    let b = u8::from_str_radix(&expanded[4..6], 16).ok()?;
-
-    Some(Rgb::new(r, g, b))
+    Color::parse_hex(trimmed).map(Rgb::from)
 }
 
 /// The outcome of pressing OK or Cancel.
@@ -467,6 +464,31 @@ mod tests {
         ] {
             assert_eq!(parse_hex(text), None, "accepted {text:?}");
         }
+    }
+
+    #[test]
+    fn the_hex_box_agrees_with_the_theme_parser_except_on_argb() {
+        for text in ["#abc", "#AABBCC", "abc", "  #BB377D  "] {
+            assert_eq!(
+                parse_hex(text),
+                Color::parse_hex(text).map(Rgb::from),
+                "{text:?} must parse the same through both"
+            );
+        }
+
+        assert_eq!(parse_hex("#abc"), Some(Rgb::new(0xAA, 0xBB, 0xCC)));
+        assert_eq!(parse_hex("#AABBCC"), Some(Rgb::new(0xAA, 0xBB, 0xCC)));
+        assert_eq!(parse_hex("##abc"), None, "the second # is a typo here too");
+
+        assert_eq!(
+            parse_hex("#FF1A2B3C"),
+            None,
+            "the one difference: this box writes back #RRGGBB and has no alpha"
+        );
+        assert!(
+            Color::parse_hex("#FF1A2B3C").is_some(),
+            "which the theme parser does accept — the guard is the whole difference"
+        );
     }
 
     #[test]
