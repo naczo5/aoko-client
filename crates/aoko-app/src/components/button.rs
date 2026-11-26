@@ -111,11 +111,47 @@ impl ButtonVariant {
 }
 
 /// A button. Behaviour is click-only; no focus ring, no keyboard activation yet.
+///
+/// Content-sized: the box is the label plus the variant's padding and nothing else. A
+/// call site that needs a fixed width uses [`button_sized`]; Rust has no default
+/// arguments, so the optional width is a second entry point rather than a nullable
+/// parameter — adding one here would have rewritten all forty-odd call sites for a
+/// property three of them want.
 pub fn button(
     id: impl Into<gpui::ElementId>,
     theme: &Theme,
     variant: ButtonVariant,
     label: impl Into<SharedString>,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    build_button(id, theme, variant, label, None, on_click)
+}
+
+/// The same button at a fixed outer width, which is what the managed UI does with
+/// `Width="140"` on the card header's keybind button (`MainWindow.xaml:359`).
+///
+/// The width is the **border-box** width, as WPF's `Width` is: the padding is inside
+/// it, so 140 means 140 on screen and the label is centred in what the padding leaves.
+/// The element refuses to shrink, so a crowded header row cannot squeeze the button back
+/// to its label; hover and press only restyle fill, label, edge and opacity, so the width
+/// holds in every state and for every [`ButtonVariant`].
+pub fn button_sized(
+    id: impl Into<gpui::ElementId>,
+    theme: &Theme,
+    variant: ButtonVariant,
+    label: impl Into<SharedString>,
+    width: f32,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    build_button(id, theme, variant, label, Some(width), on_click)
+}
+
+fn build_button(
+    id: impl Into<gpui::ElementId>,
+    theme: &Theme,
+    variant: ButtonVariant,
+    label: impl Into<SharedString>,
+    width: Option<f32>,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let spec = variant.spec(theme);
@@ -132,6 +168,10 @@ pub fn button(
         .text_size(px(spec.font_size))
         .font_weight(spec.weight)
         .text_color(spec.label);
+
+    if let Some(width) = width {
+        element = element.w(px(width)).flex_shrink_0().overflow_hidden();
+    }
 
     if let Some(border) = spec.border {
         element = element.border_1().border_color(border);
@@ -205,5 +245,152 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Every rendered button, one per row, with the wrapper that measures it.
+    ///
+    /// The wrapper exists because `debug_bounds` is keyed by a debug selector and the
+    /// component returns a type-erased `AnyElement` a test cannot decorate. The column
+    /// uses `items_start`, so each wrapper is as wide as its button and nothing else —
+    /// a shrink-to-fit parent cannot be wider than its only child, so the number below
+    /// is the button's laid-out width, not the request.
+    const CASES: [(&str, Option<f32>, ButtonVariant, &str); 7] = [
+        // The two content-sized cases use the variant the real call site uses
+        // (`Shell::keybind_button`), so the un-sized number is the one the review
+        // measured: 71 px of fill for "Keybind".
+        ("natural", None, ButtonVariant::Secondary, "Keybind"),
+        (
+            "natural-longer",
+            None,
+            ButtonVariant::Secondary,
+            "Keybind (F1)",
+        ),
+        ("sized", Some(140.0), ButtonVariant::Secondary, "Keybind"),
+        (
+            "sized-primary",
+            Some(140.0),
+            ButtonVariant::Primary,
+            "Keybind",
+        ),
+        (
+            "sized-danger",
+            Some(140.0),
+            ButtonVariant::Danger,
+            "Keybind",
+        ),
+        ("sized-dark", Some(140.0), ButtonVariant::Dark, "Keybind"),
+        (
+            "sized-different-label",
+            Some(140.0),
+            ButtonVariant::Secondary,
+            "Bind",
+        ),
+    ];
+
+    struct Probe;
+
+    impl gpui::Render for Probe {
+        fn render(
+            &mut self,
+            _window: &mut Window,
+            _cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let theme = Theme::slate();
+            let mut column = div().flex().flex_col().items_start().gap(px(4.0));
+
+            for (selector, width, variant, label) in CASES {
+                let on_click = |_: &ClickEvent, _: &mut Window, _: &mut App| {};
+                let element = match width {
+                    Some(width) => button_sized(selector, &theme, variant, label, width, on_click),
+                    None => button(selector, &theme, variant, label, on_click),
+                };
+                column = column.child(
+                    div()
+                        .debug_selector(move || selector.to_owned())
+                        .flex()
+                        .items_center()
+                        .child(element),
+                );
+            }
+
+            column
+        }
+    }
+
+    /// The rendered width of one case, in the window the probe was drawn in.
+    fn width_of(visual: &mut gpui::VisualTestContext, selector: &'static str) -> f32 {
+        let bounds = visual
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} was not painted"));
+        f32::from(bounds.size.width)
+    }
+
+    fn probe_window() -> (gpui::VisualTestContext, gpui::TestAppContext) {
+        let cx = gpui::TestAppContext::single();
+        let window = cx.update(|cx| {
+            let probe = cx.new(|_| Probe);
+            cx.open_window(Default::default(), |_, _| probe.clone())
+                .expect("test window")
+        });
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), &cx);
+        // `debug_bounds` reads the rendered frame, so paint once before measuring.
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        (visual, cx)
+    }
+
+    #[test]
+    fn a_sized_button_renders_at_its_width_and_a_plain_one_at_its_content() {
+        let (mut visual, _cx) = probe_window();
+
+        assert_eq!(
+            width_of(&mut visual, "sized"),
+            140.0,
+            "the width is the border-box width: 140 on screen, padding inside"
+        );
+        // The same width whatever the label is doing inside it.
+        assert_eq!(width_of(&mut visual, "sized-different-label"), 140.0);
+
+        // Content-sized, unchanged from before this parameter existed: narrower than the
+        // fixed one and wider when the label is longer.
+        let natural = width_of(&mut visual, "natural");
+        let longer = width_of(&mut visual, "natural-longer");
+        assert!(
+            natural < 140.0,
+            "a plain button is its label, got {natural}"
+        );
+        assert!(
+            longer > natural,
+            "a plain button grows with its label: {natural} then {longer}"
+        );
+    }
+
+    #[test]
+    fn the_width_holds_for_every_variant_and_under_the_pointer() {
+        let (mut visual, _cx) = probe_window();
+
+        for selector in ["sized-primary", "sized-danger", "sized-dark", "sized"] {
+            assert_eq!(width_of(&mut visual, selector), 140.0, "{selector}");
+        }
+
+        // Hover and press are style states, not layout: the contract is that neither can
+        // resize the button, so measure again with the pointer on it and held down.
+        let bounds = visual.debug_bounds("sized").expect("sized button");
+        let centre = gpui::point(
+            bounds.origin.x + bounds.size.width / 2.0,
+            bounds.origin.y + bounds.size.height / 2.0,
+        );
+        visual.simulate_mouse_move(centre, None, gpui::Modifiers::default());
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(width_of(&mut visual, "sized"), 140.0, "while hovered");
+
+        visual.simulate_mouse_down(centre, gpui::MouseButton::Left, gpui::Modifiers::default());
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(width_of(&mut visual, "sized"), 140.0, "while pressed");
     }
 }
