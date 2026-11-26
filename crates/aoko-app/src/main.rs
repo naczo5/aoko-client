@@ -57,7 +57,8 @@ fn main() -> ExitCode {
     }
 
     // An unknown name falls back to Slate, the same rule `ApplyGuiTheme` uses.
-    let theme = Theme::by_name(parsed.theme.as_deref().unwrap_or("Slate"));
+    let theme =
+        aoko_app::views::palette_store::theme_for(parsed.theme.as_deref().unwrap_or("Slate"));
 
     if let Some(out_dir) = parsed.capture_screenshots {
         return capture(out_dir, theme);

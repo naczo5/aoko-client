@@ -419,7 +419,7 @@ impl Shell {
                 // The palette travels in the profile, so applying a config has to
                 // repaint with the theme it names (`ApplyLoadedProfile`,
                 // `MainWindow.xaml.cs:835-848`).
-                self.theme = Theme::by_name(&self.profile.gui_theme);
+                self.theme = crate::views::palette_store::theme_for(&self.profile.gui_theme);
                 // And the loaded settings are what the bridge should be running: the config
                 // frame reads the controller's copy.
                 self.push_profile();
@@ -839,13 +839,13 @@ impl Shell {
                     .replace("{requested}", module_label(module));
                 self.keybind_conflict = Some(SharedString::from(line));
             }
-            (KeyTarget::Action(which), KeybindHolder::Module(_)) => {
+            (KeyTarget::Action(which), KeybindHolder::Module) => {
                 self.action_status[status_slot(which)] =
                     Some(SharedString::from(copy::ACTION_BIND_CONFLICT));
             }
             // The two kinds are disjoint by target: `keybind_holder` answers an action for a
             // module and a module for an action, so this pair is unreachable.
-            (KeyTarget::Module(_), KeybindHolder::Module(_))
+            (KeyTarget::Module(_), KeybindHolder::Module)
             | (KeyTarget::Action(_), KeybindHolder::Action(_)) => {}
         }
     }
@@ -2846,7 +2846,9 @@ impl Shell {
             Control::BlockEspRows => div()
                 .text_size(px(metrics::text::CAPTION))
                 .text_color(theme.dim_text)
-                .child("Tracked blocks: add a block to start.")
+                // Empty until the row controls land: the managed list has no empty state to
+                // copy, because `BlockEspTargets` arrives populated by default. An invented
+                // "add a block to start" line would be a port invention, not a gap.
                 .into_any_element(),
 
             Control::PalettePreview { name } => {
@@ -3177,8 +3179,14 @@ const fn status_slot(which: copy::ActionBind) -> usize {
 
 /// What a refused capture collided with.
 enum KeybindHolder {
-    /// A module's general bind, by the catalogue id the profile stores.
-    Module(String),
+    /// A module's general bind holds the key.
+    ///
+    /// Carries no id because nothing reads one: the managed action refusal is verbatim and
+    /// names the binding kind only (`copy::ACTION_BIND_CONFLICT`), and the module-conflict
+    /// line names the module that *asked*, which comes from the target through
+    /// [`module_label`]. An id here would be a `String` clone per refused capture with no
+    /// reader at the other end.
+    Module,
     /// One of the two action binds.
     Action(copy::ActionBind),
 }
@@ -3188,8 +3196,8 @@ enum KeybindHolder {
 /// `InputHooks.cs:124-156`, verbatim: `SetModuleKey` refuses a key either action bind holds,
 /// `SetAutoRodActionKey` and `SetThrowpotActionKey` refuse a key any general module bind
 /// holds, and a key of `0` — Escape, the managed unbind — never conflicts, so unbinding always
-/// lands. The two directions are disjoint, which is why a holder names a module or an action
-/// and never both.
+/// lands. The two directions are disjoint, which is why the holder is exactly one of the two
+/// kinds and never both.
 fn keybind_holder(
     profile: &aoko_protocol::profile::Profile,
     target: KeyTarget,
@@ -3211,7 +3219,7 @@ fn keybind_holder(
             .module_keys
             .iter()
             .find(|(_, key)| **key == vk)
-            .map(|(module, _)| KeybindHolder::Module(module.clone())),
+            .map(|_| KeybindHolder::Module),
     }
 }
 
