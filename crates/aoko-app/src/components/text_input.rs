@@ -72,10 +72,13 @@
 //!
 //! # Geometry against the C#
 //!
-//! The box matches [`super::field::field`]: `FieldVariant::Panel` fill, 1 px edge,
-//! 6 px radius, 8×5 padding, 13 px text, accent edge while focused. The caret is
-//! drawn by splitting the display text at the caret and putting a 1 px accent line
-//! between the halves, so it needs no text measurement.
+//! The field paints the same two shapes [`super::field::field`] does, chosen with
+//! [`TextInput::variant`]. `FieldVariant::Panel` is the `TabTextBox` / `HexBox` box:
+//! panel fill, 1 px edge, 6 px radius, 8×5 padding, 13 px text. `FieldVariant::Query`
+//! is the overlay's line: no fill, no edge, no padding, 18 px text and the search
+//! card's own placeholder colour. The caret is drawn by splitting the display text at
+//! the caret and putting a 1 px accent line between the halves, so it needs no text
+//! measurement.
 
 use std::ops::Range;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -89,6 +92,8 @@ use gpui::{
 };
 
 use crate::theme::{metrics, Theme};
+
+use super::field::FieldVariant;
 
 /// The mask character. One per character, so a token's length is still visible while
 /// its content is not — the same shape as a `PasswordBox`.
@@ -332,6 +337,7 @@ pub struct TextInput {
     edit: TextEdit,
     placeholder: SharedString,
     masked: bool,
+    variant: FieldVariant,
     id: ElementId,
     focus: FocusHandle,
     on_change: Option<ChangeHandler>,
@@ -339,7 +345,7 @@ pub struct TextInput {
 
 impl TextInput {
     /// A field with an empty value. `cx` is the entity context, which supplies the
-    /// focus handle.
+    /// focus handle. The default variant is the bordered [`FieldVariant::Panel`] box.
     pub fn new(cx: &mut Context<Self>, theme: Theme, placeholder: impl Into<SharedString>) -> Self {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         Self {
@@ -347,10 +353,19 @@ impl TextInput {
             edit: TextEdit::new(""),
             placeholder: placeholder.into(),
             masked: false,
+            variant: FieldVariant::Panel,
             id: ElementId::Name(SharedString::from(format!("text-input-{id}"))),
             focus: cx.focus_handle(),
             on_change: None,
         }
+    }
+
+    /// The painted shape: the bordered box, or the overlay's borderless query line
+    /// ([`FieldVariant::Query`], `CommandSearchOverlay.xaml:215-227`).
+    #[must_use]
+    pub fn variant(mut self, variant: FieldVariant) -> Self {
+        self.variant = variant;
+        self
     }
 
     /// Masks the value: one `•` per character, as a token field should.
@@ -478,7 +493,14 @@ impl Render for TextInput {
         let empty = self.edit.is_empty();
         let caret_colour = theme.accent;
         let text_colour = theme.text;
-        let placeholder_colour = theme.dim_text;
+        // The query line sits on the opaque search card, where the C# drew its
+        // placeholder in `CommandSearchPlaceholderBrush` rather than `DimTextBrush`
+        // (`CommandSearchOverlay.xaml:215-227`).
+        let placeholder_colour = match self.variant {
+            FieldVariant::Panel => theme.dim_text,
+            FieldVariant::Query => theme.search_placeholder(),
+        };
+        let font_size = self.variant.font_size();
         let edge = if focused {
             theme.accent
         } else {
@@ -486,25 +508,20 @@ impl Render for TextInput {
         };
         let placeholder = self.placeholder.clone();
         let focus = self.focus.clone();
+        let variant = self.variant;
 
         let key_entity = cx.entity();
         let focus_entity = cx.entity();
 
-        div()
+        let mut element = div()
             .id(self.id.clone())
             .flex()
             .flex_row()
             .items_center()
             .relative()
             .gap(px(1.0))
-            .text_size(px(13.0))
+            .text_size(px(font_size))
             .cursor(CursorStyle::IBeam)
-            .rounded(px(metrics::radius::CARD))
-            .border_1()
-            .bg(theme.panel)
-            .px(px(8.0))
-            .py(px(5.0))
-            .border_color(edge)
             .track_focus(&self.focus)
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 window.focus(&focus, cx);
@@ -516,7 +533,23 @@ impl Render for TextInput {
                 if handled {
                     cx.stop_propagation();
                 }
-            })
+            });
+
+        element = match variant {
+            // `TabTextBox` (`TabStyles.xaml:155`) and the picker's `HexBox`
+            // (`ColorPickerDialog.xaml:83`).
+            FieldVariant::Panel => element
+                .rounded(px(metrics::radius::CARD))
+                .border_1()
+                .bg(theme.panel)
+                .px(px(8.0))
+                .py(px(5.0))
+                .border_color(edge),
+            // `QueryBox`: no fill, no edge, 18 px text on the card.
+            FieldVariant::Query => element,
+        };
+
+        element
             // Prefix, caret, suffix: the caret is drawn where it is by being between the
             // two halves of the display value, so no text measurement is needed. An
             // empty field has no prefix, so the caret sits left of the placeholder.
@@ -531,7 +564,7 @@ impl Render for TextInput {
             .child(if focused {
                 div()
                     .w(px(1.0))
-                    .h(px(15.0))
+                    .h(px(font_size))
                     .bg(caret_colour)
                     .into_any_element()
             } else {

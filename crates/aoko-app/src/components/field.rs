@@ -27,7 +27,9 @@ pub enum FieldVariant {
 }
 
 impl FieldVariant {
-    fn font_size(self) -> f32 {
+    /// `pub(crate)` because [`super::text_input::TextInput`] paints the same two shapes
+    /// and must not restate the sizes.
+    pub(crate) fn font_size(self) -> f32 {
         match self {
             Self::Panel => 13.0,
             Self::Query => metrics::text::QUERY,

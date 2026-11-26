@@ -1,11 +1,13 @@
 //! Command search: open/close, the query, ranking, selection, row actions and the
 //! pulse-on-jump.
 //!
-//! **Not mounted in Phase 2** (section 12 decision 7): `open_search`/`close_search` have
-//! no caller, because the shell installs no `on_key_down`, so Ctrl+K, type-to-open and
-//! every row action are unreachable from the running app. The state machine, the ranking
-//! and the pulse are exercised by unit tests only. [`crate::overlay`] is the matching
-//! view, and it is equally unmounted.
+//! **Mounted** (section 12 decision 7): `a8479a7` wired `open_search`/`close_search` into
+//! the shell's key handling and mounted [`crate::overlay`], so Ctrl+K, type-to-open and the
+//! row actions reach this state machine from the running app.
+//!
+//! Two things here are shared with the view rather than private to it: [`Row::hint_text`],
+//! the row caption, and [`pulse_card`], which joins the pulse's catalogue id to the card
+//! element the ring is painted on.
 //!
 //! The overlay *view* is the component builder's; this is the state behind it,
 //! ported from `Aoko/Views/CommandSearchOverlay.xaml.cs` (open/close, the query,
@@ -141,6 +143,34 @@ impl Row {
     #[must_use]
     pub fn is_available(&self) -> bool {
         self.state.is_available
+    }
+
+    /// The row's dim caption: `CommandSearchRowViewModel.BuildHint`
+    /// (`CommandSearchOverlay.xaml.cs:642-652`).
+    ///
+    /// An unavailable row states its reason instead of a destination — the row is where
+    /// a user finds out why a module cannot run. An available one shows the tab it jumps
+    /// to, as `Open the <tab> tab` for a destination and the bare tab for a module, and
+    /// appends the alias or compact text that matched when the name itself did not.
+    ///
+    /// This is what the caption paints. `SearchEntry::card_name` is **not** copy: it is
+    /// the `x:Name` of the card, which is the pulse and scroll-into-view target
+    /// ([`pulse_card`]).
+    #[must_use]
+    pub fn hint_text(&self) -> String {
+        if !self.state.is_available {
+            return self.state.unavailable_reason.to_owned();
+        }
+
+        let lead = if self.entry.is_destination {
+            format!("Open the {} tab", self.entry.tab)
+        } else {
+            self.entry.tab.to_owned()
+        };
+        match &self.matched_alias {
+            Some(alias) => format!("{lead} \u{00b7} matches \"{alias}\""),
+            None => lead,
+        }
     }
 }
 
@@ -676,6 +706,21 @@ fn resolve(entry: &SearchEntry, dev_mode: bool, facts: &RowFactTable) -> RowStat
     )
 }
 
+/// The card a live pulse is ringing, if any — the XAML `x:Name` of the card, which is
+/// what a card painter compares against.
+///
+/// [`CardPulse`] carries the *catalogue* id (`autoclicker`), and the card a jump lands
+/// on is the entry's `card_name` (`AutoClickerCard`). This is the one place the two are
+/// joined, so a view never has to know both vocabularies.
+#[must_use]
+pub fn pulse_card(state: &CommandSearchState) -> Option<&'static str> {
+    let pulse = state.pulse()?;
+    let entry = search::entries()
+        .iter()
+        .find(|entry| entry.id == pulse.module_id)?;
+    pulse_card_of(entry)
+}
+
 /// The card a jump should pulse, if the entry has one.
 fn pulse_card_of(entry: &SearchEntry) -> Option<&'static str> {
     if entry.is_destination || entry.card_name.is_empty() {
@@ -971,6 +1016,96 @@ mod tests {
         let request = state.jump_selected().expect("a jump");
         assert_eq!(request.pulse_card, None);
         assert!(state.begin_pulse(&request, 0, true).is_none());
+    }
+
+    #[test]
+    fn a_live_pulse_names_the_card_it_rings() {
+        let facts = table(true, false);
+        let mut state = open_with(Some("autoclicker"), false, &facts);
+        assert_eq!(pulse_card(&state), None, "nothing has been jumped to yet");
+
+        let request = state.jump_selected().expect("a jump");
+        state.begin_pulse(&request, 1_000, true).expect("live");
+
+        // The pulse carries the catalogue id; the card painter compares against the
+        // XAML element name, so the join happens here.
+        assert_eq!(pulse_card(&state), Some("AutoClickerCard"));
+        assert_eq!(
+            state.pulse().map(|pulse| pulse.module_id),
+            Some("autoclicker")
+        );
+
+        // A tab destination never has a card, and the motion gate removes the pulse.
+        let mut tab = open_with(Some("accounts"), false, &facts);
+        let tab_request = tab.jump_selected().expect("a jump");
+        assert!(tab.begin_pulse(&tab_request, 0, true).is_none());
+        assert_eq!(pulse_card(&tab), None);
+
+        let finished = state.pulse().expect("live").started_ms + millis(motion::PULSE_TOTAL);
+        assert!(!state.prune_pulse(finished), "the ring has run out");
+        assert_eq!(pulse_card(&state), None, "a pruned pulse targets nothing");
+    }
+
+    #[test]
+    fn a_rows_hint_is_the_tab_the_row_jumps_to() {
+        let facts = table(true, false);
+        let state = open_with(Some("autoclicker"), false, &facts);
+        let row = state.rows().first().expect("a row");
+
+        assert_eq!(row.hint_text(), row.entry.tab);
+        assert!(
+            !row.hint_text().contains("Card"),
+            "the caption is not the card's element name: {}",
+            row.hint_text()
+        );
+    }
+
+    #[test]
+    fn a_destinations_hint_says_what_it_opens() {
+        let facts = table(true, false);
+        let state = open_with(Some("accounts"), false, &facts);
+        let row = state.rows().first().expect("a row");
+
+        assert!(row.entry.is_destination);
+        assert_eq!(row.hint_text(), format!("Open the {} tab", row.entry.tab));
+    }
+
+    #[test]
+    fn an_unavailable_rows_hint_is_its_reason() {
+        let facts = table(false, false);
+        let state = open_with(Some("autoclicker"), false, &facts);
+        let row = state.rows().first().expect("a row");
+
+        assert!(!row.is_available());
+        assert_eq!(row.hint_text(), row.state.unavailable_reason);
+        assert!(
+            !row.hint_text().is_empty(),
+            "a row that cannot run says why"
+        );
+    }
+
+    #[test]
+    fn an_alias_match_appends_what_matched() {
+        // `matches "..."` only exists on the alias/compact route, so this drives the
+        // entry through a synonym rather than its name. It asserts on the row that
+        // matched by alias rather than on the first row, so a ranking change cannot make
+        // the test assert the wrong branch.
+        let facts = table(true, false);
+        let state = open_with(Some("cps"), false, &facts);
+        let row = state
+            .rows()
+            .iter()
+            .find(|row| row.matched_alias.is_some())
+            .expect("the synonym matched a row");
+
+        assert_eq!(
+            row.hint_text(),
+            format!(
+                "{} \u{00b7} matches \"{}\"",
+                row.entry.tab,
+                row.matched_alias.as_deref().expect("an alias matched")
+            )
+        );
     }
 
     #[test]
