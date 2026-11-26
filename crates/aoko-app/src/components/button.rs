@@ -113,10 +113,10 @@ impl ButtonVariant {
 /// A button. Behaviour is click-only; no focus ring, no keyboard activation yet.
 ///
 /// Content-sized: the box is the label plus the variant's padding and nothing else. A
-/// call site that needs a fixed width uses [`button_sized`]; Rust has no default
-/// arguments, so the optional width is a second entry point rather than a nullable
-/// parameter — adding one here would have rewritten all 32 call sites for a
-/// property one of them wants.
+/// call site that needs a pinned box uses [`button_sized`] (width) or [`button_pinned`]
+/// (either axis); Rust has no default arguments, so each pin is its own entry point rather
+/// than a nullable parameter — adding one here would have rewritten all 32 call sites for
+/// a property one of them wants.
 pub fn button(
     id: impl Into<gpui::ElementId>,
     theme: &Theme,
@@ -124,7 +124,7 @@ pub fn button(
     label: impl Into<SharedString>,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
-    build_button(id, theme, variant, label, None, on_click)
+    build_button(id, theme, variant, label, None, None, on_click)
 }
 
 /// The same button at a fixed outer width, which is what the managed UI does with
@@ -143,7 +143,27 @@ pub fn button_sized(
     width: f32,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
-    build_button(id, theme, variant, label, Some(width), on_click)
+    build_button(id, theme, variant, label, Some(width), None, on_click)
+}
+
+/// The same button with either axis — or both — pinned to the markup's own number.
+///
+/// WPF sets `Height` on two of the shell's buttons and no width on them: the Stats tab's
+/// "Reset Stats" is `Padding="14,6" Height="40"` with a content width
+/// (`MainWindow.xaml:1466-1467`). A pinned axis is the **border-box** size, as WPF's is,
+/// and it refuses to shrink, exactly like [`button_sized`]'s width. `None` leaves that axis
+/// content-sized, so `button_pinned(.., None, Some(40.0), ..)` is a tall button with the
+/// label's own width.
+pub fn button_pinned(
+    id: impl Into<gpui::ElementId>,
+    theme: &Theme,
+    variant: ButtonVariant,
+    label: impl Into<SharedString>,
+    width: Option<f32>,
+    height: Option<f32>,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    build_button(id, theme, variant, label, width, height, on_click)
 }
 
 fn build_button(
@@ -152,6 +172,7 @@ fn build_button(
     variant: ButtonVariant,
     label: impl Into<SharedString>,
     width: Option<f32>,
+    height: Option<f32>,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let spec = variant.spec(theme);
@@ -171,6 +192,10 @@ fn build_button(
 
     if let Some(width) = width {
         element = element.w(px(width)).flex_shrink_0().overflow_hidden();
+    }
+
+    if let Some(height) = height {
+        element = element.h(px(height)).flex_shrink_0().overflow_hidden();
     }
 
     if let Some(border) = spec.border {
@@ -254,36 +279,61 @@ mod tests {
     /// uses `items_start`, so each wrapper is as wide as its button and nothing else —
     /// a shrink-to-fit parent cannot be wider than its only child, so the number below
     /// is the button's laid-out width, not the request.
-    const CASES: [(&str, Option<f32>, ButtonVariant, &str); 7] = [
+    const CASES: [(&str, Option<f32>, Option<f32>, ButtonVariant, &str); 8] = [
         // The two content-sized cases use the variant the real call site uses
         // (`Shell::keybind_button`), so the un-sized number is the one the review
         // measured: 71 px of fill for "Keybind".
-        ("natural", None, ButtonVariant::Secondary, "Keybind"),
+        ("natural", None, None, ButtonVariant::Secondary, "Keybind"),
         (
             "natural-longer",
+            None,
             None,
             ButtonVariant::Secondary,
             "Keybind (F1)",
         ),
-        ("sized", Some(140.0), ButtonVariant::Secondary, "Keybind"),
+        (
+            "sized",
+            Some(140.0),
+            None,
+            ButtonVariant::Secondary,
+            "Keybind",
+        ),
         (
             "sized-primary",
             Some(140.0),
+            None,
             ButtonVariant::Primary,
             "Keybind",
         ),
         (
             "sized-danger",
             Some(140.0),
+            None,
             ButtonVariant::Danger,
             "Keybind",
         ),
-        ("sized-dark", Some(140.0), ButtonVariant::Dark, "Keybind"),
+        (
+            "sized-dark",
+            Some(140.0),
+            None,
+            ButtonVariant::Dark,
+            "Keybind",
+        ),
         (
             "sized-different-label",
             Some(140.0),
+            None,
             ButtonVariant::Secondary,
             "Bind",
+        ),
+        // `MainWindow.xaml:1466-1467`: `Height="40"` with no width, the Stats tab's
+        // "Reset Stats" button, which is the one call site that pins a height.
+        (
+            "pinned-height",
+            None,
+            Some(40.0),
+            ButtonVariant::Dark,
+            "Reset Stats",
         ),
     ];
 
@@ -298,11 +348,16 @@ mod tests {
             let theme = Theme::slate();
             let mut column = div().flex().flex_col().items_start().gap(px(4.0));
 
-            for (selector, width, variant, label) in CASES {
+            for (selector, width, height, variant, label) in CASES {
                 let on_click = |_: &ClickEvent, _: &mut Window, _: &mut App| {};
-                let element = match width {
-                    Some(width) => button_sized(selector, &theme, variant, label, width, on_click),
-                    None => button(selector, &theme, variant, label, on_click),
+                let element = match (width, height) {
+                    (None, None) => button(selector, &theme, variant, label, on_click),
+                    (Some(width), None) => {
+                        button_sized(selector, &theme, variant, label, width, on_click)
+                    }
+                    (width, height) => {
+                        button_pinned(selector, &theme, variant, label, width, height, on_click)
+                    }
                 };
                 column = column.child(
                     div()
@@ -323,6 +378,14 @@ mod tests {
             .debug_bounds(selector)
             .unwrap_or_else(|| panic!("{selector} was not painted"));
         f32::from(bounds.size.width)
+    }
+
+    /// The rendered height of one case.
+    fn height_of(visual: &mut gpui::VisualTestContext, selector: &'static str) -> f32 {
+        let bounds = visual
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} was not painted"));
+        f32::from(bounds.size.height)
     }
 
     fn probe_window() -> (gpui::VisualTestContext, gpui::TestAppContext) {
@@ -363,6 +426,45 @@ mod tests {
         assert!(
             longer > natural,
             "a plain button grows with its label: {natural} then {longer}"
+        );
+    }
+
+    #[test]
+    fn a_pinned_height_renders_at_its_height_and_a_plain_one_at_its_content() {
+        let (mut visual, _cx) = probe_window();
+
+        assert_eq!(
+            height_of(&mut visual, "pinned-height"),
+            40.0,
+            "the height is the border-box height, as WPF's `Height` is"
+        );
+
+        // Content-sized on both axes, unchanged from before the height existed: shorter
+        // than the pin, and a longer label does not move the height.
+        let natural = height_of(&mut visual, "natural");
+        let longer = height_of(&mut visual, "natural-longer");
+        assert!(natural < 40.0, "a plain button is its label, got {natural}");
+        assert_eq!(
+            longer, natural,
+            "a longer label changes the width only: {natural} then {longer}"
+        );
+
+        // And the pinned height holds for the dark variant that uses it, under the pointer.
+        let bounds = visual
+            .debug_bounds("pinned-height")
+            .expect("pinned-height was not painted");
+        let centre = gpui::point(
+            bounds.origin.x + bounds.size.width / 2.0,
+            bounds.origin.y + bounds.size.height / 2.0,
+        );
+        visual.simulate_mouse_move(centre, None, gpui::Modifiers::default());
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(
+            height_of(&mut visual, "pinned-height"),
+            40.0,
+            "while hovered"
         );
     }
 

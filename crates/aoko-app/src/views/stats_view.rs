@@ -48,16 +48,8 @@
 //! and each column carries the markup's tooltip — the bucket's own `count_text()`
 //! (`MainWindow.xaml:1488`).
 //!
-//! # Deviations, named rather than implied
+//! # Box rules, named rather than implied
 //!
-//! * **"Reset Stats" does not fill its 40 px.** `MainWindow.xaml:1466-1467` sets
-//!   `Height="40"` and `Padding="14,6"` on the `DarkButton` itself.
-//!   [`components::button`](crate::components::button) is content-sized — its spec is
-//!   the variant's padding around its label, with no size parameter — so the row is 40 px
-//!   (the wrap panel's spacing is kept) and the button is its natural height, top-aligned
-//!   exactly as `VerticalAlignment="Top"` asks. Matching the fill needs a height
-//!   parameter on the component, which is a change to `components/button.rs` and not a
-//!   restyle of one button here.
 //! * **The chart box is `min_h(158)`, as the markup's `MinHeight="158"` is.** With no
 //!   samples the box is the minimum and the centred "No samples yet" sits where the
 //!   markup puts it; with samples the columns (124 px bar row plus a 5 px gap and a 9 px
@@ -269,30 +261,27 @@ fn summary_card(
         .into_any_element()
 }
 
-/// "Reset Stats": a [`ButtonVariant::Dark`] button in a row as tall as the markup's 40 px.
+/// "Reset Stats": a [`ButtonVariant::Dark`] button whose height is the markup's 40 px.
 ///
-/// The debug selector is on a wrapper that is exactly the button's box, so a test click
-/// at its centre lands on the button; the 40 px row is outside that wrapper.
+/// `MainWindow.xaml:1466-1467` sets `Padding="14,6" Height="40"` and no `Width`, so the
+/// height is pinned and the width stays the label's. The debug selector is on a wrapper
+/// that is exactly the button's box, so a test click at its centre lands on the button.
 fn reset_button(
     theme: &Theme,
     on_reset: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     div()
-        .h(px(metrics::stats::RESET_HEIGHT))
         .flex()
-        .items_start()
-        .child(
-            div()
-                .flex()
-                .debug_selector(|| String::from("stats-reset"))
-                .child(components::button(
-                    "stats-reset",
-                    theme,
-                    ButtonVariant::Dark,
-                    copy::RESET,
-                    on_reset,
-                )),
-        )
+        .debug_selector(|| String::from("stats-reset"))
+        .child(components::button_pinned(
+            "stats-reset",
+            theme,
+            ButtonVariant::Dark,
+            copy::RESET,
+            None,
+            Some(metrics::stats::RESET_HEIGHT),
+            on_reset,
+        ))
         .into_any_element()
 }
 
@@ -612,10 +601,16 @@ mod tests {
             "no empty state over real samples"
         );
 
-        // The button reports its press to the caller that owns the tracker.
+        // The button reports its press to the caller that owns the tracker, and its box is
+        // the markup's `Height="40"`.
         let button = visual
             .debug_bounds("stats-reset")
             .expect("the reset button is laid out");
+        assert_eq!(
+            f32::from(button.size.height),
+            metrics::stats::RESET_HEIGHT,
+            "`Height=\"40\"` is the border-box height"
+        );
         visual.simulate_click(button.center(), Modifiers::default());
         assert_eq!(
             *resets.lock().expect("resets lock"),
