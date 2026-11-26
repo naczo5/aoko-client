@@ -11,7 +11,28 @@ description = "GPUI desktop application for the Aoko host."
 name = "aoko"
 path = "src/main.rs"
 
+[lib]
+name = "aoko_app"
+path = "src/lib.rs"
+
+[features]
+default = []
+# Screenshot harness. `Window::render_to_image` and
+# `gpui_platform::current_headless_renderer` are both `test-support`-gated at the
+# pinned revision, and `test-support` drags in proptest/postage/futures-concurrency
+# (`crates/gpui/Cargo.toml:21-31`). Keeping it behind this feature keeps the
+# shipped binary lean: CI captures with `--features capture`, users never link it.
+capture = ["dep:image", "gpui/test-support", "gpui_platform/test-support"]
+
 [dependencies]
 gpui = { workspace = true }
 gpui_platform = { workspace = true }
-
+image = { workspace = true, optional = true }
+# The views read module state, the profile and the search index straight out of
+# `aoko-core`, and the wire types out of `aoko-protocol`.
+aoko-protocol = { workspace = true }
+aoko-platform = { workspace = true }
+# Not in the workspace dependency table yet: the workspace owner has to add
+# `aoko-core = { path = "crates/aoko-core" }` before this becomes
+# `{ workspace = true }`. Requested, not worked around.
+aoko-core = { path = "../aoko-core" }
