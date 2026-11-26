@@ -243,6 +243,14 @@ mod tests {
         // `OrdinalIgnoreCase`, so any casing of the literal matches.
         assert!(is_game_window(&window("MINECRAFT", "java", 13)));
         assert!(is_game_window(&window("[JVM] lunar client", "java", 14)));
+        // Substring, not prefix and not a whole word: a real client title with
+        // the version in front still matches, and narrowing this rule to make
+        // the false-positive test below pass would break it.
+        assert!(is_game_window(&window(
+            "Minecraft 1.21.4 - Lunar Client",
+            "javaw",
+            15
+        )));
     }
 
     #[test]
@@ -254,13 +262,29 @@ mod tests {
             "firefox",
             20
         )));
-        assert!(!is_game_window(&window(
-            "Badlion skin gallery",
-            "chrome",
-            21
-        )));
         // Empty and titleless windows are not the game.
         assert!(!is_game_window(&window("", "java", 22)));
+    }
+
+    // Inherited limit, pinned rather than wished away: the managed rule is a
+    // substring test on the title alone, so any application whose title happens
+    // to carry a game name answers `true` here. Narrowing the rule to avoid this
+    // would stop detecting real titles like "Minecraft 1.21.4 - Lunar Client",
+    // so the false positive is handled at the gate instead of in the rule.
+    #[test]
+    fn a_non_game_window_whose_title_names_the_game_is_the_inherited_limit() {
+        let gallery = window("Badlion skin gallery", "chrome", 21);
+
+        // Managed behaviour, and what the title rule must answer.
+        assert!(
+            is_game_window(&gallery),
+            "Contains(gameTitle, OrdinalIgnoreCase) matches, exactly as managed"
+        );
+
+        // The composition an automation gate must use, because `chrome` is not a
+        // JVM: the window cannot reach a click.
+        let acts = is_game_window(&gallery) && gallery.is_jvm();
+        assert!(!acts, "a browser must not pass the automation gate");
     }
 
     // The case that made the score unusable as a game test: `describe_target`
