@@ -182,6 +182,11 @@ mod tests {
 /// The managed suite fakes the socket; this is the equivalent. Bytes fed into the
 /// peer are framed by the same [`crate::framing::BoundedLineReader`], so the CRLF,
 /// cap, and oversized-line rules are exercised end to end without a socket.
+///
+/// The client end appends to the caller's buffer, exactly as [`Transport::recv_line`]
+/// requires. It used to clear that buffer first, which made a reader that forgot to
+/// clear its own buffer look correct and let `TransportClient::pump` ship without the
+/// clear; a fake that quietly satisfies a contract is worse than no fake.
 pub mod memory {
     use std::collections::VecDeque;
     use std::io::Read;
@@ -264,12 +269,23 @@ pub mod memory {
     #[derive(Debug)]
     pub struct MemoryTransport {
         reader: BoundedLineReader<QueueReader>,
+        /// The line the reader produced, reused across calls. `BoundedLineReader`
+        /// replaces the buffer it is given, so appending what the caller asked for means
+        /// staging here first.
+        line: LineBuf,
         shared: Arc<Mutex<Shared>>,
     }
 
     impl Transport for MemoryTransport {
         fn recv_line(&mut self, out: &mut LineBuf) -> Result<RecvOutcome, TransportError> {
-            self.reader.read_line(out).map_err(TransportError::Io)
+            let outcome = self
+                .reader
+                .read_line(&mut self.line)
+                .map_err(TransportError::Io)?;
+            if outcome == RecvOutcome::Line {
+                out.extend_from_slice(self.line.as_slice());
+            }
+            Ok(outcome)
         }
 
         fn send_line(&mut self, line: &[u8]) -> Result<(), TransportError> {
@@ -291,6 +307,7 @@ pub mod memory {
             reader: BoundedLineReader::with_wire_cap(QueueReader {
                 shared: Arc::clone(&shared),
             }),
+            line: LineBuf::new(),
             shared: Arc::clone(&shared),
         };
         (transport, MemoryPeer { shared })

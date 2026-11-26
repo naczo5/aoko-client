@@ -17,13 +17,15 @@ noisy, so they are **recorded, not asserted**, in `benches/` and in the table be
 Measured on 2026-11-26 against the tree this document lands with, whose parent
 commit is `be80ada`, with `rustc 1.100.0 (0ef1bc386 2026-11-09)`.
 
-**Every frame-row count below is a prediction, not a measurement.** The shape change
-that moved `Inbound::State` from `Box<GameState>` to `Arc<GameState>` was written
-without a compiler or a benchmark run — compilation had moved to CI by then — so the
-three codec rows and the core publish row are the counts the tests now assert and CI is
-the first thing to check them. The framing, patch and GTB rows are measured. When CI
-reports, the predicted rows are replaced with the measured ones and this note goes
-away.
+**CI has now run these.** The shape change that moved `Inbound::State` from
+`Box<GameState>` to `Arc<GameState>` was written without a compiler, so the three codec
+rows and the core publish row went in as predictions. CI ran them: three held exactly
+(7 / 665, 17 / 1902 and 1 / 40), and the fourth came back at
+`Allocations { count: 12, bytes: 1572 }` against a predicted 8 / 672. The prediction
+modelled `GameState::clone` and did not model the fresh `ArcInner` that `Arc::make_mut`
+builds to clone into, so the shared-merge row below is the measured 12 / 1572 and its
+test is named for the three things it pays. The framing, patch and GTB rows were
+measured before the shape change and did not move.
 
 ## The machine
 
@@ -66,7 +68,7 @@ so a test cannot be disturbed by the other tests `cargo test` runs in parallel.
 | `apply_into` with six scalar fields | 0 | 0 | **exactly zero** | `merging_a_scalar_patch_into_a_live_state_allocates_nothing` |
 | `apply_into` with one string field | 1 | 12 | **exactly the string**, nothing else | `merging_a_patch_that_carries_one_string_allocates_only_that_string` |
 | Partial frame, nobody holding the last one | 7 | 665 | **exactly its parse**, no copy | `a_partial_frame_costs_exactly_its_parse_when_the_last_frame_is_released` |
-| Partial frame, a reader still holds the last one | 8 | 672 | parse + **exactly one** state copy | `a_partial_frame_costs_one_copy_while_a_reader_still_holds_the_last_snapshot` |
+| Partial frame, a reader still holds the last one | 12 | 1572 | parse + **one** state copy + **one** fresh snapshot | `a_shared_merge_costs_its_parse_the_state_copy_and_the_fresh_snapshot` |
 | One complete frame through `Decoder::ingest` | 17 | 1902 | parse + decode + **one** `Arc`, no copy | `a_complete_frame_costs_its_parse_and_decode_plus_one_shared_snapshot` |
 | GTB, repeated action-bar line | 0 | 0 | **exactly zero** | `a_repeated_gtb_mask_is_answered_without_touching_the_allocator` |
 | GTB, new action-bar line | 24 | 521 | pipeline (19) + memo line + matches + vector | `a_new_action_bar_line_pays_the_mask_pipeline_and_its_matches` |
@@ -79,24 +81,25 @@ Four of those numbers need the decomposition to be readable:
 - **The partial frame's 7** is entirely `serde_json` parsing the document (665 B). The
   merge itself allocates nothing when the decoder owns the snapshot, and handing the
   frame out is an `Arc::clone` (an atomic increment, not an allocator call).
-- **The partial frame's 8** is that same parse plus one `GameState` copy (1 allocation,
-  7 B for this frame's state), which is what `Arc::make_mut` pays when a reader is still
-  holding the previous snapshot. Losing that copy would mean mutating a value another
-  thread is reading, so the pair of tests exists to keep both halves true at once.
-- **The complete frame's 17** is 13 for the JSON parse (1464 B), 3 for the decode out of
-  the parsed tree (86 B) and 1 for the `Arc` the decoded state moves into
-  (352 B = 336 B of `GameState` plus the `Arc` header's two counters).
-- **The GTB new line's 24** is 19 for the mask pipeline's temporary strings, 1 to
-  remember the line, 3 for the matching words and 1 for the vector holding them. A
-  repeated line never reaches any of it.
+- **The shared merge's 12** is that same parse (10, 1213 B), plus one `GameState` copy
+  (1, 7 B for this frame's state), plus the fresh `ArcInner<GameState>` the copy is
+  built inside (1, 352 B: 336 B of `GameState` and the `Arc` header's two counters).
+  `Arc::make_mut` cannot clone in place while a reader still holds the previous
+  snapshot; it has to allocate a new one with its own reference counts and clone the
+  value into it, so a shared merge costs parse + copy + **snapshot**, not parse + copy.
+  That third term is the one a reader of this file is most likely to leave out of a
+  count, and it is why this row is 12 and not 8. Losing the copy would mean mutating a
+  value another thread is reading, so the pair of tests exists to keep both halves true
+  at once.
 
 For scale: cloning a populated `GameState` (two strings, a module-status map with one
 entry, one named entity) costs 7 allocations and 667 bytes. Phase 3 paid that clone for
-every frame in one form or another — twice per partial packet before the in-place
-merge, once after it. Phase 4 pays it only when a reader is still holding the snapshot
+every frame in one form or another, twice per partial packet before the in-place merge
+and once after it. Phase 4 pays it only when a reader is still holding the snapshot
 being replaced, which is the one case where the copy is doing work rather than being
-the shape's price. Every codec row above is dominated by `serde_json`, not by the port:
-the parse is what allocates.
+the shape's price, and that case pays the 352-byte snapshot the copy lands in as well.
+Every codec row above is dominated by `serde_json`, not by the port: the parse is what
+allocates.
 
 ## Bench figures
 
@@ -138,8 +141,8 @@ pass as a result.
 
 ## What the measurements caught
 
-Phase 4 closed the clause itself rather than a path under it, and it is the one row set
-in this document that no compiler has seen yet. `Inbound::State` carries
+Phase 4 closed the clause itself rather than a path under it. CI compiled and ran it:
+one row was wrong, corrected above, and nothing else moved. `Inbound::State` carries
 `Arc<GameState>` instead of `Box<GameState>`, so a decoded frame is the decoder's own
 snapshot and publishing it costs an atomic increment. A partial frame mutates that
 snapshot in place while the decoder is its only owner and copies exactly once when a
@@ -182,6 +185,15 @@ Three paths were restructured rather than loosened:
    `a_complete_frame_costs_its_parse_and_decode_plus_one_shared_snapshot` pins: one
    parse, one decode, no copy.
 
+One defect the same round turned up is not a number in this document at all.
+`TransportClient::pump` handed the transport a buffer it never cleared, and
+`Transport::recv_line` **appends**, so every frame after the first decoded as the first
+and second concatenated: one state published and then silence. `MemoryTransport` hid
+it by clearing on the caller's behalf; it appends now, so a reader that forgets to
+clear fails its own test instead of being covered for.
+`pumping_two_lines_decodes_two_frames_not_their_concatenation` pins it. `pump` clears
+first, and `Vec::clear` keeps the allocation, so no count in this document moved.
+
 ## What the numbers do not prove
 
 - **They do not prove speed, and no comparison with the C# host is implied.** Section 6
@@ -206,19 +218,11 @@ Three paths were restructured rather than loosened:
 Named here rather than quietly omitted, because a measured gap is auditable and an
 unmentioned one is not.
 
-1. **A reader that holds a snapshot across a merge still forces one copy.** That is the
-   price of copy-on-write, not a gap: the alternative is mutating a value another thread
-   is reading. What remains open is whether the *ingest* side ever holds one that long —
+1. **A reader that holds a snapshot across a merge still forces one copy.** Measured at
+   12 allocations and 1572 bytes against 7 and 665 when nobody holds the previous
+   snapshot: the copy, plus the fresh snapshot it lands in. That is the price of
+   copy-on-write, not a gap: the alternative is mutating a value another thread is
+   reading. What remains open is whether the *ingest* side ever holds one that long;
    `StateStore::publish_shared` drops the previous snapshot on publish, so a pump loop
    that publishes before it reads again pays nothing. This is a property to keep, not a
    clause to close.
-2. **A new GTB line still allocates through the mask pipeline** (19 allocations,
-   measured). The clause's strict reading — a live query touches no allocator beyond the
-   output — holds for the steady state, which is what the per-frame loop actually sees,
-   and does not hold for a first-time line. Fixing it means threading reusable scratch
-   buffers through `extract_mask`'s normalisation chain: a redesign of code that has
-   parity tests, so it is measured and deferred rather than attempted here.
-3. **No bench framework.** `crates/aoko-protocol/benches/protocol.rs` and
-   `crates/aoko-core/benches/loops.rs` are hand-rolled `harness = false` binaries that
-   print one line per case. There is no regression gate on the numbers, by design:
-   nothing here is stable enough on this machine to fail a build.

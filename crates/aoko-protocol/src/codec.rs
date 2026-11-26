@@ -248,6 +248,12 @@ impl<T: Transport> TransportClient<T> {
 
     /// Reads and decodes one line.
     pub fn pump(&mut self) -> Result<Pump, TransportError> {
+        // `Transport::recv_line` appends to the buffer it is handed, so the caller clears
+        // it first. Without this the second frame arrives as the first frame followed by
+        // the second, which is not a document: the decoder reports `NotJson` and every
+        // frame after the first is silently ignored, leaving the store with one state and
+        // no updates. `Vec::clear` keeps the allocation, so this costs nothing.
+        self.line.clear();
         let outcome = self.transport.recv_line(&mut self.line)?;
         match outcome {
             RecvOutcome::EndOfStream => Ok(Pump::Closed),

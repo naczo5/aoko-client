@@ -388,11 +388,16 @@ mod tests {
     }
 
     #[test]
-    fn a_partial_frame_costs_one_copy_while_a_reader_still_holds_the_last_snapshot() {
+    fn a_shared_merge_costs_its_parse_the_state_copy_and_the_fresh_snapshot() {
         // The other side of copy-on-write: a reader that keeps the snapshot it was given
-        // must not see it change underneath, so the merge copies once before mutating.
-        // That copy is the whole reason the steady state can be free, and a shape that
-        // lost it would be mutating a value another thread is reading.
+        // must not see it change underneath, so the merge copies the state before
+        // mutating. The copy cannot be written back into the shared allocation, so
+        // `Arc::make_mut` also builds a fresh `Arc`, which is a second allocation of
+        // `ArcInner<GameState>` (16 B of counters plus `size_of::<GameState>()`).
+        //
+        // CI is why this test measures two probes instead of one: the copy alone came to
+        // 11 allocations and the real path charged 12, the extra one exactly 352 bytes.
+        // The state copy and the snapshot it lives in are separate allocations.
         let warm = r#"{"type":"state","partial":true,"health":19.5,"posX":12.0,"stateMs":7}"#;
         let measured = r#"{"type":"state","partial":true,"health":11.0,"posX":12.0,"stateMs":8}"#;
         let mut decoder = Decoder::new();
@@ -401,12 +406,16 @@ mod tests {
 
         let (_, parsed) = measure(|| serde_json::from_str::<Value>(measured).expect("valid json"));
         let (_, copied) = measure(|| GameState::clone(decoder.state()));
+        // A stand-in state so the probe counts only the `Arc` allocation, not the default
+        // state's own string.
+        let probe = GameState::default();
+        let (_, shared) = measure(move || Arc::new(probe));
         let (_, total) = measure(|| decoder.ingest(measured));
 
         assert_eq!(
             total,
-            parsed.plus(copied),
-            "a merge into a shared snapshot costs its parse plus exactly one state copy"
+            parsed.plus(copied).plus(shared),
+            "a shared merge costs its parse, the state copy and the fresh snapshot"
         );
         assert_eq!(decoder.state().health, 11.0);
         match held {

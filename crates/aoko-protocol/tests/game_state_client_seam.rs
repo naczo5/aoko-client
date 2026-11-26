@@ -14,7 +14,8 @@ use aoko_protocol::config_payload::{
     module_list_style_to_index, normalize_detected_version, resolve_bridge_dll_name,
 };
 use aoko_protocol::diagnostics::ManagedTransportDiagnostics;
-use aoko_protocol::transport::memory;
+use aoko_protocol::transport::{memory, LineBuf, RecvOutcome, Transport, TransportError};
+use std::collections::VecDeque;
 use std::time::Duration;
 
 #[test]
@@ -222,6 +223,67 @@ fn the_client_keeps_the_last_state_between_pumps() {
     ));
 
     assert_eq!(client.decoder().state().health, 11.0);
+}
+
+/// A transport that appends to the caller's buffer, as the `Transport` contract requires,
+/// and serves a fixed list of lines.
+///
+/// Deliberately hand-written rather than built on `memory::MemoryTransport`: the test
+/// below has to fail if `pump` stops clearing its buffer, so it must not inherit whatever
+/// the fake does with the buffer it is handed.
+struct AppendingLines {
+    lines: VecDeque<&'static [u8]>,
+}
+
+impl Transport for AppendingLines {
+    fn recv_line(&mut self, out: &mut LineBuf) -> Result<RecvOutcome, TransportError> {
+        match self.lines.pop_front() {
+            Some(line) => {
+                out.extend_from_slice(line);
+                Ok(RecvOutcome::Line)
+            }
+            None => Ok(RecvOutcome::EndOfStream),
+        }
+    }
+
+    fn send_line(&mut self, _line: &[u8]) -> Result<(), TransportError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn pumping_two_lines_decodes_two_frames_not_their_concatenation() {
+    // `pump` hands the transport one reused buffer, and the transport appends to it, so a
+    // `pump` that forgets to clear decodes the second frame as the first frame followed by
+    // the second. That is not a document, so the decoder reports `NotJson` and the store
+    // would publish one state and then go silent — the defect this test exists to keep
+    // out. The second line is a partial merge on top of the first, so a frame that
+    // decoded in isolation but skipped the first would also fail.
+    let first = &b"{\"type\":\"state\",\"health\":20.0}"[..];
+    let second = &b"{\"type\":\"state\",\"partial\":true,\"health\":11.0}"[..];
+    let transport = AppendingLines {
+        lines: [first, second].into_iter().collect(),
+    };
+    let mut client = TransportClient::new(
+        transport,
+        Decoder::new(),
+        ManagedTransportDiagnostics::new(false, Duration::from_secs(1), 20, 0),
+    );
+
+    match client.pump().expect("first pump") {
+        Pump::Frame(Inbound::State { state, .. }) => assert_eq!(state.health, 20.0),
+        other => panic!("unexpected first frame: {other:?}"),
+    }
+    match client.pump().expect("second pump") {
+        Pump::Frame(Inbound::State { state, .. }) => assert_eq!(
+            state.health, 11.0,
+            "the second line must decode as its own document"
+        ),
+        other => panic!("the second frame decoded as {other:?}, not a state"),
+    }
+
+    assert_eq!(client.decoder().state().health, 11.0);
+    assert_eq!(client.pump().expect("third pump"), Pump::Closed);
 }
 
 #[test]
