@@ -202,6 +202,11 @@ impl Shell {
         // not look like it can reveal the folder.
         shell.open_configs_folder = capabilities.open_path;
         shell.runtime = Runtime::new(Arc::new(AppController::new(capabilities)));
+        // Before the link dials: the `config` frame is built from the controller's profile,
+        // and the profile `start` loaded above went into the controller this line replaces.
+        // Pushing first means the first frame the bridge sees already carries the saved
+        // settings, rather than the defaults and then a correction.
+        shell.push_profile();
         // Nothing else connects the store to a bridge; see `crate::ingest`.
         shell.runtime.connect_bridge();
         // From here on a module switch starts and stops loop threads; see
@@ -330,6 +335,9 @@ impl Shell {
     fn with_loaded_profile(mut self, profile: aoko_protocol::profile::Profile) -> Self {
         self.values = crate::views::bindings::snapshot(&profile);
         self.profile = profile;
+        // The frame is built from the controller, not from this shell: a shell that starts
+        // from a saved profile has to hand it over before anything reads it.
+        self.push_profile();
         self
     }
 
@@ -373,6 +381,9 @@ impl Shell {
                 // repaint with the theme it names (`ApplyLoadedProfile`,
                 // `MainWindow.xaml.cs:835-848`).
                 self.theme = Theme::by_name(&self.profile.gui_theme);
+                // And the loaded settings are what the bridge should be running: the config
+                // frame reads the controller's copy.
+                self.push_profile();
                 Ok(())
             }
             Err(error) => Err(error),
@@ -743,6 +754,9 @@ impl Shell {
                 self.profile.throwpot_action_key = vk;
             }
         }
+        // The keybinds are the case a user notices: the `config` frame carries every one of
+        // them, and the controller is the copy it is built from.
+        self.push_profile();
         // What rebuilds the label: the next paint sees a key that no longer matches the one
         // the button was built from. See `sync_keybind_captures`.
         cx.notify();
@@ -869,8 +883,30 @@ impl Shell {
         let written = crate::views::bindings::write(&mut self.profile, bind, value);
         if written {
             self.values = crate::views::bindings::snapshot(&self.profile);
+            // The controller's copy is what the `config` frame is built from, so it has to
+            // see every accepted write; see `push_profile`.
+            self.push_profile();
         }
         written
+    }
+
+    /// Hands the live profile to the controller, which is the copy the `config` frame reads.
+    ///
+    /// The shell owns the profile for the UI — [`crate::views::bindings`] writes it and
+    /// [`Shell::save_profile`] persists it — while `AppController::config_payload` builds the
+    /// frame from its own copy. Nothing else pushes between them, so every write that changes
+    /// the profile calls this, or the bridge keeps the old value for the life of the link.
+    ///
+    /// `update_profile` rather than `replace_profile`: the latter normalises the action binds
+    /// on the copy it is handed (`Profile::normalize_action_binds`), which is the rule for
+    /// *applying a saved config*, not for a live edit. Assigning keeps the two copies equal,
+    /// so what the UI shows is what the wire carries.
+    fn push_profile(&mut self) {
+        let profile = self.profile.clone();
+        self.runtime.controller().update_profile(move |active| {
+            *active = profile;
+            true
+        });
     }
 
     /// Records a checkbox, which the profile stores as a boolean.
@@ -2374,7 +2410,7 @@ impl Shell {
             // The header arm paints this control on every card that has one
             // (`control_is_header`), so this is the same capture, reached by the same
             // target rather than by a second button.
-            Control::Keybind { module } => self.render_capture(KeyTarget::Module(*module)),
+            Control::Keybind { module } => self.render_capture(KeyTarget::Module(module)),
 
             Control::Button { label, tooltip } => {
                 // The configs card's buttons are real actions: Load and Save
@@ -2769,7 +2805,7 @@ fn key_targets() -> &'static [KeyTarget] {
     static TARGETS: OnceLock<Vec<KeyTarget>> = OnceLock::new();
     TARGETS.get_or_init(|| {
         let mut targets: Vec<KeyTarget> = copy::all_cards()
-            .filter_map(|card| card_module(card))
+            .filter_map(card_module)
             .map(KeyTarget::Module)
             .collect();
         targets.push(KeyTarget::Action(copy::ActionBind::AutoRod));
@@ -3106,6 +3142,37 @@ mod tests {
         // A second shell over the same directory is the next launch.
         let reloaded = Shell::with_store(Theme::slate(), aoko_platform::ProfileStore::new(&root));
         assert_eq!(reloaded.value("MinCPS", 0.0), 11.0);
+    }
+
+    /// A profile write reaches the controller, which is the copy the `config` frame is built
+    /// from.
+    ///
+    /// Two writers with no push between them is the defect this migration keeps finding: the
+    /// UI would show the new value, the saved file would carry it, and the bridge would keep
+    /// running the old one for the life of the link. `FightStatusEnabled` is one of the two
+    /// fields the config slice names, and it stands in for every bind path that shares
+    /// `apply_control`.
+    #[test]
+    fn a_profile_write_reaches_the_controller_the_config_frame_reads() {
+        use crate::views::bindings::ControlValue;
+
+        let mut shell = Shell::new(Theme::slate());
+        assert!(!shell.profile().fight_status_enabled);
+
+        assert!(
+            shell.apply_control("FightStatusEnabled", ControlValue::Toggle(true)),
+            "the switch's bind path has a field behind it"
+        );
+
+        assert!(shell.profile().fight_status_enabled, "the UI copy took it");
+        assert!(
+            shell.controller().profile().fight_status_enabled,
+            "and the controller's copy, which `config_payload` fills `fightStatus` from"
+        );
+        assert!(
+            shell.controller().config_payload().fight_status,
+            "so the frame the reader sends carries it"
+        );
     }
 
     #[test]
@@ -3981,6 +4048,17 @@ mod tests {
                 .copied()),
             Some(0x70),
             "the capture wrote the module key through the profile"
+        );
+        assert_eq!(
+            cx.read(|cx| shell
+                .read(cx)
+                .controller()
+                .profile()
+                .module_keys
+                .get("autoclicker")
+                .copied()),
+            Some(0x70),
+            "and the controller's copy, which the config frame fills `keybindAutoclicker` from"
         );
 
         // The paint the write scheduled is what rebuilds the button.

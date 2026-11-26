@@ -26,8 +26,31 @@
 //! uses the client directly. `memory::MemoryTransport` appends as well, so the seam tests
 //! exercise the same contract the socket does.
 //!
-//! What this deliberately does not do: no reconnect, no command sending, no injection and
-//! no module execution. A failed dial leaves the link down with the reason in the log, and
+//! # The config frame
+//!
+//! The link is not read-only any more: on connect, and whenever the controller's payload
+//! changes, the reader writes the managed `config` frame. The payload is
+//! `AppController::config_payload`, so `fightStatus` and every `keybind*` stay the profile's,
+//! and `ConfigPayload::to_line` is the protocol's encoder — this crate assembles no payload of
+//! its own.
+//!
+//! **One writer, and it is the reader.** `Transport` gives a single `&mut self` for both
+//! directions, so a second thread would have to share the transport behind a lock — and the
+//! socket's read blocks with no timeout (`aoko-platform/src/tcp.rs:87`), which would starve
+//! that lock for as long as the bridge is quiet. Instead the read loop syncs before every
+//! read: the transport is owned by one thread, a write can never land inside a read, and a
+//! torn frame is not something a lock has to prevent. The cost is latency, not correctness —
+//! a change goes out on the next inbound frame, and the bridge streams state at tens of
+//! hertz.
+//!
+//! The managed host runs a separate `ConfigSenderLoop` with a 2 s heartbeat
+//! (`GameStateClient.cs:1265-1345`). That shape needs a writer that can make progress while a
+//! read is blocked, which this transport cannot offer; a heartbeat here could only piggyback
+//! on traffic that already arrived, so this slice sends on change only. [`crate::ingest`]'s
+//! report names what a real sender would need.
+//!
+//! What this deliberately does not do: no reconnect, no command frames, no injection and no
+//! module execution. A failed dial leaves the link down with the reason in the log, and
 //! the connection lifecycle (retry, backoff, teardown) belongs to a later slice. The
 //! reader thread is detached when `crate::ingest::Ingest` is dropped: a blocking
 //! `recv_line` on a live socket cannot be interrupted without closing it, and closing it
@@ -40,8 +63,10 @@ use std::time::{Duration, Instant};
 use aoko_core::app::AppController;
 use aoko_platform::TcpBridgeTransport;
 use aoko_protocol::codec::{Decoder, Inbound, Pump, TransportClient};
+use aoko_protocol::config_payload::ConfigPayload;
 use aoko_protocol::diagnostics::ManagedTransportDiagnostics;
-use aoko_protocol::transport::Transport;
+use aoko_protocol::hud::HudLayout;
+use aoko_protocol::transport::{Transport, TransportError};
 
 /// Ticks per second the transport diagnostics are counted against.
 ///
@@ -147,7 +172,8 @@ impl Ingest {
     }
 }
 
-/// The read loop: publish every state frame until the peer closes or the read fails.
+/// The read loop: publish every state frame until the peer closes or the read fails, and
+/// keep the link's `config` frame in step with the controller.
 ///
 /// Connected is set on entry and cleared on every exit path, so a closed link, a read
 /// error and a panicking frame handler all leave the store saying "disconnected" rather
@@ -156,7 +182,20 @@ fn pump<T: Transport>(mut client: TransportClient<T>, controller: &AppController
     let store = controller.store();
     store.set_connected(true);
 
+    // What the link has been told, and the layout its frame carries. Both live on this
+    // thread, which is the only writer: see the module docs.
+    let mut sent: Option<ConfigPayload> = None;
+    let hud = HudLayout::default();
+
     loop {
+        // Before every read, so a config write can never land inside one. A profile edit made
+        // on the UI thread is picked up here on the next iteration; while nothing changes
+        // this is a profile read and a field compare, not an encode.
+        if let Err(error) = sync_config(&mut client, controller, &mut sent, &hud) {
+            tracing::warn!("bridge config write failed: {error}");
+            break;
+        }
+
         match client.pump() {
             Ok(Pump::Frame(Inbound::State { state, .. })) => {
                 // `publish_shared`, not `publish`: the frame already arrives as an `Arc`
@@ -181,11 +220,43 @@ fn pump<T: Transport>(mut client: TransportClient<T>, controller: &AppController
     store.set_connected(false);
 }
 
+/// Writes the `config` frame when the controller's payload differs from the one on the wire.
+///
+/// The payload is the controller's (`AppController::config_payload`), so `fightStatus` and
+/// every `keybind*` come from the profile and this never assembles a payload of its own;
+/// [`ConfigPayload::to_line`] is the protocol's encoder. The compare is on the payload value
+/// rather than the encoded line, so an idle tick costs a profile read and a field compare
+/// where encoding costs a ~4 KB `String`.
+///
+/// `to_line` also takes the HUD layout, and this passes the default. That is a gap rather
+/// than a choice: `Profile::hud_layout` stores the managed JSON blob and nothing converts it
+/// to a `HudLayout`, so a customised HUD would be sent as the default layout.
+/// `HudLayout::from_json` is the missing call, and it belongs beside `config_payload` in
+/// `aoko-core`, which is where the rest of the frame is filled.
+fn sync_config<T: Transport>(
+    client: &mut TransportClient<T>,
+    controller: &AppController,
+    sent: &mut Option<ConfigPayload>,
+    hud: &HudLayout,
+) -> Result<(), TransportError> {
+    let payload = controller.config_payload();
+    if sent.as_ref() == Some(&payload) {
+        return Ok(());
+    }
+
+    let line = payload.to_line(hud);
+    client.send_line(&line)?;
+    tracing::debug!(bytes = line.len(), "bridge config frame sent");
+    *sent = Some(payload);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use aoko_protocol::state::GameState;
     use aoko_protocol::transport::{memory, LineBuf, RecvOutcome, TransportError};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Condvar, Mutex};
 
     /// A gate the test opens when it is done watching the link.
@@ -335,5 +406,196 @@ mod tests {
             Some(7.5),
             "the last decoded state survives the disconnect"
         );
+    }
+
+    // ---- the config frame ------------------------------------------------------------
+
+    /// A link the test drives: the memory transport for the wire, plus the one property it
+    /// lacks — a read that waits instead of reporting end of stream.
+    ///
+    /// `MemoryTransport` answers `EndOfStream` as soon as its queue is empty, which a socket
+    /// never does, so a reader on it would leave at the first quiet moment and no later frame
+    /// could be observed. The wait is a 1 ms poll on a flag: a real socket blocks in the
+    /// kernel, and nothing asserted below depends on how long the fake waits.
+    struct Driven {
+        inner: memory::MemoryTransport,
+        closed: Arc<AtomicBool>,
+    }
+
+    impl Transport for Driven {
+        fn recv_line(&mut self, out: &mut LineBuf) -> Result<RecvOutcome, TransportError> {
+            loop {
+                match self.inner.recv_line(out)? {
+                    RecvOutcome::EndOfStream if !self.closed.load(Ordering::SeqCst) => {
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    other => return Ok(other),
+                }
+            }
+        }
+
+        fn send_line(&mut self, line: &[u8]) -> Result<(), TransportError> {
+            self.inner.send_line(line)
+        }
+    }
+
+    /// A reader on a [`Driven`] link, plus the peer that feeds it and records what it writes.
+    fn connect(controller: &Arc<AppController>) -> (memory::MemoryPeer, Arc<AtomicBool>, Ingest) {
+        let closed = Arc::new(AtomicBool::new(false));
+        let (transport, peer) = memory::duplex();
+        let ingest = Ingest::attach(
+            Driven {
+                inner: transport,
+                closed: Arc::clone(&closed),
+            },
+            Arc::clone(controller),
+        );
+        (peer, closed, ingest)
+    }
+
+    /// Waits until the client has written `count` lines, then hands back everything it wrote.
+    fn wait_for_lines(peer: &memory::MemoryPeer, count: usize) -> Vec<String> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let lines = peer.sent_lines();
+            if lines.len() >= count {
+                return lines;
+            }
+            if Instant::now() >= deadline {
+                panic!(
+                    "the client wrote {} lines, expected at least {count}: {lines:?}",
+                    lines.len()
+                );
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// One written line as the bridge would read it.
+    fn json(line: &str) -> serde_json::Value {
+        serde_json::from_str(line).unwrap_or_else(|error| panic!("{line}: {error}"))
+    }
+
+    /// Feeds one state frame and waits until the reader published it.
+    ///
+    /// The wait is what makes a tick a fact rather than a timing assumption: when this
+    /// returns, the reader has taken the frame, so its next config sync is the one that runs
+    /// before the *next* read.
+    fn tick(controller: &AppController, peer: &memory::MemoryPeer, health: f32) {
+        peer.feed(
+            format!("{{\"screenName\":\"Arena\",\"health\":{health},\"inWorld\":true}}\n")
+                .as_bytes(),
+        );
+        wait_for_state(controller, |state| state.health == health);
+    }
+
+    /// On connect the client writes exactly one `config` frame, and it is the controller's:
+    /// `fightStatus` and `keybindAutoclicker` are the profile's values, not the payload's
+    /// defaults.
+    #[test]
+    fn connecting_writes_the_controllers_config_frame_once() {
+        let controller = Arc::new(AppController::default());
+        controller.update_profile(|profile| {
+            profile.fight_status_enabled = true;
+            profile
+                .module_keys
+                .insert(String::from("autoclicker"), 0x70);
+            true
+        });
+
+        let (peer, closed, ingest) = connect(&controller);
+
+        let lines = wait_for_lines(&peer, 1);
+        assert_eq!(lines.len(), 1, "one frame on connect: {lines:?}");
+
+        let frame = json(&lines[0]);
+        assert_eq!(frame["type"].as_str(), Some("config"));
+        assert_eq!(
+            frame["fightStatus"].as_bool(),
+            Some(true),
+            "`fightStatus` is `Profile::fight_status_enabled`; `false` would be a default payload"
+        );
+        assert_eq!(
+            frame["keybindAutoclicker"].as_i64(),
+            Some(0x70),
+            "and every keybind comes from `Profile::module_keys`"
+        );
+        assert!(
+            frame["hudLayout"].is_object(),
+            "the layout field is always present in the managed frame"
+        );
+
+        closed.store(true, Ordering::SeqCst);
+        ingest.join();
+    }
+
+    /// A profile change reaches the wire on the live link: no reconnect, no second reader.
+    #[test]
+    fn a_fight_status_change_is_written_on_the_live_link() {
+        let controller = Arc::new(AppController::default());
+        let (peer, closed, ingest) = connect(&controller);
+
+        let lines = wait_for_lines(&peer, 1);
+        assert_eq!(
+            json(&lines[0])["fightStatus"].as_bool(),
+            Some(false),
+            "the default profile is off, and that is what connect sent"
+        );
+
+        // The flip is what a switch press does, from another thread.
+        controller.update_profile(|profile| {
+            profile.fight_status_enabled = true;
+            true
+        });
+
+        // One inbound frame is the tick the reader syncs on. The bridge streams these at tens
+        // of hertz, so the change goes out within a frame rather than at the next connect.
+        tick(&controller, &peer, 20.0);
+
+        let lines = wait_for_lines(&peer, 2);
+        assert_eq!(
+            json(&lines[1])["fightStatus"].as_bool(),
+            Some(true),
+            "the new value, on the same link"
+        );
+        assert!(
+            controller.store().is_connected(),
+            "the link never dropped, so this is not a reconnect"
+        );
+
+        closed.store(true, Ordering::SeqCst);
+        ingest.join();
+    }
+
+    /// An unchanged tick writes nothing: the compare is on the payload, so idle frames leave
+    /// the wire at two lines rather than resending the same one.
+    #[test]
+    fn an_unchanged_tick_writes_no_third_frame() {
+        let controller = Arc::new(AppController::default());
+        let (peer, closed, ingest) = connect(&controller);
+        wait_for_lines(&peer, 1);
+
+        // One change, so there are two frames on the wire.
+        controller.update_profile(|profile| {
+            profile.fight_status_enabled = true;
+            true
+        });
+        tick(&controller, &peer, 20.0);
+        tick(&controller, &peer, 19.0);
+        wait_for_lines(&peer, 2);
+
+        // Two more ticks. Each one syncs before its read and finds the payload it already
+        // sent; by the time `tick` returns, that sync has run.
+        tick(&controller, &peer, 18.0);
+        tick(&controller, &peer, 17.0);
+
+        assert_eq!(
+            peer.sent_lines().len(),
+            2,
+            "the connect frame and the one change, and nothing on an idle tick"
+        );
+
+        closed.store(true, Ordering::SeqCst);
+        ingest.join();
     }
 }
