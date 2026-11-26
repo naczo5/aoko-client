@@ -121,6 +121,18 @@ impl Profiles {
         };
 
         profiles.refresh();
+
+        // New copy with no managed analogue: the WPF app never migrated anything. It
+        // goes in the card, not only into `tracing`, because this binary installs no
+        // subscriber yet and a log line would reach nobody.
+        if profiles.migrated > 0 && profiles.status.message.is_empty() {
+            let count = profiles.migrated;
+            let noun = if count == 1 { "config" } else { "configs" };
+            profiles.set_status(format!(
+                "Migrated {count} {noun} from the previous version."
+            ));
+        }
+
         (profiles, profile)
     }
 
@@ -474,10 +486,19 @@ mod tests {
         let (profiles, _) = Profiles::with_store(store_at(&root));
         assert_eq!(profiles.migrated(), 1, "the count is reported, not dropped");
         assert_eq!(profiles.configs(), ["Old".to_owned()]);
+        assert_eq!(
+            profiles.status().message,
+            "Migrated 1 config from the previous version."
+        );
 
         // A second launch copies nothing: the live directory is already populated.
         let (again, _) = Profiles::with_store(store_at(&root));
         assert_eq!(again.migrated(), 0);
+        assert_eq!(
+            again.status().message,
+            "",
+            "nothing to report, nothing said"
+        );
     }
 
     #[test]
