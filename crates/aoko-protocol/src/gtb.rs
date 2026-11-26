@@ -25,7 +25,8 @@ pub struct GtbWordSolver {
     /// Indices into `words`, bucketed by character length.
     by_length: Vec<Vec<u32>>,
     known: HashSet<String>,
-    /// The action-bar line the memo below was built from.
+    /// The action-bar line the memo below was built from: with `last_mask` it is the
+    /// memo key.
     last_action_bar: String,
     last_mask: String,
     last_matches: Vec<String>,
@@ -79,8 +80,12 @@ impl GtbWordSolver {
     /// running the mask pipeline, and a repeated mask returns it after one pass.
     pub fn solve(&mut self, action_bar_text: &str, max_results: usize) -> (&str, &[String]) {
         // The steady state: the bridge re-sends the same line, so this comparison is
-        // the whole cost of a frame that changes nothing. It reads the memo only
-        // while it is valid, which is why `try_learn_solved_word` clears it.
+        // the whole cost of a frame that changes nothing. The memo key is the pair
+        // (line, mask it normalises to); keying it on the mask alone is what this
+        // guard replaced, and it cannot come back, because reaching the mask means
+        // running `extract_mask`, which is the allocation a per-frame query must not
+        // make. It reads the memo only while it is valid, which is why
+        // `try_learn_solved_word` clears it.
         if !self.last_mask.is_empty() && action_bar_text == self.last_action_bar {
             return (&self.last_mask, &self.last_matches);
         }
