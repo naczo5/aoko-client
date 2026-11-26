@@ -9,8 +9,8 @@
 //! Rules for this module, so the layer stays a design system rather than a second
 //! theme system:
 //!
-//! - **No colour literals.** Every colour comes from a [`Theme`] token or from a
-//!   `theme::fixed` token. The C# shell carries 121 hex literals in
+//! - **No colour literals.** Every colour comes from a [`Theme`](crate::theme::Theme)
+//!   token or from a `theme::fixed` token. The C# shell carries 121 hex literals in
 //!   `MainWindow.xaml` and that dual source is the defect arbitration 1 exists to
 //!   prevent.
 //! - **No copy.** Call sites pass labels in; component-internal glyphs are limited

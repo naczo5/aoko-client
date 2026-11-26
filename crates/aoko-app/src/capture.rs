@@ -12,9 +12,9 @@
 //!
 //! So: the registry is a list of [`Screen`] values, each **named by the screen it
 //! shows**, and the harness names the file after the screen rather than by position.
-//! There is no index-to-name table anywhere in this module, and [`registry`] starts
-//! with exactly one placeholder because filling it with the nine tabs is Builder 5's
-//! job.
+//! There is no index-to-name table anywhere in this module. This module owns the
+//! [`Screen`] type and the loop that writes the files; the list of screens is the
+//! shell's business.
 //!
 //! # Capture path
 //!
@@ -37,6 +37,29 @@
 //! Determinism: the scale factor is pinned to 1.0, the clock is advanced rather than
 //! real time waited, and the animation gate is set to reduced motion so every widget
 //! renders its end state instead of a frame of a transition.
+//!
+//! # Reproducing
+//!
+//! Verified on this host with lavapipe, from the repository root:
+//!
+//! ```text
+//! unset LD_LIBRARY_PATH
+//! cargo build -p aoko-app --features capture
+//! VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json \
+//!     ./target/debug/aoko --capture-screenshots target/capture-evidence
+//! ```
+//!
+//! `LD_LIBRARY_PATH` has to be unset for the **run**, not only for the build. The Vibe
+//! CLI exports a stale `libstdc++`, and with it set wgpu enumerates no adapter and the
+//! harness reports `No usable headless GPU adapter found` — which reads like a missing
+//! driver rather than a library-path problem. An X server is not needed: the headless
+//! renderer writes the same PNGs with no `DISPLAY` at all, and `xvfb-run` changes
+//! nothing here (it is the live-window path that wants one).
+//!
+//! Because `target/` is shared with other builders, a plain `cargo build -p aoko-app`
+//! replaces `target/debug/aoko` with a binary that has no `capture` feature, and the run
+//! then errors that the harness needs a rebuild. Build with the feature immediately
+//! before capturing.
 
 use crate::shell::Shell;
 

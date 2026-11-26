@@ -3,7 +3,7 @@
 //! `DarkComboBox` (`App.xaml:24-116`) is a `ToggleButton` plus a chevron, a `Popup`
 //! with a `MaxHeight="200"` scroller and a separate item template. There is no
 //! dropdown widget at the pin, so the trigger is here and the list is
-//! [`super::popup`]; selection, keyboard movement and dismissal belong to the shell's
+//! `super::popup`; selection, keyboard movement and dismissal belong to the shell's
 //! state.
 
 use gpui::prelude::*;

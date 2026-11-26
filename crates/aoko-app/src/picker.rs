@@ -43,8 +43,8 @@ pub const HUE_THUMB: f32 = 4.0;
 /// The saturation/value square.
 ///
 /// `on_drag` receives square-local pixels on press and on every drag move. The caller
-/// updates its own [`crate::dialogs::color_picker::PickerState`]; this widget keeps no
-/// state beyond the drag flag and the captured bounds.
+/// updates its own [`ColorPickerState`](crate::dialogs::color_picker::ColorPickerState);
+/// this widget keeps no state beyond the drag flag and the captured bounds.
 pub fn sv_square(
     name: impl Into<SharedString>,
     hsv: Hsv,
