@@ -8,9 +8,16 @@
 //! Framing is the byte-level half of the contract and is shared by both OSes:
 //! one UTF-8 JSON document per line, `\n` terminated, a single trailing `\r`
 //! stripped on read, no length prefix, no keepalive, no TLS.
+//!
+//! One connection has two handles because the reader blocks in `recv_line` for
+//! as long as the bridge is quiet: [`TcpBridgeTransport::try_clone_writer`]
+//! hands the sender its own handle on the same socket, so a config write never
+//! waits for the pump. The handles share one frame mutex, which is what keeps a
+//! frame from being torn by two concurrent writers; see [`TcpBridgeWriter`].
 
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use aoko_protocol::transport::{
@@ -42,6 +49,11 @@ pub struct TcpBridgeTransport {
     /// found, mirroring `BoundedLineReader`'s discard state.
     discard_until_newline: bool,
     send_buffer: Vec<u8>,
+    /// Serialises whole frames between this handle and every writer cloned from
+    /// it. A duplicated handle is the same socket, and `write_all` can issue more
+    /// than one `write` when a frame outgrows the send buffer, so two writers
+    /// without this could interleave two frames into one torn line.
+    frame_lock: Arc<Mutex<()>>,
 }
 
 impl TcpBridgeTransport {
@@ -91,6 +103,42 @@ impl TcpBridgeTransport {
             consumed: 0,
             discard_until_newline: false,
             send_buffer: Vec::with_capacity(READ_BUFFER_BYTES),
+            frame_lock: Arc::new(Mutex::new(())),
+        })
+    }
+
+    /// A second handle for a dedicated sender, so a config write does not wait
+    /// for [`Transport::recv_line`] to return.
+    ///
+    /// `TcpStream::try_clone` is `dup(2)` on Unix and `WSADuplicateSocket` +
+    /// `WSASocket` on Windows, so this is a genuinely separate handle with its
+    /// own close: dropping it leaves the connection open, and the connection
+    /// closes when every handle is gone. It is the *same* TCP connection and the
+    /// same kernel send buffer, and `std::net::TcpStream` keeps no user-space
+    /// buffer, so `flush` is a no-op on both platforms - there is no flush
+    /// ordering between the handles to get right.
+    ///
+    /// What does need ordering is the frames: `write_all` can issue several
+    /// `write` calls for one frame, so two writers on one socket can interleave
+    /// two frames into a line neither side wrote. The new handle shares this
+    /// transport's frame mutex, so [`TcpBridgeWriter::send_line`] and
+    /// [`Transport::send_line`] cannot tear each other: many handles may write,
+    /// one frame at a time.
+    ///
+    /// The handle starts with empty buffers. The inbound buffer, the consumed
+    /// cursor and the discard flag stay with the reader, because a half-read
+    /// frame belongs to exactly one of them.
+    ///
+    /// Socket options live on the socket, not the handle, so the 10 s
+    /// [`SEND_TIMEOUT`] and the absent read timeout set by [`Self::from_stream`]
+    /// apply to both. Nothing here adds a read timeout: a silent bridge stays
+    /// silent rather than surfacing `WouldBlock` as a torn connection.
+    pub fn try_clone_writer(&self) -> Result<TcpBridgeWriter, TransportError> {
+        let stream = self.stream.try_clone()?;
+        Ok(TcpBridgeWriter {
+            stream,
+            send_buffer: Vec::with_capacity(READ_BUFFER_BYTES),
+            frame_lock: Arc::clone(&self.frame_lock),
         })
     }
 
@@ -126,6 +174,71 @@ impl TcpBridgeTransport {
             self.consumed = 0;
         }
     }
+}
+
+/// The write half of a bridge connection, for a sender that must not wait for
+/// the pump to return from a read.
+///
+/// Obtained from [`TcpBridgeTransport::try_clone_writer`], which carries the
+/// platform answer in full: a duplicated handle on the same socket, no
+/// user-space buffering, no flush ordering to respect, and one frame mutex
+/// shared with the reader so two writers cannot interleave a frame.
+///
+/// It holds its own frame buffer and nothing else - no inbound bytes, no
+/// consumed cursor, no discard state - so a half-read frame can never be
+/// replayed onto the wire by this handle.
+pub struct TcpBridgeWriter {
+    stream: TcpStream,
+    send_buffer: Vec<u8>,
+    frame_lock: Arc<Mutex<()>>,
+}
+
+impl TcpBridgeWriter {
+    /// Writes one line frame, appending `\n` when the line does not already end
+    /// with one.
+    ///
+    /// A write failure is [`TransportError::Io`], exactly as
+    /// [`Transport::send_line`] reports it, and it never panics: on Unix the
+    /// runtime ignores `SIGPIPE`, so a closed peer surfaces as `EPIPE`; on
+    /// Windows it surfaces as `WSAECONNRESET` or `WSAENOTCONN`. The caller owns
+    /// the reaction, because a torn send means the connection is suspect and
+    /// only the caller knows whether to redial.
+    pub fn send_line(&mut self, line: &str) -> Result<(), TransportError> {
+        frame_into(&mut self.send_buffer, line.as_bytes());
+        write_frame(&mut self.stream, &self.send_buffer, &self.frame_lock)
+    }
+}
+
+/// Builds one frame in place: the line, then exactly one `\n`.
+fn frame_into(buffer: &mut Vec<u8>, line: &[u8]) {
+    buffer.clear();
+    buffer.extend_from_slice(line);
+    if buffer.last() != Some(&b'\n') {
+        buffer.push(b'\n');
+    }
+}
+
+/// Writes one already-framed line while holding the connection's frame lock.
+///
+/// The lock is what makes the frame whole; `flush` is kept for symmetry with a
+/// future buffered writer, and is a no-op for a raw `TcpStream` on both
+/// platforms. A poisoned lock only means another handle panicked while holding
+/// it - the mutex guards ordering, not data - so recovering the guard is
+/// correct and no send is lost because of a panic elsewhere.
+///
+/// A writer blocked on a full send buffer holds the lock for up to
+/// [`SEND_TIMEOUT`], which delays the next frame but can never interleave it.
+fn write_frame(
+    stream: &mut TcpStream,
+    buffer: &[u8],
+    frame_lock: &Arc<Mutex<()>>,
+) -> Result<(), TransportError> {
+    let _frame = frame_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    stream.write_all(buffer)?;
+    stream.flush()?;
+    Ok(())
 }
 
 impl Transport for TcpBridgeTransport {
@@ -199,15 +312,10 @@ impl Transport for TcpBridgeTransport {
     }
 
     fn send_line(&mut self, line: &[u8]) -> Result<(), TransportError> {
-        self.send_buffer.clear();
-        self.send_buffer.extend_from_slice(line);
-        if self.send_buffer.last() != Some(&b'\n') {
-            self.send_buffer.push(b'\n');
-        }
-        // One write for one frame, so a torn line can never sit on the socket.
-        self.stream.write_all(&self.send_buffer)?;
-        self.stream.flush()?;
-        Ok(())
+        // One write for one frame, under the same lock the cloned writer uses, so
+        // a torn line can never sit on the socket from either handle.
+        frame_into(&mut self.send_buffer, line);
+        write_frame(&mut self.stream, &self.send_buffer, &self.frame_lock)
     }
 }
 
@@ -392,6 +500,149 @@ mod tests {
         let (first, second) = server.join().expect("server thread");
         assert_eq!(first, "{\"type\":\"config\"}\n");
         assert_eq!(second, "{\"type\":\"moduleAction\"}\n");
+    }
+
+    #[test]
+    fn a_writer_handle_sends_while_the_transport_is_blocked_in_a_read() {
+        let (listener, addr) = listener();
+        let server = std::thread::spawn(move || {
+            let (socket, _) = listener.accept().expect("accept");
+            let mut reader = std::io::BufReader::new(socket);
+            let mut config = String::new();
+            reader.read_line(&mut config).expect("read config");
+            // The reader stays blocked until this line exists, so the write below
+            // can only have come from the cloned handle.
+            reader
+                .get_mut()
+                .write_all(b"{\"type\":\"state\"}\n")
+                .expect("write state");
+            config
+        });
+
+        let transport = TcpBridgeTransport::connect(addr).expect("connect");
+        let mut writer = transport.try_clone_writer().expect("clone writer");
+
+        let (at_read, wait_at_read) = std::sync::mpsc::sync_channel(0);
+        let reader_thread = std::thread::spawn(move || {
+            let mut transport = transport;
+            // Rendezvous: one statement from blocking in `recv_line`, with the
+            // server still silent.
+            at_read.send(()).expect("rendezvous");
+            read_line(&mut transport)
+        });
+
+        wait_at_read.recv().expect("reader reached recv_line");
+        writer
+            .send_line("{\"type\":\"config\"}")
+            .expect("send config");
+
+        assert_eq!(
+            reader_thread.join().expect("reader thread"),
+            "{\"type\":\"state\"}"
+        );
+        assert_eq!(
+            server.join().expect("server thread"),
+            "{\"type\":\"config\"}\n"
+        );
+    }
+
+    #[test]
+    fn a_send_to_a_closed_peer_is_a_classified_error_not_a_panic() {
+        let (listener, addr) = listener();
+        let server = std::thread::spawn(move || {
+            let (_socket, _) = listener.accept().expect("accept");
+            // Dropping sends a FIN; the reset arrives once the peer writes again.
+        });
+
+        let transport = TcpBridgeTransport::connect(addr).expect("connect");
+        let mut writer = transport.try_clone_writer().expect("clone writer");
+        server.join().expect("server thread");
+
+        // The write that races the reset can still be accepted by the local send
+        // buffer, so this asserts that the error arrives, not that the first call
+        // returns it.
+        let mut error = None;
+        for _ in 0..64 {
+            if let Err(err) = writer.send_line("{\"type\":\"config\"}") {
+                error = Some(err);
+                break;
+            }
+        }
+
+        let err = error.expect("a closed peer must surface an error");
+        assert!(
+            matches!(&err, TransportError::Io(_)),
+            "classified like any other transport failure: {err:?}"
+        );
+    }
+
+    #[test]
+    fn two_writer_sends_arrive_as_two_lines_not_one_frame() {
+        let (listener, addr) = listener();
+        let server = std::thread::spawn(move || {
+            let (socket, _) = listener.accept().expect("accept");
+            let mut reader = std::io::BufReader::new(socket);
+            let mut first = String::new();
+            let mut second = String::new();
+            reader.read_line(&mut first).expect("read first");
+            reader.read_line(&mut second).expect("read second");
+            (first, second)
+        });
+
+        let transport = TcpBridgeTransport::connect(addr).expect("connect");
+        let mut writer = transport.try_clone_writer().expect("clone writer");
+        writer
+            .send_line("{\"type\":\"config\"}")
+            .expect("first send");
+        writer
+            .send_line("{\"type\":\"moduleAction\"}")
+            .expect("second send");
+
+        let (first, second) = server.join().expect("server thread");
+        assert_eq!(first, "{\"type\":\"config\"}\n");
+        assert_eq!(second, "{\"type\":\"moduleAction\"}\n");
+    }
+
+    #[test]
+    fn a_writer_handle_does_not_inherit_the_readers_buffered_frame() {
+        let (listener, addr) = listener();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept");
+            // One complete line, then the start of a second one: reading the
+            // first leaves the second pending in the reader.
+            socket
+                .write_all(b"{\"type\":\"state\"}\n{\"ty")
+                .expect("write partial");
+
+            let mut received = Vec::new();
+            let mut chunk = [0u8; 64];
+            while !received.contains(&b'\n') {
+                let read = socket.read(&mut chunk).expect("read config");
+                assert_ne!(read, 0, "the peer closed mid-test");
+                received.extend_from_slice(chunk.get(..read).expect("chunk"));
+            }
+
+            // Finish the line the reader is still holding a prefix of.
+            socket.write_all(b"pe\":\"state\"}\n").expect("complete");
+            received
+        });
+
+        let mut transport = TcpBridgeTransport::connect(addr).expect("connect");
+        assert_eq!(read_line(&mut transport), "{\"type\":\"state\"}");
+
+        let mut writer = transport.try_clone_writer().expect("clone writer");
+        writer
+            .send_line("{\"type\":\"config\"}")
+            .expect("send config");
+
+        // The peer sees the config frame alone, so no byte the reader is holding
+        // was replayed onto the writer's handle.
+        assert_eq!(
+            server.join().expect("server thread"),
+            b"{\"type\":\"config\"}\n".to_vec()
+        );
+        // And the reader still owns its half-read frame.
+        assert_eq!(read_line(&mut transport), "{\"type\":\"state\"}");
     }
 
     #[test]

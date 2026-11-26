@@ -51,7 +51,7 @@ pub use srv::{
     Clock as SrvClock, SrvExchange, SrvLookupCache, SrvResolver, SrvTarget, UdpExchange, DNS_PORT,
     SRV_FAILURE_TTL, SRV_SUCCESS_TTL, SRV_TIMEOUT,
 };
-pub use tcp::{TcpBridgeTransport, BRIDGE_ADDRESS, SEND_TIMEOUT};
+pub use tcp::{TcpBridgeTransport, TcpBridgeWriter, BRIDGE_ADDRESS, SEND_TIMEOUT};
 pub use version::{normalize_detected_version, resolve_bridge_dll_name, try_parse_version};
 pub use window::{is_game_window, sort_windows, Rect, WindowHandle, WindowInfo, WindowInspector};
 
