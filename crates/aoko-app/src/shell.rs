@@ -59,6 +59,7 @@ use aoko_protocol::block_esp::{self, BlockEspTargetData};
 use crate::components;
 use crate::components::text_input::TextInput;
 use crate::components::ButtonVariant;
+use crate::components::FieldVariant;
 use crate::runtime::Runtime;
 use crate::theme::metrics;
 use crate::theme::motion::{self, Motion};
@@ -141,6 +142,18 @@ pub struct Shell {
     /// shell submits itself — on Enter and on the button beside it — rather than a form the
     /// account and server panels own.
     block_add: Option<Entity<TextInput>>,
+    /// The overlay's query box, the seventh text field.
+    ///
+    /// Created with the six in [`FormFields`] for the same reason as [`Shell::block_add`]: an
+    /// entity needs a context, so it exists from the first render rather than from
+    /// [`Shell::new`]. It is not in that struct because nothing in it is a form: the search
+    /// state is the owner of the query, and this box is its keyboard.
+    ///
+    /// It is in [`Shell::any_text_field_focused`] for the same reason the Block ESP box is. A
+    /// character typed into it must not also be read as type-to-open, and a Ctrl+K while it has
+    /// focus must not open what is already open. That last half is why the close path blurs it:
+    /// a field that holds focus after its overlay is gone would close the gate for good.
+    search_query: Option<Entity<TextInput>>,
     /// The palette file, the applied name, and the create-palette card's four hex drafts.
     ///
     /// The one owner of those four strings, for the same reason [`Shell::profile`] is the one
@@ -413,6 +426,7 @@ impl Shell {
             profiles,
             fields: FormFields::default(),
             block_add: None,
+            search_query: None,
             // Seeded without reading the file: `from_system` only resolves the path, and `at`
             // touches nothing. The reads are `palettes()`/`resolve()`, the write is
             // `save_draft()`, and no constructor calls any of them — which is what keeps a unit
@@ -734,6 +748,23 @@ impl Shell {
                 input.update(cx, |input, cx| input.set_text(value, cx));
             }
             self.fields.config_name = Some(input);
+        }
+
+        // The overlay's query box. The placeholder is the overlay's own literal, which is the
+        // sentence `views/copy.rs` does not carry yet: it exists twice in `crate::overlay` and
+        // now once here, so the copy owner owns the constant rather than this file inventing a
+        // fourth spelling.
+        if self.search_query.is_none() {
+            let handle = cx.entity();
+            let input = cx.new(|cx| {
+                TextInput::new(cx, theme.clone(), "Search modules and settings")
+                    .variant(FieldVariant::Query)
+                    .on_change(move |text, _window, cx| {
+                        let text = text.to_string();
+                        handle.update(cx, |shell, cx| shell.set_search_query(text, cx));
+                    })
+            });
+            self.search_query = Some(input);
         }
     }
 
@@ -1958,13 +1989,80 @@ impl Shell {
         }
     }
 
-    /// One window keystroke: the two controls that take a window key, in the order that decides
-    /// which of them sees it.
+    /// Mirrors the query box into the search state, which is the owner of the query.
+    ///
+    /// The field is the keyboard, not a second copy: every keystroke lands here and the state
+    /// re-ranks from the same string, so the rows and the box cannot disagree. A text that does
+    /// not change the query (an arrow key, the caret moving) returns before it rebuilds.
+    fn set_search_query(&mut self, text: String, cx: &mut Context<Self>) {
+        let facts = self.row_facts();
+        let dev_mode = self.profile.dev_mode;
+        if self.search.set_query(&text, dev_mode, &facts) {
+            cx.notify();
+        }
+    }
+
+    /// Seeds the query box from the state and focuses it: the overlay's open path.
+    ///
+    /// The seed is the state's query rather than the keystroke that opened it, so the type-to-open
+    /// character and Ctrl+K's empty string take one route and the box cannot disagree with the
+    /// rows the state already ranked. [`crate::overlay::focus_query`] is the managed
+    /// `CommandSearchOverlay.Open` (`CommandSearchOverlay.xaml.cs:69-88`): seed, caret at the end,
+    /// focus, in that order.
+    fn focus_search_query(&self, window: &mut Window, cx: &mut App) {
+        let Some(field) = &self.search_query else {
+            return;
+        };
+        let seed = self.search.query().to_owned();
+        crate::overlay::focus_query(field, &seed, window, cx);
+    }
+
+    /// Blurs the query box, which is the restore-focus half of [`SearchKeyOutcome::Closed`].
+    ///
+    /// Without it the box keeps the window's focus after the overlay is gone, and
+    /// [`Shell::any_text_field_focused`] then reports a focused field for a field nobody can see:
+    /// Ctrl+K and type-to-open would both be refused for the rest of the session.
+    fn blur_search_query(&self, window: &mut Window, cx: &mut App) {
+        let Some(field) = &self.search_query else {
+            return;
+        };
+        if field.read(cx).focus_handle().is_focused(window) {
+            window.blur(cx);
+        }
+    }
+
+    /// One window keystroke, and the focus that goes with its outcome.
+    ///
+    /// The focus is applied here rather than at each return site, because every `Closed` is one —
+    /// Escape, a scrim click's equivalent and the Enter that jumps all end the overlay — and a
+    /// path that forgot to blur would leave the gate refusing Ctrl+K for good. A repaint follows
+    /// only an outcome that changed something.
+    fn handle_window_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> SearchKeyOutcome {
+        let outcome = self.window_key_outcome(event, window, cx);
+        match outcome {
+            // `SearchKeyOutcome::Opened`'s contract: the caller focuses the query field.
+            SearchKeyOutcome::Opened => self.focus_search_query(window, cx),
+            // And `Closed`'s: it restores focus, which here means handing it back to the window.
+            SearchKeyOutcome::Closed => self.blur_search_query(window, cx),
+            SearchKeyOutcome::Ignored => {}
+        }
+        if outcome != SearchKeyOutcome::Ignored {
+            cx.notify();
+        }
+        outcome
+    }
+
+    /// The two controls that take a window key, in the order that decides which of them sees it.
     ///
     /// `Opened` and `Closed` are the outcomes worth stopping propagation for: the overlay has
     /// taken the keyboard, and letting the key travel on would also hit whatever is behind it.
     /// Everything else is `Ignored`, and the key goes on to the element that would have had it.
-    fn handle_window_key(
+    fn window_key_outcome(
         &mut self,
         event: &KeyDownEvent,
         window: &Window,
@@ -2007,11 +2105,7 @@ impl Shell {
         let facts = self.row_facts();
         let dev_mode = self.profile.dev_mode;
         let gate = self.search_gate(Some(window), cx);
-        let outcome = self.search.handle_window_key(key, &gate, dev_mode, &facts);
-        if outcome != SearchKeyOutcome::Ignored {
-            cx.notify();
-        }
-        outcome
+        self.search.handle_window_key(key, &gate, dev_mode, &facts)
     }
 
     /// A click on one result row: select it, then perform the jump.
@@ -2097,8 +2191,10 @@ impl Shell {
     /// Read off the entities rather than a tracked flag: six of them live in one place
     /// ([`FormFields`]) and a flag beside each would be a second copy of the focus GPUI already
     /// keeps. A new field added to `FormFields` is in this array, so the gate cannot forget it —
-    /// and the Block ESP add box, which is the one text field that lives on the shell instead, is
-    /// here for the same reason: a character typed into it must not open the search overlay.
+    /// and the three that live on the shell instead (the Block ESP box, the palette boxes and the
+    /// overlay's query box) are here for the same reason: a character typed into one must not
+    /// open the search overlay. The query box matters twice over, because it is the one field
+    /// that exists while the overlay is open, so the close path blurs it.
     fn any_text_field_focused(&self, window: &Window, cx: &App) -> bool {
         [
             &self.fields.token,
@@ -2108,6 +2204,7 @@ impl Shell {
             &self.fields.direct_address,
             &self.fields.config_name,
             &self.block_add,
+            &self.search_query,
         ]
         .into_iter()
         .flatten()
@@ -2151,11 +2248,17 @@ impl Shell {
         }
 
         let handle = entity.clone();
+        // The live field when it exists, the static query line otherwise. The two shapes are
+        // `OverlayQuery`'s, so which one paints is this expression and nothing inside the overlay.
+        let query: crate::overlay::OverlayQuery<'_> = match &self.search_query {
+            Some(field) => (field, window.viewport_size()).into(),
+            None => window.viewport_size().into(),
+        };
         Some(crate::overlay::overlay(
             theme,
             &self.search,
             motion,
-            window.viewport_size(),
+            query,
             move |index, _event, _window, cx| {
                 handle.update(cx, |shell, cx| shell.jump_to_row(index, cx));
             },
@@ -2453,8 +2556,14 @@ impl Shell {
                     "   ",
                     copy::SEARCH_BUTTON_CHORD,
                 ),
-                move |_, _window, cx| {
-                    handle.update(cx, |shell, cx| shell.open_search(None, cx));
+                move |_, window, cx| {
+                    handle.update(cx, |shell, cx| {
+                        shell.open_search(None, cx);
+                        // The click opens the same overlay Ctrl+K does, so it puts the caret in
+                        // the same box: a press that left the keyboard nowhere would paint a
+                        // query field that cannot be typed into.
+                        shell.focus_search_query(window, cx);
+                    });
                 },
             )
             .into_any_element()
@@ -2541,7 +2650,29 @@ impl Shell {
         }
 
         for card in cards {
-            body = body.child(self.render_card(card, theme, motion, entity));
+            // The card is wrapped in a `relative()` box so the pulse ring can sit on top of it
+            // without taking part in its layout, and the wrapper carries the card's `x:Name` as
+            // its selector: the ring's box is the card's box, so a test can compare the two and
+            // say which card rang.
+            //
+            // `flex_col` is not decoration. `div()` is a row by default and the card sets no
+            // width of its own: it has always stretched because it was a direct child of the
+            // column the cards live in. A row wrapper would stop that stretch and paint every
+            // card as narrow as its widest control.
+            body = body.child(
+                div()
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .debug_selector(move || card.id.to_owned())
+                    .child(self.render_card(card, theme, motion, entity))
+                    .children(crate::overlay::card_pulse_ring(
+                        theme,
+                        &self.search,
+                        motion,
+                        card.id,
+                    )),
+            );
         }
 
         body.into_any_element()
@@ -5940,6 +6071,240 @@ mod tests {
         assert!(!open, "Enter dismissed the card");
         assert_eq!(tab, tab_of_row, "and landed on the selected row's tab");
         assert_ne!(tab, current, "which is not the tab the shell started on");
+    }
+
+    /// Ctrl+K puts the caret in the query box, typing lands there, and Escape hands the keyboard
+    /// back.
+    ///
+    /// The three halves are one test because they are one object: the box is seeded from the
+    /// state on open, writes back to it on every character, and must not keep focus after the
+    /// overlay closes — a box that kept it would report a focused text field forever and the gate
+    /// would refuse Ctrl+K from then on.
+    ///
+    /// `text()` and the state's query are both asserted: the field must not become a second copy
+    /// of the query, which is the defect this wiring exists to avoid.
+    #[gpui::test]
+    fn typing_reaches_the_query_box_and_the_state(cx: &mut gpui::TestAppContext) {
+        use gpui::Keystroke;
+
+        let root = scratch_root();
+        let (shell, handle, mut visual) = shell_in_window(cx, &root);
+
+        visual
+            .cx
+            .dispatch_keystroke(handle, Keystroke::parse("ctrl-k").expect("keystroke"));
+        // The overlay is painted on the next frame, and the box is only in the tree once it is.
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let focused = visual.update(|window, cx| {
+            let shell = shell.read(cx);
+            let field = shell
+                .search_query
+                .as_ref()
+                .expect("the query box exists after the first frame");
+            field.read(cx).focus_handle().is_focused(window)
+        });
+        assert!(
+            focused,
+            "the open path seeds the box and focuses it, which is `CommandSearchOverlay.Open`"
+        );
+
+        for character in ["a", "u", "t", "o"] {
+            visual
+                .cx
+                .dispatch_keystroke(handle, Keystroke::parse(character).expect("keystroke"));
+        }
+
+        let (text, caret, query) = visual.update(|_, cx| {
+            let shell = shell.read(cx);
+            let field = shell.search_query.as_ref().expect("the box still exists");
+            (
+                field.read(cx).text().to_owned(),
+                field.read(cx).caret(),
+                shell.search().query().to_owned(),
+            )
+        });
+        assert_eq!(
+            text, "auto",
+            "the characters land in the field, from the caret the open left at its end"
+        );
+        assert_eq!(caret, 4, "and the caret stays after them");
+        assert_eq!(
+            query, "auto",
+            "and the state ranks from the same string, so the rows and the box cannot disagree"
+        );
+
+        visual
+            .cx
+            .dispatch_keystroke(handle, Keystroke::parse("escape").expect("keystroke"));
+
+        let (open, still_focused) = visual.update(|window, cx| {
+            let shell = shell.read(cx);
+            let field = shell.search_query.as_ref().expect("the box still exists");
+            (
+                shell.search().is_open(),
+                field.read(cx).focus_handle().is_focused(window),
+            )
+        });
+        assert!(!open, "Escape closed the overlay");
+        assert!(
+            !still_focused,
+            "and the box gave the keyboard back, so the gate can open the overlay again"
+        );
+
+        // The gate really did reopen: a typed character opens the overlay again, seeded with
+        // itself and with the caret after it rather than before it. The seed here is the state's
+        // query, so a caret at 0 would show the wrong half of `Open`'s three steps.
+        visual
+            .cx
+            .dispatch_keystroke(handle, Keystroke::parse("e").expect("keystroke"));
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let (open, text, caret, query) = visual.update(|_, cx| {
+            let shell = shell.read(cx);
+            let field = shell.search_query.as_ref().expect("the box still exists");
+            (
+                shell.search().is_open(),
+                field.read(cx).text().to_owned(),
+                field.read(cx).caret(),
+                shell.search().query().to_owned(),
+            )
+        });
+        assert!(open, "type-to-open still works after the close");
+        assert_eq!(text, "e", "and the box is seeded with the character");
+        assert_eq!(caret, 1, "with the caret at the end of the seed");
+        assert_eq!(
+            query, "e",
+            "and the state agrees, so the first frame ranks from it"
+        );
+    }
+
+    /// The ring names one card, and it needs motion — with the pulse live in both halves.
+    ///
+    /// Two properties at the one function that decides them, with no paint and no global flag:
+    /// the copy beside the landed card is not ringed, and `Motion::STILL` paints no ring even
+    /// though the pulse is still running. The second half is what proves the gate rather than an
+    /// empty state, which is the failure a `None` from a dead pulse would look like.
+    ///
+    /// The card is read from the catalogue rather than named here, so a rename in `copy.rs` is a
+    /// test that fails on the missing card rather than a selector that silently stops matching.
+    #[test]
+    fn the_ring_names_one_card_and_needs_motion() {
+        use crate::views::command_search::{pulse_card, JumpRequest};
+
+        let theme = Theme::slate();
+        let (entry, cards) = a_card_bearing_entry();
+        let other = cards
+            .iter()
+            .find(|card| !card.id.eq_ignore_ascii_case(entry.card_name))
+            .expect("the tab has a second card to not ring")
+            .id;
+
+        let mut state = CommandSearchState::new();
+        let request = JumpRequest {
+            entry,
+            pulse_card: Some(entry.card_name),
+        };
+        assert!(
+            state.begin_pulse(&request, 1_000, true).is_some(),
+            "the pulse starts, so the motion half is not passing on an empty state"
+        );
+        assert_eq!(pulse_card(&state), Some(entry.card_name));
+
+        assert!(
+            crate::overlay::card_pulse_ring(&theme, &state, Motion::ANIMATED, entry.card_name)
+                .is_some(),
+            "the card the jump landed on gets the ring"
+        );
+        assert!(
+            crate::overlay::card_pulse_ring(&theme, &state, Motion::ANIMATED, other).is_none(),
+            "the card beside it does not"
+        );
+        assert!(state.pulse().is_some(), "the pulse is still live");
+        assert!(
+            crate::overlay::card_pulse_ring(&theme, &state, Motion::STILL, entry.card_name)
+                .is_none(),
+            "`Motion::STILL` paints no ring while the pulse runs: the gate, not an empty state"
+        );
+    }
+
+    /// A live pulse on the landed card paints a ring on that card's box, and the mount hands the
+    /// ring the card's own `x:Name`.
+    ///
+    /// The pulse is installed here rather than taken from `perform_jump`, because that path's
+    /// gate reads the process-wide animation flag and another test owns it. What this proves is
+    /// the wiring: the wrapper's selector and the ring's selector are the same box, so the ring
+    /// is on the card the id names and the tab body passes that id through.
+    #[gpui::test]
+    fn a_live_pulse_paints_the_ring_on_the_landed_cards_box(cx: &mut gpui::TestAppContext) {
+        use crate::views::command_search::JumpRequest;
+
+        let root = scratch_root();
+        let (shell, _, mut visual) = shell_in_window(cx, &root);
+        let (entry, _) = a_card_bearing_entry();
+
+        cx.update(|cx| {
+            shell.update(cx, |shell, cx| {
+                shell.select_tab_named(entry.tab, cx);
+                let now = shell.runtime.now_ms();
+                let request = JumpRequest {
+                    entry,
+                    pulse_card: Some(entry.card_name),
+                };
+                assert!(
+                    shell.search.begin_pulse(&request, now, true).is_some(),
+                    "the pulse is live before the frame that paints it"
+                );
+            });
+        });
+
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        scroll_into_view(&mut visual, entry.card_name);
+
+        let card = visual
+            .debug_bounds(entry.card_name)
+            .expect("the card wrapper carries the card's own name as its selector");
+        let ring = visual
+            .debug_bounds("card-pulse-ring")
+            .expect("the ring paints while the pulse is live");
+        assert_eq!(ring.origin, card.origin, "the ring sits on the card's box");
+        assert_eq!(ring.size, card.size, "and covers it exactly");
+    }
+
+    /// The first catalogue entry whose card is on a card-bearing tab, with that tab's cards.
+    ///
+    /// Read from the catalogue and the copy table rather than named, so this cannot drift into a
+    /// selector for a card that no longer exists.
+    fn a_card_bearing_entry() -> (&'static search::SearchEntry, &'static [Card]) {
+        search::entries()
+            .iter()
+            .find_map(|entry| {
+                if entry.card_name.is_empty() {
+                    return None;
+                }
+                let cards = cards_on(entry.tab)?;
+                cards
+                    .iter()
+                    .any(|card| card.id.eq_ignore_ascii_case(entry.card_name))
+                    .then_some((entry, cards))
+            })
+            .expect("the catalogue has a module card on a card-bearing tab")
+    }
+
+    /// The cards a tab paints, or `None` for a view tab.
+    fn cards_on(tab_name: &str) -> Option<&'static [Card]> {
+        copy::TABS
+            .iter()
+            .find(|tab| tab.name.eq_ignore_ascii_case(tab_name))
+            .and_then(|tab| match tab.body {
+                TabBody::Cards(cards) => Some(cards),
+                _ => None,
+            })
     }
 
     /// A focused text field owns the keyboard: Ctrl+K and a typed character both belong to it.
