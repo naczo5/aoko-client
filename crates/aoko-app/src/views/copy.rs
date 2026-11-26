@@ -173,10 +173,10 @@ pub enum Control {
     },
     /// A client-only boolean preference (section 12 decision 3).
     ///
-    /// Not a `Profile` field and not one of the 143 profile-bound controls: the
+    /// Not a `Profile` field and not one of the 142 profile-bound controls: the
     /// value lives in `client-prefs.json` through
     /// [`crate::views::prefs`], so counting it as a bind would break the
-    /// 143-control reconciliation.
+    /// 142-control reconciliation.
     Preference {
         /// Label beside the checkbox. New copy; the C# has no such control.
         label: &'static str,

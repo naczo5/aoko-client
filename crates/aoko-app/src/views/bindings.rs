@@ -4,7 +4,7 @@
 //! path (`MinCPS`, `KillAuraSettings.CpsMode`, `AutoRodSlotMode`). In WPF that path
 //! *was* the persistence: `Profile` had a property of the same name, and two-way
 //! binding wrote it. GPUI has no binding, so the path has to be resolved by hand —
-//! and the honest way to do that without 143 hand-copied accessors is to resolve it
+//! and the honest way to do that without 142 hand-copied accessors is to resolve it
 //! against the `Profile` that `aoko-protocol` already serialises:
 //!
 //! * `to_profile_json` gives the exact wire shape, camelCase renames included.
@@ -73,7 +73,12 @@ pub const ALIASES: [(&str, &str); 1] = [("RandomizationModeIndex", "randomizatio
 
 /// Bind paths that name no profile field, with the reason.
 ///
-/// Both are real controls in the markup; neither is a persisted setting.
+/// Both are real controls in the markup; neither is a persisted setting. Only
+/// `ConfigSelection` is a row in the card table — `Enabled` is the tracked-block row
+/// template's checkbox (`MainWindow.xaml:697-698`), which the table now models as
+/// [`copy::Control::BlockEspRows`], so no row carries that bind any more. This list is therefore
+/// not a count of table controls: subtracting `NON_PROFILE_BINDS.len()` from [`all_binds`] gives
+/// the wrong snapshot size, which is what the reconciliation test used to do.
 pub const NON_PROFILE_BINDS: [(&str, &str); 2] = [
     (
         "ConfigSelection",
@@ -243,7 +248,7 @@ pub fn all_binds() -> Vec<&'static str> {
 
 /// The six settings the markup binds to **two sliders each**.
 ///
-/// 143 slider/check/combo controls resolve to 137 distinct bind paths because these
+/// 142 slider/check/combo controls resolve to 136 distinct bind paths because these
 /// six names appear twice in `Aoko/MainWindow.xaml`: once in the Grok-rotation panel
 /// (all of them on the single physical line 1257) and once in the always-visible
 /// movement panel at 1263-1267. Both sliders edit the same setting, so the table has
@@ -304,7 +309,7 @@ pub fn occurrences(bind: &str) -> usize {
 
 /// Every `Control::Switch` bind.
 ///
-/// Separate from [`all_binds`], which is the 137 slider/check/combo paths the
+/// Separate from [`all_binds`], which is the 136 slider/check/combo paths the
 /// reconciliation test pins. A switch needs its own read entry: the five
 /// profile-bound switches (`ShowLogo`, `DevMode`, `ShowModuleList`,
 /// `DiscordRpcEnabled`, `AutoTotemElytra`) live in the profile but not in the
@@ -367,11 +372,14 @@ mod tests {
     }
 
     #[test]
-    fn the_six_shared_binds_reconcile_143_controls_with_137_paths() {
-        // 72 sliders + 58 checks + 13 combos, counted from the markup and pinned by
-        // `copy::tests::the_control_counts_match_the_markup`.
-        assert_eq!(control_count(), 143);
-        assert_eq!(all_binds().len(), 137);
+    fn the_six_shared_binds_reconcile_142_controls_with_136_paths() {
+        // 72 sliders + 57 checks + 13 combos, counted from the table and pinned by
+        // `copy::tests::the_control_counts_match_the_markup`. The markup has 58 checkboxes;
+        // the 58th is the tracked-block row template's (`MainWindow.xaml:697-698`), which the
+        // table models as `Control::BlockEspRows` — one row per entry, and no bind path — so
+        // it is not a bound control and 143 became 142 when that swap landed (`0ec75d7`).
+        assert_eq!(control_count(), 142);
+        assert_eq!(all_binds().len(), 136);
         assert_eq!(control_count() - all_binds().len(), SHARED_BINDS.len());
 
         for (bind, citation) in SHARED_BINDS {
@@ -389,8 +397,8 @@ mod tests {
 
     #[test]
     fn the_bind_list_is_the_control_count() {
-        // 72 sliders + 58 checks + 13 combos, minus repeats: a slider and a check
-        // can share a path only if the markup does, and the table then has one bind.
+        // 72 sliders + 57 checks + 13 combos, minus repeats: a slider and a check can share a
+        // path only if the markup does, and the table then has one bind. 142 rows, 136 paths.
         let binds = all_binds();
         assert!(binds.len() >= 100, "{} binds", binds.len());
         assert!(
@@ -497,18 +505,23 @@ mod tests {
         expected.extend(switch_binds());
         expected.sort_unstable();
         expected.dedup();
-        assert_eq!(expected.len(), 180, "137 slider/check/combo plus 43 switch");
+        assert_eq!(expected.len(), 179, "136 slider/check/combo plus 43 switch");
 
-        // Three binds have no profile field of their own: the two documented
-        // exceptions, and `HudEditorActive`, which is the `hudeditor` module's toggle
-        // property (`aoko_core::search`). Module state is not profile state: since
-        // 7abc858 the controller owns it (`AppController::is_module_enabled`), reached
-        // through `crate::runtime::Runtime`, so a switch on it writes there and not
-        // here.
+        // Two of the 179 name no profile field, so they cannot appear and the snapshot holds
+        // 177: `ConfigSelection`, which the Settings combo fills from the configs directory at
+        // runtime, and `HudEditorActive`, the `hudeditor` module's toggle property
+        // (`aoko_core::search`). Module state is not profile state: since 7abc858 the controller
+        // owns it (`AppController::is_module_enabled`), reached through
+        // `crate::runtime::Runtime`, so a switch on it writes there and not here.
+        //
+        // `Enabled` is a third name in the loop below and a different case: the tracked-block
+        // row template's checkbox (`MainWindow.xaml:697-698`) used to be a table row and is now
+        // `Control::BlockEspRows`, so nothing in the table names it at all. It is asserted
+        // absent so a restore of that bogus bind is caught rather than silently re-counted.
         assert_eq!(
             values.len(),
-            expected.len() - NON_PROFILE_BINDS.len() - 1,
-            "every bind but the two non-profile controls and the module-state switch"
+            expected.len() - 2,
+            "179 minus the two binds no profile field answers"
         );
         for bind in ["ConfigSelection", "Enabled", "HudEditorActive"] {
             assert!(
