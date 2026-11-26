@@ -180,6 +180,32 @@ pub mod wash {
     pub const CHIP_TINT_WARN: f32 = 0.16;
 }
 
+/// The Block ESP tracked-block row, the `ItemsControl` item template at
+/// `MainWindow.xaml:695-712`.
+///
+/// The row is a `DockPanel` at `Margin="6,3"` holding a bare checkbox, the block name, a
+/// 22×14 colour swatch and a 22 px `DarkButton`. Every number below is one of those
+/// attributes; nothing here is inferred.
+pub mod block_esp {
+    /// The `DockPanel`'s `Margin="6,3"` (`:696`).
+    pub const ROW_PAD_X: f32 = 6.0;
+    pub const ROW_PAD_Y: f32 = 3.0;
+    /// The checkbox's `Margin="0,0,8,0"` (`:698`).
+    pub const CHECK_GAP: f32 = 8.0;
+    /// The remove cap's `Width="22"` (`:699`).
+    pub const REMOVE_WIDTH: f32 = 22.0;
+    /// The colour swatch's `Width="22" Height="14"` (`:703`).
+    pub const SWATCH_WIDTH: f32 = 22.0;
+    pub const SWATCH_HEIGHT: f32 = 14.0;
+    /// The swatch's `CornerRadius="3"` (`:703`).
+    pub const SWATCH_RADIUS: f32 = 3.0;
+    /// The swatch's `Margin="6,0"` (`:704`), which is also the 6 px the name leaves before
+    /// it.
+    pub const SWATCH_GAP: f32 = 6.0;
+    /// The name's `FontSize="12"` (`:708`).
+    pub const NAME_TEXT: f32 = 12.0;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

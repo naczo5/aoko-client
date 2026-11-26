@@ -24,6 +24,7 @@
 //! right in a capture, not enough to replace the shell's state machines. Each
 //! widget's documentation says what it does **not** do yet.
 
+pub mod block_esp;
 pub mod button;
 pub mod card;
 pub mod checkbox;
@@ -41,9 +42,10 @@ pub mod switch;
 pub mod text_input;
 pub mod tooltip;
 
+pub use block_esp::{BlockEspRow, RowAction, RowControl};
 pub use button::{button, button_pinned, button_sized, ButtonVariant};
 pub use card::card;
-pub use checkbox::checkbox;
+pub use checkbox::{checkbox, checkbox_bare};
 pub use chip::{chip, ChipTone};
 pub use combo::combo;
 pub use expander::expander;

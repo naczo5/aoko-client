@@ -16,6 +16,50 @@ pub fn checkbox(
     label: impl Into<SharedString>,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
+    let text = theme.text;
+
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .cursor_pointer()
+        .child(box_(theme, is_on))
+        .child(
+            div()
+                .ml(px(metrics::checkbox::GAP))
+                .text_size(px(metrics::text::CAPTION))
+                .text_color(text)
+                .child(label.into()),
+        )
+        .on_click(on_click)
+        .into_any_element()
+}
+
+/// The 14×14 box on its own, for a row whose label is a sibling instead of the checkbox's
+/// own child.
+///
+/// The tracked-block row is that shape: the `CheckBox` at `MainWindow.xaml:698` has no
+/// `Content`, and the block name is the next element in the `DockPanel`. Painting it through
+/// [`checkbox`] with an empty label would add the 6 px label gap on top of the row's own
+/// `Margin="0,0,8,0"`.
+pub fn checkbox_bare(
+    id: impl Into<gpui::ElementId>,
+    theme: &Theme,
+    is_on: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .cursor_pointer()
+        .child(box_(theme, is_on))
+        .on_click(on_click)
+        .into_any_element()
+}
+
+/// The box itself, shared by [`checkbox`] and [`checkbox_bare`].
+fn box_(theme: &Theme, is_on: bool) -> gpui::Div {
     let rest_edge = theme.slider_foreground;
     let hover_edge = theme.accent;
     let fill = if is_on {
@@ -25,7 +69,7 @@ pub fn checkbox(
     };
     let accent = theme.accent;
 
-    let mut box_ = div()
+    let mut square = div()
         .flex()
         .items_center()
         .justify_center()
@@ -38,7 +82,7 @@ pub fn checkbox(
         .hover(move |style| style.border_color(hover_edge));
 
     if is_on {
-        box_ = box_.child(
+        square = square.child(
             div()
                 .text_size(px(metrics::checkbox::GLYPH))
                 .text_color(accent)
@@ -46,19 +90,5 @@ pub fn checkbox(
         );
     }
 
-    div()
-        .id(id)
-        .flex()
-        .items_center()
-        .cursor_pointer()
-        .child(box_)
-        .child(
-            div()
-                .ml(px(metrics::checkbox::GAP))
-                .text_size(px(metrics::text::CAPTION))
-                .text_color(theme.text)
-                .child(label.into()),
-        )
-        .on_click(on_click)
-        .into_any_element()
+    square
 }
