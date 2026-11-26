@@ -1104,14 +1104,15 @@ pub const KEYBIND_PENDING: &str = "Bind: [Press key or mouse...]";
 pub const ACTION_BIND_PENDING: &str = "Action: [Press key or mouse...]";
 
 /// The key an action bind was offered is already held by a general module bind
-/// (`Aoko/MainWindow.xaml.cs:2049-2051`).
+/// (`Aoko/MainWindow.xaml.cs:2049`; the Throwpot branch repeats it at `:2060`).
 pub const ACTION_BIND_CONFLICT: &str =
     "Conflict: that input is already used by a general module bind.";
 
-/// The reverse outcome: the action bind took the key (`MainWindow.xaml.cs:2050`).
+/// The reverse outcome: the action bind took the key (`MainWindow.xaml.cs:2048`, repeated
+/// for Throwpot at `:2059`).
 pub const ACTION_BIND_UPDATED: &str = "Action bind updated.";
 
-/// The managed module-conflict sentence, verbatim (`MainWindow.xaml.cs:2071`).
+/// The managed module-conflict sentence, verbatim (`MainWindow.xaml.cs:2070`).
 ///
 /// Kept although nothing references it: it is the sentence this port deliberately departs
 /// from. Managed wrote it into the AutoRod row's status line, so a conflict about a module
@@ -1120,8 +1121,13 @@ pub const MODULE_BIND_CONFLICT: &str = "Conflict: that input is used by an actio
 
 /// A module bind was refused because something else already holds the key.
 ///
-/// `{key}`, `{holder}` and `{requested}` are filled with `str::replace` rather than
-/// `format!`, because this copy is data and `format!` requires a literal format string.
+/// New copy: managed had no second sentence, so this one names both bindings instead of
+/// writing the module's conflict into the AutoRod row. `{key}` is the refused key as
+/// [`crate::views::keybind_text::format_virtual_key`] renders it, `{holder}` the action bind
+/// that already owns it, and `{requested}` the module that asked.
+///
+/// The three are filled with `str::replace` rather than `format!`, because this copy is data
+/// and `format!` requires a literal format string.
 pub const MODULE_BIND_CONFLICT_NAMED: &str =
     "Conflict: {key} is already bound to {holder}, so {requested} was left unchanged.";
 
