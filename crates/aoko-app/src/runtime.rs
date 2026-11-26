@@ -33,6 +33,12 @@
 //! builds no platform service at all, which is what keeps the suite and the capture harness
 //! off the OS.
 //!
+//! Injection is gated a second time, per action: `crate::runtime::game_is_foreground` must
+//! confirm that the foreground window is a Java launcher whose title names the game before a
+//! click, a key press or a movement reaches the OS. Supervision therefore starts without a
+//! user action — parity with the managed host — and a window that took focus still cannot
+//! receive a synthetic click.
+//!
 //! Two constructors, deliberately:
 //!
 //! * [`crate::runtime::Runtime::probed`] asks the platform what this session can do
@@ -97,6 +103,18 @@ const REFUSED_SAMPLING: &str = "automation loops run without platform injection:
 const REFUSED_WINDOWS: &str = "automation loops read no window state: \
      CapabilityReport::window_inspection is false, so no foreground window can be asked \
      which process is focused";
+
+/// Injection refused because the guard that makes it safe has nothing to read.
+///
+/// The gate is [`game_is_foreground`], and it reads the foreground window. Without that
+/// surface a synthetic click could land in whatever window happens to be in front, so the
+/// session keeps the refusing backend rather than injecting blind.
+const REFUSED_INJECTION_WITHOUT_WINDOWS: &str = "automation loops run without platform \
+     injection: CapabilityReport::window_inspection is false, so the game cannot be confirmed \
+     foreground before a synthetic action";
+
+/// Why a synthetic action is refused by the foreground gate.
+const GAME_NOT_FOREGROUND: &str = "the game is not the confirmed foreground window";
 
 /// The application's runtime state: the controller, the id mapping the switches need to
 /// reach it, the bridge reader, and — on the shipped path only — the loop supervisor.
@@ -440,10 +458,10 @@ impl Surface {
 
 /// What the platform allows the automation loops to touch.
 ///
-/// Two surfaces, decided independently: injection is synthetic input, window sense is reading
-/// focus and the cursor. A session can have either without the other — X11 without uinput can
-/// inspect windows and inject nothing, and a Wayland session with a readable `/dev/input` can
-/// inject and not inspect — so neither implies the other.
+/// Two surfaces, decided separately: injection is synthetic input, window sense is reading focus
+/// and the cursor. Window sense stands alone — a session can inspect windows and inject nothing
+/// (X11 without `uinput`) — but injection does not: it is gated on the game being confirmed
+/// foreground, so a session without window inspection keeps the refusing backend.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoopSurfaces {
     /// Whether synthetic input may go through the platform's `InputBackend`.
@@ -459,15 +477,18 @@ pub struct LoopSurfaces {
 /// [`crate::runtime::Runtime`] has nothing left to choose. `start_loops` is the only caller,
 /// through `platform_surfaces`; no caller anywhere picks a backend by hand.
 ///
-/// Injection needs both capabilities. `input_synthesis` is what moves and clicks, and
-/// `pointer_state_sampling` is what a hold guard reads before it treats a trigger as down; a
-/// backend that can click and cannot see the button is worse than one that refuses, because
-/// the loop cannot tell "held" from "not held".
+/// Injection needs three capabilities. `input_synthesis` is what moves and clicks,
+/// `pointer_state_sampling` is what a hold guard reads before it treats a trigger as down, and
+/// `window_inspection` is what [`game_is_foreground`] reads before every acting call. A backend
+/// that can click and cannot see the button is worse than one that refuses, because the loop
+/// cannot tell "held" from "not held"; and a backend that can click without confirming the
+/// foreground is worse than both, because the click can land in an editor.
 #[must_use]
 pub fn select_loop_surfaces(capabilities: &CapabilityReport) -> LoopSurfaces {
     let injection_refusals: Vec<&'static str> = [
         (!capabilities.input_synthesis).then_some(REFUSED_SYNTHESIS),
         (!capabilities.pointer_state_sampling).then_some(REFUSED_SAMPLING),
+        (!capabilities.window_inspection).then_some(REFUSED_INJECTION_WITHOUT_WINDOWS),
     ]
     .into_iter()
     .flatten()
@@ -488,6 +509,149 @@ pub fn select_loop_surfaces(capabilities: &CapabilityReport) -> LoopSurfaces {
     LoopSurfaces { injection, windows }
 }
 
+/// The managed host's game-title rule, `WindowDetection.WindowTarget.IsGameTitle`.
+///
+/// `Aoko/Core/WindowDetection.cs:57` holds the titles (`Minecraft`, `Lunar Client`, `Badlion`) and
+/// `:181` compares them as ordinal, case-insensitive substrings. The three literals are folded to
+/// lowercase here and nothing else is added: a bare `lunar` is deliberately not enough, because
+/// the managed literal is `Lunar Client`.
+///
+/// **This is the one copy in the crate, and it exists to be deleted.** The platform owner is
+/// exposing the same rule as `aoko_platform::is_game_window`, which is title-only by design;
+/// [`game_is_foreground`] adds the launcher test on top, so when that function commits this body
+/// becomes `aoko_platform::is_game_window(&window)` and the composition stays. Until then it must
+/// not drift: `a_game_title_rule_matches_the_managed_titles` pins the three literals.
+#[must_use]
+pub fn is_game_title(title: &str) -> bool {
+    let lower = title.to_lowercase();
+    lower.contains("minecraft") || lower.contains("lunar client") || lower.contains("badlion")
+}
+
+/// Whether the game is the foreground window, confirmed strictly enough to gate injection.
+///
+/// Both halves of the managed test are required, not one score against one threshold:
+///
+/// * the owning process must be a Java launcher — `java`, `javaw`, `java.exe`, `javaw.exe`, which
+///   is `WindowInfo::is_jvm` (`WindowDetection.WindowTarget.IsJvm`);
+/// * the title must name the game — [`is_game_title`].
+///
+/// `aoko_platform::describe_target(..).is_likely_minecraft()` is deliberately not used: its
+/// markers include project words (`fabric`, `forge`, `quilt`, `feather`), so a focused editor on
+/// a mod workspace scores as the game, and a click gated on a confidence score would type into
+/// code. Requiring the title half as well closes that case: `fabric-mod-template - IntelliJ IDEA`
+/// is a Java process, so it passes the launcher test and fails the title test.
+///
+/// One residual case is worth stating rather than hiding: this is still a title test, so a Java
+/// IDE whose window title contains a game word — a project called `minecraft-plugin`, say —
+/// satisfies both halves. Closing it needs the managed host's stronger first test (the foreground
+/// equals a known game window, i.e. `select_best_window` over a full enumeration) or a rule that
+/// excludes IDE windows, and neither exists in `aoko_platform` today. Inventing an IDE blocklist
+/// here would be the drift [`is_game_title`] exists to avoid, so it is reported instead.
+///
+/// A missing window surface, a foreground the backend cannot read, and a window with no process
+/// name all answer `false`: this is the guard, so it fails closed.
+#[must_use]
+pub fn game_is_foreground(windows: &dyn WindowInspector) -> bool {
+    let Ok(Some(foreground)) = windows.foreground() else {
+        return false;
+    };
+    foreground.is_jvm() && is_game_title(&foreground.title)
+}
+
+/// The platform input backend, gated on the game being confirmed foreground.
+///
+/// Every acting call asks [`game_is_foreground`] first and is refused with a classified
+/// `unsupported` when it answers no, so a window that took focus between two ticks cannot receive
+/// a synthetic click. Observation calls pass through untouched — they cannot act, and a hold
+/// guard must still see whether a button is down — and so do the two release calls
+/// (`button_up`, `key_up`), because a focus change must never leave a button or a key held.
+///
+/// The check costs one `WindowInspector::foreground` per acting call — one X11 round trip plus a
+/// `/proc` read on Linux — which is once per click or key press, never once per tick.
+struct ForegroundGated {
+    platform: Arc<dyn InputBackend>,
+    windows: Arc<dyn WindowInspector>,
+}
+
+impl ForegroundGated {
+    /// The confirmation, evaluated fresh for every acting call rather than cached.
+    fn confirmed(&self) -> bool {
+        game_is_foreground(self.windows.as_ref())
+    }
+
+    /// `Ok` when the game is confirmed foreground, otherwise the classified refusal.
+    fn require_game(&self) -> Result<(), PlatformError> {
+        if self.confirmed() {
+            Ok(())
+        } else {
+            Err(PlatformError::unsupported(GAME_NOT_FOREGROUND))
+        }
+    }
+}
+
+impl InputBackend for ForegroundGated {
+    fn probe_mouse_state(&self) -> Option<MouseState> {
+        self.platform.probe_mouse_state()
+    }
+
+    fn probe_key_state(&self, key: Key) -> Option<bool> {
+        self.platform.probe_key_state(key)
+    }
+
+    fn mouse_state(&self) -> MouseState {
+        self.platform.mouse_state()
+    }
+
+    fn key_state(&self, key: Key) -> bool {
+        self.platform.key_state(key)
+    }
+
+    fn mouse_position(&self) -> Option<(i32, i32)> {
+        self.platform.mouse_position()
+    }
+
+    fn poll_events(&self, out: &mut Vec<InputEvent>) -> Result<(), PlatformError> {
+        self.platform.poll_events(out)
+    }
+
+    fn click(&self, button: MouseButton) -> Result<(), PlatformError> {
+        self.require_game()?;
+        self.platform.click(button)
+    }
+
+    fn move_relative(&self, dx: i32, dy: i32) -> Result<(), PlatformError> {
+        self.require_game()?;
+        self.platform.move_relative(dx, dy)
+    }
+
+    fn key_press(&self, key: Key) -> Result<(), PlatformError> {
+        self.require_game()?;
+        self.platform.key_press(key)
+    }
+
+    fn button_down(&self, button: MouseButton) -> Result<(), PlatformError> {
+        self.require_game()?;
+        self.platform.button_down(button)
+    }
+
+    fn key_down(&self, key: Key) -> Result<(), PlatformError> {
+        self.require_game()?;
+        self.platform.key_down(key)
+    }
+
+    /// Not gated: a release must always be attempted, or a focus change mid-hold would strand a
+    /// button down in whatever application has it.
+    fn button_up(&self, button: MouseButton) -> Result<(), PlatformError> {
+        self.platform.button_up(button)
+    }
+
+    /// Not gated, for the same reason as [`ForegroundGated::button_up`]'s note: a held key must
+    /// never be stranded.
+    fn key_up(&self, key: Key) -> Result<(), PlatformError> {
+        self.platform.key_up(key)
+    }
+}
+
 /// Builds the two platform surfaces that [`select_loop_surfaces`] allows.
 ///
 /// `aoko_platform::default_services` is called only when at least one surface is reachable, so
@@ -497,7 +661,9 @@ pub fn select_loop_surfaces(capabilities: &CapabilityReport) -> LoopSurfaces {
 /// fail-closed sense.
 ///
 /// The reachable surfaces are the platform's own implementations, not wrappers: nothing in this
-/// crate re-implements an input call or a window query.
+/// crate re-implements an input call or a window query. The one addition is the gate —
+/// `ForegroundGated` refuses an acting call the platform backend would have performed, which is
+/// a safety condition rather than a second implementation of the call.
 fn platform_surfaces(
     surfaces: &LoopSurfaces,
 ) -> (Arc<dyn InputBackend>, Option<Arc<dyn WindowInspector>>) {
@@ -516,12 +682,23 @@ fn platform_surfaces(
     }
 
     let services = aoko_platform::default_services();
-    if surfaces.injection.is_platform() {
-        // `Box<dyn InputBackend>` to `Arc<dyn InputBackend>`, the platform's backend itself.
-        input = Arc::from(services.input);
-    }
     if surfaces.windows.is_platform() {
         windows = Some(Arc::from(services.windows));
+    }
+    if surfaces.injection.is_platform() {
+        match windows.as_ref() {
+            // The decision refuses injection without window inspection, so a reachable
+            // injection surface always has the guard it needs.
+            Some(window_surface) => {
+                input = Arc::new(ForegroundGated {
+                    platform: Arc::from(services.input),
+                    windows: Arc::clone(window_surface),
+                });
+            }
+            None => tracing::warn!(
+                "platform injection selected without a window surface; keeping the refusing backend"
+            ),
+        }
     }
     (input, windows)
 }
@@ -568,42 +745,30 @@ impl LoopSense for ControllerSense {
 
     /// `WindowDetection.IsMinecraftActive()`.
     ///
-    /// Two of the managed host's three tests, in its order: the foreground window decides, and
-    /// the game test is `aoko_platform::describe_target` — the platform's own scorer, so no
-    /// marker list is repeated here. The managed host's first test (does the foreground match a
-    /// cached game handle) is skipped because it needs `select_best_window`, and that needs a
-    /// full `WindowInspector::enumerate`: property reads plus a process-name lookup per window,
-    /// once per tick per body. Only the focused window is asked.
+    /// The same strict confirmation the injection gate uses — [`game_is_foreground`], which is
+    /// the foreground window with a Java launcher name *and* a game title — so the click bodies'
+    /// own gate and the backend's gate cannot disagree about whether the game is in front.
     ///
-    /// The scorer's markers are broader than game titles (`fabric`, `forge`, `quilt`, `feather`
-    /// are project words too), so a focused IDE on a mod workspace can score as the game. That
-    /// is inherited rather than introduced: the platform's `is_game_title` is private, and this
-    /// is the closest public answer to the managed title test.
+    /// `false` when the session refused the window surface: a loop must not believe the game is
+    /// focused because nothing can check.
     fn minecraft_active(&self) -> bool {
-        let Some(windows) = self.windows.as_deref() else {
-            return false;
-        };
-        let Ok(Some(foreground)) = windows.foreground() else {
-            return false;
-        };
-        aoko_platform::describe_target(
-            foreground.pid.unwrap_or(0),
-            Some(foreground.handle),
-            &foreground.title,
-            foreground.process_name.as_deref().unwrap_or_default(),
-            None,
-            None,
-        )
-        .is_likely_minecraft()
+        self.windows.as_deref().is_some_and(game_is_foreground)
     }
 
     /// `WindowDetection.IsCursorVisible()`.
     ///
-    /// The platform answers this where it can (`GetCursorInfo` on Windows) and leaves it `None`
-    /// where it cannot, which today is the X11 backend: `WindowInspector::cursor_visible`'s
-    /// default is `None` and the Linux implementation does not override it. `None` keeps the
-    /// fail-closed `false` this sense has always answered, so a loop that gates on the cursor
-    /// cannot start acting on a guess.
+    /// **Linux cannot answer this.** The platform returns the cursor's visibility where it can
+    /// (Windows uses `GetCursorInfo`), and `WindowInspector::cursor_visible` defaults to `None`
+    /// with no override in `linux/window.rs`, so on X11 there is nothing to read. `None` keeps
+    /// the fail-closed `false` this sense has always answered: `triggerbot` acts on
+    /// `!cursor_visible`, so guessing "hidden" would make it click while a menu is open, and
+    /// `aim`/`pixel-party` require the cursor, so guessing "visible" would make those act in the
+    /// game view.
+    ///
+    /// What makes the fail-closed half safe is not this method: it is [`game_is_foreground`] in
+    /// [`ForegroundGated`], which refuses every acting call unless the game is the confirmed
+    /// foreground window. A wrong cursor answer can therefore only stop a loop, never aim one at
+    /// another application.
     fn cursor_visible(&self) -> bool {
         self.windows
             .as_deref()
@@ -762,7 +927,7 @@ mod tests {
     #[test]
     fn a_headless_runtime_opens_no_socket() {
         let started = Instant::now();
-        let mut runtime = Runtime::headless();
+        let runtime = Runtime::headless();
         let status = runtime.ingest_status();
 
         assert!(runtime.ingest.is_none(), "headless builds no bridge reader");
@@ -781,7 +946,7 @@ mod tests {
     fn status_reports_what_the_store_holds() {
         use aoko_protocol::state::GameState;
 
-        let mut runtime = Runtime::headless();
+        let runtime = Runtime::headless();
         let store = runtime.controller().store();
 
         store.set_connected(true);
@@ -854,8 +1019,8 @@ mod tests {
     fn enabling_a_loop_module_starts_supervision_and_disabling_stops_it() {
         let controller = Arc::new(AppController::default());
         let source = Arc::new(StepClock::new());
-        let clock: Arc<dyn Clock> = Arc::clone(&source);
-        let sleeper: Arc<dyn Sleeper> = Arc::clone(&source);
+        let clock: Arc<dyn Clock> = source.clone();
+        let sleeper: Arc<dyn Sleeper> = source.clone();
 
         let mut runtime = Runtime::with_time(Arc::clone(&controller), clock, sleeper);
         runtime.start_supervision();
@@ -890,8 +1055,8 @@ mod tests {
     fn a_setting_only_module_starts_no_loops() {
         let controller = Arc::new(AppController::default());
         let source = Arc::new(StepClock::new());
-        let clock: Arc<dyn Clock> = Arc::clone(&source);
-        let sleeper: Arc<dyn Sleeper> = Arc::clone(&source);
+        let clock: Arc<dyn Clock> = source.clone();
+        let sleeper: Arc<dyn Sleeper> = source.clone();
 
         let mut runtime = Runtime::with_time(controller, clock, sleeper);
         runtime.start_supervision();
@@ -972,6 +1137,10 @@ mod tests {
 
     /// A report with every OS service off names one refusal per capability, and the text says
     /// which flag refused it — that string is what the log and the report carry.
+    ///
+    /// Three, not two: injection is gated on the game being confirmed foreground, and that
+    /// confirmation reads the foreground window, so `window_inspection` refuses injection as
+    /// well as window sense.
     #[test]
     fn every_missing_capability_names_its_own_refusal() {
         let surfaces = select_loop_surfaces(&CapabilityReport::transport_only(
@@ -982,7 +1151,7 @@ mod tests {
         assert!(!surfaces.windows.is_platform());
         assert_eq!(
             surfaces.injection.refusals().len(),
-            2,
+            3,
             "{:?}",
             surfaces.injection.refusals()
         );
@@ -996,6 +1165,11 @@ mod tests {
             .refusals()
             .iter()
             .any(|reason| reason.contains("pointer_state_sampling")));
+        assert!(surfaces
+            .injection
+            .refusals()
+            .iter()
+            .any(|reason| reason.contains("window_inspection")));
         assert_eq!(surfaces.windows.refusals().len(), 1);
         assert!(surfaces.windows.refusals()[0].contains("window_inspection"));
     }
@@ -1016,12 +1190,15 @@ mod tests {
         assert!(surfaces.windows.refusals().is_empty());
     }
 
-    /// The two surfaces are independent, and injection needs both of its capabilities.
+    /// Window sense stands alone; injection does not.
     ///
     /// The first half is the Wayland shape the platform reports: readable input devices, no
-    /// pointer sampling. The second is a session that can see windows and inject nothing.
+    /// pointer sampling, so injection is refused for exactly that one capability. The second is
+    /// a session that can synthesise and sample but cannot inspect windows: injection is refused
+    /// because the foreground gate would have nothing to read, which is the dependency the strict
+    /// check adds. The third is the direction that still holds freely — windows without injection.
     #[test]
-    fn injection_and_window_sense_are_decided_separately() {
+    fn window_sense_stands_alone_and_injection_depends_on_it() {
         let mut report = CapabilityReport::transport_only(aoko_platform::SessionKind::Wayland);
         report.input_synthesis = true;
         report.window_inspection = true;
@@ -1035,19 +1212,44 @@ mod tests {
         assert_eq!(
             surfaces.injection.refusals().len(),
             1,
-            "only the sampling capability refuses injection"
+            "only the sampling capability refuses injection here"
         );
         assert!(surfaces.injection.refusals()[0].contains("pointer_state_sampling"));
         assert!(surfaces.windows.is_platform(), "window inspection is on");
 
-        let mut report = CapabilityReport::transport_only(aoko_platform::SessionKind::Wayland);
+        let mut report = CapabilityReport::transport_only(aoko_platform::SessionKind::X11);
         report.input_synthesis = true;
         report.pointer_state_sampling = true;
 
         let surfaces = select_loop_surfaces(&report);
 
-        assert!(surfaces.injection.is_platform());
+        assert!(
+            !surfaces.injection.is_platform(),
+            "the foreground gate needs the window surface"
+        );
+        assert_eq!(
+            surfaces.injection.refusals().len(),
+            1,
+            "the missing capability is the window one"
+        );
+        assert!(surfaces.injection.refusals()[0].contains("window_inspection"));
         assert!(!surfaces.windows.is_platform());
+
+        let mut report = CapabilityReport::transport_only(aoko_platform::SessionKind::X11);
+        report.window_inspection = true;
+
+        let surfaces = select_loop_surfaces(&report);
+
+        assert!(
+            surfaces.windows.is_platform(),
+            "window sense needs no injection capability"
+        );
+        assert!(!surfaces.injection.is_platform());
+        assert_eq!(
+            surfaces.injection.refusals().len(),
+            2,
+            "synthesis and sampling are both off"
+        );
     }
 
     /// A headless runtime would take no platform surface, so it can never reach
@@ -1075,7 +1277,7 @@ mod tests {
     fn window_sense_reads_the_platform_surface_and_never_the_os() {
         let controller = Arc::new(AppController::default());
 
-        // The game is focused: the platform's own scorer sees the title marker.
+        // The game is focused: a Java launcher whose title names the game.
         let game: Arc<dyn WindowInspector> = Arc::new(FakeWindows {
             foreground: Some(window("Minecraft 1.8.9", "java")),
             cursor: Some(false),
@@ -1085,8 +1287,8 @@ mod tests {
         assert!(sense.minecraft_active(), "a focused game window is active");
         assert!(!sense.cursor_visible(), "the platform answered: no cursor");
 
-        // A Java process with a window, and not the game: the scorer's confidence stays below
-        // its threshold, which is what keeps a focused IDE from reading as the game.
+        // A Java process with a window, and not the game: the title half of the strict check
+        // fails, which is what keeps a focused IDE from reading as the game.
         let editor: Arc<dyn WindowInspector> = Arc::new(FakeWindows {
             foreground: Some(window("MainActivity.java - IntelliJ IDEA", "java")),
             cursor: None,
@@ -1120,6 +1322,163 @@ mod tests {
             sense.cursor_visible(),
             "the platform answered: cursor drawn"
         );
+    }
+
+    /// A platform backend that accepts everything, so a refusal can only come from the gate.
+    struct AcceptingInput;
+
+    impl InputBackend for AcceptingInput {
+        fn probe_mouse_state(&self) -> Option<MouseState> {
+            Some(MouseState::default())
+        }
+
+        fn mouse_state(&self) -> MouseState {
+            MouseState::default()
+        }
+
+        fn key_state(&self, _key: Key) -> bool {
+            false
+        }
+
+        fn click(&self, _button: MouseButton) -> Result<(), PlatformError> {
+            Ok(())
+        }
+
+        fn move_relative(&self, _dx: i32, _dy: i32) -> Result<(), PlatformError> {
+            Ok(())
+        }
+
+        fn key_press(&self, _key: Key) -> Result<(), PlatformError> {
+            Ok(())
+        }
+
+        fn poll_events(&self, _out: &mut Vec<InputEvent>) -> Result<(), PlatformError> {
+            Ok(())
+        }
+
+        fn button_up(&self, _button: MouseButton) -> Result<(), PlatformError> {
+            Ok(())
+        }
+
+        fn key_up(&self, _key: Key) -> Result<(), PlatformError> {
+            Ok(())
+        }
+    }
+
+    /// The gate over `AcceptingInput`, with the foreground the caller names.
+    fn gated(foreground: Option<aoko_platform::WindowInfo>) -> ForegroundGated {
+        let windows: Arc<dyn WindowInspector> = Arc::new(FakeWindows {
+            foreground,
+            cursor: None,
+        });
+        ForegroundGated {
+            platform: Arc::new(AcceptingInput),
+            windows,
+        }
+    }
+
+    /// The title rule is the platform's private one, copied once, so it is pinned here: a drift
+    /// before `aoko_platform` exposes it would quietly widen or narrow the injection guard.
+    #[test]
+    fn a_game_title_rule_matches_the_managed_titles() {
+        for title in [
+            "Minecraft",
+            "Minecraft 1.8.9",
+            "Lunar Client v3.2.1",
+            "Badlion Client",
+        ] {
+            assert!(is_game_title(title), "{title} names the game");
+        }
+
+        for title in [
+            "",
+            "Visual Studio Code",
+            "MainActivity.java - IntelliJ IDEA",
+            "fabric-mod-template - IntelliJ IDEA",
+            "Lunaris Notes",
+            "lunar",
+        ] {
+            assert!(!is_game_title(title), "{title} does not name the game");
+        }
+    }
+
+    /// The confirmation needs both halves: neither a Java process nor a game title is enough.
+    #[test]
+    fn the_foreground_needs_a_java_launcher_and_a_game_title() {
+        fn confirmed(title: &str, process: &str) -> bool {
+            let windows: Arc<dyn WindowInspector> = Arc::new(FakeWindows {
+                foreground: Some(window(title, process)),
+                cursor: None,
+            });
+            game_is_foreground(windows.as_ref())
+        }
+
+        assert!(confirmed("Minecraft 1.8.9", "java"));
+        assert!(confirmed("Lunar Client v3.2.1", "javaw.exe"));
+
+        assert!(
+            !confirmed("Minecraft 1.8.9", "explorer.exe"),
+            "a game title in a non-Java process is not the game"
+        );
+        assert!(
+            !confirmed("fabric-mod-template - IntelliJ IDEA", "java"),
+            "a Java process that is not titled as the game is not the game"
+        );
+        assert!(!confirmed("MainActivity.java - IntelliJ IDEA", "java"));
+
+        let no_foreground = FakeWindows {
+            foreground: None,
+            cursor: None,
+        };
+        assert!(
+            !game_is_foreground(&no_foreground),
+            "no foreground window, no confirmation"
+        );
+    }
+
+    /// A focused IDE on a mod workspace must not enable injection.
+    ///
+    /// This is the case the score test missed: `aoko_platform::describe_target`'s markers include
+    /// `fabric`, `forge` and `quilt`, so a mod workspace scores as the game. The gate does not
+    /// score — it requires a Java launcher name *and* a game title — and this window passes
+    /// neither, so every acting call is refused before the platform backend is reached.
+    #[test]
+    fn a_focused_ide_on_a_mod_workspace_cannot_inject() {
+        let editor = gated(Some(window("fabric-mod-template - IntelliJ IDEA", "java")));
+
+        assert!(!editor.confirmed(), "the title names a mod, not the game");
+        assert!(
+            matches!(
+                editor.click(MouseButton::Left),
+                Err(PlatformError::Unsupported { .. })
+            ),
+            "a click must be refused, not aimed at the editor"
+        );
+        assert!(
+            matches!(
+                editor.key_press(Key::Char('a')),
+                Err(PlatformError::Unsupported { .. })
+            ),
+            "a key press must be refused for the same reason"
+        );
+        assert!(
+            editor.button_up(MouseButton::Left).is_ok(),
+            "a release is never gated: a focus change must not strand a button"
+        );
+        assert_eq!(
+            editor.probe_mouse_state(),
+            Some(MouseState::default()),
+            "observation is not gated: the hold guards still see the button"
+        );
+
+        // The same backend with the game in front: the gate opens, and it is the gate that
+        // decides, since `AcceptingInput` would accept on either side.
+        let game = gated(Some(window("Minecraft 1.8.9", "java")));
+
+        assert!(game.confirmed());
+        assert!(game.click(MouseButton::Left).is_ok());
+        assert!(game.move_relative(4, 0).is_ok());
+        assert!(game.key_press(Key::Char('a')).is_ok());
     }
 
     /// The table is anchored to the catalog, not to a list of spellings.
