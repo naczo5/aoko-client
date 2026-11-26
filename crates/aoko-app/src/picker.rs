@@ -52,6 +52,20 @@ pub const HUE_WIDTH: f32 = 22.0;
 /// The hue thumb's height (`:52-68`).
 pub const HUE_THUMB: f32 = 4.0;
 
+/// The square's drag callback: element-local `(x, y)`, plus the window and app so the
+/// caller can write its own state and repaint.
+///
+/// The three callbacks are named rather than written out at each binding: the same shapes
+/// appear in [`crate::components::slider`] and the colour dialog, and a reader comparing
+/// them should see three documented types instead of a repeated `Rc<dyn Fn(..)>`.
+pub type DragCallback = dyn Fn(f32, f32, &mut Window, &mut App);
+
+/// The hue bar's drag callback: element-local `y`, plus the window and app.
+pub type HueDragCallback = dyn Fn(f32, &mut Window, &mut App);
+
+/// Either widget's drag-ended callback.
+pub type ReleaseCallback = dyn Fn(&mut Window, &mut App);
+
 /// The saturation/value square.
 ///
 /// `on_drag` receives square-local pixels on press and on every move while the left button
@@ -71,8 +85,8 @@ pub fn sv_square(
     on_release: impl Fn(&mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let name: SharedString = name.into();
-    let on_drag: Rc<dyn Fn(f32, f32, &mut Window, &mut App)> = Rc::new(on_drag);
-    let on_release: Rc<dyn Fn(&mut Window, &mut App)> = Rc::new(on_release);
+    let on_drag: Rc<DragCallback> = Rc::new(on_drag);
+    let on_release: Rc<ReleaseCallback> = Rc::new(on_release);
     let bounds: Rc<Cell<Bounds<Pixels>>> = Rc::new(Cell::new(Bounds::default()));
 
     let paint_bounds = bounds.clone();
@@ -153,8 +167,8 @@ pub fn hue_bar(
     on_release: impl Fn(&mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let name: SharedString = name.into();
-    let on_drag: Rc<dyn Fn(f32, &mut Window, &mut App)> = Rc::new(on_drag);
-    let on_release: Rc<dyn Fn(&mut Window, &mut App)> = Rc::new(on_release);
+    let on_drag: Rc<HueDragCallback> = Rc::new(on_drag);
+    let on_release: Rc<ReleaseCallback> = Rc::new(on_release);
     let bounds: Rc<Cell<Bounds<Pixels>>> = Rc::new(Cell::new(Bounds::default()));
 
     let paint_bounds = bounds.clone();

@@ -62,6 +62,12 @@ struct ChannelRow {
     value: u8,
 }
 
+/// The dialog's result sink.
+///
+/// One callback for both outcomes: the [`PickResult`] carries `accepted`, which is what
+/// `TryPick(owner, initial, out picked)` modelled with a `bool` return.
+pub type ResultCallback = dyn Fn(PickResult, &mut Window, &mut App);
+
 /// The dialog, as a GPUI entity.
 pub struct ColorPickerView {
     state: ColorPickerState,
@@ -72,7 +78,7 @@ pub struct ColorPickerView {
     /// callback has no `Context<Self>`, so this is the seam that keeps typing out of a
     /// borrow of the view.
     pending_hex: Rc<RefCell<Option<String>>>,
-    on_result: Option<Arc<dyn Fn(PickResult, &mut Window, &mut App)>>,
+    on_result: Option<Arc<ResultCallback>>,
 }
 
 impl ColorPickerView {

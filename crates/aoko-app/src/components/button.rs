@@ -272,6 +272,20 @@ mod tests {
         }
     }
 
+    /// One rendered button: the pins it asks for and the copy it draws.
+    ///
+    /// A named struct rather than a five-field tuple, because the tuple was over clippy's
+    /// complexity threshold and, more to the point, `width` and `height` as two anonymous
+    /// `Option<f32>`s read the same at a call site that gets them the wrong way round.
+    struct Case {
+        /// The selector the measuring wrapper records, and the button's own id.
+        selector: &'static str,
+        width: Option<f32>,
+        height: Option<f32>,
+        variant: ButtonVariant,
+        label: &'static str,
+    }
+
     /// Every rendered button, one per row, with the wrapper that measures it.
     ///
     /// The wrapper exists because `debug_bounds` is keyed by a debug selector and the
@@ -279,62 +293,68 @@ mod tests {
     /// uses `items_start`, so each wrapper is as wide as its button and nothing else —
     /// a shrink-to-fit parent cannot be wider than its only child, so the number below
     /// is the button's laid-out width, not the request.
-    const CASES: [(&str, Option<f32>, Option<f32>, ButtonVariant, &str); 8] = [
+    const CASES: [Case; 8] = [
         // The two content-sized cases use the variant the real call site uses
         // (`Shell::keybind_button`), so the un-sized number is the one the review
         // measured: 71 px of fill for "Keybind".
-        ("natural", None, None, ButtonVariant::Secondary, "Keybind"),
-        (
-            "natural-longer",
-            None,
-            None,
-            ButtonVariant::Secondary,
-            "Keybind (F1)",
-        ),
-        (
-            "sized",
-            Some(140.0),
-            None,
-            ButtonVariant::Secondary,
-            "Keybind",
-        ),
-        (
-            "sized-primary",
-            Some(140.0),
-            None,
-            ButtonVariant::Primary,
-            "Keybind",
-        ),
-        (
-            "sized-danger",
-            Some(140.0),
-            None,
-            ButtonVariant::Danger,
-            "Keybind",
-        ),
-        (
-            "sized-dark",
-            Some(140.0),
-            None,
-            ButtonVariant::Dark,
-            "Keybind",
-        ),
-        (
-            "sized-different-label",
-            Some(140.0),
-            None,
-            ButtonVariant::Secondary,
-            "Bind",
-        ),
+        Case {
+            selector: "natural",
+            width: None,
+            height: None,
+            variant: ButtonVariant::Secondary,
+            label: "Keybind",
+        },
+        Case {
+            selector: "natural-longer",
+            width: None,
+            height: None,
+            variant: ButtonVariant::Secondary,
+            label: "Keybind (F1)",
+        },
+        Case {
+            selector: "sized",
+            width: Some(140.0),
+            height: None,
+            variant: ButtonVariant::Secondary,
+            label: "Keybind",
+        },
+        Case {
+            selector: "sized-primary",
+            width: Some(140.0),
+            height: None,
+            variant: ButtonVariant::Primary,
+            label: "Keybind",
+        },
+        Case {
+            selector: "sized-danger",
+            width: Some(140.0),
+            height: None,
+            variant: ButtonVariant::Danger,
+            label: "Keybind",
+        },
+        Case {
+            selector: "sized-dark",
+            width: Some(140.0),
+            height: None,
+            variant: ButtonVariant::Dark,
+            label: "Keybind",
+        },
+        Case {
+            selector: "sized-different-label",
+            width: Some(140.0),
+            height: None,
+            variant: ButtonVariant::Secondary,
+            label: "Bind",
+        },
         // `MainWindow.xaml:1466-1467`: `Height="40"` with no width, the Stats tab's
         // "Reset Stats" button, which is the one call site that pins a height.
-        (
-            "pinned-height",
-            None,
-            Some(40.0),
-            ButtonVariant::Dark,
-            "Reset Stats",
-        ),
+        Case {
+            selector: "pinned-height",
+            width: None,
+            height: Some(40.0),
+            variant: ButtonVariant::Dark,
+            label: "Reset Stats",
+        },
     ];
 
     struct Probe;
@@ -348,7 +368,14 @@ mod tests {
             let theme = Theme::slate();
             let mut column = div().flex().flex_col().items_start().gap(px(4.0));
 
-            for (selector, width, height, variant, label) in CASES {
+            for case in CASES {
+                let Case {
+                    selector,
+                    width,
+                    height,
+                    variant,
+                    label,
+                } = case;
                 let on_click = |_: &ClickEvent, _: &mut Window, _: &mut App| {};
                 let element = match (width, height) {
                     (None, None) => button(selector, &theme, variant, label, on_click),
