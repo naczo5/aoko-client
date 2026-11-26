@@ -35,6 +35,75 @@ pub enum ActionBind {
     Throwpot,
 }
 
+/// One card's header row, in the shape the managed markup draws.
+///
+/// There is no separate title element in the C#: a card either opens with a
+/// `DockPanel` whose right-hand child is the 140-wide keybind button and whose
+/// fill is the module switch (`MainWindow.xaml:359-362`), or with a bold
+/// `TextBlock` and the same button (`:376-379`). A card with neither has no
+/// header at all, which is why most Settings and Stats cards open on their first
+/// control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CardHeader {
+    /// The switch *is* the heading, as on the 38 module cards.
+    Switch {
+        /// The switch's own label, which is the module name.
+        label: &'static str,
+        /// Managed binding path for the switch.
+        bind: &'static str,
+    },
+    /// A bold 16 px label.
+    Text(&'static str),
+}
+
+/// The headings the C# writes as a bold `TextBlock` on cards that have no switch.
+///
+/// Every string is the markup's own, so a diff against `MainWindow.xaml` is a
+/// line diff. A card that is not in this table has no header: painting its `id`
+/// there would put an internal identifier on screen.
+#[must_use]
+pub fn heading(card_id: &str) -> Option<&'static str> {
+    match card_id {
+        // `MainWindow.xaml:1528`.
+        "ConfigsCard" => Some("Configs"),
+        // `:1568`.
+        "ReloadMappingsCard" => Some("Reload Mappings"),
+        // `:1584`.
+        "GuiCustomizationCard" => Some("GUI Customization"),
+        // `:1473`.
+        "CpsHistogramCard" => Some("CPS Distribution"),
+        _ => None,
+    }
+}
+
+/// The card's header, or `None` when the markup draws none.
+///
+/// On a card with a keybind button the heading is whichever of the two managed
+/// shapes comes first: a `Note` (the bold `TextBlock`, as on "Right Click") or the
+/// switch itself. The caller must not paint the control this returns a second time.
+#[must_use]
+pub fn card_header(card: &Card) -> Option<CardHeader> {
+    let has_keybind = card
+        .controls
+        .iter()
+        .any(|control| matches!(control, Keybind { .. }));
+
+    if has_keybind {
+        let first = card
+            .controls
+            .iter()
+            .copied()
+            .find(|control| !matches!(control, Keybind { .. }));
+        match first {
+            Some(Note { text }) => return Some(CardHeader::Text(text)),
+            Some(Switch { label, bind }) => return Some(CardHeader::Switch { label, bind }),
+            _ => {}
+        }
+    }
+
+    heading(card.id).map(CardHeader::Text)
+}
+
 /// One control inside a card, in document order.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Control {
@@ -80,6 +149,18 @@ pub enum Control {
         bind: &'static str,
         /// Item labels, verbatim.
         options: &'static [&'static str],
+    },
+    /// A client-only boolean preference (section 12 decision 3).
+    ///
+    /// Not a `Profile` field and not one of the 143 profile-bound controls: the
+    /// value lives in `client-prefs.json` through
+    /// [`crate::views::prefs`], so counting it as a bind would break the
+    /// 143-control reconciliation.
+    Preference {
+        /// Label beside the checkbox. New copy; the C# has no such control.
+        label: &'static str,
+        /// One line under the row saying what it does.
+        hint: &'static str,
     },
     /// A keybind capture button (`KeybindButton_Click`, 140 wide, right-aligned).
     Keybind {
@@ -920,6 +1001,13 @@ pub const SETTINGS: &[Card] = &[
             Note {
                 text: "Shows unfinished modules (Kill Aura, \u{2026}) in the GUI. Off by default.",
             },
+            // New copy, no managed analogue: section 12 decision 3 asks for a client
+            // animation preference, which the C# never had. It lives on the GUI card
+            // because it is a GUI setting and not a `Profile` field.
+            Preference {
+                label: "Animations",
+                hint: "Turn off to stop every animation in the client.",
+            },
         ],
     },
 ];
@@ -963,9 +1051,9 @@ pub const STATS: &[Card] = &[
     Card {
         id: "CpsHistogramCard",
         controls: &[
-            Note {
-                text: "CPS Distribution",
-            },
+            // The managed card opens with the "CPS Distribution" heading
+            // (`MainWindow.xaml:1473`), drawn from [`heading`] rather than a Note, so
+            // the string lives in one place.
             Note {
                 text: "No samples yet",
             },
@@ -1133,7 +1221,8 @@ pub fn count_controls(cards: &[Card]) -> ControlCounts {
                 | Control::Availability { .. }
                 | Control::Expand { .. }
                 | Control::BlockEspRows
-                | Control::PalettePreview { .. } => {}
+                | Control::PalettePreview { .. }
+                | Control::Preference { .. } => {}
             }
         }
     }

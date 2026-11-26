@@ -12,27 +12,28 @@
 //! `Window::zoom_window` (`:3397`), `Window::start_window_move` (`:3410`) and
 //! `App::quit` (`crates/gpui/src/app.rs:1374`).
 //!
-//! Two things are deliberately minimal and say so:
+//! Two things about this file are worth knowing before reading it:
 //!
-//! * **Resize edges.** Decision 5 asks for them and the pin cannot deliver them.
-//!   `Window::resize(Size)` exists (`Window::resize`, `window.rs`), and
-//!   `UI_INVENTORY.md:476-484` (§5.12) records it, but there is **no per-edge
-//!   hit-testing API**: nothing maps a pointer at the window's edge to a resize
-//!   direction, and `window_min_size` is creation-time only, so the managed
-//!   `ResizeMode`/`MinWidth` swap at runtime (`MainWindow.xaml.cs:474-483`) has no
-//!   equivalent either. The strip below therefore draws and drags but does not
-//!   grow a resize handle, and the four edges are left to the compositor. This is
-//!   the documented gap rather than a fake resize; a real one needs a GPUI
-//!   addition, not a WPF parity fix.
-//! * **Persistence.** The switch rows are wired through
-//!   [`aoko_core::clicker::toggles::ModuleToggles`] and the search index's
-//!   `toggle_property`, which is the same reverse map the overlay uses. Sliders,
-//!   checkboxes and combos resolve their `bind` path against the `Profile` through
-//!   [`crate::views::bindings`] and write it back. [`Shell::new`] is the startup
-//!   path: it opens [`crate::views::profiles::Profiles`], migrates legacy profiles,
-//!   reads the auto-save slot and applies it, and the two close paths write it
-//!   back — the same cadence as `MainWindow.xaml.cs:407-412` (load once) and
-//!   `:1861-1871` (save on exit), with `:946-970` for a named save.
+//! * **Resize edges.** Decision 5 asks for them, and they are drawn here rather
+//!   than deferred: `resize_strips` places four 4 px edges and four 10 px corners
+//!   over the client area, and each one calls `Window::start_window_resize(edge)`
+//!   (`crates/gpui/src/window.rs:2873`; `ResizeEdge` has all eight variants at
+//!   `platform.rs:850`, and both Linux backends implement it). What GPUI does not
+//!   give us is *automatic* edge hit-testing — the old note here claimed resize was
+//!   impossible at the pin, which was false — so the strips exist to be the hit
+//!   targets. `window_min_size` remains creation-time only, which is why the managed
+//!   `ResizeMode`/`MinWidth` swap at runtime (`MainWindow.xaml.cs:474-483`) is not
+//!   ported.
+//! * **Persistence.** Sliders, checkboxes and combos resolve their `bind` path
+//!   against the `Profile` through [`crate::views::bindings`] and write it back;
+//!   switches go through [`crate::views::bindings`]' reverse map into
+//!   [`ModuleToggles`] on the press. [`Shell::new`] is the startup path: it opens
+//!   [`crate::views::profiles::Profiles`], migrates legacy profiles, reads the
+//!   auto-save slot and applies it, and the two close paths write it back — the same
+//!   cadence as `MainWindow.xaml.cs:407-412` (load once) and `:1861-1871` (save on
+//!   exit), with `:946-970` for a named save. Decision 3's animation setting is
+//!   *not* in the profile: it lives in [`crate::views::prefs`], because `Profile` is
+//!   a bridge wire type.
 
 use std::collections::BTreeMap;
 
@@ -52,6 +53,7 @@ use crate::views::accounts_state::{AccountPanel, AccountsState, OfflineSubmit, P
 use crate::views::command_search::{CommandSearchState, KeyboardGate, RowFactTable, SearchKey};
 use crate::views::copy::{self, Card, Control, TabBody, MODULE_LIST_PREVIEW_SAMPLE};
 use crate::views::forms::FormFields;
+use crate::views::prefs::ClientPrefs;
 use crate::views::profiles::{CreateOutcome, Profiles};
 use crate::views::servers_state::{AddOutcome, JoinOutcome, PingRequest, ServersState};
 use crate::views::stores::{NoStore, StoreBridge};
@@ -87,6 +89,18 @@ pub struct Shell {
     /// (`CapabilityReport::open_path`). False until [`Shell::from_system`] probes it,
     /// so the button cannot claim a capability this build has not checked.
     open_configs_folder: bool,
+    /// Decision 3's client setting: whether animated sites run. Kept in
+    /// `client-prefs.json` rather than `Profile`, which is a bridge wire type.
+    animations: bool,
+    /// The preferences file, `None` under `cfg(test)` and `capture` so neither
+    /// touches the machine's app-data directory.
+    prefs: Option<crate::views::prefs::PrefsFile>,
+    /// Why a preference could not be read or written, shown in the Settings card.
+    prefs_status: String,
+    /// The last resize edge a strip asked for. The platform owns the actual resize
+    /// (`Window::start_window_resize`), so this is the only part a test can observe,
+    /// and it is what proves the strip is hit-testable.
+    resize_requested: Option<gpui::ResizeEdge>,
     /// Whether the close hook has been registered on this window, so a repaint does
     /// not box a new callback every frame.
     close_hook_installed: bool,
@@ -141,6 +155,31 @@ impl Shell {
         // keyed on: Linux needs `xdg-open` on `PATH`, and a session without it must
         // not look like it can reveal the folder.
         shell.open_configs_folder = aoko_platform::probe_capabilities().open_path;
+
+        // Section 12 decision 3: the client setting that gates every animation. It is
+        // applied to `theme::motion` here, before the first frame, so a user who
+        // turned animations off does not see one animated frame on startup.
+        match crate::views::prefs::PrefsFile::from_system() {
+            Ok(file) => {
+                match file.load() {
+                    Ok(prefs) => {
+                        shell.animations = prefs.animations;
+                        motion::set_animations_enabled(prefs.animations);
+                    }
+                    Err(error) => {
+                        shell.prefs_status = format!("Could not read client preferences: {error}");
+                    }
+                }
+                shell.prefs = Some(file);
+            }
+            Err(error) => {
+                shell.prefs_status = format!(
+                    "Could not locate client preferences: {}",
+                    error.user_facing()
+                );
+            }
+        }
+
         shell
     }
 
@@ -151,6 +190,12 @@ impl Shell {
     /// `xdg-open`.
     pub fn set_open_folder_supported(&mut self, supported: bool) {
         self.open_configs_folder = supported;
+    }
+
+    /// Attaches a preferences file, as the startup path does. Tests use it to prove
+    /// a flipped animation setting reaches the disk.
+    pub fn set_prefs(&mut self, prefs: crate::views::prefs::PrefsFile) {
+        self.prefs = Some(prefs);
     }
 
     /// A shell over a caller-supplied store: tests, and an app-data root chosen
@@ -180,6 +225,12 @@ impl Shell {
             fields: FormFields::default(),
             config_name: String::new(),
             open_configs_folder: false,
+            // Under `cfg(test)` and `capture` nothing has changed the process gate, so
+            // the row shows what the leaf widgets are already doing.
+            animations: motion::animations_enabled(),
+            prefs: None,
+            prefs_status: String::new(),
+            resize_requested: None,
             close_hook_installed: false,
             pending_join: None,
             pending_account_switch: None,
@@ -629,10 +680,12 @@ impl Shell {
         }
     }
 
-    /// The command-search state, for the overlay view to read.
+    /// The command-search state.
     ///
-    /// The overlay owns the pixels; this owns open/close, the query, ranking and
-    /// the pulse — see [`crate::views::command_search`].
+    /// **Not mounted in Phase 2** (section 12 decision 7): nothing calls
+    /// [`Self::open_search`] and no key listener exists, so there is no overlay on
+    /// screen. This accessor, the state machine and the view are built and tested,
+    /// and the wiring is owed.
     #[must_use]
     pub fn search(&self) -> &CommandSearchState {
         &self.search
@@ -914,6 +967,46 @@ impl Shell {
         cx.notify();
     }
 
+    /// Whether animated sites run, from decision 3's client setting.
+    #[must_use]
+    pub fn animations(&self) -> bool {
+        self.animations
+    }
+
+    /// Why a client preference could not be read or written, empty when nothing
+    /// failed.
+    #[must_use]
+    pub fn prefs_status(&self) -> &str {
+        &self.prefs_status
+    }
+
+    /// The Settings tab's Animations row: flips the gate and remembers the choice.
+    pub fn toggle_animations(&mut self, cx: &mut Context<Self>) {
+        self.set_animations(!self.animations, cx);
+    }
+
+    /// Applies an animation setting to `theme::motion` and persists it.
+    ///
+    /// The gate is process-wide, so this is the one write the shipped binary makes
+    /// to it; a failure to save is reported in the card rather than dropped.
+    pub fn set_animations(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.animations = enabled;
+        motion::set_animations_enabled(enabled);
+
+        if let Some(prefs) = self.prefs.as_ref() {
+            match prefs.save(ClientPrefs {
+                animations: enabled,
+            }) {
+                Ok(()) => self.prefs_status.clear(),
+                Err(error) => {
+                    self.prefs_status = format!("Could not save client preferences: {error}");
+                }
+            }
+        }
+
+        cx.notify();
+    }
+
     /// "Use account": gates, then parks the switch for the bridge.
     pub fn accounts_use_selected(&mut self, cx: &mut Context<Self>) {
         if self.accounts.actions().use_account {
@@ -1070,9 +1163,11 @@ impl Shell {
         cx.notify();
     }
 
-    /// Opens the overlay, optionally seeded with the typed character.
+    /// Opens the search state, optionally seeded with the typed character.
     ///
-    /// Ctrl+K and type-to-open both land here; they differ only in the seed.
+    /// **Nothing calls this in Phase 2** (decision 7): the shell installs no key
+    /// listener, so Ctrl+K and type-to-open do not reach it. When the wiring lands,
+    /// both gestures land here and differ only in the seed.
     pub fn open_search(&mut self, seed: Option<&str>, cx: &mut Context<Self>) {
         let gate = KeyboardGate::ready();
         let facts = RowFactTable::default();
@@ -1143,7 +1238,8 @@ impl Render for Shell {
             None => div().flex_1().into_any_element(),
         };
 
-        div()
+        let mut root = div()
+            .relative()
             .flex()
             .flex_col()
             .size_full()
@@ -1162,8 +1258,16 @@ impl Render for Shell {
                     .gap(px(metrics::rail::GAP))
                     .child(self.render_rail(&theme, &entity))
                     .child(div().flex().flex_1().min_w(px(0.0)).child(body)),
-            )
-            .into_any_element()
+            );
+
+        // Decision 5's resize edges. They are last so they paint above the title bar
+        // and the tab body, and each consumes its own mouse-down before anything
+        // else can see it.
+        for handle in resize_strips() {
+            root = root.child(self.render_resize_handle(&handle, &entity));
+        }
+
+        root.into_any_element()
     }
 }
 
@@ -1357,19 +1461,17 @@ impl Shell {
         motion: Motion,
         entity: &Entity<Self>,
     ) -> AnyElement {
-        let mut body = components::card(theme).child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .w_full()
-                .text_size(px(metrics::text::BUTTON))
-                .text_color(theme.text)
-                .child(SharedString::from(card_title(card))),
-        );
+        let header = copy::card_header(card);
+        let mut body = components::card(theme);
+
+        if let Some(header) = header {
+            body = body.child(self.render_card_header(card, header, theme, motion, entity));
+        }
 
         for control in card.controls {
+            if control_is_header(control, header) {
+                continue;
+            }
             body = body.child(self.render_control(card, control, theme, motion, entity));
         }
 
@@ -1385,6 +1487,133 @@ impl Shell {
         }
 
         body.into_any_element()
+    }
+
+    /// One resize strip: absolutely placed, and the only element that asks the
+    /// platform to start a resize for its edge.
+    fn render_resize_handle(&self, strip: &ResizeStrip, entity: &Entity<Self>) -> AnyElement {
+        let mut element = div().id(strip.id).absolute().cursor(strip.cursor);
+        if let Some(left) = strip.left {
+            element = element.left(px(left));
+        }
+        if let Some(right) = strip.right {
+            element = element.right(px(right));
+        }
+        if let Some(top) = strip.top {
+            element = element.top(px(top));
+        }
+        if let Some(bottom) = strip.bottom {
+            element = element.bottom(px(bottom));
+        }
+        if let Some(width) = strip.width {
+            element = element.w(px(width));
+        }
+        if let Some(height) = strip.height {
+            element = element.h(px(height));
+        }
+
+        let edge = strip.edge;
+        let handle = entity.clone();
+        element
+            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                // Recorded first: the test platform's `start_window_resize` is a
+                // no-op, so this field is what a test can see, and on a real
+                // backend the call below is the actual resize.
+                handle.update(cx, |shell, _cx| shell.resize_requested = Some(edge));
+                window.start_window_resize(edge);
+                cx.stop_propagation();
+            })
+            .into_any_element()
+    }
+
+    /// The managed header row: the switch or the bold label on the left, the
+    /// 140-wide keybind button docked right (`MainWindow.xaml:359-379`).
+    fn render_card_header(
+        &self,
+        card: &Card,
+        header: copy::CardHeader,
+        theme: &Theme,
+        motion: Motion,
+        entity: &Entity<Self>,
+    ) -> AnyElement {
+        let mut row = div().flex().flex_row().items_center().w_full().gap(px(8.0));
+
+        match header {
+            copy::CardHeader::Text(text) => {
+                row = row.child(div().text_size(px(16.0)).text_color(theme.text).child(text));
+            }
+            copy::CardHeader::Switch { label, bind } => {
+                row = row.child(self.render_switch(card, label, bind, theme, motion, entity));
+            }
+        }
+
+        if let Some(module) = card_module(card) {
+            row = row.child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .w(px(140.0))
+                    .child(keybind_button(card.id, module, theme, entity)),
+            );
+        }
+
+        row.into_any_element()
+    }
+
+    /// The switch row's widget, used both in a header and in a body row.
+    fn render_switch(
+        &self,
+        card: &Card,
+        label: &'static str,
+        bind: &'static str,
+        theme: &Theme,
+        motion: Motion,
+        entity: &Entity<Self>,
+    ) -> AnyElement {
+        let module = module_for_bind(bind).or_else(|| card_module(card));
+        let is_on = module.is_some_and(|module| self.is_module_on(module));
+        // The clicking half of the switch lives here: `switch` is an interactive element
+        // and attaches `.id()`/`.on_click()` internally, so this arm is where the click
+        // is routed to the module it names. A card whose bind resolves to no module
+        // keeps a handler that refuses, rather than a picture that looks clickable.
+        let handle = entity.clone();
+        let switch = components::switch(
+            SharedString::from(format!("{}-{}", card.id, bind)),
+            theme,
+            is_on,
+            motion,
+            move |_, _, cx| {
+                if let Some(module) = module {
+                    handle.update(cx, |shell, cx| shell.toggle_module(module, cx));
+                }
+            },
+        );
+
+        let mut switch = switch;
+        if let Some(selector) = switch_debug_selector(bind) {
+            // A test needs to know where the switch is to click it, and
+            // `debug_selector` takes a `&'static str`; the AutoClicker switch is the
+            // one the click test uses.
+            switch = div()
+                .debug_selector(move || selector.to_owned())
+                .child(switch)
+                .into_any_element();
+        }
+
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .w_full()
+            .child(
+                div()
+                    .text_size(px(metrics::text::BUTTON))
+                    .text_color(theme.text)
+                    .child(label),
+            )
+            .child(switch)
+            .into_any_element()
     }
 
     /// The Delete button plus, when armed, the in-card confirmation.
@@ -1534,28 +1763,7 @@ impl Shell {
                 .into_any_element(),
 
             Control::Switch { label, bind } => {
-                let module = module_for_bind(bind).or_else(|| card_module(card));
-                let is_on = module.is_some_and(|module| self.is_module_on(module));
-                let row = div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .w_full()
-                    .child(
-                        div()
-                            .text_size(px(metrics::text::BUTTON))
-                            .text_color(theme.text)
-                            .child(*label),
-                    )
-                    .child(components::switch(
-                        SharedString::from(format!("{}-{}", card.id, bind)),
-                        theme,
-                        is_on,
-                        motion,
-                    ));
-
-                row.into_any_element()
+                self.render_switch(card, label, bind, theme, motion, entity)
             }
 
             Control::Check {
@@ -1745,6 +1953,36 @@ impl Shell {
                     .into_any_element()
             }
 
+            Control::Preference { label, hint } => {
+                let on = self.animations;
+                let handle = entity.clone();
+                let boxed = components::checkbox(
+                    SharedString::from(format!("{}-{label}", card.id)),
+                    theme,
+                    on,
+                    *label,
+                    move |_, _, cx| handle.update(cx, |shell, cx| shell.toggle_animations(cx)),
+                );
+
+                let mut column = div().flex().flex_col().gap(px(2.0)).child(boxed).child(
+                    div()
+                        .text_size(px(metrics::text::CAPTION))
+                        .text_color(theme.dim_text)
+                        .child(*hint),
+                );
+
+                if !self.prefs_status.is_empty() {
+                    column = column.child(
+                        div()
+                            .text_size(px(metrics::text::CAPTION))
+                            .text_color(crate::theme::fixed::CRITICAL)
+                            .child(SharedString::from(self.prefs_status.clone())),
+                    );
+                }
+
+                column.into_any_element()
+            }
+
             Control::Keybind { module } => components::button(
                 SharedString::from(format!("{}-keybind", card.id)),
                 theme,
@@ -1862,16 +2100,175 @@ fn format_value(value: f64) -> String {
     }
 }
 
-/// The card's title: the first `Note` that reads like a heading, else the module
-/// name its keybind names, else the id.
-fn card_title(card: &Card) -> String {
-    if let Some(module) = card_module(card) {
-        if let Some(entry) = search::entries().iter().find(|entry| entry.id == module) {
-            return entry.display_name.to_owned();
-        }
-    }
+/// One client-drawn resize strip: an edge or a corner, placed absolutely.
+struct ResizeStrip {
+    id: &'static str,
+    edge: gpui::ResizeEdge,
+    cursor: gpui::CursorStyle,
+    left: Option<f32>,
+    right: Option<f32>,
+    top: Option<f32>,
+    bottom: Option<f32>,
+    width: Option<f32>,
+    height: Option<f32>,
+}
 
-    card.id.trim_end_matches("Card").to_owned()
+/// The eight strips decision 5 asks for: four edges and four corners.
+///
+/// `Window::start_window_resize(edge)` is public at the pin
+/// (`crates/gpui/src/window.rs:2873`), `ResizeEdge` has all eight variants
+/// (`platform.rs:850`), and both Linux backends implement it, but GPUI does no edge
+/// hit-testing for us: the pointer has to land on an element that asks. These are
+/// that element, drawn in client area like the title bar.
+#[must_use]
+fn resize_strips() -> [ResizeStrip; 8] {
+    use gpui::{CursorStyle, ResizeEdge};
+
+    /// How thick an edge strip is, in px.
+    const EDGE: f32 = 4.0;
+    /// How thick a corner strip is, in px.
+    const CORNER: f32 = 10.0;
+
+    [
+        ResizeStrip {
+            id: "resize-left",
+            edge: ResizeEdge::Left,
+            cursor: CursorStyle::ResizeLeftRight,
+            left: Some(0.0),
+            right: None,
+            top: Some(0.0),
+            bottom: Some(0.0),
+            width: Some(EDGE),
+            height: None,
+        },
+        ResizeStrip {
+            id: "resize-right",
+            edge: ResizeEdge::Right,
+            cursor: CursorStyle::ResizeLeftRight,
+            left: None,
+            right: Some(0.0),
+            top: Some(0.0),
+            bottom: Some(0.0),
+            width: Some(EDGE),
+            height: None,
+        },
+        ResizeStrip {
+            id: "resize-top",
+            edge: ResizeEdge::Top,
+            cursor: CursorStyle::ResizeUpDown,
+            left: Some(0.0),
+            right: Some(0.0),
+            top: Some(0.0),
+            bottom: None,
+            width: None,
+            height: Some(EDGE),
+        },
+        ResizeStrip {
+            id: "resize-bottom",
+            edge: ResizeEdge::Bottom,
+            cursor: CursorStyle::ResizeUpDown,
+            left: Some(0.0),
+            right: Some(0.0),
+            top: None,
+            bottom: Some(0.0),
+            width: None,
+            height: Some(EDGE),
+        },
+        ResizeStrip {
+            id: "resize-top-left",
+            edge: ResizeEdge::TopLeft,
+            cursor: CursorStyle::ResizeUpRightDownLeft,
+            left: Some(0.0),
+            right: None,
+            top: Some(0.0),
+            bottom: None,
+            width: Some(CORNER),
+            height: Some(CORNER),
+        },
+        ResizeStrip {
+            id: "resize-top-right",
+            edge: ResizeEdge::TopRight,
+            cursor: CursorStyle::ResizeUpLeftDownRight,
+            left: None,
+            right: Some(0.0),
+            top: Some(0.0),
+            bottom: None,
+            width: Some(CORNER),
+            height: Some(CORNER),
+        },
+        ResizeStrip {
+            id: "resize-bottom-left",
+            edge: ResizeEdge::BottomLeft,
+            cursor: CursorStyle::ResizeUpLeftDownRight,
+            left: Some(0.0),
+            right: None,
+            top: None,
+            bottom: Some(0.0),
+            width: Some(CORNER),
+            height: Some(CORNER),
+        },
+        ResizeStrip {
+            id: "resize-bottom-right",
+            edge: ResizeEdge::BottomRight,
+            cursor: CursorStyle::ResizeUpRightDownLeft,
+            left: None,
+            right: Some(0.0),
+            top: None,
+            bottom: Some(0.0),
+            width: Some(CORNER),
+            height: Some(CORNER),
+        },
+    ]
+}
+
+/// The debug selector for the switch the click test targets.
+///
+/// `debug_selector` takes a `&'static str`, and an id built from a card and a bind
+/// is a `SharedString`, so this names the one switch a test needs rather than all
+/// 43. It records nothing in a release build (`debug_assertions` off).
+fn switch_debug_selector(bind: &'static str) -> Option<&'static str> {
+    match bind {
+        "IsArmed" => Some("switch-IsArmed"),
+        _ => None,
+    }
+}
+
+/// Whether a control was already painted as part of the card's header.
+///
+/// The managed header row *is* the switch on a module card and the first `Note` on
+/// a text-headed one (`MainWindow.xaml:359-379`), so painting them again in the body
+/// would duplicate them — which is what the old title did on all 38 module cards.
+fn control_is_header(control: &Control, header: Option<copy::CardHeader>) -> bool {
+    match (control, header) {
+        (Control::Keybind { .. }, Some(_)) => true,
+        (
+            Control::Switch { bind, .. },
+            Some(copy::CardHeader::Switch {
+                bind: header_bind, ..
+            }),
+        ) => *bind == header_bind,
+        (Control::Note { text }, Some(copy::CardHeader::Text(heading_text))) => {
+            *text == heading_text
+        }
+        _ => false,
+    }
+}
+
+/// The 140-wide keybind button the managed header docks right.
+fn keybind_button(
+    card_id: &'static str,
+    module: &'static str,
+    theme: &Theme,
+    _entity: &Entity<Shell>,
+) -> AnyElement {
+    components::button(
+        SharedString::from(format!("{card_id}-keybind")),
+        theme,
+        ButtonVariant::Secondary,
+        SharedString::from(keybind_label(module)),
+        |_, _, _| {},
+    )
+    .into_any_element()
 }
 
 /// The catalogue module a card's keybind button names.
@@ -1943,14 +2340,76 @@ mod tests {
     }
 
     #[test]
-    fn cards_are_titled_by_their_catalogue_display_name() {
-        let combat = match copy::TABS[0].body {
+    fn card_headers_are_the_managed_shapes_and_never_an_identifier() {
+        let cards = match copy::TABS[0].body {
             TabBody::Cards(cards) => cards,
-            _ => unreachable!(),
+            TabBody::Accounts | TabBody::Servers => &[],
         };
 
-        assert_eq!(card_title(&combat[0]), "AutoClicker");
-        assert_eq!(card_title(&combat[1]), "Right Click");
+        // `MainWindow.xaml:359-362`: the header of a module card is its switch.
+        assert_eq!(
+            copy::card_header(&cards[0]),
+            Some(copy::CardHeader::Switch {
+                label: "AutoClicker",
+                bind: "IsArmed"
+            })
+        );
+        // `:376-379`: Right Click is a bold label, and its switch is a body row.
+        assert_eq!(
+            copy::card_header(&cards[1]),
+            Some(copy::CardHeader::Text("Right Click"))
+        );
+
+        // No card may paint an identifier: every header is either its own switch's
+        // label or a string the table already carries (a `Note`, or one of the four
+        // managed headings).
+        for tab in copy::TABS {
+            let TabBody::Cards(cards) = tab.body else {
+                continue;
+            };
+            for card in cards {
+                match copy::card_header(card) {
+                    Some(copy::CardHeader::Switch { label, bind }) => {
+                        assert!(
+                            card.controls.iter().any(|control| matches!(
+                                control,
+                                Control::Switch { label: own, bind: own_bind }
+                                    if *own == label && *own_bind == bind
+                            )),
+                            "{} header switch is not the card's own",
+                            card.id
+                        );
+                    }
+                    Some(copy::CardHeader::Text(text)) => {
+                        assert!(
+                            copy::heading(card.id) == Some(text)
+                                || card.controls.iter().any(|control| matches!(
+                                    control,
+                                    Control::Note { text: own } if *own == text
+                                )),
+                            "{} header {text} is not in the table",
+                            card.id
+                        );
+                    }
+                    None => {}
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_four_managed_headings_are_verbatim() {
+        assert_eq!(copy::heading("ConfigsCard"), Some("Configs"));
+        assert_eq!(copy::heading("ReloadMappingsCard"), Some("Reload Mappings"));
+        assert_eq!(
+            copy::heading("GuiCustomizationCard"),
+            Some("GUI Customization")
+        );
+        assert_eq!(copy::heading("CpsHistogramCard"), Some("CPS Distribution"));
+        // Cards the C# gives no heading must not acquire one.
+        assert_eq!(copy::heading("PlaytimeSummaryCard"), None);
+        assert_eq!(copy::heading("DiscordRpcCard"), None);
+        assert_eq!(copy::heading("BetaBannerCard"), None);
     }
 
     #[test]
@@ -2371,6 +2830,159 @@ mod tests {
             cx.read(|cx| handle.read(cx).config_name().to_owned()),
             "pvp",
             "the widget's on_change writes into the shell's config name"
+        );
+    }
+    #[gpui::test]
+    fn flipping_the_animations_row_persists_and_gates(cx: &mut gpui::TestAppContext) {
+        let root = scratch_root();
+        let prefs = crate::views::prefs::PrefsFile::at(root.join(crate::views::prefs::FILE_NAME));
+        let shell = cx.update(|cx| {
+            cx.new(|_| {
+                let mut shell = Shell::new(Theme::slate());
+                shell.set_prefs(prefs.clone());
+                shell
+            })
+        });
+
+        assert!(cx.read(|cx| shell.read(cx).animations()));
+
+        cx.update(|cx| shell.update(cx, |shell, cx| shell.toggle_animations(cx)));
+        assert!(!cx.read(|cx| shell.read(cx).animations()));
+        assert!(!motion::animations_enabled(), "the gate is process-wide");
+        assert_eq!(
+            prefs.load(),
+            Ok(crate::views::prefs::ClientPrefs { animations: false }),
+            "the flip reached the disk"
+        );
+
+        cx.update(|cx| shell.update(cx, |shell, cx| shell.toggle_animations(cx)));
+        assert!(motion::animations_enabled());
+        assert_eq!(
+            prefs.load(),
+            Ok(crate::views::prefs::ClientPrefs { animations: true })
+        );
+    }
+
+    #[gpui::test]
+    fn the_bottom_right_strip_asks_for_a_window_resize(cx: &mut gpui::TestAppContext) {
+        use gpui::{point, Modifiers, WindowOptions};
+
+        let shell = cx.update(|cx| cx.new(|_| Shell::new(Theme::slate())));
+        let window = cx.update(|cx| {
+            cx.open_window(WindowOptions::default(), |_, _| shell.clone())
+                .expect("test window")
+        });
+
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        let (width, height) = visual.update(|window, cx| {
+            let _ = window.draw(cx);
+            let size = window.viewport_size();
+            (size.width, size.height)
+        });
+
+        visual.simulate_mouse_down(
+            point(width - px(2.0), height - px(2.0)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+
+        assert_eq!(
+            visual.cx.read(|cx| shell.read(cx).resize_requested),
+            Some(gpui::ResizeEdge::BottomRight),
+            "the corner strip is the hit target and asks for its own edge"
+        );
+    }
+
+    /// A root view that renders exactly one switch arm, so the click lands at a known
+    /// point instead of somewhere in a 1020x760 shell.
+    struct SwitchProbe {
+        shell: Entity<Shell>,
+        theme: Theme,
+    }
+
+    impl Render for SwitchProbe {
+        fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let shell = self.shell.clone();
+            let row = shell.read(cx).render_switch(
+                &crate::views::copy::COMBAT[0],
+                "Armed",
+                "IsArmed",
+                &self.theme,
+                Motion::STILL,
+                &shell,
+            );
+            div().size_full().child(div().w(px(200.0)).child(row))
+        }
+    }
+
+    /// The blocker's second half: the arm's handler must reach `toggle_module`, so a click
+    /// on a rendered switch flips the module it names.
+    #[gpui::test]
+    fn clicking_the_module_switch_arms_the_module(cx: &mut gpui::TestAppContext) {
+        use gpui::{point, Modifiers, WindowOptions};
+
+        let probe = cx.update(|cx| {
+            let shell = cx.new(|_| Shell::new(Theme::slate()));
+            cx.new(|_| SwitchProbe {
+                shell,
+                theme: Theme::slate(),
+            })
+        });
+        let window = cx.update(|cx| {
+            cx.open_window(WindowOptions::default(), |_, _| probe.clone())
+                .expect("test window")
+        });
+
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        let _ = visual.update(|window, cx| window.draw(cx));
+
+        let before = visual
+            .cx
+            .read(|cx| probe.read(cx).shell.read(cx).is_module_on("autoclicker"));
+        // The row is 200 wide with the switch at its right edge, so the switch occupies
+        // x in [154, 200]; (177, 12) is inside the track.
+        visual.simulate_click(point(px(177.0), px(12.0)), Modifiers::default());
+        let after = visual
+            .cx
+            .read(|cx| probe.read(cx).shell.read(cx).is_module_on("autoclicker"));
+
+        assert_ne!(
+            before, after,
+            "a click on the switch must flip the module it names"
+        );
+    }
+    #[gpui::test]
+    fn clicking_the_autoclicker_switch_flips_the_module(cx: &mut gpui::TestAppContext) {
+        use gpui::{Modifiers, WindowOptions};
+
+        let shell = cx.update(|cx| cx.new(|_| Shell::new(Theme::slate())));
+        let window = cx.update(|cx| {
+            cx.open_window(WindowOptions::default(), |_, _| shell.clone())
+                .expect("test window")
+        });
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        assert!(!cx.read(|cx| shell.read(cx).is_module_on("autoclicker")));
+
+        let bounds = visual
+            .debug_bounds("switch-IsArmed")
+            .expect("the switch renders with its debug selector");
+        visual.simulate_click(bounds.center(), Modifiers::default());
+        assert!(
+            cx.read(|cx| shell.read(cx).is_module_on("autoclicker")),
+            "the click reached toggle_module"
+        );
+
+        let bounds = visual
+            .debug_bounds("switch-IsArmed")
+            .expect("the switch is still there");
+        visual.simulate_click(bounds.center(), Modifiers::default());
+        assert!(
+            !cx.read(|cx| shell.read(cx).is_module_on("autoclicker")),
+            "a second click flips it back"
         );
     }
 }

@@ -24,6 +24,8 @@ use std::collections::BTreeMap;
 
 use aoko_core::search::{self, RowState, SearchEntry, SearchHit, SearchRange};
 
+use crate::theme::motion;
+
 /// The command-search card never narrows below this.
 pub const CARD_MIN_WIDTH: f32 = 340.0;
 /// The card never widens past this.
@@ -49,13 +51,6 @@ pub const OPEN_CARD_MS: u32 = 140;
 pub const CLOSE_MS: u32 = 100;
 /// The list is placed, not animated, on the first layout.
 pub const PLACE_EASE_MS: u32 = 120;
-/// Pulse: the ring reaches full opacity here.
-pub const PULSE_RISE_MS: i64 = 160;
-/// Pulse: it starts fading here.
-pub const PULSE_HOLD_MS: i64 = 820;
-/// Pulse: it is gone here.
-pub const PULSE_TOTAL_MS: i64 = 1200;
-
 /// What the window knows about one module, which the row cannot read itself.
 ///
 /// This replaces the managed `StateProvider` callback: the shell fills it from the
@@ -252,39 +247,42 @@ pub struct CardPulse {
 }
 
 impl CardPulse {
-    /// Ring opacity at `now_ms`, on the managed keyframes: 0 to 1 over 160 ms
-    /// (cubic ease-out), hold to 820 ms, then linear to 0 at 1200 ms.
+    /// Ring opacity at `now_ms`.
+    ///
+    /// The three keyframes are [`motion::PULSE_RISE`], [`motion::PULSE_HOLD`] and
+    /// [`motion::PULSE_TOTAL`], and the curve is [`motion::card_pulse`]: this
+    /// converts the overlay's millisecond clock to normalised progress and nothing
+    /// else, so the ring and every other animated site share one implementation.
     #[must_use]
     pub fn opacity_at(&self, now_ms: i64) -> f32 {
         let elapsed = now_ms.saturating_sub(self.started_ms);
-        if elapsed >= PULSE_TOTAL_MS {
+        let total = pulse_total_ms();
+        if elapsed >= total {
             return 0.0;
         }
 
-        if elapsed >= PULSE_HOLD_MS {
-            let fade = (elapsed - PULSE_HOLD_MS) as f32 / (PULSE_TOTAL_MS - PULSE_HOLD_MS) as f32;
-            return (1.0 - fade).clamp(0.0, 1.0);
-        }
-
-        if elapsed >= PULSE_RISE_MS {
-            return 1.0;
-        }
-
-        let t = elapsed as f32 / PULSE_RISE_MS as f32;
-        cubic_ease_out(t).clamp(0.0, 1.0)
+        motion::card_pulse(elapsed as f32 / total as f32).clamp(0.0, 1.0)
     }
 
     /// Whether the ring has finished and the caller may drop it.
     #[must_use]
     pub fn is_finished(&self, now_ms: i64) -> bool {
-        now_ms.saturating_sub(self.started_ms) >= PULSE_TOTAL_MS
+        now_ms.saturating_sub(self.started_ms) >= pulse_total_ms()
     }
 }
 
-/// `CubicEase { EasingMode = EaseOut }`: `1 - (1 - t)^3`.
-fn cubic_ease_out(t: f32) -> f32 {
-    let inverse = 1.0 - t.clamp(0.0, 1.0);
-    1.0 - inverse * inverse * inverse
+/// The pulse's three keyframes, taken from [`motion`] rather than restated.
+///
+/// The curve has one implementation — [`motion::card_pulse`] — and this only
+/// converts its `Duration` keyframes to the millisecond clock the overlay runs on.
+/// A second copy here is what the Gate 2 review found drifting.
+fn pulse_total_ms() -> i64 {
+    millis(motion::PULSE_TOTAL)
+}
+
+/// One `Duration` keyframe in milliseconds, saturating rather than wrapping.
+fn millis(duration: std::time::Duration) -> i64 {
+    i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
 }
 
 /// The overlay's state.
@@ -1003,16 +1001,21 @@ mod tests {
         };
 
         assert_eq!(pulse.opacity_at(0), 0.0);
-        assert!((pulse.opacity_at(PULSE_RISE_MS) - 1.0).abs() < f32::EPSILON);
-        assert_eq!(pulse.opacity_at(PULSE_HOLD_MS), 1.0);
-        let mid_fade = pulse.opacity_at((PULSE_HOLD_MS + PULSE_TOTAL_MS) / 2);
+        let rise = millis(motion::PULSE_RISE);
+        let hold = millis(motion::PULSE_HOLD);
+        let total = millis(motion::PULSE_TOTAL);
+        assert!((pulse.opacity_at(rise) - 1.0).abs() < 1e-5);
+        // At the hold keyframe the two implementations can differ in the last bit of
+        // the f32 division, so the boundary is compared with a tolerance.
+        assert!((pulse.opacity_at(hold) - 1.0).abs() < 1e-5);
+        let mid_fade = pulse.opacity_at((hold + total) / 2);
         assert!(
             mid_fade > 0.0 && mid_fade < 1.0,
             "the fall is linear in between"
         );
-        assert_eq!(pulse.opacity_at(PULSE_TOTAL_MS), 0.0);
-        assert!(pulse.is_finished(PULSE_TOTAL_MS));
-        assert!(!pulse.is_finished(PULSE_TOTAL_MS - 1));
+        assert_eq!(pulse.opacity_at(total), 0.0);
+        assert!(pulse.is_finished(total));
+        assert!(!pulse.is_finished(total - 1));
     }
 
     #[test]
@@ -1022,8 +1025,9 @@ mod tests {
         let request = state.jump_selected().expect("a jump");
         state.begin_pulse(&request, 0, true);
 
-        assert!(state.prune_pulse(PULSE_TOTAL_MS - 1));
-        assert!(!state.prune_pulse(PULSE_TOTAL_MS));
+        let total = millis(motion::PULSE_TOTAL);
+        assert!(state.prune_pulse(total - 1));
+        assert!(!state.prune_pulse(total));
         assert!(state.pulse().is_none());
     }
 
