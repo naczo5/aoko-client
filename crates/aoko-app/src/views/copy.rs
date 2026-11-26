@@ -1086,7 +1086,7 @@ pub const STATS_PEAK_PREFIX: &str = "Peak ";
 /// Suffix after the sample count in the histogram caption.
 pub const STATS_SAMPLES_SUFFIX: &str = " samples";
 
-// ── Keybind capture ────────────────────────────────────────────────────────
+// ── Keybind capture ─────────────────────────────────────────────────────────────
 
 /// What a module keybind button reads while it is capturing.
 ///
@@ -1198,11 +1198,74 @@ pub const SEARCH_BUTTON_TOOLTIP: &str = "Search modules and tabs (Ctrl+K)";
 /// The rail search button's chord hint.
 pub const SEARCH_BUTTON_CHORD: &str = "ctrl k";
 
-/// The loader's first line.
+/// A title with no managed source, kept flagged rather than deleted.
+///
+/// `MainWindow.xaml` contains no "Aoko" text: the window is titled `aoko client` (`:7`) and
+/// the loader panel opens with [`LOADER_HEADING`] (`:307`). This constant predates that
+/// finding, nothing reads it, and it is **not** the panel heading — the loader's first line
+/// is the one below.
 pub const LOADER_TITLE: &str = "Aoko";
 
-/// The loader's injection button.
+// ── The loader panel ────────────────────────────────────────────────────────────
+//
+// `LoaderPanel` (`MainWindow.xaml:306-340`), in document order. The panel is the window's
+// only content until injection succeeds; `EnterControlMode` (`MainWindow.xaml.cs:469-492`)
+// then hides it and shows `ControlPanel`, which is the tree the rest of this table paints.
+
+/// The panel's heading, `MainWindow.xaml:307-308`: 16 px, bold, centred, 10 px above.
+pub const LOADER_HEADING: &str = "Injection Control";
+
+/// The versions line under it, `MainWindow.xaml:309-315`.
+///
+/// 11 px, dim, wrapped and centred. The list is the managed claim verbatim, `and` included:
+/// a Rust bridge that stops supporting one of these versions has to edit this line, because
+/// the panel is where the claim is shown to the user.
+pub const LOADER_SUPPORTED_VERSIONS: &str =
+    "Supported versions: 1.8.9, 1.21.x, 26.1, 26.2, and 26.3 (auto-detected)";
+
+/// The injection button at rest, `MainWindow.xaml:317-319`: `DarkButton`, height 35,
+/// 13 px, 8 px below. The same word comes back after a cancelled picker
+/// (`MainWindow.xaml.cs:1463-1464`) and after a failed run (`:1500`, `:1547`).
 pub const LOADER_INJECT: &str = "Inject";
+
+/// The button while the process list is being enumerated, `MainWindow.xaml.cs:1437`.
+pub const LOADER_INJECT_DETECTING: &str = "Detecting...";
+
+/// The button while the bridge is being attached, `MainWindow.xaml.cs:1489`.
+///
+/// Three full stops in the managed code, not the ellipsis character.
+pub const LOADER_INJECT_CONNECTING: &str = "...";
+
+/// The button once the bridge answers, `MainWindow.xaml.cs:1500` and again at `:1532`.
+pub const LOADER_INJECT_CONNECTED: &str = "Connected";
+
+/// The line under the button, `MainWindow.xaml:321-327`: 10 px, dim, wrapped and centred.
+pub const LOADER_AUTODETECT: &str =
+    "The Java/Minecraft client is detected automatically. If multiple clients are running, you can select one.";
+
+/// The status line at rest, `MainWindow.xaml:329-332` (12 px, dim, centred), and the text a
+/// cancelled picker restores at `MainWindow.xaml.cs:1464`.
+pub const LOADER_STATUS_NOT_INJECTED: &str = "Status: Not Injected";
+
+/// While the process list is being enumerated, `MainWindow.xaml.cs:1438`.
+pub const LOADER_STATUS_DETECTING: &str = "Status: Detecting Java clients...";
+
+/// While the bridge is being attached, `MainWindow.xaml.cs:1490`.
+pub const LOADER_STATUS_CONNECTING: &str = "Status: Connecting...";
+
+/// Once the bridge answers, `MainWindow.xaml.cs:1528` — the one status line drawn in the
+/// accent colour (`:1529`) instead of the dim one.
+pub const LOADER_STATUS_CONNECTED: &str = "Status: Connected & Injected";
+
+/// The prefix of every other status line, `MainWindow.xaml.cs:1539`:
+/// `$"Status: {gs.StatusMessage}"`.
+///
+/// **There is no fixed failure string to add here.** Every failure is this prefix plus
+/// `GameStateClient.StatusMessage`, and those messages are set in `GameStateClient.cs`
+/// (`:304`, `:355`, `:369`, `:395`, `:411`, `:493`), not in the loader. A Rust `Failed`
+/// state therefore carries the message it was given; naming a constant here would be
+/// wording the managed app never draws.
+pub const LOADER_STATUS_PREFIX: &str = "Status: ";
 
 /// The client-drawn title bar's minimise/maximise/close accessible names.
 pub const TITLE_BAR_MINIMISE: &str = "Minimise";
