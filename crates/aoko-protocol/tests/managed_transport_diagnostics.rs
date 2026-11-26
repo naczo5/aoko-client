@@ -2,8 +2,11 @@
 //!
 //! The managed suite spent most cases asserting literal strings exist in
 //! `GameStateClient.cs`, `bridge.cpp`, and `bridge_261.cpp`. Those checks are kept as
-//! source pins against the native files (the wire really is written there), while the
-//! counters, the two policies, and the log line are exercised as real code.
+//! source pins: the managed client is read from the frozen copy in
+//! `tests/fixtures/managed/` (see the README there for provenance and the rule against
+//! editing it), the native files are still read from the repository, because they are
+//! still shipped and still write the wire. The counters, the two policies, and the log
+//! line are exercised as real code.
 
 use aoko_protocol::diagnostics::{
     is_config_send_due, should_serialize_config, ManagedTransportDiagnostics,
@@ -21,10 +24,13 @@ fn native_source(file: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{path}: {error}"))
 }
 
-fn managed_source(file: &str) -> String {
-    let path = format!("{}/../../Aoko/Core/{file}", env!("CARGO_MANIFEST_DIR"));
-    std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{path}: {error}"))
-}
+/// `Aoko/Core/GameStateClient.cs`, frozen at the commit named in
+/// `tests/fixtures/managed/README.md`.
+///
+/// `include_str!` rather than a runtime read: the evidence lives inside the crate now, so
+/// deleting `Aoko/` cannot take it, and removing the fixture is a compile error instead of
+/// a panic inside `read_to_string` on the sign-off commit.
+const GAME_STATE_CLIENT_CS: &str = include_str!("fixtures/managed/GameStateClient.cs");
 
 #[test]
 fn enabled_reflects_configured_state() {
@@ -138,7 +144,7 @@ fn config_change_tracking_covers_properties_nested_settings_and_keybinds() {
     // Source pin: the wiring that marks the bridge config dirty lives in the managed
     // client, which `aoko-core` owns. Keeping the pin means a refactor that silently
     // drops one of the three subscriptions fails here.
-    let source = managed_source("GameStateClient.cs");
+    let source = GAME_STATE_CLIENT_CS;
 
     for needle in [
         "Clicker.Instance.PropertyChanged += OnClickerConfigPropertyChanged;",
@@ -151,7 +157,7 @@ fn config_change_tracking_covers_properties_nested_settings_and_keybinds() {
 
 #[test]
 fn diagnostics_flag_is_carried_to_both_native_bridges() {
-    let managed = managed_source("GameStateClient.cs");
+    let managed = GAME_STATE_CLIENT_CS;
     let legacy = native_source("bridge.cpp");
     let modern = native_source("bridge_261.cpp");
 
@@ -163,7 +169,7 @@ fn diagnostics_flag_is_carried_to_both_native_bridges() {
 #[test]
 fn modern_fast_state_uses_an_explicit_partial_envelope() {
     let modern = native_source("bridge_261.cpp");
-    let client = managed_source("GameStateClient.cs");
+    let client = GAME_STATE_CLIENT_CS;
 
     assert!(modern.contains("\\\"partial\\\":true"));
     assert!(client.contains("GameStatePatchMerger.IsPartial"));

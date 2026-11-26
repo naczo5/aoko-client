@@ -5,13 +5,31 @@
 //! describe the wire and the profile key, both owned here. `LocalToggle` and
 //! `Panic_Reset` drive `Clicker`/`InputHooks`, which belong to `aoko-core`, so their
 //! contract is pinned as source text instead.
+//!
+//! The three managed files are read from the frozen copies in `tests/fixtures/managed/`
+//! and compiled in with `include_str!`; only `bridge_capabilities.h` is still read from
+//! the repository, because the native bridge is still shipped and still writes the wire.
+//! See that directory's README before touching either the fixtures or these pins.
 
 use aoko_protocol::capabilities::BridgeCapabilities;
 use aoko_protocol::config_payload::ConfigPayload;
 use aoko_protocol::hud::HudLayout;
 use aoko_protocol::profile::{load_profile_from_json, to_profile_json, Profile};
 
-fn repo_file(relative: &str) -> String {
+/// `Aoko/Core/Profile.cs`, frozen at the commit named in
+/// `tests/fixtures/managed/README.md`.
+///
+/// `include_str!` rather than a runtime read: the evidence lives inside the crate now, so
+/// deleting `Aoko/` cannot take it, and removing the fixture is a compile error instead of
+/// a panic inside `read_to_string` on the sign-off commit.
+const PROFILE_CS: &str = include_str!("fixtures/managed/Profile.cs");
+/// `Aoko/Core/GameStateClient.cs`, frozen the same way.
+const GAME_STATE_CLIENT_CS: &str = include_str!("fixtures/managed/GameStateClient.cs");
+/// `Aoko/Core/Clicker.cs`, frozen the same way.
+const CLICKER_CS: &str = include_str!("fixtures/managed/Clicker.cs");
+
+/// A native bridge source file, which is still shipped and still read from the repository.
+fn native_file(relative: &str) -> String {
     let path = format!("{}/../../{relative}", env!("CARGO_MANIFEST_DIR"));
     std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{path}: {error}"))
 }
@@ -19,7 +37,7 @@ fn repo_file(relative: &str) -> String {
 #[test]
 fn profile_manager_maps_fight_status_both_directions() {
     // Source pin for the two directions the managed host wires, plus the keybind map.
-    let source = repo_file("Aoko/Core/Profile.cs");
+    let source = PROFILE_CS;
 
     assert!(source.contains("FightStatusEnabled = clicker.FightStatusEnabled"));
     assert!(source.contains("clicker.FightStatusEnabled = profile.FightStatusEnabled"));
@@ -49,7 +67,7 @@ fn profile_carries_the_fight_status_flag_and_keybind() {
 
 #[test]
 fn config_payload_contains_fight_status_and_its_keybind() {
-    let source = repo_file("Aoko/Core/GameStateClient.cs");
+    let source = GAME_STATE_CLIENT_CS;
 
     assert!(source.contains("fightStatus = clicker.FightStatusEnabled"));
     assert!(source.contains("keybindFightStatus   = InputHooks.GetModuleKey(\"fightstatus\")"));
@@ -70,7 +88,7 @@ fn config_payload_contains_fight_status_and_its_keybind() {
 
 #[test]
 fn native_capability_payloads_advertise_fight_status_setting_and_keybind() {
-    let header = repo_file("McInjector/src/main/cpp/bridge_capabilities.h");
+    let header = native_file("McInjector/src/main/cpp/bridge_capabilities.h");
     let modern = header
         .find("ModernCapabilitiesJson")
         .expect("modern payload");
@@ -109,7 +127,7 @@ fn local_toggle_and_panic_reset_are_pinned_in_the_managed_host() {
     // `LocalToggle` flips `Clicker.FightStatusEnabled` through `InputHooks.ToggleModule`,
     // and `TriggerPanicAsync` clears it. Both live in `aoko-core`; the pins keep the
     // contract visible from the crate that owns the flag.
-    let clicker = repo_file("Aoko/Core/Clicker.cs");
+    let clicker = CLICKER_CS;
     let start = clicker
         .find("public async Task TriggerPanicAsync()")
         .expect("panic handler");
