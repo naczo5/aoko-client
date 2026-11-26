@@ -61,13 +61,14 @@ use crate::components::ButtonVariant;
 use crate::runtime::Runtime;
 use crate::theme::metrics;
 use crate::theme::motion::{self, Motion};
-use crate::theme::Theme;
+use crate::theme::{Color, Theme};
 use crate::views::accounts_state::{AccountPanel, AccountsState, OfflineSubmit, PasteSubmit};
 use crate::views::command_search::{
     CommandSearchState, KeyboardGate, RowFactTable, RowFacts, SearchKey, SearchKeyOutcome,
 };
 use crate::views::copy::{self, Card, Control, TabBody, MODULE_LIST_PREVIEW_SAMPLE};
 use crate::views::forms::FormFields;
+use crate::views::palette_store::PaletteDraft;
 use crate::views::prefs::ClientPrefs;
 use crate::views::profiles::{CreateOutcome, Profiles};
 use crate::views::servers_state::{AddOutcome, JoinOutcome, PingRequest, ServersState};
@@ -127,6 +128,20 @@ pub struct Shell {
     /// shell submits itself — on Enter and on the button beside it — rather than a form the
     /// account and server panels own.
     block_add: Option<Entity<TextInput>>,
+    /// The four palette-editor hex boxes, by managed box name.
+    ///
+    /// The typed text lives in the widget, the way the account and server forms live in
+    /// `FormFields`: the palette draft is not mounted on the shell yet
+    /// (`views::palette_store::PaletteStore` owns it, and it arrives with the saved-palette card),
+    /// so a struct here holding four hexes would be the second writable copy this migration keeps
+    /// finding.
+    color_fields: HashMap<&'static str, Entity<TextInput>>,
+    /// The colour each swatch last parsed, by managed box name.
+    ///
+    /// A memo of the last successful parse, not a second copy of the text: an edit that does not
+    /// parse leaves the swatch on the colour it had, so a half-typed `#0A` cannot flash it. Seeded
+    /// from [`PaletteDraft::default`], which is the markup's own four initial values.
+    swatches: HashMap<&'static str, Color>,
     /// The new-config name box's text (`NewConfigNameBox`, `MainWindow.xaml:1552`).
     config_name: String,
     /// Whether the session can hand a folder to the file manager
@@ -342,6 +357,8 @@ impl Shell {
             profiles,
             fields: FormFields::default(),
             block_add: None,
+            color_fields: HashMap::new(),
+            swatches: HashMap::new(),
             config_name: String::new(),
             open_configs_folder: false,
             // Under `cfg(test)` and `capture` nothing has changed the process gate, so
@@ -625,6 +642,141 @@ impl Shell {
         // `Block id, e.g. …` sentence as its tooltip, and inventing wording here is exactly
         // what `views::copy` exists to prevent.
         self.block_add = Some(cx.new(|cx| TextInput::new(cx, theme.clone(), "")));
+    }
+
+    /// Creates the four palette-editor boxes, once each.
+    ///
+    /// The seed is [`PaletteDraft::default`], the markup's own four initial hexes, and the first
+    /// paint parses it into the swatch memo so the card looks right before anything is typed.
+    fn ensure_color_fields(&mut self, cx: &mut Context<Self>) {
+        let theme = self.theme.clone();
+        for bind in COLOR_FIELDS {
+            if self.color_fields.contains_key(bind) {
+                continue;
+            }
+
+            let seed = draft_seed(bind);
+            if let Some(color) = Color::parse_hex(&seed) {
+                self.swatches.insert(bind, color);
+            }
+
+            let handle = cx.entity().downgrade();
+            let input = cx.new(|cx| {
+                TextInput::new(cx, theme.clone(), "").on_change(move |text, _window, cx| {
+                    if let Some(shell) = handle.upgrade() {
+                        shell.update(cx, |shell, cx| {
+                            shell.set_color_text(bind, text.as_ref(), cx);
+                        });
+                    }
+                })
+            });
+            if !seed.is_empty() {
+                input.update(cx, |input, cx| input.set_text(seed, cx));
+            }
+            self.color_fields.insert(bind, input);
+        }
+    }
+
+    /// Parses one palette box and remembers the colour, leaving the swatch alone when it does not.
+    ///
+    /// The one write path for a row's colour: the box's `on_change` calls it, and so will the
+    /// colour picker the swatch opens. An edit that does not parse is ignored rather than stored,
+    /// which is what keeps a half-typed hex off the swatch.
+    fn set_color_text(&mut self, bind: &'static str, text: &str, cx: &mut Context<Self>) {
+        let Some(color) = Color::parse_hex(text) else {
+            return;
+        };
+        if self.swatches.get(bind) == Some(&color) {
+            return;
+        }
+        self.swatches.insert(bind, color);
+        cx.notify();
+    }
+
+    /// Writes one palette box back in the canonical `#RRGGBB` form, when it parses.
+    ///
+    /// Enter is the commit gesture. Normalising on every keystroke would rewrite the text under
+    /// the caret, so a user typing `#0a0b0f` could never finish the string they started.
+    fn commit_color_text(&mut self, bind: &'static str, cx: &mut Context<Self>) {
+        let Some(field) = self.color_fields.get(bind).cloned() else {
+            return;
+        };
+        let text = field.read(cx).text().to_owned();
+        let Some(color) = Color::parse_hex(&text) else {
+            return;
+        };
+
+        let canonical = color.to_hex();
+        self.set_color_text(bind, &canonical, cx);
+        if text != canonical {
+            field.update(cx, |field, cx| field.set_text(canonical, cx));
+        }
+    }
+
+    /// One palette-editor row: the caption, the swatch, and the hex box beside it.
+    ///
+    /// `MainWindow.xaml:1962` is the swatch's geometry — 22×22, radius 3, a 1 px `#40FFFFFF`
+    /// edge — and the edge is [`crate::theme::fixed::CONTRAST_LABEL`] at alpha `0x40` rather than
+    /// a new colour literal.
+    ///
+    /// The swatch is painted and is not yet a picker host: the press has to open
+    /// `dialogs::color_picker_view::ColorPickerView`, which no route in this app mounts yet. The
+    /// hand cursor and the managed "Click to pick a color" tooltip stay, so the affordance is the
+    /// one the managed card has; what it needs is reported rather than stubbed with a handler that
+    /// does nothing.
+    fn render_color_field(
+        &self,
+        label: &'static str,
+        bind: &'static str,
+        theme: &Theme,
+    ) -> AnyElement {
+        let swatch = self
+            .swatches
+            .get(bind)
+            .copied()
+            .unwrap_or(Color::TRANSPARENT);
+        let row_selector = format!("palette-row-{bind}");
+        let swatch_selector = format!("palette-swatch-{bind}");
+
+        let field = match self.color_fields.get(bind) {
+            Some(field) => field.clone().into_any_element(),
+            // Created in `render`, before the tree, so this is the defensive answer.
+            None => div().into_any_element(),
+        };
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .debug_selector(move || row_selector)
+            .child(
+                div()
+                    .text_size(px(metrics::text::CAPTION))
+                    .text_color(theme.dim_text)
+                    .child(label),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(
+                        div()
+                            .id(crate::reuse::stitched("palette-swatch-", "", bind))
+                            .w(px(22.0))
+                            .h(px(22.0))
+                            .rounded(px(3.0))
+                            .border_1()
+                            .border_color(crate::theme::fixed::CONTRAST_LABEL.with_alpha(0x40))
+                            .bg(swatch)
+                            .cursor_pointer()
+                            .tooltip(components::tooltip(theme, copy::PALETTE_SWATCH_TOOLTIP))
+                            .debug_selector(move || swatch_selector),
+                    )
+                    .child(div().flex_1().min_w(px(0.0)).child(field)),
+            )
+            .into_any_element()
     }
 
     /// Pushes the state's text into every field the user is not typing in.
@@ -1703,6 +1855,15 @@ impl Shell {
             return SearchKeyOutcome::Ignored;
         }
 
+        // Enter in a palette box commits its hex in the canonical `#RRGGBB` form. Same route,
+        // same reason: the widget leaves Enter to its owner.
+        if event.keystroke.key.eq_ignore_ascii_case("enter") && !self.search.is_open() {
+            if let Some(bind) = self.color_field_focused(window, cx) {
+                self.commit_color_text(bind, cx);
+                return SearchKeyOutcome::Ignored;
+            }
+        }
+
         // Enter jumps the selected row, and only while the overlay is open. It is not a
         // `SearchKey` because the managed `Jump` is a query-field key, not a window gesture.
         // The query row is painted rather than focusable (`overlay::query_row`), so the root
@@ -1823,6 +1984,7 @@ impl Shell {
         ]
         .into_iter()
         .flatten()
+        .chain(self.color_fields.values())
         .any(|field| field.read(cx).focus_handle().is_focused(window))
     }
 
@@ -1831,6 +1993,17 @@ impl Shell {
         self.block_add
             .as_ref()
             .is_some_and(|field| field.read(cx).focus_handle().is_focused(window))
+    }
+
+    /// Which palette box owns the keyboard, for the Enter that commits its hex.
+    fn color_field_focused(&self, window: &Window, cx: &App) -> Option<&'static str> {
+        self.color_fields.iter().find_map(|(bind, field)| {
+            field
+                .read(cx)
+                .focus_handle()
+                .is_focused(window)
+                .then_some(*bind)
+        })
     }
 
     /// The command-search overlay, or `None` while it is closed.
@@ -1925,6 +2098,8 @@ impl Render for Shell {
         // The add-block box is an entity too, and for the same reason it is created here
         // rather than in `Shell::new`.
         self.ensure_block_add(cx);
+        // And the four palette boxes, for the same reason.
+        self.ensure_color_fields(cx);
 
         // The GTB helper is polled here because this is the only per-frame hook the shell
         // has: the runtime decides whether there is work (module on, link live, frame fresh,
@@ -2904,6 +3079,8 @@ impl Shell {
 
             Control::BlockEspAdd { bind } => self.render_block_add(bind, theme, entity),
 
+            Control::ColorField { label, bind } => self.render_color_field(label, bind, theme),
+
             Control::PalettePreview { name } => {
                 let preview_accent = Theme::accent_by_name(name);
                 div()
@@ -3244,6 +3421,35 @@ fn switch_debug_selector(bind: &'static str) -> Option<&'static str> {
 /// an `ElementId` and no selector, so this is the only handle there is.
 fn block_add_selector(bind: &'static str) -> String {
     format!("blockesp-add-{bind}")
+}
+
+/// The four create-palette colour rows, in the markup's order.
+///
+/// `MainWindow.xaml:1963`, `:1974`, `:1985` and `:1996` are the boxes; the order is the one the
+/// derived shades are read in, and it is the order the card paints them.
+const COLOR_FIELDS: [&str; 4] = [
+    "PaletteBgBox",
+    "PalettePanelBox",
+    "PaletteAccentBox",
+    "PaletteTextBox",
+];
+
+/// The hex a palette box starts from, which is [`PaletteDraft::default`]'s value for it.
+///
+/// This match is the seam that wants to be `PaletteDraft::get(bind)` in
+/// [`crate::views::palette_store`]: four managed names and four draft fields are exactly the
+/// pairing that file owns, and the palette card's own save needs the mirror of it. Until then the
+/// pairing lives here rather than a second set of initial hexes, so the first frame and the
+/// managed card cannot disagree about what a fresh draft says.
+fn draft_seed(bind: &str) -> String {
+    let draft = PaletteDraft::default();
+    match bind {
+        "PaletteBgBox" => draft.background,
+        "PalettePanelBox" => draft.panel,
+        "PaletteAccentBox" => draft.accent,
+        "PaletteTextBox" => draft.text,
+        _ => String::new(),
+    }
 }
 
 /// Whether a control was already painted as part of the card's header.
@@ -5913,5 +6119,175 @@ mod tests {
             before,
             "an empty box is still a no-op through the press path"
         );
+    }
+
+    // ---- the palette editor's colour rows --------------------------------------
+
+    /// Focuses one palette hex box, so a keystroke lands in it.
+    fn focus_color_field(
+        cx: &mut gpui::TestAppContext,
+        shell: &Entity<Shell>,
+        visual: &mut gpui::VisualTestContext,
+        bind: &'static str,
+    ) -> Entity<TextInput> {
+        let field = cx
+            .read(|cx| shell.read(cx).color_fields.get(bind).cloned())
+            .expect("the box exists after the first frame");
+        let focus = cx.read(|cx| field.read(cx).focus_handle().clone());
+        visual.update(|window, cx| window.focus(&focus, cx));
+        field
+    }
+
+    /// The swatch a row paints, as the shell remembers it.
+    fn swatch_of(
+        cx: &mut gpui::TestAppContext,
+        shell: &Entity<Shell>,
+        bind: &'static str,
+    ) -> Color {
+        cx.read(|cx| {
+            shell
+                .read(cx)
+                .swatches
+                .get(bind)
+                .copied()
+                .expect("the seed parsed on the first frame")
+        })
+    }
+
+    /// Each colour row paints its caption, a 22x22 swatch and a box, seeded from the draft.
+    ///
+    /// The swatch's box is the only part a test can measure, so 22x22 is the geometry assertion
+    /// and the seed is the model assertion: the first frame has to match what the managed card
+    /// shows before anything is typed, and it gets there by parsing
+    /// `PaletteDraft::default` rather than by holding a second set of hexes.
+    #[gpui::test]
+    fn a_palette_colour_row_paints_a_swatch_and_a_box(cx: &mut gpui::TestAppContext) {
+        let root = scratch_root();
+        let (shell, _, mut visual) = shell_in_window(cx, &root);
+
+        // The create-palette card is on Settings, below the palettes it previews.
+        cx.update(|cx| shell.update(cx, |shell, cx| shell.select_tab_named("settings", cx)));
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        scroll_into_view(&mut visual, "palette-swatch-PaletteBgBox");
+
+        let bounds = visual
+            .debug_bounds("palette-swatch-PaletteBgBox")
+            .expect("the swatch paints");
+        assert_eq!(bounds.size.width, px(22.0), "22 wide, as the markup says");
+        assert_eq!(bounds.size.height, px(22.0), "and 22 tall");
+        assert!(
+            visual.debug_bounds("palette-row-PaletteBgBox").is_some(),
+            "the caption and the box are in the same row"
+        );
+
+        let draft = PaletteDraft::default();
+        assert_eq!(
+            swatch_of(cx, &shell, "PaletteBgBox"),
+            Color::parse_hex(&draft.background).expect("the draft's own default"),
+            "the first frame paints the draft's background, not a literal of our own"
+        );
+    }
+
+    /// A typed hex reaches the swatch, and the box that owns the text is a text field like any
+    /// other: the search overlay must stay shut while it has focus.
+    #[gpui::test]
+    fn typing_a_hex_repaints_the_swatch(cx: &mut gpui::TestAppContext) {
+        use gpui::Keystroke;
+
+        let root = scratch_root();
+        let (shell, handle, mut visual) = shell_in_window(cx, &root);
+        let field = focus_color_field(cx, &shell, &mut visual, "PaletteBgBox");
+
+        // An owner write, so the six characters below are the whole value: `set_text` does not
+        // fire `on_change`, which is the behaviour `TextInput` documents.
+        cx.update(|cx| field.update(cx, |field, cx| field.set_text("", cx)));
+        for character in ["1", "2", "3", "4", "5", "6"] {
+            visual
+                .cx
+                .dispatch_keystroke(handle, Keystroke::parse(character).expect("keystroke"));
+        }
+
+        assert_eq!(
+            cx.read(|cx| field.read(cx).text().to_owned()),
+            "123456",
+            "the box received the characters"
+        );
+        assert!(
+            !cx.read(|cx| shell.read(cx).search().is_open()),
+            "and the search overlay stayed shut while a text field had focus"
+        );
+        assert_eq!(
+            swatch_of(cx, &shell, "PaletteBgBox"),
+            Color::parse_hex("#123456").expect("six digits parse"),
+            "every keystroke re-parses, so the swatch follows the box"
+        );
+
+        // The repaint reaches the paint: the swatch is still the swatch.
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let bounds = visual
+            .debug_bounds("palette-swatch-PaletteBgBox")
+            .expect("the swatch still paints");
+        assert_eq!(bounds.size.width, px(22.0), "22 wide after the change");
+        assert_eq!(bounds.size.height, px(22.0), "and 22 tall");
+    }
+
+    /// Enter writes the box back as `#RRGGBB`, which is the form the palette file stores.
+    #[gpui::test]
+    fn enter_writes_the_hex_back_in_canonical_form(cx: &mut gpui::TestAppContext) {
+        use gpui::Keystroke;
+
+        let root = scratch_root();
+        let (shell, handle, mut visual) = shell_in_window(cx, &root);
+        let field = focus_color_field(cx, &shell, &mut visual, "PaletteTextBox");
+
+        for text in ["0a0b0f", "#0a0b0f"] {
+            cx.update(|cx| field.update(cx, |field, cx| field.set_text(text, cx)));
+            visual
+                .cx
+                .dispatch_keystroke(handle, Keystroke::parse("enter").expect("keystroke"));
+            assert_eq!(
+                cx.read(|cx| field.read(cx).text().to_owned()),
+                "#0A0B0F",
+                "{text:?} commits as the canonical form"
+            );
+            assert_eq!(
+                swatch_of(cx, &shell, "PaletteTextBox"),
+                Color::parse_hex("#0A0B0F").expect("parses"),
+                "and the swatch ends on that colour"
+            );
+        }
+    }
+
+    /// A box that does not parse leaves the swatch where it was, which is what stops a
+    /// half-typed `#0A` from flashing the card grey.
+    #[gpui::test]
+    fn an_unparseable_hex_leaves_the_swatch_alone(cx: &mut gpui::TestAppContext) {
+        use gpui::Keystroke;
+
+        let root = scratch_root();
+        let (shell, handle, mut visual) = shell_in_window(cx, &root);
+        let field = focus_color_field(cx, &shell, &mut visual, "PaletteAccentBox");
+        let before = swatch_of(cx, &shell, "PaletteAccentBox");
+
+        for text in ["", "#", "#12345", "zzz", "#1234567"] {
+            cx.update(|cx| field.update(cx, |field, cx| field.set_text(text, cx)));
+            visual
+                .cx
+                .dispatch_keystroke(handle, Keystroke::parse("enter").expect("keystroke"));
+            assert_eq!(
+                swatch_of(cx, &shell, "PaletteAccentBox"),
+                before,
+                "{text:?} does not parse, so the swatch keeps its colour"
+            );
+            assert_eq!(
+                cx.read(|cx| field.read(cx).text().to_owned()),
+                text,
+                "and the box is left exactly as typed, so it can be fixed"
+            );
+        }
     }
 }

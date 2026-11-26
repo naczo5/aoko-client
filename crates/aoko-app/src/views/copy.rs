@@ -220,6 +220,18 @@ pub enum Control {
         /// `Profile::block_esp_targets`.
         bind: &'static str,
     },
+    /// A palette editor colour row, `MainWindow.xaml:1958-2001`: an 11 px caption, a 22×22
+    /// swatch that opens the colour picker, and the hex box beside it.
+    ///
+    /// Four of these are the create-palette card's base colours; the remaining shade roles are
+    /// derived from them. `bind` is the managed box name (`PaletteBgBox`, `:1963`), which is what
+    /// the row's value is keyed on and what the picker host will be handed.
+    ColorField {
+        /// Verbatim caption: `Background`, `Panel`, `Accent`, `Text`.
+        label: &'static str,
+        /// `x:Name` of the hex box in the markup.
+        bind: &'static str,
+    },
     /// One of the 18 built-in palette previews, or a custom palette card.
     PalettePreview {
         /// Palette name, verbatim.
@@ -993,17 +1005,21 @@ pub const SETTINGS: &[Card] = &[
             Note {
                 text: "Name",
             },
-            Note {
-                text: "Background",
+            ColorField {
+                label: "Background",
+                bind: "PaletteBgBox",
             },
-            Note {
-                text: "Panel",
+            ColorField {
+                label: "Panel",
+                bind: "PalettePanelBox",
             },
-            Note {
-                text: "Accent",
+            ColorField {
+                label: "Accent",
+                bind: "PaletteAccentBox",
             },
-            Note {
-                text: "Text",
+            ColorField {
+                label: "Text",
+                bind: "PaletteTextBox",
             },
             Button {
                 label: "Add palette",
@@ -1456,6 +1472,7 @@ pub fn count_controls(cards: &[Card]) -> ControlCounts {
                 | Control::Expand { .. }
                 | Control::BlockEspRows
                 | Control::BlockEspAdd { .. }
+                | Control::ColorField { .. }
                 | Control::PalettePreview { .. }
                 | Control::Preference { .. } => {}
             }
