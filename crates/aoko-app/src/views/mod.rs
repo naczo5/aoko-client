@@ -15,9 +15,15 @@
 //!   `MainWindow.xaml`, which is where 478 of the app's strings live.
 
 pub mod accounts_logic;
+pub mod accounts_state;
+pub mod accounts_view;
+pub mod bindings;
 pub mod command_search;
 pub mod copy;
 pub mod relative_time;
 pub mod servers_logic;
+pub mod servers_state;
+pub mod servers_view;
 pub mod store_recovery;
+pub mod stores;
 pub mod tab_copy;

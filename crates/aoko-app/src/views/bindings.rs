@@ -1,0 +1,403 @@
+//! The `bind`-path → `Profile` field table, and the read/write pair behind it.
+//!
+//! Every slider, checkbox and combo in the card table carries the managed binding
+//! path (`MinCPS`, `KillAuraSettings.CpsMode`, `AutoRodSlotMode`). In WPF that path
+//! *was* the persistence: `Profile` had a property of the same name, and two-way
+//! binding wrote it. GPUI has no binding, so the path has to be resolved by hand —
+//! and the honest way to do that without 143 hand-copied accessors is to resolve it
+//! against the `Profile` that `aoko-protocol` already serialises:
+//!
+//! * `to_profile_json` gives the exact wire shape, camelCase renames included.
+//! * A path walks that JSON case-insensitively, so `MinCPS` finds `minCPS` and
+//!   `KillAuraSettings.MinCps` finds `killAuraSettings.minCps`, and a name that no
+//!   longer exists fails loudly instead of silently binding to nothing.
+//! * `load_profile_from_json` rebuilds the profile after a write, so the struct is
+//!   the single source of truth and no field is written by index.
+//!
+//! The table is therefore not a list of strings: it is the profile itself, and
+//! [`unresolved_binds`] is the test that proves every control in `copy` has a field
+//! behind it. A control that resolves to nothing is a parity gap, and the test says
+//! which one by name.
+
+use std::collections::BTreeMap;
+
+use aoko_protocol::profile::{load_profile_from_json, to_profile_json, Profile};
+
+use crate::views::copy::{self, Control, TabBody};
+
+/// A control's value, whatever its widget.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ControlValue {
+    /// A slider position.
+    Number(f64),
+    /// A checkbox.
+    Toggle(bool),
+    /// A combo's selected index.
+    Index(usize),
+    /// A combo whose setting is stored as text: the mode name, not the index.
+    Text(String),
+}
+
+impl ControlValue {
+    /// The number a slider paints, with the two other variants coerced.
+    #[must_use]
+    pub fn as_f64(&self) -> f64 {
+        match self {
+            Self::Number(value) => *value,
+            Self::Toggle(on) => {
+                if *on {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            Self::Index(index) => *index as f64,
+            // A text-backed combo has no numeric value; a slider on one reads 0.
+            Self::Text(_) => 0.0,
+        }
+    }
+}
+
+/// One `bind` path split into its parts.
+#[must_use]
+pub fn path_of(bind: &str) -> Vec<&str> {
+    bind.split('.').filter(|part| !part.is_empty()).collect()
+}
+
+/// Bind paths whose managed property is derived rather than stored under that name.
+///
+/// `RandomizationModeIndex` is the slider the markup binds (`MainWindow.xaml:381`); the
+/// profile stores the mode itself as `randomizationMode`, so the index reads and
+/// writes that field.
+pub const ALIASES: [(&str, &str); 1] = [("RandomizationModeIndex", "randomizationMode")];
+
+/// Bind paths that name no profile field, with the reason.
+///
+/// Both are real controls in the markup; neither is a persisted setting.
+pub const NON_PROFILE_BINDS: [(&str, &str); 2] = [
+    (
+        "ConfigSelection",
+        "the Settings config combo is filled from the configs directory at runtime",
+    ),
+    (
+        "Enabled",
+        "the per-block checkbox inside the Block ESP item template",
+    ),
+];
+
+/// The path a bind resolves through, following [`ALIASES`].
+#[must_use]
+pub fn canonical(bind: &str) -> &str {
+    ALIASES
+        .iter()
+        .find(|(alias, _)| alias.eq_ignore_ascii_case(bind))
+        .map_or(bind, |(_, target)| *target)
+}
+
+/// Walks a profile's JSON to a bind path, case-insensitively.
+///
+/// `Some` only when the whole path exists; a miss anywhere returns `None`, which is
+/// what [`unresolved_binds`] reports.
+#[must_use]
+pub fn lookup<'a>(root: &'a serde_json::Value, bind: &str) -> Option<&'a serde_json::Value> {
+    let mut node = root;
+    for part in path_of(canonical(bind)) {
+        let object = node.as_object()?;
+        let (_, value) = object
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(part))?;
+        node = value;
+    }
+
+    Some(node)
+}
+
+/// The value at a bind path, in the shape its widget needs.
+#[must_use]
+pub fn value_at(root: &serde_json::Value, bind: &str) -> Option<ControlValue> {
+    let node = lookup(root, bind)?;
+    if let Some(number) = node.as_f64() {
+        return Some(ControlValue::Number(number));
+    }
+
+    if let Some(on) = node.as_bool() {
+        return Some(ControlValue::Toggle(on));
+    }
+
+    // A combo whose setting is the option text (`KillAuraSettings.CpsMode` holds
+    // `"Record"`) reads as text; a combo whose setting is an index (`AutoRodSlotMode`)
+    // reads as a number and the view turns it into an index.
+    node.as_str()
+        .map(|text| ControlValue::Text(text.to_owned()))
+}
+
+/// Every control value in a profile, by bind path.
+///
+/// Built once and cached by the shell: the alternative is a JSON parse per painted
+/// slider, and there are 72 of them.
+#[must_use]
+pub fn snapshot(profile: &Profile) -> BTreeMap<String, ControlValue> {
+    let root: serde_json::Value =
+        serde_json::from_str(&to_profile_json(profile)).unwrap_or(serde_json::Value::Null);
+
+    let mut values = BTreeMap::new();
+    for bind in all_binds() {
+        if let Some(value) = value_at(&root, bind) {
+            values.insert(bind.to_owned(), value);
+        }
+    }
+
+    values
+}
+
+/// Writes one control value into the profile.
+///
+/// `false` when the path does not exist or the value cannot be stored in the field
+/// the path names, in which case the profile is untouched.
+pub fn write(profile: &mut Profile, bind: &str, value: ControlValue) -> bool {
+    let Ok(text) = serde_json::to_string(
+        &serde_json::from_str::<serde_json::Value>(&to_profile_json(profile))
+            .unwrap_or(serde_json::Value::Null),
+    ) else {
+        return false;
+    };
+    let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+
+    let Some(target) = mutable_lookup(&mut root, bind) else {
+        return false;
+    };
+
+    let stored = match (target.clone(), value) {
+        (serde_json::Value::Bool(_), ControlValue::Toggle(on)) => serde_json::Value::Bool(on),
+        (serde_json::Value::Bool(_), other) => serde_json::Value::Bool(other.as_f64() > 0.5),
+        // An integer-typed field needs an integer JSON value: serde rejects
+        // `15.0` for `i32`, so a whole slider position is written as a whole number.
+        (serde_json::Value::Number(existing), ControlValue::Number(number)) => {
+            if existing.as_i64().is_some() && number.fract() == 0.0 {
+                serde_json::Value::from(number.round() as i64)
+            } else {
+                serde_json::Value::from(number)
+            }
+        }
+        (serde_json::Value::Number(_), other) => serde_json::Value::from(other.as_f64()),
+        (serde_json::Value::String(_), ControlValue::Text(text)) => serde_json::Value::from(text),
+        (serde_json::Value::String(_), ControlValue::Index(_)) => return false,
+        _ => return false,
+    };
+    *target = stored;
+
+    match load_profile_from_json(&root.to_string()) {
+        Some(updated) => {
+            *profile = updated;
+            true
+        }
+        None => false,
+    }
+}
+
+/// Same walk as [`lookup`], but borrowing mutably so the leaf can be replaced.
+fn mutable_lookup<'a>(
+    root: &'a mut serde_json::Value,
+    bind: &str,
+) -> Option<&'a mut serde_json::Value> {
+    let mut node = root;
+    for part in path_of(canonical(bind)) {
+        let object = node.as_object_mut()?;
+        let key = object
+            .keys()
+            .find(|key| key.eq_ignore_ascii_case(part))?
+            .clone();
+        node = object.get_mut(&key)?;
+    }
+
+    Some(node)
+}
+
+/// Every slider, checkbox and combo bind path in the card table.
+#[must_use]
+pub fn all_binds() -> Vec<&'static str> {
+    let mut binds = Vec::new();
+    for tab in &copy::TABS {
+        let TabBody::Cards(cards) = tab.body else {
+            continue;
+        };
+
+        for card in cards {
+            for control in card.controls {
+                match control {
+                    Control::Slider { bind, .. }
+                    | Control::Check { bind, .. }
+                    | Control::Combo { bind, .. } => binds.push(*bind),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    binds.sort_unstable();
+    binds.dedup();
+    binds
+}
+
+/// Bind paths with no field behind them, for a given profile.
+#[must_use]
+pub fn unresolved_binds(profile: &Profile) -> Vec<&'static str> {
+    let root: serde_json::Value =
+        serde_json::from_str(&to_profile_json(profile)).unwrap_or(serde_json::Value::Null);
+
+    all_binds()
+        .into_iter()
+        .filter(|bind| value_at(&root, bind).is_none())
+        .filter(|bind| {
+            !NON_PROFILE_BINDS
+                .iter()
+                .any(|(known, _)| known.eq_ignore_ascii_case(bind))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn default_profile() -> Profile {
+        Profile::default()
+    }
+
+    #[test]
+    fn every_control_bind_resolves_to_a_profile_field() {
+        let missing = unresolved_binds(&default_profile());
+        assert!(
+            missing.is_empty(),
+            "{} control binds have no Profile field: {missing:?}",
+            missing.len()
+        );
+    }
+
+    #[test]
+    fn the_bind_list_is_the_control_count() {
+        // 72 sliders + 58 checks + 13 combos, minus repeats: a slider and a check
+        // can share a path only if the markup does, and the table then has one bind.
+        let binds = all_binds();
+        assert!(binds.len() >= 100, "{} binds", binds.len());
+        assert!(
+            binds.windows(2).all(|pair| pair[0] < pair[1]),
+            "sorted and unique"
+        );
+    }
+
+    #[test]
+    fn a_bind_path_walks_case_insensitively() {
+        let root = serde_json::json!({
+            "minCPS": 12.0,
+            "killAuraSettings": { "cpsMode": 1 },
+            "aimAssistEnabled": true,
+        });
+
+        assert_eq!(
+            value_at(&root, "MinCPS"),
+            Some(ControlValue::Number(12.0)),
+            "the managed property name finds the camelCase field"
+        );
+        assert_eq!(
+            value_at(&root, "KillAuraSettings.CpsMode"),
+            Some(ControlValue::Number(1.0)),
+            "the JSON shape is the decoder's, the widget converts"
+        );
+        assert_eq!(
+            value_at(&root, "AimAssistEnabled"),
+            Some(ControlValue::Toggle(true))
+        );
+        assert_eq!(value_at(&root, "NoSuchField"), None);
+        assert_eq!(value_at(&root, "KillAuraSettings.NoSuchField"), None);
+    }
+
+    #[test]
+    fn writing_a_number_round_trips_through_the_profile() {
+        let mut profile = default_profile();
+        let before = profile.min_cps;
+
+        assert!(write(&mut profile, "MinCPS", ControlValue::Number(13.0)));
+        assert_eq!(profile.min_cps, 13.0);
+        assert_ne!(profile.min_cps, before);
+
+        let json = to_profile_json(&profile);
+        assert!(json.contains("\"minCPS\": 13.0"), "{json}");
+    }
+
+    #[test]
+    fn writing_a_toggle_and_an_index_reaches_the_nested_settings() {
+        let mut profile = default_profile();
+
+        assert!(write(
+            &mut profile,
+            "KillAuraSettings.CpsMode",
+            ControlValue::Text("Record".to_owned())
+        ));
+        assert_eq!(
+            profile.kill_aura_settings.cps_mode(),
+            "record",
+            "the wire form is lower-cased"
+        );
+
+        // The pair stays ordered, so the max goes up first: a min above the max is
+        // clamped on load, which is the protocol's rule and not a bug here.
+        assert!(write(
+            &mut profile,
+            "KillAuraSettings.MaxCps",
+            ControlValue::Number(18.0)
+        ));
+        assert!(write(
+            &mut profile,
+            "KillAuraSettings.MinCps",
+            ControlValue::Number(15.0)
+        ));
+        assert_eq!(profile.kill_aura_settings.min_cps(), 15, "an integer field");
+        assert_eq!(profile.kill_aura_settings.max_cps(), 18);
+    }
+
+    #[test]
+    fn a_missing_path_leaves_the_profile_alone() {
+        let mut profile = default_profile();
+        let before = profile.clone();
+
+        assert!(!write(
+            &mut profile,
+            "NoSuchField",
+            ControlValue::Number(1.0)
+        ));
+        assert_eq!(profile, before);
+        assert!(!write(
+            &mut profile,
+            "KillAuraSettings.NoSuchField",
+            ControlValue::Number(1.0)
+        ));
+        assert_eq!(profile, before);
+    }
+
+    #[test]
+    fn the_snapshot_carries_one_entry_per_bind() {
+        let profile = default_profile();
+        let values = snapshot(&profile);
+
+        assert_eq!(
+            values.len(),
+            all_binds().len() - NON_PROFILE_BINDS.len(),
+            "the two non-profile binds are the only gaps"
+        );
+        assert_eq!(
+            values.get("MinCPS").cloned(),
+            Some(ControlValue::Number(f64::from(profile.min_cps)))
+        );
+    }
+
+    #[test]
+    fn a_toggle_reads_as_one_or_zero_for_a_slider() {
+        assert_eq!(ControlValue::Toggle(true).as_f64(), 1.0);
+        assert_eq!(ControlValue::Toggle(false).as_f64(), 0.0);
+        assert_eq!(ControlValue::Index(3).as_f64(), 3.0);
+        assert_eq!(ControlValue::Number(4.5).as_f64(), 4.5);
+    }
+}

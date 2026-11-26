@@ -141,6 +141,93 @@ pub fn seed_state(shell: &mut Shell) {
     for module in SEEDED_MODULES {
         shell.seed_module(module, true);
     }
+
+    seed_data_tabs(shell);
+}
+
+/// The three accounts the capture shows. The script read whatever was in
+/// `accounts.json`; a capture has no store, so the registry names them.
+pub const SEEDED_ACCOUNTS: [(&str, &str, &str); 3] = [
+    ("capture-account-1", "Notch", "localts"),
+    ("capture-account-2", "Herobrine", "offline"),
+    ("capture-account-3", "Steve", "cookie"),
+];
+
+/// The three servers the capture shows, and the one that answers its ping.
+pub const SEEDED_SERVERS: [(&str, &str, &str); 3] = [
+    ("capture-server-1", "Spawn", "play.example.net"),
+    ("capture-server-2", "Anarchy", "anarchy.example.net:25566"),
+    ("capture-server-3", "Creative", "creative.example.net"),
+];
+
+/// The account the capture marks as signed in, and the UUID it compares against.
+pub const SEEDED_SESSION_NAME: &str = "Notch";
+
+/// The compact UUID of [`SEEDED_SESSION_NAME`]: the offline UUID of `Notch`, which
+/// is the value `OfflineAccount.ComputeOfflineUuid` produces for that name.
+pub const SEEDED_SESSION_UUID: &str = "b50ad385829d3141a2167e7d7539ba7f";
+
+/// Fills the two data tabs so their screens show rows rather than empty states.
+///
+/// The store seam is [`crate::views::stores::NoStore`] in a capture, which is why
+/// this seeds the state machines directly rather than a store: the recipe for a
+/// screen is the state it paints.
+fn seed_data_tabs(shell: &mut Shell) {
+    let now = 1_700_000_000_000_i64;
+
+    let accounts: Vec<aoko_protocol::accounts::StoredAccount> = SEEDED_ACCOUNTS
+        .iter()
+        .map(|(id, name, source)| {
+            let mut account = aoko_protocol::accounts::StoredAccount::new(
+                *id,
+                *name,
+                aoko_protocol::accounts::offline::compute_offline_uuid(name).replace('-', ""),
+            );
+            account.source = (*source).to_owned();
+            account
+        })
+        .collect();
+
+    let state = shell.accounts_mut();
+    state.set_session(crate::views::accounts_state::SessionStrip {
+        connected: true,
+        supports_set_session: true,
+        supports_session_read: true,
+        identity: Some(crate::views::accounts_state::SessionIdentity {
+            name: Some(SEEDED_SESSION_NAME.to_owned()),
+            uuid: Some(SEEDED_SESSION_UUID.to_owned()),
+        }),
+        ..crate::views::accounts_state::SessionStrip::default()
+    });
+    state.load(&accounts, Some("capture-account-1"), now);
+
+    let rows: Vec<crate::views::servers_logic::ServerRowSource> = SEEDED_SERVERS
+        .iter()
+        .map(
+            |(id, name, address)| crate::views::servers_logic::ServerRowSource {
+                id: (*id).to_owned(),
+                name: (*name).to_owned(),
+                address: (*address).to_owned(),
+                added_at: Some("2024-01-01T00:00:00Z".to_owned()),
+                last_joined_at: None,
+            },
+        )
+        .collect();
+
+    let servers = shell.servers_mut();
+    servers.set_join_state(crate::views::servers_logic::ServerJoinState::Ready);
+    servers.load(&rows, Some("capture-server-1"), None, now);
+    servers.apply_ping(
+        "capture-server-1",
+        &crate::views::servers_logic::PingOutcome {
+            online: true,
+            latency_ms: 48,
+            players_label: "12/100".to_owned(),
+            description: Some("A Minecraft Server".to_owned()),
+            error: String::new(),
+        },
+    );
+    servers.mark_auto_pinged();
 }
 
 /// The values `New-GuiScreenshots.ps1` sets before capturing, by binding path.
@@ -251,6 +338,13 @@ mod registry_tests {
     }
 }
 
+/// One row of the capture report, so a caller can assert it without duplicating the
+/// format: the name in a 12-column field, the size right-aligned to 4, then the path.
+#[must_use]
+pub fn report_line(name: &str, width: u32, height: u32, path: &str) -> String {
+    format!("{name:<12} {width:>4}x{height:<4} {path}")
+}
+
 #[cfg(feature = "capture")]
 pub use harness::run;
 
@@ -262,6 +356,7 @@ mod harness {
 
     use gpui::{AnyWindowHandle, App, AppContext as _, HeadlessAppContext};
 
+    use super::report_line;
     use crate::assets::{self, Assets};
     use crate::shell::Shell;
     use crate::theme::{motion, Theme};
@@ -317,22 +412,17 @@ mod harness {
             let path = out_dir.join(format!("{}.png", screen.name));
             image.save(&path)?;
             println!(
-                "{:<12} {:>4}x{:<4} {}",
-                screen.name,
-                image.width(),
-                image.height(),
-                path.display()
+                "{}",
+                report_line(
+                    screen.name,
+                    image.width(),
+                    image.height(),
+                    &path.display().to_string()
+                )
             );
         }
 
         Ok(())
-    }
-
-    /// The report line's shape, so a caller can assert it without duplicating the format.
-    #[cfg(test)]
-    #[must_use]
-    pub fn report_line(name: &str, width: u32, height: u32, path: &str) -> String {
-        format!("{name:<12} {width:>4}x{height:<4} {path}")
     }
 }
 
@@ -369,6 +459,20 @@ mod tests {
     }
 
     #[test]
+    fn the_report_line_pins_the_printed_columns() {
+        // Captured output is read as a table: the screen name is the left column and the
+        // dimensions line up under each other, so a size difference is visible at a glance.
+        assert_eq!(
+            report_line("combat", 1020, 760, "target/capture/combat.png"),
+            "combat       1020x760  target/capture/combat.png"
+        );
+        assert_eq!(
+            report_line("settings", 1020, 760, "s.png"),
+            "settings     1020x760  s.png"
+        );
+    }
+
+    #[test]
     fn the_registry_order_is_the_rail_order() {
         // The C# bug was an index-to-name table living beside the capture code, so a
         // seven-name array drove a nine-tab window. The invariant that closes it: the
@@ -384,5 +488,70 @@ mod tests {
             .collect();
 
         assert_eq!(screens, rail);
+    }
+}
+
+#[cfg(test)]
+mod data_tab_tests {
+    use super::*;
+    use crate::views::servers_logic::NOT_PINGED_LABEL;
+
+    #[test]
+    fn the_seeded_session_uuid_is_the_offline_uuid_of_the_seeded_name() {
+        let expected = aoko_protocol::accounts::offline::compute_offline_uuid(SEEDED_SESSION_NAME)
+            .replace('-', "");
+        assert_eq!(SEEDED_SESSION_UUID, expected);
+    }
+
+    #[test]
+    fn seeding_fills_both_data_tabs() {
+        let mut shell = Shell::new(crate::theme::Theme::slate());
+        seed_state(&mut shell);
+
+        let accounts = shell.accounts();
+        assert_eq!(accounts.rows().len(), SEEDED_ACCOUNTS.len());
+        eprintln!(
+            "rows: {:#?}",
+            accounts
+                .rows()
+                .iter()
+                .map(|row| (row.name.clone(), row.is_current))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(accounts.selected_id(), Some("capture-account-1"));
+        assert_eq!(accounts.session().name_text(), SEEDED_SESSION_NAME);
+        assert!(
+            accounts.rows()[0].is_current,
+            "the selected account is the signed-in one"
+        );
+        assert!(
+            !accounts.rows()[1].is_current,
+            "a different UUID is not in use"
+        );
+
+        let servers = shell.servers();
+        assert_eq!(servers.rows().len(), SEEDED_SERVERS.len());
+        assert_eq!(servers.selected_id(), Some("capture-server-1"));
+        assert!(servers.auto_pinged());
+        let pinged = servers
+            .rows()
+            .iter()
+            .find(|row| row.id == "capture-server-1")
+            .expect("the pinged server is in the list");
+        assert_eq!(pinged.status_text, "48 ms");
+        assert!(
+            servers
+                .rows()
+                .iter()
+                .filter(|row| row.id != "capture-server-1")
+                .all(|row| row.status_text == NOT_PINGED_LABEL),
+            "the rest are at their rest state"
+        );
+    }
+
+    #[test]
+    fn the_seeded_registry_order_still_matches_the_rail() {
+        let names: Vec<&str> = registry().iter().map(|screen| screen.name).collect();
+        assert_eq!(names, SCREEN_ORDER);
     }
 }

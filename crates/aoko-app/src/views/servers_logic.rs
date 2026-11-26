@@ -26,9 +26,11 @@ pub enum ServerStatusTone {
 }
 
 /// Whether this view can hand a join to the bridge right now.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ServerJoinState {
     Ready,
+    /// The bridge is offline, so nothing can be joined.
+    #[default]
     Disconnected,
     Unsupported,
 }

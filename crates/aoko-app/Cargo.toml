@@ -31,8 +31,17 @@ image = { workspace = true, optional = true }
 # The views read module state, the profile and the search index straight out of
 # `aoko-core`, and the wire types out of `aoko-protocol`.
 aoko-protocol = { workspace = true }
+serde_json = { workspace = true }
 aoko-platform = { workspace = true }
 # Not in the workspace dependency table yet: the workspace owner has to add
 # `aoko-core = { path = "crates/aoko-core" }` before this becomes
 # `{ workspace = true }`. Requested, not worked around.
 aoko-core = { path = "../aoko-core" }
+
+[dev-dependencies]
+# `TestAppContext` and the TestPlatform window live behind `gpui/test-support`
+# (`crates/gpui/src/app.rs:37`). `cfg(test)` does not apply to a dependency, so a
+# widget test in this crate has to ask for the feature on the dev graph; `cargo build`
+# does not pull dev-dependencies, so the shipped binary stays lean.
+gpui = { workspace = true, features = ["test-support"] }
+gpui_platform = { workspace = true, features = ["test-support"] }
