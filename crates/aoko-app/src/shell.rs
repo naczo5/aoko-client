@@ -602,7 +602,7 @@ impl Shell {
         &self.theme
     }
 
-    /// Pins the palette against the saved profile, or unpins it; see [`Shell::theme_pinned`].
+    /// Pins the palette against the saved profile, or unpins it; see `theme_pinned`.
     ///
     /// The binary decides through [`Shell::startup`]'s parameter. Tests call this to drive
     /// the startup branch itself, because a test shell has no command line to read a pin
@@ -1542,7 +1542,7 @@ impl Shell {
     /// The command-search state.
     ///
     /// Mounted now: `Ctrl+K`, a typed character and the rail button open it, the root listener
-    /// handles Enter and Escape, and [`Shell::render_search`] paints
+    /// handles Enter and Escape, and `Shell::render_search` paints
     /// [`crate::overlay::overlay`] over the rail and body while it is open.
     #[must_use]
     pub fn search(&self) -> &CommandSearchState {

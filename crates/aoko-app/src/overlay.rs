@@ -43,7 +43,7 @@
 //! of this file painted [`crate::components::field::field`], which cannot receive focus or
 //! keystrokes, so the mount would have put an inert box on screen. [`overlay`] now paints
 //! the owner's [`TextInput`] entity in its place, chosen with
-//! [`FieldVariant::Query`](crate::components::field::FieldVariant::Query).
+//! [`FieldVariant::Query`].
 //!
 //! An entity cannot be created during a render, so the field arrives as a parameter: see
 //! [`OverlayQuery`] for the two shapes and what the shell has to do to supply the live one.
