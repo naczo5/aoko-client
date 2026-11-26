@@ -206,6 +206,11 @@ impl DraftError {
 }
 
 /// What an Add-palette press did.
+///
+/// `Saved` holds its palette behind a `Box` on purpose: [`CustomPalette`] is ten `String`s, so
+/// inline it made the whole enum 264 bytes wide and every `save_draft` return carried that width
+/// — including the refusal, which stores nothing. Boxing is what clippy's `large_enum_variant`
+/// asks for; an `allow` would have hidden the size rather than moved it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DraftOutcome {
     /// The name is already in the file and the managed code asks before replacing it
@@ -220,7 +225,7 @@ pub enum DraftOutcome {
     /// The palette was written and applied.
     Saved {
         /// What was stored, with the five derived roles filled.
-        palette: CustomPalette,
+        palette: Box<CustomPalette>,
         /// `Saved and applied palette '<name>'.` (`:1170`).
         status: String,
     },
@@ -415,7 +420,7 @@ impl PaletteStore {
         self.current = name.clone();
         self.draft.name.clear();
         Ok(DraftOutcome::Saved {
-            palette,
+            palette: Box::new(palette),
             status: copy::PALETTE_STATUS_SAVED.replace("{name}", &name),
         })
     }
@@ -540,7 +545,7 @@ fn is_valid_name(name: &str) -> bool {
 fn is_builtin_ignoring_case(name: &str) -> bool {
     Theme::builtin_names()
         .iter()
-        .any(|builtin| same_name(*builtin, name))
+        .any(|builtin| same_name(builtin, name))
 }
 
 /// `StringComparison.OrdinalIgnoreCase` (`MainWindow.xaml.cs:1105`, `:1298`).
@@ -675,7 +680,7 @@ mod tests {
             text.contains("\"sliderBackground\""),
             "the managed key shape (`CustomPalette.cs:41-44`): {text}"
         );
-        assert_eq!(store.palettes(), vec![palette]);
+        assert_eq!(store.palettes(), vec![*palette]);
     }
 
     #[test]
