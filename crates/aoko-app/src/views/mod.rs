@@ -13,6 +13,8 @@
 //!   changed.
 //! * [`copy`] holds the card, tab and settings copy lifted verbatim out of
 //!   `MainWindow.xaml`, which is where 478 of the app's strings live.
+//! * [`palette_store`] owns the custom-palette file and the create-palette card's
+//!   editor state, because nothing else in the crate reads `CustomPalette` yet.
 
 pub mod accounts_logic;
 pub mod accounts_state;
@@ -22,6 +24,7 @@ pub mod command_search;
 pub mod copy;
 pub mod forms;
 pub mod keybind_text;
+pub mod palette_store;
 pub mod prefs;
 pub mod profiles;
 pub mod relative_time;
