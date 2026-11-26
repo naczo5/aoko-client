@@ -28,6 +28,16 @@ pub fn button_label(vk: i32) -> String {
     format!("Bind: {}", format_virtual_key(vk))
 }
 
+/// An action-bind button's label for one action's virtual key.
+///
+/// `AutoRodActionBindButton` and `ThrowpotActionBindButton` read
+/// ``Action: {FormatVirtualKey(...)}`` (`MainWindow.xaml.cs:2135-2140`) from
+/// `Profile::auto_rod_action_key` / `Profile::throwpot_action_key`.
+#[must_use]
+pub fn action_label(vk: i32) -> String {
+    format!("Action: {}", format_virtual_key(vk))
+}
+
 /// `FormatVirtualKey` (`MainWindow.xaml.cs:2157-2173`), explicit branches only.
 ///
 /// The mouse pseudo-keys (`0x01`-`0x06`) are the managed naming for the five buttons a
@@ -95,6 +105,13 @@ mod tests {
         assert_eq!(format_virtual_key(0x39), "9");
         assert_eq!(format_virtual_key(0x41), "A");
         assert_eq!(format_virtual_key(0x5A), "Z");
+    }
+
+    #[test]
+    fn an_action_bind_reads_its_own_prefix_and_key() {
+        assert_eq!(action_label(0), "Action: Unbound");
+        assert_eq!(action_label(0x02), "Action: Mouse Right");
+        assert_eq!(action_label(0x70), "Action: F1");
     }
 
     #[test]

@@ -1384,8 +1384,8 @@ impl Shell {
         // **Inert in Phase 2** (section 12 decision 7 debt): the managed button opens the
         // command-search overlay (`MainWindow.xaml.cs:1623-1824`). The overlay view and
         // its state exist, but nothing mounts the view and the shell installs no key
-        // handling, so a click reaches no handler. It keeps the managed label rather than
-        // switching to a disabled style the C# does not have.
+        // handling, so this is a click handler that does nothing. It keeps the managed
+        // label rather than switching to a disabled style the C# does not have.
         rail = rail.child(
             components::button(
                 "rail-search",
@@ -2070,14 +2070,32 @@ impl Shell {
             // **Inert in Phase 2** (decision 7 debt), same reason as the keybind buttons:
             // `AutoRodActionBindButton_Click` (`MainWindow.xaml.cs:1954-1963`) starts the
             // key capture, and there is no capture surface to start.
-            Control::ActionBind { which } => components::button(
-                SharedString::from(format!("{}-{which:?}", card.id)),
-                theme,
-                ButtonVariant::Secondary,
-                SharedString::from("Action: Unbound"),
-                |_, _, _| {},
-            )
-            .into_any_element(),
+            //
+            // Both buttons are `Style="{StaticResource DarkButton}"
+            // HorizontalAlignment="Left" Width="210" Margin="0,10,0,0"`
+            // (`MainWindow.xaml:525`, `:542`), so neither the keybind button's width (140)
+            // nor a content-sized box is right. These two rows are `Control::ActionBind`
+            // rather than `Control::Button` precisely so the variant, width and label can
+            // differ; before that they were generic rows and this arm had no callers.
+            Control::ActionBind { which } => {
+                // The card stacks its children with a 6 px gap, so 4 more is the managed
+                // 10 px top margin.
+                // `HorizontalAlignment="Left"`: shrink to the button and sit at the card's
+                // left edge instead of stretching across the column.
+                let mut slot = div().mt(px(4.0)).self_start();
+                if let Some(selector) = action_bind_debug_selector(card.id, *which) {
+                    slot = slot.debug_selector(move || selector.to_owned());
+                }
+                slot.child(components::button_sized(
+                    SharedString::from(format!("{}-{which:?}", card.id)),
+                    theme,
+                    ButtonVariant::Dark,
+                    SharedString::from(action_bind_label(&self.profile, *which)),
+                    210.0,
+                    |_, _, _| {},
+                ))
+                .into_any_element()
+            }
 
             Control::Availability { text, bind } => div()
                 .id(SharedString::from(*bind))
@@ -2285,6 +2303,20 @@ fn switch_target(bind: &'static str) -> SwitchTarget {
     }
 }
 
+/// The debug selector for the action-bind button the geometry test measures.
+///
+/// Same rule as [`switch_debug_selector`]: name only what a test targets. Both buttons
+/// are 210 wide in the markup, and this measures one of them.
+fn action_bind_debug_selector(
+    card_id: &'static str,
+    which: crate::views::copy::ActionBind,
+) -> Option<&'static str> {
+    match (card_id, which) {
+        ("AutoRodCard", crate::views::copy::ActionBind::AutoRod) => Some("action-bind-AutoRod"),
+        _ => None,
+    }
+}
+
 /// The debug selector for the keybind button the geometry test measures.
 ///
 /// Same rule as [`switch_debug_selector`]: name only what a test targets, because the
@@ -2376,6 +2408,25 @@ fn module_for_bind(bind: &'static str) -> Option<&'static str> {
         .iter()
         .find(|entry| entry.toggle_property.eq_ignore_ascii_case(bind))
         .map(|entry| entry.id)
+}
+
+/// An action-bind button's rest label.
+///
+/// `UpdateKeybindButtons` (`MainWindow.xaml.cs:2135-2140`) composes
+/// ``Action: {FormatVirtualKey(InputHooks.AutoRodActionKey)}`` from
+/// `Profile::auto_rod_action_key` / `Profile::throwpot_action_key`, so the button follows
+/// the saved key the same way the keybind button follows `Profile::module_keys`. The
+/// pending-capture branch (`Action: [Press key or mouse...]`) needs the capture surface
+/// this phase does not have.
+fn action_bind_label(
+    profile: &aoko_protocol::profile::Profile,
+    which: crate::views::copy::ActionBind,
+) -> String {
+    let vk = match which {
+        crate::views::copy::ActionBind::AutoRod => profile.auto_rod_action_key,
+        crate::views::copy::ActionBind::Throwpot => profile.throwpot_action_key,
+    };
+    crate::views::keybind_text::action_label(vk)
 }
 
 /// The keybind button's rest label.
@@ -3243,6 +3294,77 @@ mod tests {
             "DockPanel docks the button right with Margin=8,0,0,0: button at {}, switch ends at {}",
             f32::from(button.origin.x),
             f32::from(switch.origin.x + switch.size.width),
+        );
+    }
+
+    /// The action-bind button is `DarkButton` at `Width="210"` (`MainWindow.xaml:525`),
+    /// not a content-sized `Secondary` — that measured 96 px and carried a 1 px edge.
+    #[gpui::test]
+    fn the_action_bind_button_is_210_wide(cx: &mut gpui::TestAppContext) {
+        use gpui::WindowOptions;
+
+        let shell = cx.update(|cx| cx.new(|_| Shell::new(Theme::slate())));
+        let window = cx.update(|cx| {
+            cx.open_window(WindowOptions::default(), |_, _| shell.clone())
+                .expect("test window")
+        });
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+
+        let tab = test_tab_of("AutoRodCard");
+        cx.update(|cx| shell.update(cx, |shell, cx| shell.select_tab_named(tab, cx)));
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        scroll_into_view(&mut visual, "action-bind-AutoRod");
+
+        let button = visual
+            .debug_bounds("action-bind-AutoRod")
+            .expect("the action-bind button records its bounds in a debug build");
+        assert_eq!(
+            f32::from(button.size.width),
+            210.0,
+            "the button fills Width=210 from the markup"
+        );
+    }
+
+    /// The label follows `Profile::module_keys`, which is the one line that makes a
+    /// bound module read its key. Every default key is zero, so a capture cannot tell
+    /// this apart from a constant.
+    #[test]
+    fn the_keybind_label_reads_the_profile() {
+        let mut profile = aoko_protocol::profile::Profile::default();
+        assert_eq!(
+            keybind_label(&profile, "aimassist"),
+            "Bind: Unbound",
+            "an absent key is zero, which the managed method formats as Unbound"
+        );
+
+        profile.module_keys.insert(String::from("aimassist"), 0x70);
+        assert_eq!(
+            keybind_label(&profile, "aimassist"),
+            "Bind: F1",
+            "the module's own key, formatted as `Bind: ` plus FormatVirtualKey(vk)"
+        );
+        assert_eq!(
+            keybind_label(&profile, "triggerbot"),
+            "Bind: Unbound",
+            "and a module with no key in the same profile is untouched"
+        );
+
+        // The two action binds read their own profile fields, not `module_keys`.
+        assert_eq!(
+            action_bind_label(&profile, copy::ActionBind::AutoRod),
+            "Action: Unbound"
+        );
+        profile.auto_rod_action_key = 0x02;
+        assert_eq!(
+            action_bind_label(&profile, copy::ActionBind::AutoRod),
+            "Action: Mouse Right"
+        );
+        assert_eq!(
+            action_bind_label(&profile, copy::ActionBind::Throwpot),
+            "Action: Unbound",
+            "and the other action keeps its own key"
         );
     }
 
