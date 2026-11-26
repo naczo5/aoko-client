@@ -481,15 +481,11 @@ fn same_name(left: &str, right: &str) -> bool {
 /// `TryParseHex` (`MainWindow.xaml.cs:1227-1253`): `#RGB`, `#RRGGBB`, and either form
 /// without the `#`.
 ///
-/// Trims, drops leading `#` characters, expands the three-digit shorthand by doubling each
-/// digit, and rejects anything that is not six digits after that. Unlike
+/// Trims, accepts one optional leading `#`, expands the three-digit shorthand by doubling
+/// each digit, and rejects anything that is not six digits after that. Unlike
 /// [`Color::parse_hex`] it rejects the 8-digit ARGB form, because a palette file stores
 /// opaque colours only and the managed parser rejects anything that is not six digits once
 /// the shorthand is expanded.
-///
-/// One known leniency, documented rather than changed: this drops *every* leading `#` where
-/// `TryParseHex` removes one, so `##abc` parses here and is refused there. Every other shape
-/// it accepts is a managed shape.
 ///
 /// Public because a consumer outside this store has to accept exactly what
 /// [`PaletteStore::save_draft`] accepts. The colour swatch in the shell's
@@ -499,7 +495,10 @@ fn same_name(left: &str, right: &str) -> bool {
 /// defect where a swatch paints a colour the press rejects.
 #[must_use]
 pub fn parse_entry(text: &str) -> Option<Color> {
-    let digits = text.trim().trim_start_matches('#');
+    // One `#`, like `TryParseHex`: a second is the typo the managed parser refuses, and
+    // accepting it would make the same text mean one thing here and another on the C# side.
+    let trimmed = text.trim();
+    let digits = trimmed.strip_prefix('#').unwrap_or(trimmed);
     let expanded: String = if digits.len() == 3 {
         digits.chars().flat_map(|digit| [digit, digit]).collect()
     } else {
@@ -649,6 +648,36 @@ mod tests {
 
         assert!(!store.path().exists(), "a refused press writes nothing");
         assert_eq!(store.current_name(), DEFAULT_PALETTE);
+    }
+
+    /// `TryParseHex` removes **one** leading `#` (`MainWindow.xaml.cs:1233-1234`), so a
+    /// second one is the typo it refuses. Accepting `##abc` would make the same text mean a
+    /// colour here and nothing on the managed side.
+    #[test]
+    fn exactly_one_leading_hash_is_stripped() {
+        assert_eq!(parse_entry("#abc"), Some(Color::from_hex(0xAA_BB_CC)));
+        assert_eq!(parse_entry("#1A2B3C"), Some(Color::from_hex(0x1A_2B_3C)));
+        assert_eq!(
+            parse_entry("1A2B3C"),
+            Some(Color::from_hex(0x1A_2B_3C)),
+            "the # is optional"
+        );
+        assert_eq!(parse_entry("  #abc  "), Some(Color::from_hex(0xAA_BB_CC)));
+
+        assert_eq!(parse_entry("##abc"), None, "the second # is a typo");
+        assert_eq!(parse_entry("##123456"), None);
+        assert_eq!(parse_entry(" ###123456 "), None);
+
+        // The rest of the managed tolerance is unchanged: five digits, a bare `#` and the
+        // ARGB form are all refused.
+        assert_eq!(parse_entry("#12345"), None, "five digits");
+        assert_eq!(parse_entry(""), None);
+        assert_eq!(parse_entry("#"), None);
+        assert_eq!(
+            parse_entry("#FF1A2B3C"),
+            None,
+            "the ARGB form is not a palette colour"
+        );
     }
 
     #[test]
