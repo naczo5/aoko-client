@@ -180,29 +180,66 @@ pub mod wash {
     pub const CHIP_TINT_WARN: f32 = 0.16;
 }
 
+/// The saved-palette card and the editor's colour row.
+///
+/// The card is the `DataTemplate` of `CustomPalettesItems` (`MainWindow.xaml:1917-1930`): a
+/// 180 px `Border` at radius 6, padding 8,6, holding a 20 px remove cap, the name and an
+/// apply button whose four swatches are 34×12. The editor's row (`:1961-1972`) is a 22×22
+/// swatch beside a hex box, and its numbers are here too because they are the same kind of
+/// measured attribute rather than a colour decision.
+pub mod palette_card {
+    /// The card's `Width="180"` (`:1917`).
+    pub const WIDTH: f32 = 180.0;
+    /// Its `Margin="0,0,8,8"`, which is the gap between cards in the wrap panel.
+    pub const GAP: f32 = 8.0;
+    /// Its `CornerRadius="6"` (`:1917`).
+    pub const RADIUS: f32 = 6.0;
+    /// Its `Padding="8,6"` (`:1917`).
+    pub const PAD_X: f32 = 8.0;
+    pub const PAD_Y: f32 = 6.0;
+    /// The remove cap's `Width="20" Height="20"` (`:1920`).
+    pub const DELETE: f32 = 20.0;
+    /// The name's `FontSize="12"` (`:1923`).
+    pub const NAME_TEXT: f32 = 12.0;
+    /// The apply button's `Margin="0,6,0,0"` (`:1925`).
+    pub const PREVIEW_GAP: f32 = 6.0;
+    /// Each swatch's `Width="34" Height="12"` (`:1928-1931`).
+    pub const SWATCH_WIDTH: f32 = 34.0;
+    pub const SWATCH_HEIGHT: f32 = 12.0;
+    /// Their `CornerRadius="3"` (`:1928-1931`).
+    pub const SWATCH_RADIUS: f32 = 3.0;
+    /// Their `Margin="0,0,4,0"` (`:1928-1930`); the last swatch has no margin.
+    pub const SWATCH_GAP: f32 = 4.0;
+    /// The editor's swatch, `Width="22" Height="22"` (`:1961-1995`), and the `Margin="0,0,6,0"`
+    /// that separates it from the hex box beside it.
+    pub const EDITOR_SWATCH: f32 = 22.0;
+    pub const EDITOR_SWATCH_RADIUS: f32 = 3.0;
+    pub const EDITOR_SWATCH_GAP: f32 = 6.0;
+}
+
 /// The Block ESP tracked-block row, the `ItemsControl` item template at
-/// `MainWindow.xaml:695-712`.
+/// `MainWindow.xaml:695-710`.
 ///
 /// The row is a `DockPanel` at `Margin="6,3"` holding a bare checkbox, the block name, a
 /// 22×14 colour swatch and a 22 px `DarkButton`. Every number below is one of those
 /// attributes; nothing here is inferred.
 pub mod block_esp {
-    /// The `DockPanel`'s `Margin="6,3"` (`:696`).
+    /// The `DockPanel`'s `Margin="6,3"` (`:695`).
     pub const ROW_PAD_X: f32 = 6.0;
     pub const ROW_PAD_Y: f32 = 3.0;
     /// The checkbox's `Margin="0,0,8,0"` (`:698`).
     pub const CHECK_GAP: f32 = 8.0;
     /// The remove cap's `Width="22"` (`:699`).
     pub const REMOVE_WIDTH: f32 = 22.0;
-    /// The colour swatch's `Width="22" Height="14"` (`:703`).
+    /// The colour swatch's `Width="22" Height="14"` (`:702`).
     pub const SWATCH_WIDTH: f32 = 22.0;
     pub const SWATCH_HEIGHT: f32 = 14.0;
-    /// The swatch's `CornerRadius="3"` (`:703`).
+    /// The swatch's `CornerRadius="3"` (`:702`).
     pub const SWATCH_RADIUS: f32 = 3.0;
-    /// The swatch's `Margin="6,0"` (`:704`), which is also the 6 px the name leaves before
+    /// The swatch's `Margin="6,0"` (`:702`), which is also the 6 px the name leaves before
     /// it.
     pub const SWATCH_GAP: f32 = 6.0;
-    /// The name's `FontSize="12"` (`:708`).
+    /// The name's `FontSize="12"` (`:707`).
     pub const NAME_TEXT: f32 = 12.0;
 }
 
