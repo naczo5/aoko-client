@@ -21,17 +21,28 @@ use std::sync::{Mutex, OnceLock};
 
 use gpui::{ElementId, SharedString};
 
+/// The memo behind [`joined`]: `(a, b) -> "ab"`.
+type TwoPartMemo = Mutex<HashMap<(&'static str, &'static str), SharedString>>;
+
+/// The memo behind [`stitched`]: `[a, separator, b] -> "a<separator>b"`.
+type ThreePartMemo = Mutex<HashMap<[&'static str; 3], SharedString>>;
+
+/// The memo behind [`by_number`]: `(slot, number) -> label`.
+type NumberMemo = Mutex<HashMap<(&'static str, u64), SharedString>>;
+
+/// The memo behind [`text`]: `slot -> (last source, label)`.
+type TextMemo = Mutex<HashMap<&'static str, (String, SharedString)>>;
+
 /// The memo for two-part strings.
-fn two_parts() -> &'static Mutex<HashMap<(&'static str, &'static str), SharedString>> {
-    static TABLE: OnceLock<Mutex<HashMap<(&'static str, &'static str), SharedString>>> =
-        OnceLock::new();
+fn two_parts() -> &'static TwoPartMemo {
+    static TABLE: OnceLock<TwoPartMemo> = OnceLock::new();
     TABLE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// The memo for three-part strings, keyed by all three pieces so `-combo-` and `-` cannot
 /// collide on the same card and bind.
-fn three_parts() -> &'static Mutex<HashMap<[&'static str; 3], SharedString>> {
-    static TABLE: OnceLock<Mutex<HashMap<[&'static str; 3], SharedString>>> = OnceLock::new();
+fn three_parts() -> &'static ThreePartMemo {
+    static TABLE: OnceLock<ThreePartMemo> = OnceLock::new();
     TABLE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -72,8 +83,8 @@ pub fn indexed(prefix: &'static str, index: usize) -> ElementId {
 }
 
 /// The last string built for each slot, with the text it was built from.
-fn last_text() -> &'static Mutex<HashMap<&'static str, (String, SharedString)>> {
-    static TABLE: OnceLock<Mutex<HashMap<&'static str, (String, SharedString)>>> = OnceLock::new();
+fn last_text() -> &'static TextMemo {
+    static TABLE: OnceLock<TextMemo> = OnceLock::new();
     TABLE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -105,8 +116,8 @@ pub fn by_number(slot: &'static str, number: u64, build: impl FnOnce() -> String
 /// Ceiling on [`by_number`]'s table, which is what a drag can grow.
 pub const NUMBER_MEMO_LIMIT: usize = 1024;
 
-fn number_memos() -> &'static Mutex<HashMap<(&'static str, u64), SharedString>> {
-    static TABLE: OnceLock<Mutex<HashMap<(&'static str, u64), SharedString>>> = OnceLock::new();
+fn number_memos() -> &'static NumberMemo {
+    static TABLE: OnceLock<NumberMemo> = OnceLock::new();
     TABLE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 

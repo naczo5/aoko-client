@@ -728,7 +728,7 @@ impl Shell {
         let unchanged = matches!(
             self.values.get(bind),
             Some(crate::views::bindings::ControlValue::Text(current)) if current == text
-        ) && self.draft.get(bind).is_none();
+        ) && !self.draft.contains_key(bind);
         self.apply_control(
             bind,
             crate::views::bindings::ControlValue::Text(text.to_owned()),

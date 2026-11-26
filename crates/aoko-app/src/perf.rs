@@ -130,7 +130,7 @@ mod tests {
     const SHELL_FRAME_ALLOCATIONS: usize = 1006;
 
     fn warm_shell() -> (VisualTestContext, Entity<Shell>) {
-        let mut cx = TestAppContext::single();
+        let cx = TestAppContext::single();
         let shell = cx.update(|cx| cx.new(|_| Shell::new(Theme::slate())));
         let window = cx.update(|cx| {
             cx.open_window(WindowOptions::default(), |_, _| shell.clone())
@@ -218,7 +218,7 @@ mod notify_tests {
     /// the only public way to see it at the pin.
     #[test]
     fn setting_a_control_to_the_value_it_already_shows_does_not_notify() {
-        let mut cx = TestAppContext::single();
+        let cx = TestAppContext::single();
         let shell = cx.update(|cx| cx.new(|_| Shell::new(Theme::slate())));
 
         let notifications = Rc::new(Cell::new(0_usize));
