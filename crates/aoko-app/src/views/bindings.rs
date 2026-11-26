@@ -141,7 +141,7 @@ pub fn snapshot(profile: &Profile) -> BTreeMap<String, ControlValue> {
         serde_json::from_str(&to_profile_json(profile)).unwrap_or(serde_json::Value::Null);
 
     let mut values = BTreeMap::new();
-    for bind in all_binds() {
+    for bind in all_binds().into_iter().chain(switch_binds()) {
         if let Some(value) = value_at(&root, bind) {
             values.insert(bind.to_owned(), value);
         }
@@ -295,6 +295,35 @@ pub fn occurrences(bind: &str) -> usize {
             _ => false,
         })
         .count()
+}
+
+/// Every `Control::Switch` bind.
+///
+/// Separate from [`all_binds`], which is the 137 slider/check/combo paths the
+/// reconciliation test pins. A switch needs its own read entry: the five
+/// profile-bound switches (`ShowLogo`, `DevMode`, `ShowModuleList`,
+/// `DiscordRpcEnabled`, `AutoTotemElytra`) live in the profile but not in the
+/// control table, so without this they painted OFF over a profile that says ON.
+#[must_use]
+pub fn switch_binds() -> Vec<&'static str> {
+    let mut binds = Vec::new();
+    for tab in &copy::TABS {
+        let TabBody::Cards(cards) = tab.body else {
+            continue;
+        };
+
+        for card in cards {
+            for control in card.controls {
+                if let Control::Switch { bind, .. } = control {
+                    binds.push(*bind);
+                }
+            }
+        }
+    }
+
+    binds.sort_unstable();
+    binds.dedup();
+    binds
 }
 
 /// Bind paths with no field behind them, for a given profile.
@@ -459,11 +488,26 @@ mod tests {
         let profile = default_profile();
         let values = snapshot(&profile);
 
+        let mut expected = all_binds();
+        expected.extend(switch_binds());
+        expected.sort_unstable();
+        expected.dedup();
+        assert_eq!(expected.len(), 180, "137 slider/check/combo plus 43 switch");
+
+        // Three binds have no profile field of their own: the two documented
+        // exceptions, and `HudEditorActive`, which is the `hudeditor` module's toggle
+        // property (`aoko_core::search`) and lives in `ModuleToggles`, not the profile.
         assert_eq!(
             values.len(),
-            all_binds().len() - NON_PROFILE_BINDS.len(),
-            "the two non-profile binds are the only gaps"
+            expected.len() - NON_PROFILE_BINDS.len() - 1,
+            "every bind but the two non-profile controls and the module-state switch"
         );
+        for bind in ["ConfigSelection", "Enabled", "HudEditorActive"] {
+            assert!(
+                !values.contains_key(bind),
+                "{bind} has no profile field and must not be in the table"
+            );
+        }
         assert_eq!(
             values.get("MinCPS").cloned(),
             Some(ControlValue::Number(f64::from(profile.min_cps)))

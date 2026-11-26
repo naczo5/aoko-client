@@ -142,7 +142,24 @@ impl Shell {
     /// the Settings card shows it.
     #[must_use]
     pub fn from_system(theme: Theme) -> Self {
-        let (profiles, profile) = Profiles::from_system();
+        Self::start(
+            theme,
+            Profiles::from_system(),
+            crate::views::prefs::PrefsFile::from_system(),
+        )
+    }
+
+    /// The startup body, with both I/O sources handed in.
+    ///
+    /// `from_system` is the only caller in the shipped binary; tests call this with a
+    /// temporary store and a temporary preferences file, which is what pins the
+    /// startup *read*. Before this seam, `cfg(test)` skipped the whole block, so
+    /// deleting the gate write from startup left a green suite.
+    fn start(
+        theme: Theme,
+        (profiles, profile): (Profiles, aoko_protocol::profile::Profile),
+        prefs: Result<crate::views::prefs::PrefsFile, aoko_platform::PlatformError>,
+    ) -> Self {
         if profiles.migrated() > 0 {
             tracing::info!(
                 "copied {} legacy profile(s) into the profile directory",
@@ -159,7 +176,7 @@ impl Shell {
         // Section 12 decision 3: the client setting that gates every animation. It is
         // applied to `theme::motion` here, before the first frame, so a user who
         // turned animations off does not see one animated frame on startup.
-        match crate::views::prefs::PrefsFile::from_system() {
+        match prefs {
             Ok(file) => {
                 match file.load() {
                     Ok(prefs) => {
@@ -1570,12 +1587,19 @@ impl Shell {
         motion: Motion,
         entity: &Entity<Self>,
     ) -> AnyElement {
-        let module = module_for_bind(bind).or_else(|| card_module(card));
-        let is_on = module.is_some_and(|module| self.is_module_on(module));
-        // The clicking half of the switch lives here: `switch` is an interactive element
-        // and attaches `.id()`/`.on_click()` internally, so this arm is where the click
-        // is routed to the module it names. A card whose bind resolves to no module
-        // keeps a handler that refuses, rather than a picture that looks clickable.
+        let target = switch_target(bind);
+        let is_on = match target {
+            SwitchTarget::Module(module) => self.is_module_on(module),
+            // The profile snapshot, so a card paints the saved boolean rather than a
+            // hardcoded `false`. The five non-module switches are `ShowLogo`,
+            // `DevMode`, `ShowModuleList`, `DiscordRpcEnabled` and `AutoTotemElytra`.
+            SwitchTarget::Profile(bind) => self.value(bind, 0.0) > 0.5,
+        };
+        // `switch` is an interactive element and attaches `.id()`/`.on_click()`
+        // internally, so this is where the click is routed: a module flag flips
+        // `ModuleToggles`, a profile boolean writes its own bind through
+        // `bindings`. Every switch has one of the two targets — the old fallback to
+        // the card's module silently misrouted five of them.
         let handle = entity.clone();
         let switch = components::switch(
             SharedString::from(format!("{}-{}", card.id, bind)),
@@ -1583,17 +1607,18 @@ impl Shell {
             is_on,
             motion,
             move |_, _, cx| {
-                if let Some(module) = module {
-                    handle.update(cx, |shell, cx| shell.toggle_module(module, cx));
-                }
+                handle.update(cx, |shell, cx| match target {
+                    SwitchTarget::Module(module) => shell.toggle_module(module, cx),
+                    SwitchTarget::Profile(bind) => shell.set_checked(bind, !is_on, cx),
+                });
             },
         );
 
         let mut switch = switch;
         if let Some(selector) = switch_debug_selector(bind) {
             // A test needs to know where the switch is to click it, and
-            // `debug_selector` takes a `&'static str`; the AutoClicker switch is the
-            // one the click test uses.
+            // `debug_selector` takes a `&'static str`; only the switches the click
+            // tests target carry one.
             switch = div()
                 .debug_selector(move || selector.to_owned())
                 .child(switch)
@@ -2221,14 +2246,45 @@ fn resize_strips() -> [ResizeStrip; 8] {
     ]
 }
 
-/// The debug selector for the switch the click test targets.
+/// What a `Control::Switch` row flips.
+///
+/// The managed markup styles two different things as `ModuleSwitch`: a module's own
+/// flag, whose bind resolves through the catalogue's `toggle_property`, and a
+/// profile boolean that belongs to no module (`ShowLogo`, `DevMode`,
+/// `ShowModuleList`, `DiscordRpcEnabled`, `AutoTotemElytra`). The old code fell back
+/// to the card's module when the bind resolved to nothing, which flipped the whole
+/// AutoTotem module from the Elytra row and left the other four dead — and three of
+/// those painted OFF over a default profile that says ON.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SwitchTarget {
+    /// A catalogue module flag: the switch flips [`ModuleToggles`].
+    Module(&'static str),
+    /// A profile boolean with no module: the switch writes this bind through
+    /// [`crate::views::bindings`].
+    Profile(&'static str),
+}
+
+/// Which of the two a switch's bind names. Never falls back to the card.
+fn switch_target(bind: &'static str) -> SwitchTarget {
+    match module_for_bind(bind) {
+        Some(module) => SwitchTarget::Module(module),
+        None => SwitchTarget::Profile(bind),
+    }
+}
+
+/// The debug selector for the switches the click tests target.
 ///
 /// `debug_selector` takes a `&'static str`, and an id built from a card and a bind
-/// is a `SharedString`, so this names the one switch a test needs rather than all
+/// is a `SharedString`, so this names the six switches a test needs rather than all
 /// 43. It records nothing in a release build (`debug_assertions` off).
 fn switch_debug_selector(bind: &'static str) -> Option<&'static str> {
     match bind {
         "IsArmed" => Some("switch-IsArmed"),
+        "ShowModuleList" => Some("switch-ShowModuleList"),
+        "DiscordRpcEnabled" => Some("switch-DiscordRpcEnabled"),
+        "AutoTotemElytra" => Some("switch-AutoTotemElytra"),
+        "ShowLogo" => Some("switch-ShowLogo"),
+        "DevMode" => Some("switch-DevMode"),
         _ => None,
     }
 }
@@ -2832,8 +2888,120 @@ mod tests {
             "the widget's on_change writes into the shell's config name"
         );
     }
+
+    /// Serialises the tests that write the process-wide animation gate, and restores
+    /// it even when an assertion panics: the re-review caught a failed mutation
+    /// leaving the flag `false` and taking an unrelated test down with it.
+    static MOTION_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct GateReset;
+
+    impl Drop for GateReset {
+        fn drop(&mut self) {
+            motion::set_animations_enabled(true);
+        }
+    }
+
+    fn gate_lock() -> std::sync::MutexGuard<'static, ()> {
+        MOTION_GATE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[test]
+    fn the_startup_read_applies_the_saved_animation_setting() {
+        let _gate = gate_lock();
+        let _reset = GateReset;
+
+        let root = scratch_root();
+        let file = crate::views::prefs::PrefsFile::at(root.join(crate::views::prefs::FILE_NAME));
+        file.save(crate::views::prefs::ClientPrefs { animations: false })
+            .expect("write the preference");
+
+        // The same body `from_system` runs, with a temporary file instead of the
+        // machine's app-data directory. Deleting the gate write from `Shell::start`
+        // fails here, which is what pins the startup read.
+        let shell = Shell::start(
+            Theme::slate(),
+            (
+                Profiles::unavailable(),
+                aoko_protocol::profile::Profile::default(),
+            ),
+            Ok(file),
+        );
+
+        assert!(!shell.animations(), "the saved value is applied at startup");
+        assert!(
+            !motion::animations_enabled(),
+            "the gate is set before the first frame, not at the first repaint"
+        );
+        assert_eq!(shell.prefs_status(), "");
+        assert!(
+            shell.prefs.is_some(),
+            "and the file stays attached for later writes"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_prefs_file_is_reported_and_the_gate_is_untouched() {
+        let _gate = gate_lock();
+        let _reset = GateReset;
+
+        let root = scratch_root();
+        let path = root.join(crate::views::prefs::FILE_NAME);
+        std::fs::write(&path, "not json").expect("write a corrupt file");
+        let before = motion::animations_enabled();
+
+        let shell = Shell::start(
+            Theme::slate(),
+            (
+                Profiles::unavailable(),
+                aoko_protocol::profile::Profile::default(),
+            ),
+            Ok(crate::views::prefs::PrefsFile::at(&path)),
+        );
+
+        assert!(
+            shell
+                .prefs_status()
+                .contains("Could not read client preferences"),
+            "a corrupt file is card copy, not a silent default: {}",
+            shell.prefs_status()
+        );
+        assert_eq!(
+            motion::animations_enabled(),
+            before,
+            "the gate did not move"
+        );
+    }
+
+    #[test]
+    fn a_prefs_directory_that_cannot_be_found_is_reported() {
+        let shell = Shell::start(
+            Theme::slate(),
+            (
+                Profiles::unavailable(),
+                aoko_protocol::profile::Profile::default(),
+            ),
+            Err(aoko_platform::PlatformError::unsupported(
+                "no app-data directory",
+            )),
+        );
+
+        assert!(
+            shell
+                .prefs_status()
+                .contains("Could not locate client preferences"),
+            "{}",
+            shell.prefs_status()
+        );
+    }
+
     #[gpui::test]
     fn flipping_the_animations_row_persists_and_gates(cx: &mut gpui::TestAppContext) {
+        let _gate = gate_lock();
+        let _reset = GateReset;
+
         let root = scratch_root();
         let prefs = crate::views::prefs::PrefsFile::at(root.join(crate::views::prefs::FILE_NAME));
         let shell = cx.update(|cx| {
@@ -2984,5 +3152,170 @@ mod tests {
             !cx.read(|cx| shell.read(cx).is_module_on("autoclicker")),
             "a second click flips it back"
         );
+    }
+    /// The tab whose card list holds `card_id`, for the switch tests.
+    fn test_tab_of(card_id: &str) -> &'static str {
+        copy::TABS
+            .iter()
+            .find(|tab| match tab.body {
+                TabBody::Cards(cards) => cards.iter().any(|card| card.id == card_id),
+                TabBody::Accounts | TabBody::Servers => false,
+            })
+            .map(|tab| tab.name)
+            .expect("the card is in a tab")
+    }
+
+    #[test]
+    fn every_switch_is_a_module_flag_or_its_own_profile_boolean() {
+        let mut profile_bound = Vec::new();
+        let mut module_bound = 0;
+        for tab in copy::TABS {
+            let TabBody::Cards(cards) = tab.body else {
+                continue;
+            };
+            for card in cards {
+                for control in card.controls {
+                    let Control::Switch { bind, .. } = control else {
+                        continue;
+                    };
+                    match switch_target(bind) {
+                        SwitchTarget::Module(_) => module_bound += 1,
+                        // A profile switch must have a field behind it, or its click
+                        // writes nowhere. `snapshot` is the same table `value` reads.
+                        SwitchTarget::Profile(bind) => {
+                            assert!(
+                                crate::views::bindings::snapshot(
+                                    &aoko_protocol::profile::Profile::default()
+                                )
+                                .contains_key(bind),
+                                "{bind} has no profile field"
+                            );
+                            profile_bound.push(bind);
+                        }
+                    }
+                }
+            }
+        }
+
+        profile_bound.sort_unstable();
+        assert_eq!(
+            profile_bound,
+            [
+                "AutoTotemElytra",
+                "DevMode",
+                "DiscordRpcEnabled",
+                "ShowLogo",
+                "ShowModuleList"
+            ],
+            "exactly the five the managed markup binds to a profile boolean"
+        );
+        assert_eq!(
+            module_bound + profile_bound.len(),
+            43,
+            "and every switch is one of the two"
+        );
+    }
+
+    /// Scrolls a control up into the viewport before clicking it.
+    ///
+    /// GPUI's hit test drops a point outside the viewport, and the tab body is a
+    /// scroll container (`components::scroll`), so the cards below the fold at the
+    /// test platform's 1536x1080 are scrolled up first. The scroll is a real
+    /// `ScrollEvent` delivered to the same container a wheel reaches.
+    fn scroll_into_view(visual: &mut gpui::VisualTestContext, selector: &'static str) {
+        use gpui::{point, ScrollDelta, ScrollEvent, ScrollSource, TouchPhase};
+
+        let viewport = visual.update(|window, _| window.viewport_size());
+        let mut bounds = visual.debug_bounds(selector).expect("the control renders");
+        let mut scrolls = 0;
+        while bounds.center().y > viewport.height - px(24.0) && scrolls < 40 {
+            visual.simulate_event(ScrollEvent {
+                position: point(px(700.0), px(600.0)),
+                delta: ScrollDelta::Pixels(point(px(0.0), px(-60.0))),
+                modifiers: gpui::Modifiers::default(),
+                touch_phase: TouchPhase::Moved,
+                source: ScrollSource::Pointer,
+            });
+            visual.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            bounds = visual
+                .debug_bounds(selector)
+                .expect("the control still renders");
+            scrolls += 1;
+        }
+        assert!(
+            bounds.center().y < viewport.height,
+            "{selector} is in the viewport after {scrolls} scrolls"
+        );
+    }
+
+    #[gpui::test]
+    fn the_five_non_module_switches_flip_their_own_boolean(cx: &mut gpui::TestAppContext) {
+        use gpui::{Modifiers, WindowOptions};
+
+        let shell = cx.update(|cx| cx.new(|_| Shell::new(Theme::slate())));
+        let window = cx.update(|cx| {
+            cx.open_window(WindowOptions::default(), |_, _| shell.clone())
+                .expect("test window")
+        });
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+
+        // (card, bind, selector, what the default profile says)
+        let cases = [
+            (
+                "ModuleListCard",
+                "ShowModuleList",
+                "switch-ShowModuleList",
+                true,
+            ),
+            (
+                "DiscordRpcCard",
+                "DiscordRpcEnabled",
+                "switch-DiscordRpcEnabled",
+                true,
+            ),
+            (
+                "AutoTotemCard",
+                "AutoTotemElytra",
+                "switch-AutoTotemElytra",
+                true,
+            ),
+            ("GuiCustomizationCard", "ShowLogo", "switch-ShowLogo", true),
+            ("GuiCustomizationCard", "DevMode", "switch-DevMode", false),
+        ];
+
+        for (card, bind, selector, default_on) in cases {
+            let tab = test_tab_of(card);
+            cx.update(|cx| shell.update(cx, |shell, cx| shell.select_tab_named(tab, cx)));
+            visual.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+
+            assert_eq!(
+                cx.read(|cx| shell.read(cx).value(bind, 0.0) > 0.5),
+                default_on,
+                "{card} paints the profile's value"
+            );
+
+            // Three of the five cards sit below the fold, so scroll before clicking.
+            scroll_into_view(&mut visual, selector);
+            let bounds = visual
+                .debug_bounds(selector)
+                .expect("the switch renders with its debug selector");
+            visual.simulate_click(bounds.center(), Modifiers::default());
+            assert_eq!(
+                cx.read(|cx| shell.read(cx).value(bind, 0.0) > 0.5),
+                !default_on,
+                "{bind} flipped its own boolean"
+            );
+
+            if bind == "AutoTotemElytra" {
+                assert!(
+                    !cx.read(|cx| shell.read(cx).is_module_on("autototem")),
+                    "the Elytra row must not flip the AutoTotem module"
+                );
+            }
+        }
     }
 }
