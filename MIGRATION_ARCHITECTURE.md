@@ -251,8 +251,13 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 cargo bench --workspace
-cargo run -p aoko-app -- --capture-screenshots <out_dir>
+cargo run -p aoko-app --features capture -- --capture-screenshots <out_dir>
 ```
+
+The capture run needs `--features capture`: without it the binary exits 1 and prints the correct form
+itself, because `Window::render_to_image` and the headless renderer both sit behind gpui's
+`test-support` at the pin. A documented command that cannot run is worse than an undocumented one,
+because it reads as verified.
 
 The Windows leg needs the runner variable, or the suite cross-compiles and never executes:
 
@@ -303,10 +308,10 @@ semantics or workspace dependencies. Neither builder re-opens these.
 | 1 | **Bare `gpui` only.** No zed `ui`/`text` crates. | Every widget is hand-built against the pin. One theme system, no second settings/schema tree. The slider and the text field must be written from scratch either way: the pinned tree contains no slider widget and no text-input widget, since the only `TextInput` is the platform IME event type. |
 | 2 | **Opaque card over a dark scrim.** Frosted glass is dropped. | The overlay stays readable without backdrop blur, which GPUI cannot do at the pin: `Background` offers solid and 2-stop linear only. |
 | 3 | **Animations stay, gated by a client setting we own.** | Do not probe `ClientAreaAnimation`. Expose an in-app preference through `theme::motion` so one toggle governs every animated site on every platform. |
-| 4 | **One window at control geometry, loader as an in-view state.** | No destroy-and-recreate transition, so window position survives and there is no flicker. The loader is a shell state, not a second window. |
+| 4 | **One window at control geometry, loader as an in-view state.** | No destroy-and-recreate transition, so window position survives and there is no flicker. The loader is a shell state, not a second window. Not built yet: only `LOADER_TITLE` and `LOADER_INJECT` exist, and nothing reads them. Decision 7 records it as debt, so this is a decision about where a loader will live when one exists, not a claim that it does. |
 | 5 | **Client decorations we draw.** | The title bar is ours: themed background, drag region, and our own minimise/maximise/close hit-testing, plus resize edges. It is client area, so it appears in headless captures; that is the better visual-parity outcome and it must be captured. |
 | 6 | **Bundle open font families** for UI and for monospace, shipped as assets. | Identical metrics on Windows and Linux. The drift versus the `Segoe UI` / `Consolas` baseline is accepted once rather than reflowing per platform. The families are **Liberation Sans** for UI and **Liberation Mono** for monospace — Open, and redistributable under SIL OFL 1.1, which is what makes bundling them in a GPL-3 binary lawful. The record of why, with the licence citation, is the module header at `crates/aoko-app/src/assets/mod.rs`; §3 of `docs/rust/UI_INVENTORY.md` lists the same two and defers to it. Neither builder re-picks them. |
-| 7 | **Drawn-but-unmounted surfaces are named debt, not delivered work.** | The command-search overlay, both dialogs (colour picker, window picker), the loader state and pulse-on-jump are built and unit-tested, but no route reaches them: nothing calls `open_search`, neither dialog type implements `Render`, the shell installs no key listener, and the overlay ignores the motion value handed to it. They stay in the tree behind that boundary and are carried as open items. The consequence is procedural: no builder may describe such a surface as working without a test that reaches it from a window, and no doc comment may claim it is wired. Deliberate debt is auditable; a doc comment that says "wired" is not. |
+| 7 | **Unmounted surfaces and inert controls are named debt, not delivered work.** | Two kinds, and they are not the same claim. *Built but unmounted:* the command-search overlay, both dialogs (colour picker, window picker) and pulse-on-jump exist and are unit-tested, but no route reaches them — nothing calls `open_search`, neither dialog type implements `Render`, the shell installs no key listener for search, and the overlay ignores the motion value handed to it. *Not built, and deliberately inert:* keybind capture (the 38 keybind buttons and the search rail button render with a click handler that does nothing, following `Control::Button`'s rule that a control stays inert rather than pretending) and the loader, of which only two unread copy constants exist and no state machine. The consequence is procedural: no builder may describe a surface as working without a test that reaches it from a window, and no doc comment may claim it is wired. Deliberate debt is auditable; a doc comment that says "wired" is not — and a register that lists more than exists is the same defect in the other direction. |
 
 The existing `gui-*.png` artifacts are **not** parity evidence: `scripts/New-GuiScreenshots.ps1`
 misnamed two of them and never captured Stats or Settings (section 8 item 9).
