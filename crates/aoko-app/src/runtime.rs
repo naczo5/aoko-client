@@ -646,7 +646,7 @@ impl InputBackend for ForegroundGated {
 /// a headless runtime and every test reach no platform service at all: the controller's default
 /// report refuses both. Each refusal is logged once — no injection at `warn`, because the loops
 /// run and cannot act, and no window sense at `info`, because the loops still act on the
-/// fail-closed sense.
+/// conservative sense.
 ///
 /// The reachable surfaces are the platform's own implementations, not wrappers: nothing in this
 /// crate re-implements an input call or a window query. The one addition is the gate —
@@ -702,8 +702,9 @@ fn platform_surfaces(
 /// bridge's `capabilities` frame is stored (the ingest decodes it and drops it today).
 ///
 /// The window half is [`crate::runtime::select_loop_surfaces`]'s decision: `windows` is `None`
-/// exactly when that function refused the surface, and then both window questions answer
-/// fail-closed rather than guessing.
+/// exactly when that function refused the surface. Without it the game can never be confirmed
+/// foreground, so `minecraft_active` answers `false`, and the cursor answers the conservative
+/// "drawn" that parks every consumer rather than the permissive "hidden".
 struct ControllerSense {
     controller: Arc<AppController>,
     windows: Option<Arc<dyn WindowInspector>>,
