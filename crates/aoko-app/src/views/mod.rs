@@ -28,6 +28,7 @@ pub mod relative_time;
 pub mod servers_logic;
 pub mod servers_state;
 pub mod servers_view;
+pub mod stats_view;
 pub mod store_recovery;
 pub mod stores;
 pub mod tab_copy;

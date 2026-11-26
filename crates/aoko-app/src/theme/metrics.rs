@@ -107,6 +107,46 @@ pub mod slider {
     pub const DRAG_DOT_SCALE: f32 = 1.2;
 }
 
+/// Stats tab (`MainWindow.xaml:1440-1515`).
+///
+/// The tab is the one place the markup puts a `Width` on a `ControlCardStyle`
+/// border and a fixed height on a chart row, so these are the numbers a pixel
+/// diff of the tab would catch. The bar heights themselves are not here: they are
+/// `aoko_protocol::stats`'s `MAX_BAR_HEIGHT` scaled by the tracker, because the
+/// 124 px row is the space a bar is drawn in, not the bar.
+pub mod stats {
+    /// The three summary borders' `Width` (`:1442`, `:1448`, `:1457`).
+    pub const SUMMARY_CARD: f32 = 150.0;
+    /// The `0,0,8,8` margin each of them and the Reset button carries.
+    pub const SUMMARY_GAP: f32 = 8.0;
+    /// The summary value's `FontSize="20"` (`:1445`).
+    pub const VALUE: f32 = 20.0;
+    /// The value's `Margin="0,4,0,0"` (`:1445`).
+    pub const VALUE_GAP: f32 = 4.0;
+    /// The sub-line's `Margin="0,2,0,0"` (`:1452`, `:1461`).
+    pub const SUBLINE_GAP: f32 = 2.0;
+    /// "Reset Stats" `Height="40"`, `Padding="14,6"` (`:1466-1467`).
+    pub const RESET_HEIGHT: f32 = 40.0;
+    /// The header's `Margin="0,0,0,10"` (`:1472`).
+    pub const HEADER_GAP: f32 = 10.0;
+    /// "CPS Distribution" `FontSize="16"` (`:1473`).
+    pub const HEADING: f32 = 16.0;
+    /// The chart box: `CornerRadius="6" Padding="8" MinHeight="158"` (`:1478`).
+    pub const CHART_RADIUS: f32 = 6.0;
+    pub const CHART_PADDING: f32 = 8.0;
+    pub const CHART_MIN_HEIGHT: f32 = 158.0;
+    /// One column (`:1488-1496`): a 124 px bar row, an 18×h bar of radius 3, a
+    /// 3 px side margin, and a 9 px label 5 px under the bar.
+    pub const BAR_AREA: f32 = 124.0;
+    pub const BAR_WIDTH: f32 = 18.0;
+    pub const BAR_RADIUS: f32 = 3.0;
+    pub const BUCKET_GAP: f32 = 3.0;
+    pub const LABEL: f32 = 9.0;
+    pub const LABEL_GAP: f32 = 5.0;
+    /// "No samples yet" `FontSize="12"` (`:1501`).
+    pub const EMPTY: f32 = 12.0;
+}
+
 /// Command-search overlay geometry.
 ///
 /// `CommandSearchOverlay.xaml.cs:24-32`. The inventory's correction matters here:
@@ -153,6 +193,15 @@ mod tests {
         );
         // And vertically it is centred.
         assert_eq!((switch::TRACK_HEIGHT - switch::THUMB) / 2.0, switch::INSET);
+    }
+
+    #[test]
+    fn the_three_summary_cards_stay_on_one_row_at_the_default_width() {
+        // The wrap panel has room for content minus the rail and the tab's own 12 px
+        // margin. Three 150 px cards and the two 8 px gaps have to fit, or the C#
+        // layout (which never wraps at this width) stops matching.
+        let content = window::WIDTH - rail::WIDTH - rail::GAP - 2.0 * 12.0;
+        assert!(3.0 * stats::SUMMARY_CARD + 2.0 * stats::SUMMARY_GAP <= content);
     }
 
     #[test]
