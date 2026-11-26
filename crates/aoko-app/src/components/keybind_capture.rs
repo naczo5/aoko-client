@@ -274,6 +274,33 @@ impl Render for KeybindCapture {
 
 #[cfg(test)]
 mod tests {
+    //! Why every test here activates its window, and what a focus listener that never fires
+    //! actually looks like.
+    //!
+    //! A focus listener needs three things at once, and the third is invisible when it is
+    //! missing: the subscription must be active, the frame must be drawn, and the **window
+    //! must be active**. The first two are what the obvious failure modes are about — a
+    //! listener registered during a draw is `Pending` until its deferred activation runs
+    //! (`crates/gpui/src/app/context.rs:576-587`, `src/subscription.rs:194-231`), and
+    //! `Window::blur` only clears the focus and marks the frame dirty (`src/window.rs:2785-2800`),
+    //! so the blur is delivered by the next draw rather than by the call. The third is the
+    //! one that costs an afternoon, because a listener that is registered, active and
+    //! invoked still reports nothing:
+    //!
+    //! * `Frame::new` starts with `window_active: false` (`crates/gpui/src/window.rs:1109`).
+    //! * Each frame copies the platform's bit in: `next_frame.window_active = self.active.get()`
+    //!   (`:3910`), and `self.active` is written only by the platform's activation callback
+    //!   (`:2238`), not by opening a window.
+    //! * The focus dispatch blanks both paths of the event for an inactive window
+    //!   (`:3973-3981`): `previous_focus_path` and `current_focus_path` are each replaced by
+    //!   `Default::default()` when their frame was not active.
+    //! * `Context::on_blur` filters on `event.previous_focus_path.last() == Some(&focus_id)`
+    //!   (`crates/gpui/src/app/context.rs:579-580`), so an empty path can never match.
+    //!
+    //! The result is indistinguishable, from the assertion's side, from a listener that was
+    //! never registered: both produce an empty result list. Drawing more frames cannot help,
+    //! which is why `Probe::activate` exists and why every test calls it from `probe()`.
+
     use std::sync::{Arc, Mutex};
 
     use gpui::{
@@ -339,23 +366,20 @@ mod tests {
             });
         }
 
-        /// Makes the test window the active one, which is what a focus listener needs.
+        /// Activates the test window and confirms it took, which is what a focus listener
+        /// needs. The chain that makes this necessary is in the module docs.
         ///
-        /// A fresh test window is inactive: `Frame::new` starts with `window_active: false`
-        /// (`crates/gpui/src/window.rs:1109`) and each frame copies the platform's bit in
-        /// (`:3910`). The focus dispatch then blanks both paths of the event for an inactive
-        /// window (`:3973-3981`), and `Context::on_blur` filters on
-        /// `previous_focus_path.last() == Some(&focus_id)`
-        /// (`crates/gpui/src/app/context.rs:579-580`), which an empty path can never satisfy
-        /// — that is why no number of draws delivers a blur to an inactive window.
-        /// Activation goes through the platform callback on the foreground executor, which
-        /// is why it needs the pump before the next draw.
+        /// Activation goes through the platform callback on the foreground executor, hence
+        /// the pump: `Window::activate_window` (`crates/gpui/src/window.rs:7275`) reaches
+        /// `TestPlatform::set_active_window`, which spawns the task that calls
+        /// `on_active_status_change` and so writes `self.active`.
         fn activate(&mut self) {
             self.visual.update(|window, _| window.activate_window());
             self.visual.run_until_parked();
-            // `is_window_active` reads the flag the callback writes, not the frame, so this
-            // fails loudly if activation did not take instead of leaking into an empty
-            // focus path two frames later.
+            // The tripwire, and its whole purpose is the error message: `is_window_active`
+            // reads the flag the callback writes rather than the frame, so a failed
+            // activation fails here *by name* instead of surfacing two frames later as an
+            // empty result list, which looks exactly like a missing listener.
             self.visual.update(|window, _| {
                 assert!(
                     window.is_window_active(),
