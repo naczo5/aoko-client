@@ -84,6 +84,8 @@ pub mod overlay;
 pub mod perf;
 pub mod picker;
 pub mod reuse;
+/// The runtime owner: the `AppController` every module switch reads and writes.
+pub mod runtime;
 pub mod shell;
 pub mod theme;
 pub mod views;

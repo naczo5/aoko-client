@@ -26,8 +26,9 @@
 //!   ported.
 //! * **Persistence.** Sliders, checkboxes and combos resolve their `bind` path
 //!   against the `Profile` through [`crate::views::bindings`] and write it back;
-//!   switches go through [`crate::views::bindings`]' reverse map into
-//!   [`ModuleToggles`] on the press. [`Shell::new`] is the startup path: it opens
+//!   a module switch goes through [`crate::runtime::Runtime`] into the
+//!   [`AppController`] this shell owns, and a non-module switch straight into the
+//!   `Profile`. [`Shell::new`] is the startup path: it opens
 //!   [`crate::views::profiles::Profiles`], migrates legacy profiles, reads the
 //!   auto-save slot and applies it, and the two close paths write it back — the same
 //!   cadence as `MainWindow.xaml.cs:407-412` (load once) and `:1861-1871` (save on
@@ -36,16 +37,18 @@
 //!   a bridge wire type.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::{div, px, AnyElement, Context, Entity, MouseButton, Render, SharedString, Window};
 
-use aoko_core::clicker::toggles::{self, ModuleToggles};
+use aoko_core::app::AppController;
 use aoko_core::search;
 
 use crate::components;
 use crate::components::text_input::TextInput;
 use crate::components::ButtonVariant;
+use crate::runtime::Runtime;
 use crate::theme::metrics;
 use crate::theme::motion::{self, Motion};
 use crate::theme::Theme;
@@ -62,7 +65,9 @@ use crate::views::stores::{NoStore, StoreBridge};
 pub struct Shell {
     theme: Theme,
     tab: usize,
-    toggles: ModuleToggles,
+    /// The one owner of module state: every switch reads and writes the controller
+    /// inside it. See [`crate::runtime`] for why there is no second copy.
+    runtime: Runtime,
     /// The session override for every `bind` path: the capture harness seeds it and a
     /// press writes it. A value here wins over the profile snapshot below.
     draft: BTreeMap<&'static str, f64>,
@@ -156,13 +161,30 @@ impl Shell {
     /// A store that cannot be opened does not stop the app and is not replaced by a
     /// silent default: [`Profiles::store_error`] carries the classified reason and
     /// the Settings card shows it.
+    ///
+    /// This is also where the runtime is built, because it is the one constructor that
+    /// runs with a window in front of it: [`Runtime::probed`] is the only caller of
+    /// `aoko_platform::probe_capabilities`, and the report feeds both the controller and
+    /// the "Open Configs Folder" row's `open_path`. `Shell::start` deliberately does
+    /// not probe — three tests call it with a temporary store — so a test-built shell
+    /// owns a [`Runtime::headless`] controller and the suite cannot depend on the
+    /// machine. [`Shell::new`] needs no `Context` for either step: the controller is not
+    /// an entity, so nothing here waits for `cx.new`.
     #[must_use]
     pub fn from_system(theme: Theme) -> Self {
-        Self::start(
+        let capabilities = aoko_platform::probe_capabilities();
+        let mut shell = Self::start(
             theme,
             Profiles::from_system(),
             crate::views::prefs::PrefsFile::from_system(),
-        )
+        );
+
+        // `CapabilityReport::open_path` is the flag the "Open Configs Folder" row is
+        // keyed on: Linux needs `xdg-open` on `PATH`, and a session without it must
+        // not look like it can reveal the folder.
+        shell.open_configs_folder = capabilities.open_path;
+        shell.runtime = Runtime::new(Arc::new(AppController::new(capabilities)));
+        shell
     }
 
     /// The startup body, with both I/O sources handed in.
@@ -171,6 +193,9 @@ impl Shell {
     /// temporary store and a temporary preferences file, which is what pins the
     /// startup *read*. Before this seam, `cfg(test)` skipped the whole block, so
     /// deleting the gate write from startup left a green suite.
+    ///
+    /// It probes nothing: the capability report is [`Shell::from_system`]'s to fetch, so
+    /// a test that calls this cannot observe the machine it runs on.
     fn start(
         theme: Theme,
         (profiles, profile): (Profiles, aoko_protocol::profile::Profile),
@@ -184,10 +209,6 @@ impl Shell {
         }
 
         let mut shell = Self::with_profiles(theme, profiles).with_loaded_profile(profile);
-        // `CapabilityReport::open_path` is the flag the "Open Configs Folder" row is
-        // keyed on: Linux needs `xdg-open` on `PATH`, and a session without it must
-        // not look like it can reveal the folder.
-        shell.open_configs_folder = aoko_platform::probe_capabilities().open_path;
 
         // Section 12 decision 3: the client setting that gates every animation. It is
         // applied to `theme::motion` here, before the first frame, so a user who
@@ -246,7 +267,9 @@ impl Shell {
         let mut shell = Self {
             theme,
             tab: 0,
-            toggles: ModuleToggles::new(),
+            // The capture harness and every unit test land here, so the controller is
+            // built without a probe; `from_system` replaces it with the probed one.
+            runtime: Runtime::headless(),
             draft: BTreeMap::new(),
             profile: aoko_protocol::profile::Profile::default(),
             values: BTreeMap::new(),
@@ -609,20 +632,31 @@ impl Shell {
 
     /// Turns one module on or off. Refuses nothing: the catalogue decides what a
     /// switch may show, and an unavailable row is drawn read-only by its card.
+    ///
+    /// The flip lands in the controller ([`crate::runtime::Runtime::flip_module`]), not
+    /// in a field of this view, which is what makes it observable to anything else
+    /// holding an `Arc<AppController>`. A click on a row that names no module boolean
+    /// changes nothing and does not repaint.
     pub fn toggle_module(&mut self, module_id: &str, cx: &mut Context<Self>) {
-        let Some(canonical) = toggles::canonical_id(module_id) else {
-            return;
-        };
-        let next = !self.toggles.is_enabled(canonical);
-        self.toggles.set_enabled(canonical, next);
-        cx.notify();
+        if self.runtime.flip_module(module_id) {
+            cx.notify();
+        }
     }
 
     /// The switch state for a card, resolved through the search index's
     /// `toggle_property` map so a card and its overlay row cannot disagree.
     #[must_use]
     pub fn is_module_on(&self, module_id: &str) -> bool {
-        self.toggles.is_enabled(module_id)
+        self.runtime.module_enabled(module_id)
+    }
+
+    /// The `AppController` this shell writes through.
+    ///
+    /// The same `Arc` a transport owner or a click loop would hold, so a caller can
+    /// watch a switch flip without asking this view what it drew.
+    #[must_use]
+    pub fn controller(&self) -> &Arc<AppController> {
+        self.runtime.controller()
     }
 
     /// A control value: the session override, else the profile, else `default`.
@@ -744,10 +778,11 @@ impl Shell {
     }
 
     /// Seeds one module's switch without notifying, for the capture harness.
+    ///
+    /// It writes the same controller a click writes, so a seeded screenshot and a
+    /// clicked switch cannot drift apart.
     pub fn seed_module(&mut self, module_id: &str, on: bool) {
-        if let Some(canonical) = toggles::canonical_id(module_id) {
-            self.toggles.set_enabled(canonical, on);
-        }
+        self.runtime.set_module_enabled(module_id, on);
     }
 
     /// The command-search state.
@@ -1280,9 +1315,14 @@ impl Shell {
     /// the text is a pure function of (armed, enabled count), so it is cached against
     /// those two values rather than formatted per call. `perf::tests` counts the
     /// difference.
+    ///
+    /// Both inputs are read from the controller, and reading them allocates nothing: the
+    /// count is one `is_module_enabled` per catalog entry and the armed bit is one more.
+    /// That is the same per-frame work the old `ModuleToggles` arithmetic did (one set
+    /// lookup per entry), now against the one owner of module state.
     fn chip_text(&mut self) -> SharedString {
-        let enabled = self.toggles.enabled_count();
-        let key = (self.toggles.armed(), enabled);
+        let enabled = self.runtime.enabled_count();
+        let key = (self.runtime.armed(), enabled);
 
         if let Some((cached, text)) = &self.chrome.chip {
             if *cached == key {
@@ -1714,10 +1754,10 @@ impl Shell {
             SwitchTarget::Profile(bind) => self.value(bind, 0.0) > 0.5,
         };
         // `switch` is an interactive element and attaches `.id()`/`.on_click()`
-        // internally, so this is where the click is routed: a module flag flips
-        // `ModuleToggles`, a profile boolean writes its own bind through
-        // `bindings`. Every switch has one of the two targets — the old fallback to
-        // the card's module silently misrouted five of them.
+        // internally, so this is where the click is routed: a module flag goes to the
+        // controller through [`Runtime::flip_module`], a profile boolean writes its own
+        // bind through `bindings`. Every switch has one of the two targets — the old
+        // fallback to the card's module silently misrouted five of them.
         let handle = entity.clone();
         let switch = components::switch(
             crate::reuse::stitched(card.id, "-", bind),
@@ -2400,7 +2440,8 @@ fn resize_strips() -> [ResizeStrip; 8] {
 /// those painted OFF over a default profile that says ON.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SwitchTarget {
-    /// A catalogue module flag: the switch flips [`ModuleToggles`].
+    /// A catalogue module flag: the switch flips it in the controller through
+    /// [`Runtime::flip_module`].
     Module(&'static str),
     /// A profile boolean with no module: the switch writes this bind through
     /// [`crate::views::bindings`].
@@ -3397,6 +3438,75 @@ mod tests {
             !cx.read(|cx| shell.read(cx).is_module_on("autoclicker")),
             "a second click flips it back"
         );
+    }
+
+    /// A switch click has to be visible on the controller, not only on a field the view
+    /// happens to own.
+    ///
+    /// The shell used to keep its own `ModuleToggles`, so a test could only ask the view
+    /// what it had drawn. Now the state lives in the `Arc<AppController>` inside
+    /// [`Runtime`], and this holds a second handle to it — the same handle a transport
+    /// owner or a click loop would take — and reads the flip without going through
+    /// `Shell` at all.
+    #[gpui::test]
+    fn a_switch_click_is_observable_through_the_controller(cx: &mut gpui::TestAppContext) {
+        use aoko_protocol::module_catalog::EnabledFlag;
+        use gpui::{Modifiers, WindowOptions};
+
+        let shell = cx.update(|cx| cx.new(|_| Shell::new(Theme::slate())));
+        let window = cx.update(|cx| {
+            cx.open_window(WindowOptions::default(), |_, _| shell.clone())
+                .expect("test window")
+        });
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let controller = cx.read(|cx| Arc::clone(shell.read(cx).controller()));
+        assert!(!controller.is_module_enabled(EnabledFlag::LeftClick));
+
+        let bounds = visual
+            .debug_bounds("switch-IsArmed")
+            .expect("the switch renders with its debug selector");
+        visual.simulate_click(bounds.center(), Modifiers::default());
+
+        assert!(
+            controller.is_module_enabled(EnabledFlag::LeftClick),
+            "the click reached AppController::set_module_enabled"
+        );
+        assert!(
+            !controller.is_module_enabled(EnabledFlag::AutoTotem),
+            "the AutoClicker switch flips its own flag and no other"
+        );
+
+        let bounds = visual
+            .debug_bounds("switch-IsArmed")
+            .expect("the switch is still there");
+        visual.simulate_click(bounds.center(), Modifiers::default());
+        assert!(
+            !controller.is_module_enabled(EnabledFlag::LeftClick),
+            "a second click flips it back through the same owner"
+        );
+    }
+
+    /// The suite must not depend on the machine it runs on.
+    ///
+    /// A shell built for a test owns a controller that probed nothing, and its capability
+    /// report says so: `AppController::default` is built over
+    /// `CapabilityReport::transport_only(SessionKind::None)`, whereas a probe on this
+    /// machine would name X11 or Wayland. If the probe ever moves back into
+    /// [`Shell::start`], this test fails on a developer box and not only in CI.
+    #[gpui::test]
+    fn a_test_shell_owns_a_controller_that_probed_nothing(cx: &mut gpui::TestAppContext) {
+        use aoko_platform::SessionKind;
+
+        let shell = cx.update(|cx| cx.new(|_| Shell::new(Theme::slate())));
+        let session = cx.read(|cx| shell.read(cx).controller().capabilities().session);
+        let open_path = cx.read(|cx| shell.read(cx).controller().capabilities().open_path);
+
+        assert_eq!(session, SessionKind::None);
+        assert!(!open_path);
     }
     /// The header button is WPF's `Width="140"` on the button itself
     /// (`MainWindow.xaml:359`), not a 140 px slot with a content-sized button inside it.
