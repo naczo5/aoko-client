@@ -1,15 +1,14 @@
 //! Text fields.
 //!
-//! **There is no text-field widget at the pin** (`UI_INVENTORY.md` row 9). The only
-//! seam is `EntityInputHandler` (`gpui/src/input.rs:26`), so a real editable field
-//! needs an entity, focus tracking, an IME handler and hand-drawn caret and
-//! selection. This component is the *visual* layer only: it draws the box, the text,
-//! the placeholder and — when focused — a caret. It reports clicks so the shell can
-//! focus its own state.
+//! **There is no text-field widget at the pin** (`UI_INVENTORY.md` row 9). This module
+//! is the *visual* layer only: it draws the box, the text, the placeholder and — when
+//! `focused` is passed in — a caret, and it reports clicks so an owner can move focus.
 //!
-//! Not implemented: editing, IME, selection. When the shell needs a real field, this
-//! is where `EntityInputHandler` attaches; the geometry and colours are already the
-//! measured ones.
+//! For a field the user can actually type into, use [`super::text_input::TextInput`]:
+//! an entity that implements `EntityInputHandler`, tracks its own focus and caret, and
+//! reports edits through a callback. Reach for this module when the value is drawn but
+//! not edited (a read-only row, the overlay's query line before the shell takes it
+//! over, a capture).
 
 use gpui::prelude::*;
 use gpui::{div, px, AnyElement, App, ClickEvent, CursorStyle, IntoElement, SharedString, Window};

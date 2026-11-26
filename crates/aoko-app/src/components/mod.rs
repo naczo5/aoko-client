@@ -37,6 +37,7 @@ pub mod progress;
 pub mod scroll;
 pub mod slider;
 pub mod switch;
+pub mod text_input;
 pub mod tooltip;
 
 pub use button::{button, ButtonVariant};
@@ -52,6 +53,7 @@ pub use progress::{progress, progress_indeterminate};
 pub use scroll::scroll;
 pub use slider::{slider, DragCoalescer, SliderGeometry};
 pub use switch::switch;
+pub use text_input::{TextEdit, TextInput};
 pub use tooltip::{tooltip, Tooltip};
 
 /// Component-internal glyphs and labels.
