@@ -48,8 +48,8 @@ use std::time::Instant;
 
 use gpui::prelude::*;
 use gpui::{
-    div, px, AnyElement, App, Context, Entity, KeyDownEvent, MouseButton, Render, SharedString,
-    Window,
+    div, px, AnyElement, App, Context, Entity, FocusHandle, KeyDownEvent, MouseButton, Render,
+    SharedString, Window,
 };
 
 use aoko_core::app::AppController;
@@ -190,6 +190,20 @@ pub struct Shell {
     /// The dialog reports and does not dismiss itself, so this is the host's half: it is cleared
     /// on any result, and the row is written only for an acceptance.
     picker: Option<(&'static str, Entity<ColorPickerView>)>,
+    /// The shell's own focus handle: what holds the keyboard when no control does.
+    ///
+    /// This is what makes the window keys work at all. GPUI dispatches a key event from
+    /// `Window::focus`'s node up to the dispatch tree's *synthetic* root, and that root carries no
+    /// listeners (`window.rs:7113-7121`, `key_dispatch.rs:611-614`). With nothing focused the walk
+    /// therefore starts and ends at a node that has no `on_key_down` on it, so the root listener
+    /// this shell installs is never called: Ctrl+K on a freshly opened window did nothing, and
+    /// Escape could not reach the colour picker's host. Tracking this handle on the root element
+    /// and holding it whenever nothing else does puts the shell's own tree back on the path.
+    ///
+    /// Anything that takes focus — a text field, a keybind capture — takes it away from here for
+    /// as long as it holds it, which is the same rule [`Shell::search_gate`] reads. `None` until
+    /// the first frame, because the handle needs a context the constructors do not have.
+    window_focus: Option<FocusHandle>,
     /// The new-config name box's text (`NewConfigNameBox`, `MainWindow.xaml:1552`).
     config_name: String,
     /// Whether the session can hand a folder to the file manager
@@ -447,6 +461,8 @@ impl Shell {
             swatches: HashMap::new(),
             // Closed: a picker exists only between a swatch press and the report that ends it.
             picker: None,
+            // Filled on the first frame, where a context is available; see the field docs.
+            window_focus: None,
             config_name: String::new(),
             open_configs_folder: false,
             // Under `cfg(test)` and `capture` nothing has changed the process gate, so
@@ -2257,6 +2273,33 @@ impl Shell {
         facts
     }
 
+    /// Holds the shell's own focus when nothing else does, so the window keys have somewhere to
+    /// land.
+    ///
+    /// Run at the top of every frame, and cheap: `Window::focus` returns immediately when this
+    /// handle already has the keyboard (`window.rs:2770-2773`).
+    ///
+    /// The "when nothing else does" half is not politeness. A text field or a keybind capture that
+    /// holds focus owns the keyboard, and pulling it back here would make the box the user is
+    /// typing in stop receiving characters — the gate in [`Shell::search_gate`] would then say a
+    /// text field is focused while nothing it types arrives. So this only fills the empty case.
+    fn hold_window_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) -> FocusHandle {
+        let handle = match &self.window_focus {
+            Some(handle) => handle.clone(),
+            None => {
+                let handle = cx.focus_handle();
+                self.window_focus = Some(handle.clone());
+                handle
+            }
+        };
+
+        if window.focused(cx).is_none() {
+            window.focus(&handle, cx);
+        }
+
+        handle
+    }
+
     /// `CanOpenCommandSearch`, as far as this port can answer it.
     ///
     /// `capturing_keybind` covers the managed hook flag *and* both pending action binds,
@@ -2440,6 +2483,11 @@ impl Render for Shell {
         // [`Shell::close_window`], which saves before quitting.
         self.ensure_close_hook(window, cx);
 
+        // The window keys live on the root element, and a key event only reaches it when the
+        // shell's own handle is on the focus path. This is what holds it whenever nothing else
+        // does; see [`Shell::hold_window_focus`].
+        let window_focus = self.hold_window_focus(window, cx);
+
         // The text fields are entities, so they exist only from the first render on;
         // `Shell::new` has no context to create them with. Syncing here is what makes
         // a state change (an add form prefill, a cleared form) reach the widget
@@ -2524,10 +2572,17 @@ impl Render for Shell {
             // inherits. Installing the fonts without asking for the family would leave
             // every measurement to whatever fontconfig happens to resolve.
             .font_family(crate::assets::UI_FAMILY)
-            // The window-level keys, all of them: Ctrl+K, Escape, type-to-open and Enter.
-            // GPUI dispatches a key from the focused node up the tree, and with nothing
-            // focused the path starts at the root, so this listener is the one place a
-            // keystroke is guaranteed to arrive.
+            // The shell tracks its own focus handle so the listener below is on the key path even
+            // when no control holds focus. GPUI starts a key event at `Window::focus` and walks up
+            // to the dispatch tree's *synthetic* root, which carries no listeners
+            // (`window.rs:7113-7121`, `key_dispatch.rs:611-614`): with nothing focused the walk
+            // never passed through this element, so the window keys did nothing at all.
+            // [`Shell::hold_window_focus`] is what keeps this handle focused.
+            .id("shell-root")
+            .track_focus(&window_focus)
+            // The window-level keys, all of them: Ctrl+K, Escape, type-to-open and Enter. This is
+            // the one place a keystroke is guaranteed to arrive: the root is a focusable element
+            // and it holds the handle whenever no field does.
             .on_key_down({
                 let handle = entity.clone();
                 move |event, window, cx| {
