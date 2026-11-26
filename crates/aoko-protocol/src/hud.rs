@@ -104,7 +104,8 @@ impl HudLayout {
     ///
     /// Unknown ids are ignored: `HudElementId` is a closed set shared with the
     /// bridge, so routing an unknown id here is a programming error rather than a
-    /// wire case.
+    /// wire case. Ids match exactly, so a caller that folds case for a user has to do
+    /// it before calling in — see `index_of`.
     pub fn set(&mut self, element_id: &str, value: HudElementLayout) {
         let Some(index) = index_of(element_id) else {
             return;
@@ -163,6 +164,10 @@ impl HudLayout {
     /// A value that fails to parse falls back to that element's default, and
     /// every stored value is clamped — so a hand-edited profile cannot move an
     /// element off-screen.
+    ///
+    /// Ids match exactly, which is the managed `ContainsKey` rule: `"ModuleList"` is an
+    /// unknown id here, exactly as it was in `HudLayout.FromJson`, not a second spelling of
+    /// `modulelist`.
     #[must_use]
     pub fn from_json(node: &Value) -> Self {
         let mut layout = Self::new();
@@ -207,10 +212,17 @@ impl HudLayout {
     }
 }
 
+/// Looks up an element id, matching exactly.
+///
+/// Exactness is the managed rule, not an accident: `HudLayout.FromJson` tested
+/// `elements.ContainsKey(id)` against the lowercase ids in `HudElementId`, so `"ModuleList"`
+/// was an unknown id there and stayed the default. A profile file has to mean the same thing
+/// to both hosts, so a case-variant id is unknown here too. Any user-facing case folding
+/// belongs at the editor boundary, never in the wire parser.
 fn index_of(element_id: &str) -> Option<usize> {
     KNOWN_ELEMENT_IDS
         .iter()
-        .position(|known| known.eq_ignore_ascii_case(element_id))
+        .position(|known| *known == element_id)
 }
 
 fn clamp_coord(value: f64, fallback: f64) -> f64 {

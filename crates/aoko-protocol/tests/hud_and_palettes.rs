@@ -138,6 +138,37 @@ fn hud_layout_from_json_tolerates_missing_and_odd_values() {
 }
 
 #[test]
+fn hud_layout_ids_match_exactly_as_the_managed_reader_did() {
+    // `HudLayout.FromJson` skipped anything `elements.ContainsKey(id)` did not know, and the ids
+    // it knew are lowercase. A case-variant id was therefore unknown there and stayed the
+    // default; a profile file has to mean the same thing to both hosts.
+    let json: Value =
+        serde_json::from_str(r#"{"ModuleList":{"x":0.3},"modulelist":{"y":0.4}}"#).expect("json");
+    let layout = HudLayout::from_json(&json);
+    let default = HudLayout::new();
+
+    assert_eq!(
+        layout.get(element_id::MODULE_LIST).x,
+        default.get(element_id::MODULE_LIST).x,
+        "a case-variant id must not move the element"
+    );
+    assert_eq!(
+        layout.get(element_id::MODULE_LIST).y,
+        0.4,
+        "the exact id in the same document still applies"
+    );
+
+    // The editor boundary owns any user-facing case folding, not the parser: `set` is exact
+    // for the same reason.
+    let mut edited = HudLayout::new();
+    edited.set("MODULELIST", HudElementLayout::new(0.1, 0.1, 1.0));
+    assert_eq!(
+        edited, default,
+        "`set` must not accept a case variant either"
+    );
+}
+
+#[test]
 fn palettes_round_trip_through_their_file_format() {
     let palette = CustomPalette {
         name: "Stream".to_owned(),
