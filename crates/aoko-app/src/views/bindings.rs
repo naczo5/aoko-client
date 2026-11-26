@@ -496,7 +496,10 @@ mod tests {
 
         // Three binds have no profile field of their own: the two documented
         // exceptions, and `HudEditorActive`, which is the `hudeditor` module's toggle
-        // property (`aoko_core::search`) and lives in `ModuleToggles`, not the profile.
+        // property (`aoko_core::search`). Module state is not profile state: since
+        // 7abc858 the controller owns it (`AppController::is_module_enabled`), reached
+        // through `crate::runtime::Runtime`, so a switch on it writes there and not
+        // here.
         assert_eq!(
             values.len(),
             expected.len() - NON_PROFILE_BINDS.len() - 1,
