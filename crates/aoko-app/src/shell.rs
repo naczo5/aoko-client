@@ -1284,27 +1284,60 @@ impl Shell {
         }
     }
 
-    /// Drops the status line the binding's last capture wrote, and puts the button back on its
-    /// resting label.
+    /// Drops the status line the binding's last capture wrote.
     ///
     /// A capture that loses focus stores nothing, so the outcome on the row is stale: taking
     /// the line away is how the row reads the explanatory copy again.
     ///
-    /// The label is the other half and it is not reachable from the status line. The label lives
-    /// on the capture entity, and [`Shell::ensure_capture`] rebuilds that entity only when the
-    /// *profile's* key changes — which an abandoned capture never does. Leaving the entity in
-    /// place therefore left the button reading `Bind: [Press key or mouse...]` for good after
-    /// focus moved away, which is the failure this replaces the entity to fix.
+    /// The label is the other half, and it is repaired by the *next frame* rather than here:
+    /// [`Shell::ensure_capture`] rebuilds a button that has stopped listening and is still
+    /// painting its pending line. This callback runs inside the capture entity's own update, so
+    /// dropping its entity from here would be the one place the file forbids — the rebuild has to
+    /// happen after the update unwinds, which is exactly what the frame boundary gives.
     fn clear_capture_status(&mut self, target: KeyTarget, cx: &mut Context<Self>) {
         match target {
             KeyTarget::Module(_) => self.keybind_conflict = None,
             KeyTarget::Action(which) => self.action_status[status_slot(which)] = None,
         }
-        // A fresh entity, built from the same profile key the old one held: the key is unchanged,
-        // so nothing but the label differs, and that is exactly the part to rebuild.
-        self.captures.remove(&target);
-        self.ensure_capture(target, cx);
         cx.notify();
+    }
+
+    /// Ends a capture whose button no longer holds the keyboard.
+    ///
+    /// The component listens for its own blur and reports `Abandoned` through
+    /// [`Shell::clear_capture_status`], and that is the ordinary path. This is the invariant
+    /// beside it, for the case that path cannot see: `Window::blur` only clears `Window::focus`
+    /// (`window.rs:2785-2800`), the blur is delivered by the next frame's listener dispatch, and
+    /// that dispatch compares the previous and current focus *paths* — so a focus move made during
+    /// the same frame (the root reclaiming itself, a modal closing) can leave the listener without
+    /// the event it needs. A capture still listening with no focus is orphaned either way: it
+    /// cannot receive a key, so nothing it does can ever be reported.
+    ///
+    /// The button is replaced rather than told to cancel. `cancel` reports through this shell's
+    /// own callback, and that callback would re-enter this update; replacing the entity from the
+    /// frame is safe because the frame is not inside its update. Nothing is stored either way,
+    /// which is the property that matters: focus loss is not a key.
+    ///
+    /// Allocation-free on an idle frame: the scan clones nothing until a capture is stale.
+    fn abandon_unfocused_captures(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let stale: Vec<KeyTarget> = self
+            .captures
+            .iter()
+            .filter(|(_, held)| {
+                let capture = held.capture.read(cx);
+                capture.is_capturing() && !capture.focus_handle().is_focused(window)
+            })
+            .map(|(target, _)| *target)
+            .collect();
+
+        for target in stale {
+            match target {
+                KeyTarget::Module(_) => self.keybind_conflict = None,
+                KeyTarget::Action(which) => self.action_status[status_slot(which)] = None,
+            }
+            self.captures.remove(&target);
+            self.ensure_capture(target, cx);
+        }
     }
 
     /// The capture button for one binding, as the tree paints it.
@@ -2516,6 +2549,12 @@ impl Render for Shell {
         // a capture holds focus across frames, so its entity outlives the paint that drew it,
         // and this is also where a profile that changed rebuilds one.
         self.sync_keybind_captures(cx);
+        // A capture that is listening while its button holds no focus can never finish: it
+        // receives no keys, and the blur that would end it is only delivered if GPUI's focus-path
+        // comparison sees the path shrink (`window.rs:3944-3995`). The frame is where the
+        // condition is checkable without depending on that. See
+        // [`Shell::abandon_unfocused_captures`].
+        self.abandon_unfocused_captures(window, cx);
         // The add-block box is an entity too, and for the same reason it is created here
         // rather than in `Shell::new`.
         self.ensure_block_add(cx);
