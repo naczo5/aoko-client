@@ -72,7 +72,7 @@ fn render_row(
     };
 
     let mut card = components::card(theme)
-        .id(SharedString::from(format!("server-card-{index}")))
+        .id(crate::reuse::indexed("server-card", index))
         .border_1()
         .border_color(border)
         .cursor_pointer()
@@ -108,7 +108,7 @@ fn render_row(
                 .child(
                     // The chip is also the row's ping button (`LatencyChip_Click`).
                     div()
-                        .id(SharedString::from(format!("server-chip-{index}")))
+                        .id(crate::reuse::indexed("server-chip", index))
                         .cursor_pointer()
                         .on_mouse_down(MouseButton::Left, {
                             let id = row.id.clone();
@@ -158,7 +158,7 @@ pub fn render(
     entity: &Entity<Shell>,
     tab_index: usize,
 ) -> AnyElement {
-    let mut body = components::scroll(SharedString::from(format!("tab-scroll-{tab_index}")))
+    let mut body = components::scroll(crate::reuse::indexed("tab-scroll", tab_index))
         .flex_col()
         .p(px(12.0))
         .gap(px(8.0));

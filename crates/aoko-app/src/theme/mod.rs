@@ -247,6 +247,22 @@ impl Theme {
         slate()
     }
 
+    /// One palette's accent, without building the palette.
+    ///
+    /// Port of the same lookup [`Theme::by_name`] does, for a caller that needs a single
+    /// colour: the Settings tab's preview rows read only the accent, and cloning a whole
+    /// `Theme` per row per frame allocated its `String` name eighteen times a frame.
+    #[must_use]
+    pub fn accent_by_name(name: &str) -> Color {
+        let trimmed = name.trim();
+        let table = builtins();
+        table
+            .iter()
+            .find(|theme| theme.name.eq_ignore_ascii_case(trimmed))
+            .or_else(|| table.first())
+            .map_or(Color::TRANSPARENT, |theme| theme.accent)
+    }
+
     /// Palette names in table order, which is the order the Settings tab lists them.
     #[must_use]
     pub fn builtin_names() -> Vec<&'static str> {

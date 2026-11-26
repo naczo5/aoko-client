@@ -111,6 +111,22 @@ pub struct Shell {
     /// either stores the request or reports why it cannot.
     pending_join: Option<String>,
     pending_account_switch: Option<String>,
+    /// The title bar's strings, with the values they were built from.
+    chrome: ChromeCache,
+}
+
+/// The two strings the chrome shows, cached against what they say.
+///
+/// `Render::render` asks for the chip text twice — the title bar and the rail footer —
+/// and for the title once. Both change only when a toggle or the tab does, so keeping
+/// the last value with its inputs turns three `format!`s per frame into two
+/// `SharedString` clones, which allocate nothing.
+#[derive(Default)]
+struct ChromeCache {
+    /// `armed · 7 on`, keyed by (armed, enabled count).
+    chip: Option<((bool, usize), SharedString)>,
+    /// `Combat · armed · 7 on`, keyed by (tab index, chip text).
+    title: Option<((usize, SharedString), SharedString)>,
 }
 
 impl Shell {
@@ -251,6 +267,7 @@ impl Shell {
             close_hook_installed: false,
             pending_join: None,
             pending_account_switch: None,
+            chrome: ChromeCache::default(),
         };
         shell.reload_accounts();
         shell.reload_servers();
@@ -564,6 +581,14 @@ impl Shell {
         copy::TABS.get(self.tab).map_or("", |tab| tab.name)
     }
 
+    /// The saved virtual key for one module, or `0` when the profile has none.
+    ///
+    /// The render path asks for this rather than for the formatted label: the label is a
+    /// pure function of the key, so [`crate::reuse::by_number`] can memoise it.
+    fn module_key(&self, module: &'static str) -> i32 {
+        self.profile.module_keys.get(module).copied().unwrap_or(0)
+    }
+
     /// Shows one tab by index; out of range is ignored.
     pub fn select_tab(&mut self, index: usize, cx: &mut Context<Self>) {
         if index < copy::TABS.len() && index != self.tab {
@@ -618,10 +643,18 @@ impl Shell {
     /// The profile is the persisted shape: a restart that loads it shows the value.
     /// A path with no field behind it stays in the session override, which is what the
     /// two `NON_PROFILE_BINDS` in [`crate::views::bindings`] are.
+    ///
+    /// Section 6's "`cx.notify()` scoped to entities whose displayed fields changed":
+    /// a slider drag coalesces to 25 ms but still delivers repeats of the same value at
+    /// the ends of its travel, and each one used to repaint the whole shell. The paint
+    /// is now conditional on the displayed number actually moving.
     pub fn set_value(&mut self, bind: &'static str, value: f64, cx: &mut Context<Self>) {
+        let changed = self.draft.get(bind).copied() != Some(value);
         self.draft.insert(bind, value);
         self.apply_control(bind, crate::views::bindings::ControlValue::Number(value));
-        cx.notify();
+        if changed {
+            cx.notify();
+        }
     }
 
     /// Writes one value into the profile and refreshes the snapshot.
@@ -642,10 +675,17 @@ impl Shell {
     }
 
     /// Records a checkbox, which the profile stores as a boolean.
+    ///
+    /// Like [`Shell::set_value`], the paint is conditional: a press that sets the value
+    /// the checkbox already shows changes nothing visible.
     pub fn set_checked(&mut self, bind: &'static str, on: bool, cx: &mut Context<Self>) {
-        self.draft.insert(bind, if on { 1.0 } else { 0.0 });
+        let stored = if on { 1.0 } else { 0.0 };
+        let changed = self.draft.get(bind).copied() != Some(stored);
+        self.draft.insert(bind, stored);
         self.apply_control(bind, crate::views::bindings::ControlValue::Toggle(on));
-        cx.notify();
+        if changed {
+            cx.notify();
+        }
     }
 
     /// Records a combo selection by index, or by text when the field stores the option.
@@ -663,26 +703,39 @@ impl Shell {
 
         if stores_text {
             self.set_selected_text(bind, text, cx);
-        } else if crate::views::bindings::write(
+            return;
+        }
+
+        let before = self.value(bind, f64::NAN).to_bits();
+        if crate::views::bindings::write(
             &mut self.profile,
             bind,
             crate::views::bindings::ControlValue::Number(index as f64),
         ) {
             self.values = crate::views::bindings::snapshot(&self.profile);
-            cx.notify();
         } else {
             self.draft.insert(bind, index as f64);
+        }
+        if self.value(bind, f64::NAN).to_bits() != before {
             cx.notify();
         }
     }
 
     /// Records a combo selection by option text, which is how a mode field stores it.
+    ///
+    /// A press that lands on the option already shown does not repaint the card.
     pub fn set_selected_text(&mut self, bind: &'static str, text: &str, cx: &mut Context<Self>) {
+        let unchanged = matches!(
+            self.values.get(bind),
+            Some(crate::views::bindings::ControlValue::Text(current)) if current == text
+        ) && self.draft.get(bind).is_none();
         self.apply_control(
             bind,
             crate::views::bindings::ControlValue::Text(text.to_owned()),
         );
-        cx.notify();
+        if !unchanged {
+            cx.notify();
+        }
     }
 
     /// Seeds a control value without notifying, for the capture harness.
@@ -874,9 +927,15 @@ impl Shell {
 
     /// Moves the config selection by one, which is what pressing the trigger does
     /// until a dropdown list exists.
+    ///
+    /// With fewer than two configs there is nowhere to move, so the press is a no-op
+    /// that no longer repaints the settings card.
     pub fn select_next_config(&mut self, cx: &mut Context<Self>) {
+        let before = self.profiles.selection();
         self.profiles.select_next();
-        cx.notify();
+        if self.profiles.selection() != before {
+            cx.notify();
+        }
     }
 
     /// `LoadConfigButton_Click` (`MainWindow.xaml.cs:813-831`).
@@ -1007,6 +1066,12 @@ impl Shell {
     /// The gate is process-wide, so this is the one write the shipped binary makes
     /// to it; a failure to save is reported in the card rather than dropped.
     pub fn set_animations(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        // Both the row's boolean and its status line are what a repaint would show, so
+        // the paint waits for one of them to move. The gate is applied and the file
+        // written either way: `theme::motion` is process-wide state a test can reset
+        // independently of this field.
+        let changed = self.animations != enabled;
+        let status_before = self.prefs_status.clone();
         self.animations = enabled;
         motion::set_animations_enabled(enabled);
 
@@ -1021,7 +1086,9 @@ impl Shell {
             }
         }
 
-        cx.notify();
+        if changed || self.prefs_status != status_before {
+            cx.notify();
+        }
     }
 
     /// "Use account": gates, then parks the switch for the bridge.
@@ -1207,14 +1274,41 @@ impl Shell {
         }
     }
 
-    fn chip_text(&self) -> SharedString {
+    /// `armed · 7 on`, rebuilt only when a toggle changes.
+    ///
+    /// `Render::render` wants it twice a frame — the title bar and the rail footer — and
+    /// the text is a pure function of (armed, enabled count), so it is cached against
+    /// those two values rather than formatted per call. `perf::tests` counts the
+    /// difference.
+    fn chip_text(&mut self) -> SharedString {
         let enabled = self.toggles.enabled_count();
-        let armed = if self.toggles.armed() {
-            "armed"
-        } else {
-            "disarmed"
-        };
-        SharedString::from(format!("{armed} \u{00b7} {enabled} on"))
+        let key = (self.toggles.armed(), enabled);
+
+        if let Some((cached, text)) = &self.chrome.chip {
+            if *cached == key {
+                return SharedString::clone(text);
+            }
+        }
+
+        let armed = if key.0 { "armed" } else { "disarmed" };
+        let text = SharedString::from(format!("{armed} \u{00b7} {enabled} on"));
+        self.chrome.chip = Some((key, text.clone()));
+        text
+    }
+
+    /// `Combat · armed · 7 on`, rebuilt only when the tab or the chip changes.
+    fn title_text(&mut self, chip: &SharedString) -> SharedString {
+        let key = (self.tab, SharedString::clone(chip));
+
+        if let Some((cached, text)) = &self.chrome.title {
+            if *cached == key {
+                return SharedString::clone(text);
+            }
+        }
+
+        let text = SharedString::from(format!("{} \u{00b7} {}", self.selected_tab_name(), chip));
+        self.chrome.title = Some((key, text.clone()));
+        text
     }
 }
 
@@ -1233,22 +1327,28 @@ impl Render for Shell {
         self.sync_form_fields(window, cx);
 
         let motion = motion::motion();
-        let theme = self.theme.clone();
+        // The two chrome strings are built before the theme is borrowed: each needs
+        // `&mut self` to consult its cache, and both are read only once the tree is
+        // being assembled. `&self.theme` rather than a clone — a `Theme` carries a
+        // `String` name, so cloning it was one heap allocation per frame.
+        let chip = self.chip_text();
+        let title = self.title_text(&chip);
+        let theme = &self.theme;
         let entity = cx.entity();
 
         let body = match copy::TABS.get(self.tab).map(|tab| tab.body) {
-            Some(TabBody::Cards(cards)) => self.render_cards(cards, &theme, motion, &entity),
+            Some(TabBody::Cards(cards)) => self.render_cards(cards, theme, motion, &entity),
             Some(TabBody::Accounts) => crate::views::accounts_view::render(
                 &self.accounts,
                 &self.fields,
-                &theme,
+                theme,
                 &entity,
                 self.tab,
             ),
             Some(TabBody::Servers) => crate::views::servers_view::render(
                 &self.servers,
                 &self.fields,
-                &theme,
+                theme,
                 &entity,
                 self.tab,
             ),
@@ -1265,7 +1365,7 @@ impl Render for Shell {
             // inherits. Installing the fonts without asking for the family would leave
             // every measurement to whatever fontconfig happens to resolve.
             .font_family(crate::assets::UI_FAMILY)
-            .child(self.render_title_bar(&theme, &entity))
+            .child(self.render_title_bar(theme, &entity, &title))
             .child(
                 div()
                     .flex()
@@ -1273,7 +1373,7 @@ impl Render for Shell {
                     .flex_1()
                     .min_h(px(0.0))
                     .gap(px(metrics::rail::GAP))
-                    .child(self.render_rail(&theme, &entity))
+                    .child(self.render_rail(theme, &entity, &chip))
                     .child(div().flex().flex_1().min_w(px(0.0)).child(body)),
             );
 
@@ -1290,7 +1390,12 @@ impl Render for Shell {
 
 impl Shell {
     /// Decision 5: the themed, draggable, hit-tested title bar.
-    fn render_title_bar(&self, theme: &Theme, self_handle: &Entity<Self>) -> AnyElement {
+    fn render_title_bar(
+        &self,
+        theme: &Theme,
+        self_handle: &Entity<Self>,
+        title: &SharedString,
+    ) -> AnyElement {
         let close = crate::theme::fixed::CRITICAL;
         div()
             .id("title-bar")
@@ -1320,11 +1425,7 @@ impl Shell {
                     .flex_1()
                     .text_size(px(metrics::text::CAPTION))
                     .text_color(theme.dim_text)
-                    .child(format!(
-                        "{} \u{00b7} {}",
-                        self.selected_tab_name(),
-                        self.chip_text()
-                    )),
+                    .child(SharedString::clone(title)),
             )
             .child(
                 div()
@@ -1370,7 +1471,7 @@ impl Shell {
     }
 
     /// The 176 px rail: search button, the nine tabs, the update row.
-    fn render_rail(&self, theme: &Theme, entity: &Entity<Self>) -> AnyElement {
+    fn render_rail(&self, theme: &Theme, entity: &Entity<Self>, chip: &SharedString) -> AnyElement {
         let mut rail = div()
             .flex()
             .flex_col()
@@ -1391,13 +1492,15 @@ impl Shell {
                 "rail-search",
                 theme,
                 ButtonVariant::Secondary,
-                format!(
-                    "{}   {}",
+                // Fixed copy: the label is the tooltip without its chord, then the
+                // chord. `reuse::stitched` builds it on the first frame.
+                crate::reuse::stitched(
                     copy::SEARCH_BUTTON_TOOLTIP
                         .split(" (")
                         .next()
                         .unwrap_or(copy::SEARCH_BUTTON_TOOLTIP),
-                    copy::SEARCH_BUTTON_CHORD
+                    "   ",
+                    copy::SEARCH_BUTTON_CHORD,
                 ),
                 |_, _, _| {},
             )
@@ -1412,7 +1515,7 @@ impl Shell {
             div()
                 .text_size(px(metrics::text::CAPTION))
                 .text_color(theme.dim_text)
-                .child(self.chip_text()),
+                .child(SharedString::clone(chip)),
         )
         .into_any_element()
     }
@@ -1434,7 +1537,7 @@ impl Shell {
         let handle = entity.clone();
 
         div()
-            .id(SharedString::from(format!("rail-tab-{index}")))
+            .id(crate::reuse::indexed("rail-tab", index))
             .flex()
             .items_center()
             .w(px(metrics::rail::ITEM_WIDTH))
@@ -1464,7 +1567,7 @@ impl Shell {
         motion: Motion,
         entity: &Entity<Self>,
     ) -> AnyElement {
-        let mut body = components::scroll(SharedString::from(format!("tab-scroll-{}", self.tab)))
+        let mut body = components::scroll(crate::reuse::indexed("tab-scroll", self.tab))
             .flex_col()
             .p(px(12.0))
             .gap(px(12.0));
@@ -1504,7 +1607,10 @@ impl Shell {
                 div()
                     .text_size(px(metrics::text::CAPTION))
                     .text_color(theme.dim_text)
-                    .child(SharedString::from(self.profiles.status().message.clone())),
+                    .child(crate::reuse::text(
+                        "configs-status",
+                        &self.profiles.status().message,
+                    )),
             );
         }
 
@@ -1580,7 +1686,7 @@ impl Shell {
             }
             row = row.child(slot.child(keybind_button(
                 card.id,
-                &keybind_label(&self.profile, module),
+                self.module_key(module),
                 theme,
                 entity,
             )));
@@ -1614,7 +1720,7 @@ impl Shell {
         // the card's module silently misrouted five of them.
         let handle = entity.clone();
         let switch = components::switch(
-            SharedString::from(format!("{}-{}", card.id, bind)),
+            crate::reuse::stitched(card.id, "-", bind),
             theme,
             is_on,
             motion,
@@ -1812,7 +1918,7 @@ impl Shell {
                 // the table already holds rather than the borrow of `control`.
                 let bind: &'static str = bind;
                 let value = self.value(bind, 0.0) > 0.5;
-                let id = SharedString::from(format!("{}-{}", card.id, bind));
+                let id = crate::reuse::stitched(card.id, "-", bind);
                 let handle = entity.clone();
                 let boxed = components::checkbox(id, theme, value, *label, move |_, _, cx| {
                     handle.update(cx, |shell, cx| shell.set_checked(bind, !value, cx));
@@ -1847,7 +1953,7 @@ impl Shell {
                     if *snap { 1.0 } else { 0.0 },
                 );
                 let handle = entity.clone();
-                let name = SharedString::from(format!("{}-{}", card.id, bind));
+                let name = crate::reuse::stitched(card.id, "-", bind);
 
                 div()
                     .flex()
@@ -1870,7 +1976,11 @@ impl Shell {
                                 div()
                                     .text_size(px(metrics::text::CAPTION))
                                     .text_color(theme.dim_text)
-                                    .child(SharedString::from(format_value(value))),
+                                    .child(crate::reuse::by_number(
+                                        "value",
+                                        value.to_bits(),
+                                        || format_value(value),
+                                    )),
                             ),
                     )
                     .child(components::slider(
@@ -1899,12 +2009,11 @@ impl Shell {
                 // copy table: `RefreshConfigList` (`MainWindow.xaml.cs:781-805`) filled
                 // it from the profile directory, so it reads the store's list here.
                 if bind == "ConfigSelection" {
-                    let names: Vec<String> = self.profiles.configs().to_vec();
-                    let current = self
-                        .profiles
-                        .selected()
-                        .map(str::to_owned)
-                        .unwrap_or_default();
+                    // Borrowed, not cloned: the store's list is rebuilt only when a
+                    // config is created or deleted, so a per-frame `to_vec` was a `Vec`
+                    // and a `String` per name for nothing.
+                    let names = self.profiles.configs();
+                    let current = self.profiles.selected().unwrap_or("");
                     let handle = entity.clone();
                     let has_names = !names.is_empty();
                     let mut row = div().flex().flex_col().gap(px(2.0)).w_full().child(
@@ -1916,9 +2025,11 @@ impl Shell {
 
                     if has_names {
                         row = row.child(components::combo(
-                            SharedString::from(format!("{}-combo-{bind}", card.id)),
+                            crate::reuse::stitched(card.id, "-combo-", bind),
                             theme,
-                            SharedString::from(current),
+                            // `selected` already names a config; the label is a view of
+                            // it, so it is memoised rather than copied twice a frame.
+                            crate::reuse::text("config-selection", current),
                             move |_, _, cx| {
                                 handle.update(cx, |shell, cx| shell.select_next_config(cx));
                             },
@@ -1927,7 +2038,7 @@ impl Shell {
                         // `ConfigComboBox` with no items: an empty trigger, exactly what a
                         // WPF `ComboBox` with an empty `ItemsSource` paints.
                         row = row.child(components::combo(
-                            SharedString::from(format!("{}-combo-{bind}", card.id)),
+                            crate::reuse::stitched(card.id, "-combo-", bind),
                             theme,
                             SharedString::from(""),
                             |_, _, _| {},
@@ -1938,18 +2049,16 @@ impl Shell {
                 }
 
                 // The setting is either an index or the option text; the profile decides
-                // which, so the press converts back through the same table.
-                let stored = self
-                    .values
-                    .get(bind)
-                    .cloned()
-                    .unwrap_or(crate::views::bindings::ControlValue::Number(0.0));
-                let selected = match &stored {
-                    crate::views::bindings::ControlValue::Text(text) => options
+                // which, so the press converts back through the same table. Borrowed, not
+                // cloned: a `Text` variant would copy its `String` every frame.
+                let stored = self.values.get(bind);
+                let selected = match stored {
+                    Some(crate::views::bindings::ControlValue::Text(text)) => options
                         .iter()
                         .position(|option| option.eq_ignore_ascii_case(text))
                         .unwrap_or(0),
-                    other => other.as_f64() as usize,
+                    Some(other) => other.as_f64() as usize,
+                    None => 0,
                 };
                 let clamped = selected.min(options.len().saturating_sub(1));
                 let current = options.get(clamped).copied().unwrap_or("");
@@ -1962,7 +2071,7 @@ impl Shell {
                 let options_empty = options.is_empty();
                 let handle = entity.clone();
                 let trigger = components::combo(
-                    SharedString::from(format!("{}-combo-{bind}", card.id)),
+                    crate::reuse::stitched(card.id, "-combo-", bind),
                     theme,
                     SharedString::from(current),
                     move |_, _, cx| {
@@ -1994,7 +2103,7 @@ impl Shell {
                 let on = self.animations;
                 let handle = entity.clone();
                 let boxed = components::checkbox(
-                    SharedString::from(format!("{}-{label}", card.id)),
+                    crate::reuse::stitched(card.id, "-", label),
                     theme,
                     on,
                     *label,
@@ -2013,19 +2122,16 @@ impl Shell {
                         div()
                             .text_size(px(metrics::text::CAPTION))
                             .text_color(crate::theme::fixed::CRITICAL)
-                            .child(SharedString::from(self.prefs_status.clone())),
+                            .child(crate::reuse::text("prefs-status", &self.prefs_status)),
                     );
                 }
 
                 column.into_any_element()
             }
 
-            Control::Keybind { module } => keybind_button(
-                card.id,
-                &keybind_label(&self.profile, module),
-                theme,
-                entity,
-            ),
+            Control::Keybind { module } => {
+                keybind_button(card.id, self.module_key(module), theme, entity)
+            }
 
             Control::Button { label, tooltip } => {
                 // The configs card's buttons are real actions: Load and Save
@@ -2045,7 +2151,7 @@ impl Shell {
                 let handle = entity.clone();
 
                 let button = components::button(
-                    SharedString::from(format!("{}-{label}", card.id)),
+                    crate::reuse::stitched(card.id, "-", label),
                     theme,
                     if tooltip.is_empty() {
                         ButtonVariant::Dark
@@ -2087,10 +2193,16 @@ impl Shell {
                     slot = slot.debug_selector(move || selector.to_owned());
                 }
                 slot.child(components::button_sized(
-                    SharedString::from(format!("{}-{which:?}", card.id)),
+                    crate::reuse::stitched(card.id, "-", which.id()),
                     theme,
                     ButtonVariant::Dark,
-                    SharedString::from(action_bind_label(&self.profile, *which)),
+                    // The label is a function of the saved key, nothing else, so it is
+                    // memoised by that key instead of formatted per frame.
+                    crate::reuse::by_number(
+                        "action-label",
+                        action_vk(&self.profile, *which),
+                        || action_bind_label(&self.profile, *which),
+                    ),
                     210.0,
                     |_, _, _| {},
                 ))
@@ -2109,7 +2221,7 @@ impl Shell {
                 .mt(px(6.0))
                 .text_size(px(metrics::text::BUTTON))
                 .text_color(theme.text)
-                .child(SharedString::from(format!("\u{25b8} {header}")))
+                .child(crate::reuse::joined("\u{25b8} ", header))
                 .into_any_element(),
 
             Control::BlockEspRows => div()
@@ -2119,9 +2231,9 @@ impl Shell {
                 .into_any_element(),
 
             Control::PalettePreview { name } => {
-                let preview = Theme::by_name(name);
+                let preview_accent = Theme::accent_by_name(name);
                 div()
-                    .id(SharedString::from(format!("palette-{name}")))
+                    .id(crate::reuse::stitched("palette-", "", name))
                     .flex()
                     .flex_row()
                     .items_center()
@@ -2132,7 +2244,7 @@ impl Shell {
                             .w(px(22.0))
                             .h(px(22.0))
                             .rounded(px(3.0))
-                            .bg(preview.accent),
+                            .bg(preview_accent),
                     )
                     .child(
                         div()
@@ -2375,19 +2487,40 @@ fn control_is_header(control: &Control, header: Option<copy::CardHeader>) -> boo
 /// path, and the button keeps the managed copy so a reader can see it is the same control.
 fn keybind_button(
     card_id: &'static str,
-    label: &str,
+    vk: i32,
     theme: &Theme,
     _entity: &Entity<Shell>,
 ) -> AnyElement {
     components::button::button_sized(
-        SharedString::from(format!("{card_id}-keybind")),
+        crate::reuse::stitched(card_id, "-keybind", ""),
         theme,
         ButtonVariant::Secondary,
-        SharedString::from(label.to_owned()),
+        // `Bind: {key}` depends on the saved key and nothing else, so it is memoised by
+        // the key. Formatting it here allocated a `String` per keybind button per frame.
+        crate::reuse::by_number("keybind-label", action_vk_of(vk), || {
+            crate::views::keybind_text::button_label(vk)
+        }),
         140.0,
         |_, _, _| {},
     )
     .into_any_element()
+}
+
+/// A virtual key as the unsigned key [`crate::reuse::by_number`] memoises on.
+fn action_vk_of(vk: i32) -> u64 {
+    u64::from(vk as u32)
+}
+
+/// The saved action key for one action-bind button.
+fn action_vk(
+    profile: &aoko_protocol::profile::Profile,
+    which: crate::views::copy::ActionBind,
+) -> u64 {
+    let vk = match which {
+        crate::views::copy::ActionBind::AutoRod => profile.auto_rod_action_key,
+        crate::views::copy::ActionBind::Throwpot => profile.throwpot_action_key,
+    };
+    action_vk_of(vk)
 }
 
 /// The catalogue module a card's keybind button names.
@@ -2429,7 +2562,7 @@ fn action_bind_label(
     crate::views::keybind_text::action_label(vk)
 }
 
-/// The keybind button's rest label.
+/// The keybind button's rest label for a whole profile.
 ///
 /// The XAML button has no `Content` (`MainWindow.xaml:359`): every label comes from
 /// `SetKeybindButtonContent` (`MainWindow.xaml.cs:2143-2156`), which composes
@@ -2437,6 +2570,11 @@ fn action_bind_label(
 /// virtual key, or `Unbound` when there is none — so an untouched profile reads
 /// `Bind: Unbound`. See [`crate::views::keybind_text`] for the format and the one
 /// branch (`Key` enum names) that is not ported.
+///
+/// Test-only: `render` goes through [`Shell::module_key`] and
+/// [`crate::reuse::by_number`] so the label is built once per key rather than once per
+/// frame, and this is the same composition written out for the tests that pin it.
+#[cfg(test)]
 fn keybind_label(profile: &aoko_protocol::profile::Profile, module: &'static str) -> String {
     let vk = profile.module_keys.get(module).copied().unwrap_or(0);
     crate::views::keybind_text::button_label(vk)

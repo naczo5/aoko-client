@@ -35,6 +35,21 @@ pub enum ActionBind {
     Throwpot,
 }
 
+impl ActionBind {
+    /// The variant's own name, for element ids.
+    ///
+    /// The id used to be built with `format!("{which:?}")` in `Render::render`, which is
+    /// a heap allocation per frame; this is the same text without the allocation, and
+    /// `an_action_bind_id_matches_its_debug_name` keeps the two equal.
+    #[must_use]
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::AutoRod => "AutoRod",
+            Self::Throwpot => "Throwpot",
+        }
+    }
+}
+
 /// One card's header row, in the shape the managed markup draws.
 ///
 /// There is no separate title element in the C#: a card either opens with a
@@ -1233,6 +1248,23 @@ pub fn count_controls(cards: &[Card]) -> ControlCounts {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The action-bind id is the text `{:?}` used to produce.
+    ///
+    /// The render path builds the button's element id from [`ActionBind::id`] instead of
+    /// `format!("{which:?}")`, which was a heap allocation per frame. The ids are not
+    /// user-visible, but they are element identity: if a rename made the two disagree,
+    /// every id built before the change would stop matching.
+    #[test]
+    fn an_action_bind_id_matches_its_debug_name() {
+        for which in [ActionBind::AutoRod, ActionBind::Throwpot] {
+            assert_eq!(
+                which.id(),
+                format!("{which:?}"),
+                "the id and the Debug name must agree"
+            );
+        }
+    }
 
     #[test]
     fn the_rail_has_nine_tabs_in_the_declared_order() {

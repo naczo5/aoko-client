@@ -89,7 +89,7 @@ fn render_card(
 ) -> AnyElement {
     let selected = row.is_current;
     let mut card = components::card(theme)
-        .id(SharedString::from(format!("account-card-{index}")))
+        .id(crate::reuse::indexed("account-card", index))
         .cursor_pointer()
         .on_mouse_down(MouseButton::Left, {
             let handle = entity.clone();
@@ -167,7 +167,7 @@ pub fn render(
     entity: &Entity<Shell>,
     tab_index: usize,
 ) -> AnyElement {
-    let mut body = components::scroll(SharedString::from(format!("tab-scroll-{tab_index}")))
+    let mut body = components::scroll(crate::reuse::indexed("tab-scroll", tab_index))
         .flex_col()
         .p(px(12.0))
         .gap(px(8.0));
