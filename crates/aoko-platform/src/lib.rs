@@ -17,6 +17,7 @@ mod error;
 mod input;
 mod netstat;
 mod process;
+mod profile;
 mod srv;
 mod tcp;
 mod version;
@@ -43,6 +44,7 @@ pub use process::{
     compare_ignore_case, describe_target, is_java_process_name, select_best_window, sort_targets,
     ClientType, DiscoveryTarget, InstanceCandidate, ProcessInfo, ProcessInspector,
 };
+pub use profile::{app_data_directory, ProfileStore};
 pub use srv::{
     Clock as SrvClock, SrvExchange, SrvLookupCache, SrvResolver, SrvTarget, UdpExchange, DNS_PORT,
     SRV_FAILURE_TTL, SRV_SUCCESS_TTL, SRV_TIMEOUT,

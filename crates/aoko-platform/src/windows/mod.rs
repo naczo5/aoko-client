@@ -5,6 +5,7 @@
 //! with `SendInput` synthesis, `LoadLibrary` bridge injection and named-pipe
 //! Discord IPC.
 
+mod appdata;
 mod discord;
 mod handles;
 mod injector;
@@ -14,6 +15,7 @@ mod raw;
 mod srv;
 mod window;
 
+pub use appdata::app_data_directory;
 pub use discord::WindowsDiscordTransport;
 pub use injector::WindowsBridgeInjector;
 pub use input::{install_hooks, uninstall_hooks, HookGuard, WindowsInputBackend};

@@ -10,6 +10,7 @@
 //! cannot provide instead of returning empty results that look like "no game
 //! running".
 
+mod appdata;
 mod discord;
 mod evdev;
 mod injector;
@@ -20,6 +21,7 @@ mod uinput;
 mod window;
 mod x11;
 
+pub use appdata::app_data_directory;
 pub use discord::LinuxDiscordTransport;
 pub use injector::LinuxBridgeInjector;
 pub use input::LinuxInputBackend;

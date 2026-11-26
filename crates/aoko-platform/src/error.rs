@@ -15,6 +15,10 @@ pub enum PlatformError {
         operation: &'static str,
         detail: String,
     },
+    /// The caller passed something unusable — a profile name that sanitises to
+    /// nothing, or a target path that is not a file name. Distinct from the OS
+    /// variants because the remedy is in the calling code, not on the machine.
+    InvalidArgument { detail: String },
 }
 
 impl PlatformError {
@@ -40,6 +44,13 @@ impl PlatformError {
     }
 
     #[must_use]
+    pub fn invalid_argument(detail: impl Into<String>) -> Self {
+        Self::InvalidArgument {
+            detail: detail.into(),
+        }
+    }
+
+    #[must_use]
     pub fn os(operation: &'static str, detail: impl Into<String>) -> Self {
         Self::Os {
             operation,
@@ -57,6 +68,7 @@ impl PlatformError {
             Self::Unsupported { detail } => format!("Not supported here: {detail}"),
             Self::NotFound { detail } => format!("Not found: {detail}"),
             Self::Os { operation, detail } => format!("{operation} failed: {detail}"),
+            Self::InvalidArgument { detail } => format!("Invalid argument: {detail}"),
         }
     }
 }
@@ -79,6 +91,15 @@ mod tests {
         assert_eq!(
             err.user_facing(),
             "Permission denied: uinput needs group input"
+        );
+    }
+
+    #[test]
+    fn an_invalid_argument_is_the_callers_problem() {
+        let err = PlatformError::invalid_argument("a profile name is required");
+        assert_eq!(
+            err.user_facing(),
+            "Invalid argument: a profile name is required"
         );
     }
 
