@@ -304,8 +304,12 @@ impl Theme {
     /// absent or invalid ones exactly as `MainWindow.RegisterPalette` does
     /// (`MainWindow.xaml.cs:1005-1032`).
     ///
-    /// `aoko-app` deliberately does not depend on `aoko-protocol`, so this takes
-    /// the nine strings rather than `CustomPalette`: the caller maps its fields in.
+    /// This takes the nine strings rather than `aoko_protocol::profile::CustomPalette`
+    /// even though the crate depends on `aoko-protocol` (for the shell's state and the
+    /// views). The palette is the one piece of protocol data this layer must not need:
+    /// `theme/` is the bottom of the crate and is used by every widget, so keeping the
+    /// wire type out of its signature is what lets `Theme` be built in a unit test with
+    /// no profile in hand. The caller maps its fields in through [`CustomRoles`].
     #[must_use]
     pub fn from_custom(name: &str, roles: CustomRoles<'_>) -> Theme {
         let parse = |text: &str, fallback: Color| Color::parse_hex(text).unwrap_or(fallback);

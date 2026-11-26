@@ -122,10 +122,16 @@ pub fn registry() -> Vec<Screen> {
 }
 
 /// Seeds the state `scripts/New-GuiScreenshots.ps1` fabricated by reflection, so the
-/// two sets of images show the same thing: connected and injected, DevMode off, the
+/// two sets of images show the same thing: connected and injected, DevMode off, and the
 /// same Clicker defaults (`MinCPS 12`, `MaxCPS 16`, randomization index 2, aim assist
-/// on at FOV 45 / range 4.5 / strength 40, SpeedBridge on at 150 ms), and the stats
-/// the script synthesises (120 left clicks plus 45 right clicks).
+/// on at FOV 45 / range 4.5 / strength 40, SpeedBridge on at 150 ms).
+///
+/// What this does **not** seed, because there is nothing to seed it through: the script
+/// also synthesised 120 left clicks and 45 right clicks, and `stats.png` therefore shows
+/// the empty state ("No samples yet", blank summary cards). The Stats tab is still the
+/// static copy table from `views/copy.rs`; its cards carry `Note`s, and no render site
+/// reads `aoko_protocol::stats::StatsTracker`. Wiring that tab is what would make the
+/// click statistics exist, and the capture will start showing them when it does.
 ///
 /// Capability fabrication is not repeated here: `aoko-protocol`'s
 /// `BridgeCapabilities::for_version_fallback` is the same table the bridge reports,
@@ -510,14 +516,6 @@ mod data_tab_tests {
 
         let accounts = shell.accounts();
         assert_eq!(accounts.rows().len(), SEEDED_ACCOUNTS.len());
-        eprintln!(
-            "rows: {:#?}",
-            accounts
-                .rows()
-                .iter()
-                .map(|row| (row.name.clone(), row.is_current))
-                .collect::<Vec<_>>()
-        );
         assert_eq!(accounts.selected_id(), Some("capture-account-1"));
         assert_eq!(accounts.session().name_text(), SEEDED_SESSION_NAME);
         assert!(

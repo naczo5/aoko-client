@@ -32,7 +32,7 @@ use gpui::AppContext as _;
 /// naga, calloop and x11 is exactly what a desktop run must not print, because it
 /// drowns the lines that matter. `RUST_LOG` replaces this filter wholesale, so
 /// `RUST_LOG=debug` still gives everything.
-#[cfg(not(any(test, feature = "capture")))]
+#[cfg(not(feature = "capture"))]
 const DEFAULT_FILTER: &str =
     "warn,aoko_app=info,aoko_platform=info,aoko_core=info,aoko_protocol=info";
 
@@ -82,9 +82,8 @@ fn main() -> ExitCode {
 
 /// Installs the process-wide subscriber, once, before anything can log.
 ///
-/// Tests install nothing at all (`cfg(test)`): a global subscriber would be installed by
-/// whichever test got there first, and a test that asserts on output would become
-/// order-dependent on the test runner.
+/// Tests install nothing: `cargo test` compiles this file but never calls `main`, so a
+/// test that asserts on output cannot become order-dependent on whichever test ran first.
 ///
 /// A capture build installs nothing *unless* `RUST_LOG` is set. A capture is a render,
 /// not a session: its table goes on stdout and its evidence is nine PNGs, so a stray
@@ -95,7 +94,13 @@ fn main() -> ExitCode {
 ///
 /// `try_init`, not `init`: a second install (a harness, a child process, a re-entrant
 /// `main`) must not panic. Whichever install lands first wins.
-#[cfg(not(test))]
+///
+/// There is deliberately no `cfg(test)` variant. `cargo test` compiles `main` but never
+/// calls it, so tests install nothing for free. A `cfg(test)` no-op used to sit here and
+/// made `tracing-subscriber` genuinely unused in the test unit, which
+/// `cargo test --workspace` reported as `unused_dependency` while clippy stayed silent.
+/// The dependency is now used in every configuration, and test quietness comes from
+/// `main` not running rather than from a second copy of this function.
 fn init_logging() {
     use tracing_subscriber::EnvFilter;
 
@@ -122,10 +127,6 @@ fn init_logging() {
         .with_writer(std::io::stderr)
         .try_init();
 }
-
-/// The test harness stays quiet. See the documented variant above.
-#[cfg(test)]
-fn init_logging() {}
 
 #[cfg(feature = "capture")]
 fn capture(out_dir: std::path::PathBuf, theme: Theme) -> ExitCode {
