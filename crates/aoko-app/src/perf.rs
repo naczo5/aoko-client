@@ -130,10 +130,20 @@ mod tests {
     /// fresh row, label and handlers. Sixty allocations a frame is that difference, not a
     /// cache that grew somewhere else.
     ///
+    /// Moved from 946 to 973 when the cards gained their pulse wrappers. Twenty-four of the
+    /// twenty-seven are attributable in this file's own element model: each of the eight Combat
+    /// cards is painted inside its own wrapper (`render_cards`), and a wrapper is a `div()` — two
+    /// allocations, per the model above — plus the boxed `debug_selector` closure that names the
+    /// card, which is one more. The remaining three are measured, not explained: nothing else in
+    /// `render` is a per-frame allocation by construction (the search overlay returns `None` while
+    /// closed, the root key listener only reads, the text-field entities are created once and then
+    /// reused), and this number comes from a run rather than from arithmetic. If a later change
+    /// moves it again, the measurement wins and the delta gets its own sentence.
+    ///
     /// Treat this as a budget: if a change to the UI legitimately moves it, update the
     /// constant in the same commit and say why. If it moves on its own, something in
     /// `render` started allocating.
-    const SHELL_FRAME_ALLOCATIONS: usize = 946;
+    const SHELL_FRAME_ALLOCATIONS: usize = 973;
 
     fn warm_shell() -> (VisualTestContext, Entity<Shell>) {
         let cx = TestAppContext::single();
