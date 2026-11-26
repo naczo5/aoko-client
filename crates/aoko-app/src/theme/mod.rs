@@ -66,9 +66,15 @@ impl Color {
     ///
     /// The 8-digit form is WPF's ARGB order, which is what the C# parses with
     /// `ColorConverter.ConvertFromString` for the overlay literals.
+    ///
+    /// One leading `#` is stripped, not every one. `TryParseHex` removes a single `#`
+    /// (`MainWindow.xaml.cs:1233-1234`) and then fails on a second, so repairing `##RRGGBB`
+    /// here would paint a colour the managed side refuses from the same text — and this
+    /// parser is reached from the dialogs' hex entries, where that typo arrives.
     #[must_use]
     pub fn parse_hex(text: &str) -> Option<Self> {
-        let digits = text.trim().trim_start_matches('#');
+        let trimmed = text.trim();
+        let digits = trimmed.strip_prefix('#').unwrap_or(trimmed);
         let parsed = u32::from_str_radix(digits, 16).ok()?;
         match digits.len() {
             6 => Some(Self::from_hex(parsed)),
@@ -721,6 +727,41 @@ mod tests {
             let role = theme.accent;
             assert_eq!(Color::parse_hex(&role.to_hex()), Some(role));
         }
+    }
+
+    /// One `#`, like `TryParseHex` (`MainWindow.xaml.cs:1233-1234`).
+    ///
+    /// The dialogs' hex entries hand user text straight to this parser, so a second `#` is
+    /// the typo the managed side refuses; repairing it would make the same text a colour
+    /// here and nothing there.
+    #[test]
+    fn exactly_one_leading_hash_is_stripped() {
+        assert_eq!(Color::parse_hex("#C7625A"), Some(Color::from_hex(0xC7625A)));
+        assert_eq!(Color::parse_hex("C7625A"), Some(Color::from_hex(0xC7625A)));
+        assert_eq!(
+            Color::parse_hex("  #C7625A  "),
+            Some(Color::from_hex(0xC7625A))
+        );
+        assert_eq!(
+            Color::parse_hex("#9C020711"),
+            Some(Color::rgba(0x02, 0x07, 0x11, 0x9C)),
+            "the 8-digit ARGB form the overlay literals use"
+        );
+
+        assert_eq!(
+            Color::parse_hex("##C7625A"),
+            None,
+            "the second # is a typo, not something to repair"
+        );
+        assert_eq!(Color::parse_hex("##9C020711"), None);
+        assert_eq!(Color::parse_hex("###C7625A"), None);
+
+        // 3-digit shorthand is `TryParseHex`'s rule and lives in the two ports of it that
+        // need it (`views::palette_store::parse_entry`, `dialogs::color_picker::parse_hex`);
+        // this parser's contract is the 6- and 8-digit forms its own doc names. Asserted,
+        // not assumed, so the gap stays visible.
+        assert_eq!(Color::parse_hex("#abc"), None);
+        assert_eq!(Color::parse_hex("abc"), None);
     }
 
     #[test]
