@@ -43,6 +43,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use gpui::prelude::*;
 use gpui::{div, px, AnyElement, Context, Entity, MouseButton, Render, SharedString, Window};
@@ -1390,6 +1391,13 @@ impl Render for Shell {
         // without every mutator remembering to push it.
         self.ensure_form_fields(cx);
         self.sync_form_fields(window, cx);
+
+        // The GTB helper is polled here because this is the only per-frame hook the shell
+        // has: the runtime decides whether there is work (module on, link live, frame fresh,
+        // no menu, line changed), so an idle frame costs one atomic load, one `Arc` clone and
+        // a `&str` comparison — no allocation, which is what keeps the section-6 render
+        // budget intact.
+        self.runtime.poll_gtb(Instant::now());
 
         let motion = motion::motion();
         // The two chrome strings are built before the theme is borrowed: each needs

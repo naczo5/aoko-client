@@ -39,6 +39,15 @@
 //! user action — parity with the managed host — and a window that took focus still cannot
 //! receive a synthetic click.
 //!
+//! The GTB helper is the third piece of state: `aoko_protocol::gtb::GtbWordSolver` had no
+//! production caller before this, so the solver's "a repeated line touches no allocator"
+//! claim was priced against a path the binary never ran.
+//! `crate::runtime::Runtime::poll_gtb` is called once a frame from
+//! `crate::shell::Shell::render`, solves only when the helper is on, the link is connected, the
+//! frame is fresh, no menu is open and the action-bar line changed, and
+//! `crate::runtime::Runtime::gtb_answer` hands a view the solved word. The wordlist is
+//! embedded, so nothing reads a file per tick.
+//!
 //! Two constructors, deliberately:
 //!
 //! * [`crate::runtime::Runtime::probed`] asks the platform what this session can do
@@ -53,10 +62,11 @@
 //! assert!(runtime.controller().is_module_enabled(EnabledFlag::AutoTotem));
 //! ```
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use aoko_core::app::{AppController, StateSnapshot};
+use aoko_core::chest_stealer::FRESH_STATE_MS;
 use aoko_core::clicker::toggles;
 use aoko_core::loops::{
     ClickSink, ClickerLoopConfigs, ClickerLoops, LoopRuntime, LoopSense, NoClickSink,
@@ -66,6 +76,7 @@ use aoko_platform::{
     CapabilityReport, InputBackend, InputEvent, Key, MouseButton, MouseState, PlatformError,
     WindowInspector,
 };
+use aoko_protocol::gtb::{parse_wordlist_js, GtbWordSolver};
 use aoko_protocol::module_catalog::{self, EnabledFlag};
 
 use crate::ingest::{Ingest, IngestStatus};
@@ -116,6 +127,81 @@ const REFUSED_INJECTION_WITHOUT_WINDOWS: &str = "automation loops run without pl
 /// Why a synthetic action is refused by the foreground gate.
 const GAME_NOT_FOREGROUND: &str = "the game is not the confirmed foreground window";
 
+/// The catalog flag the GTB helper is gated on.
+///
+/// `module_catalog::ALL` names it `gtbhelper`, `cfg.gtbHelper` — `Clicker.GtbHelperEnabled`,
+/// which `Clicker.cs:2630` checks before it touches the solver at all.
+const GTB_FLAG: EnabledFlag = EnabledFlag::GtbHelper;
+
+/// How many candidate words one solve keeps.
+///
+/// `Clicker.cs:2637` asks for `maxResults: 200` and renders the joined list, so the app asks
+/// for the same number rather than a shorter guess at what the card wants to show.
+const GTB_MAX_RESULTS: usize = 200;
+
+/// The shipped wordlist, embedded rather than read.
+///
+/// The managed app loaded `Aoko/Data/gtb_wordlist.js` from disk; this build embeds it the same
+/// way it embeds its fonts (`crate::assets`), which is why `aoko_protocol`'s solver takes the
+/// text instead of opening a file. One copy in the repository, no data directory beside the
+/// binary, and no file I/O on any path.
+const WORDLIST_JS: &str = include_str!("../../../Aoko/Data/gtb_wordlist.js");
+
+/// The wordlist parsed once per process, however many runtimes a test builds.
+static WORDLIST: OnceLock<Vec<String>> = OnceLock::new();
+
+/// The shipped wordlist, normalised and deduplicated.
+fn wordlist() -> &'static [String] {
+    WORDLIST
+        .get_or_init(|| parse_wordlist_js(WORDLIST_JS))
+        .as_slice()
+}
+
+/// What the GTB helper last answered, for a view to read.
+///
+/// A copy: [`Runtime::gtb_answer`] clones, so a render path reads it when it wants the text
+/// and calls [`Runtime::poll_gtb`] — which allocates nothing on an unchanged line — every frame.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GtbAnswer {
+    /// The mask the action-bar line normalises to, e.g. `c_t`. Empty when nothing is shown.
+    pub mask: String,
+    /// Candidate words in wordlist order, at most `GTB_MAX_RESULTS` of them.
+    pub matches: Vec<String>,
+    /// The action-bar line this answer came from.
+    pub line: String,
+}
+
+/// The GTB helper: one solver, the line it last answered, and that answer.
+///
+/// Built on the first line that passes the guards, because the solver indexes the whole
+/// wordlist at construction and a runtime that never sees a GTB line should not pay for it.
+struct GtbHelper {
+    solver: GtbWordSolver,
+    /// The line the last solve answered. Compared against the store's line before any work:
+    /// the bridge repeats the same action bar on every frame, so this is the whole cost of a
+    /// frame that changes nothing.
+    last_line: String,
+    mask: String,
+    matches: Vec<String>,
+    /// How many times the solver actually ran.
+    ///
+    /// This is the work evidence the tests assert: the count is deterministic, and "the same
+    /// line twice does the work once" is a statement about this number, not about a clock.
+    solves: usize,
+}
+
+impl GtbHelper {
+    fn new() -> Self {
+        Self {
+            solver: GtbWordSolver::from_words(wordlist()),
+            last_line: String::new(),
+            mask: String::new(),
+            matches: Vec::new(),
+            solves: 0,
+        }
+    }
+}
+
 /// The application's runtime state: the controller, the id mapping the switches need to
 /// reach it, the bridge reader, and — on the shipped path only — the loop supervisor.
 pub struct Runtime {
@@ -133,14 +219,17 @@ pub struct Runtime {
     /// The time source the loop bodies park on; a test swaps in its own before enabling.
     clock: Arc<dyn Clock>,
     sleeper: Arc<dyn Sleeper>,
+    /// The GTB helper, `None` until a line passes the guards and the module is on.
+    gtb: Option<GtbHelper>,
 }
 
 impl Runtime {
     /// A runtime over a controller the caller built.
     ///
     /// This is the seam a test uses to hold the same controller the UI writes through.
-    /// It builds no bridge reader and starts no loop: `connect_bridge` and
-    /// `start_supervision` are the only two things with side effects.
+    /// It builds no bridge reader, starts no loop and solves nothing: `connect_bridge`,
+    /// `start_supervision` and `poll_gtb` are the three things that do work, and none of them
+    /// runs on its own.
     #[must_use]
     pub fn new(controller: Arc<AppController>) -> Self {
         Self::with_time(controller, Arc::new(SystemClock), Arc::new(ThreadSleeper))
@@ -162,6 +251,7 @@ impl Runtime {
             loops: None,
             clock,
             sleeper,
+            gtb: None,
         }
     }
 
@@ -224,6 +314,111 @@ impl Runtime {
             state_age: store.age(now),
             fresh: self.controller.ui_snapshot(now).is_state_fresh(),
         }
+    }
+
+    /// The current state when the bridge link is live and the frame is fresh, else `None`.
+    ///
+    /// Allocation-free on purpose: one atomic load, one `Arc` clone and a duration comparison.
+    /// This is what a per-frame caller can afford, where `AppController::ui_snapshot` is not —
+    /// that one clones `screen_name` and `version` into an owned `UiSnapshot`.
+    fn fresh_state(&self, now: Instant) -> Option<Arc<StateSnapshot>> {
+        let store = self.controller.store();
+        if !store.is_connected() {
+            return None;
+        }
+        if store.age(now)?.as_millis() as u64 > FRESH_STATE_MS {
+            return None;
+        }
+        store.snapshot()
+    }
+
+    /// Solves the action bar into a word, when the helper is on and the round is live.
+    ///
+    /// `crate::shell::Shell::render` calls this once a frame, so the steady state has to be
+    /// free: an unchanged line returns after one `&str` comparison, and the guards are an
+    /// atomic load, one `Arc` clone and a duration compare. Nothing here allocates unless the
+    /// line is new, and then only the answer, which is the cost the solver's own bench prices.
+    ///
+    /// Four guards, each for a different reason:
+    ///
+    /// * **the module is on** — `Clicker.cs:2630` returns before touching the solver, and a
+    ///   disabled helper also drops its answer, so flipping the switch on cannot publish a
+    ///   result for a line that arrived while it was off;
+    /// * **the link is connected** — no frame means no round to answer, and a disconnected
+    ///   store still holds the last line it saw;
+    /// * **the frame is fresh, inside `FRESH_STATE_MS`** — GTB rounds end, and the action bar
+    ///   keeps the completed theme after one does, so a stale line is the previous round's
+    ///   answer. This is the guard that makes "enabling must not retroactively solve a stale
+    ///   line" true;
+    /// * **no GUI is open** — the game does not draw the action bar over a menu, so the line
+    ///   while one is up belongs to whatever was there before it. This one is *not* managed
+    ///   parity (`UpdateGtbFromActionBar` has no such check); it is here because every other
+    ///   consumer in this crate treats `gui_open` as "not gameplay", and it is reported as an
+    ///   addition rather than a port.
+    pub fn poll_gtb(&mut self, now: Instant) {
+        if !self.controller.is_module_enabled(GTB_FLAG) {
+            self.gtb = None;
+            return;
+        }
+
+        let Some(snapshot) = self.fresh_state(now) else {
+            return;
+        };
+        if snapshot.state.gui_open || snapshot.state.action_bar.is_empty() {
+            return;
+        }
+
+        let line = snapshot.state.action_bar.as_str();
+        let helper = self.gtb.get_or_insert_with(GtbHelper::new);
+        if helper.last_line == line {
+            return;
+        }
+
+        // `Clicker.cs:2636` learns the finished word before it solves, which is what lets the
+        // next round's one-letter mask resolve immediately. It clears the solver's memo, so it
+        // must run before `solve`, not after.
+        helper.solver.try_learn_solved_word(line);
+        let (mask, matches) = {
+            let (mask, matches) = helper.solver.solve(line, GTB_MAX_RESULTS);
+            (mask.to_owned(), matches.to_vec())
+        };
+
+        helper.last_line.clear();
+        helper.last_line.push_str(line);
+        helper.mask = mask;
+        helper.matches = matches;
+        helper.solves += 1;
+    }
+
+    /// What the helper last answered, or `None` when there is nothing to show.
+    ///
+    /// A view reads this instead of the store: it is the solved word, already normalised, and
+    /// reading it does no work. The copy is deliberate — a render path that wants the text asks
+    /// for it when the answer changes, not every frame.
+    ///
+    /// `None` also covers an action bar with no mask in it — the line that reports a completed
+    /// build carries no underscores, so the solver answers with an empty mask and the managed
+    /// host shows `-` for it (`Clicker.SetGtbState("", 0, "")`).
+    #[must_use]
+    pub fn gtb_answer(&self) -> Option<GtbAnswer> {
+        let helper = self.gtb.as_ref()?;
+        if helper.mask.is_empty() {
+            return None;
+        }
+        Some(GtbAnswer {
+            mask: helper.mask.clone(),
+            matches: helper.matches.clone(),
+            line: helper.last_line.clone(),
+        })
+    }
+
+    /// How many times the solver has run, `0` before the first line and while the module is
+    /// off.
+    ///
+    /// The work evidence: two polls of one line leave this at one, and no clock is involved.
+    #[must_use]
+    pub fn gtb_solves(&self) -> usize {
+        self.gtb.as_ref().map_or(0, |helper| helper.solves)
     }
 
     /// Turns module switches into loop lifecycle and starts what is already enabled.
@@ -1324,6 +1519,139 @@ mod tests {
             sense.cursor_visible(),
             "the platform answered: cursor drawn"
         );
+    }
+
+    // ---- GTB helper -----------------------------------------------------------------
+
+    /// A GTB action bar for a seven-letter theme with only its first letter revealed.
+    ///
+    /// `Airport` is the first seven-letter `A` theme in the shipped wordlist, and it is what
+    /// the solved answer must contain: the mask `a______` is the game's own shape, not one the
+    /// test invented, and `(1)` is the round timer the pipeline strips.
+    const GTB_LINE: &str = "The theme is A______ (1)";
+
+    /// One frame carrying that line, as the bridge would publish it.
+    fn gtb_state() -> aoko_protocol::state::GameState {
+        aoko_protocol::state::GameState {
+            action_bar: GTB_LINE.to_string(),
+            ..aoko_protocol::state::GameState::default()
+        }
+    }
+
+    /// The helper solves the line once and exposes the word, and a repeated publish of the same
+    /// line does no work.
+    ///
+    /// The evidence is `gtb_solves`, an integer: the bridge re-sends the same action bar every
+    /// frame, and this number is what "the work happens once" means without a clock.
+    #[test]
+    fn the_gtb_helper_solves_a_new_line_once() {
+        let mut runtime = Runtime::headless();
+        runtime.set_module_enabled("gtbhelper", true);
+
+        let now = Instant::now();
+        runtime.controller().store().set_connected(true);
+        runtime.controller().store().publish(gtb_state(), now);
+
+        runtime.poll_gtb(now);
+
+        let answer = runtime.gtb_answer().expect("a mask with candidates");
+        assert_eq!(answer.mask, "a______", "the revealed letter survives");
+        assert!(
+            answer.matches.iter().any(|word| word == "airport"),
+            "the shipped wordlist was searched: {:?}",
+            answer.matches
+        );
+        assert_eq!(
+            answer.line, GTB_LINE,
+            "the answer names the line it came from"
+        );
+        assert_eq!(runtime.gtb_solves(), 1);
+
+        // The same line, three more frames: no solve, same answer.
+        for _ in 0..3 {
+            runtime.poll_gtb(now);
+        }
+
+        assert_eq!(
+            runtime.gtb_solves(),
+            1,
+            "an unchanged line must not run the solver again"
+        );
+        assert_eq!(
+            runtime.gtb_answer().map(|answer| answer.mask),
+            Some("a______".to_string())
+        );
+
+        // A different line is new work, so the counter is not simply stuck.
+        runtime.controller().store().publish(
+            aoko_protocol::state::GameState {
+                action_bar: "The theme is A_____ (2)".to_string(),
+                ..aoko_protocol::state::GameState::default()
+            },
+            now,
+        );
+        runtime.poll_gtb(now);
+
+        assert_eq!(runtime.gtb_solves(), 2, "a new line is a new solve");
+    }
+
+    /// The four guards: a disabled module, a dead link, a stale frame and an open menu all
+    /// report nothing and do no work.
+    #[test]
+    fn the_gtb_helper_does_no_work_when_the_round_is_not_live() {
+        let mut runtime = Runtime::headless();
+        let now = Instant::now();
+
+        // Module off, line present: `Clicker.cs:2630` returns before the solver.
+        runtime.controller().store().set_connected(true);
+        runtime.controller().store().publish(gtb_state(), now);
+        runtime.poll_gtb(now);
+
+        assert!(
+            runtime.gtb_answer().is_none(),
+            "a disabled helper holds nothing"
+        );
+        assert_eq!(runtime.gtb_solves(), 0);
+
+        // Module on, link down: the stored line is from a round nobody is playing.
+        runtime.set_module_enabled("gtbhelper", true);
+        runtime.controller().store().set_connected(false);
+        runtime.poll_gtb(now);
+
+        assert!(runtime.gtb_answer().is_none());
+        assert_eq!(
+            runtime.gtb_solves(),
+            0,
+            "an unconnected store solves nothing"
+        );
+
+        // Module on, link up, frame older than the fresh window: enabling the helper must not
+        // retroactively solve the line that was already sitting there.
+        runtime.controller().store().set_connected(true);
+        let stale = now + Duration::from_millis(FRESH_STATE_MS + 1);
+        runtime.poll_gtb(stale);
+
+        assert!(
+            runtime.gtb_answer().is_none(),
+            "a stale line is the previous round"
+        );
+        assert_eq!(runtime.gtb_solves(), 0);
+
+        // Module on, link up, fresh frame, menu open: the action bar is not the round.
+        runtime.controller().store().publish(
+            aoko_protocol::state::GameState {
+                gui_open: true,
+                ..gtb_state()
+            },
+            stale,
+        );
+        runtime.poll_gtb(stale);
+
+        assert!(
+            runtime.gtb_answer().is_none(),
+            "a menu is not gameplay for any other consumer either"
+        );
+        assert_eq!(runtime.gtb_solves(), 0);
     }
 
     /// An unanswered cursor must read as "drawn", and this pins the consumers' consequences.
