@@ -1194,7 +1194,11 @@ mod tests {
             accent: "#C7625A".to_owned(),
             ..CustomPalette::default()
         };
-        fs::write(store.path(), to_palettes_json(&[broken.clone()])).expect("write");
+        fs::write(
+            store.path(),
+            to_palettes_json(std::slice::from_ref(&broken)),
+        )
+        .expect("write");
 
         let row = store.rows().pop().expect("the file has one palette");
         assert_eq!(row.name, "Broken");

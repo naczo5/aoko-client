@@ -146,8 +146,10 @@ impl BlockEspRow {
         let remove_id = format!("blockesp-remove-{registry_id}");
 
         // One owner for the callback, cloned per control: an `Fn` closure captures by move, so
-        // three handlers cannot each take `on_action` unless it is shared.
-        let callback: Rc<dyn Fn(RowAction, &mut Window, &mut App)> = Rc::new(on_action);
+        // three handlers cannot each take `on_action` unless it is shared. `Rc` over the
+        // concrete closure rather than `Rc<dyn Fn>`: nothing here needs a trait object, and the
+        // type is inferred, so there is no name for the shape to get long.
+        let callback = Rc::new(on_action);
         let press = |action: RowAction| {
             let callback = Rc::clone(&callback);
             move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
