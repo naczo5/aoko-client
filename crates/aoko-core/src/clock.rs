@@ -297,10 +297,18 @@ mod tests {
     }
 
     #[test]
-    fn thread_sleeper_returns_immediately_for_a_past_deadline() {
+    fn thread_sleeper_does_not_block_for_a_past_deadline() {
+        // A deadline one second in the past, so an implementation that slept the
+        // unsigned distance instead of returning would block for about a second.
+        // The ceiling is 250 ms: wide enough that a scheduler stall cannot fail
+        // the test, narrow enough that a spurious one-second sleep still does.
+        // `checked_sub` is `Some` on any host that has been up for a second.
+        let deadline = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .expect("the host has been up for at least a second");
         let start = Instant::now();
-        ThreadSleeper.sleep_until(start);
-        assert!(start.elapsed() < Duration::from_millis(50));
+        ThreadSleeper.sleep_until(deadline);
+        assert!(start.elapsed() < Duration::from_millis(250));
     }
 
     #[test]

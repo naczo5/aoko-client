@@ -248,11 +248,43 @@ Recorded here rather than hidden.
 cargo check --workspace --all-targets
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all -- --check
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
 cargo bench --workspace
 cargo run -p aoko-app -- --capture-screenshots <out_dir>
 ```
 
+The Windows leg needs the runner variable, or the suite cross-compiles and never executes:
+
+```bash
+CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUNNER=wine \
+  cargo test -p aoko-platform --target x86_64-pc-windows-gnu
+```
+
+Without it the target still builds and never runs, so a suite that executed nothing reads as a pass. The doc gate needs `RUSTDOCFLAGS` set on the command line rather than in a manifest: plain `cargo doc` treats a broken intra-doc link as a warning, and on a crate with this many cross-references an unchecked link rots silently.
+
 CI runs the Linux and Windows matrices; `McInjector` DLL pipelines are untouched.
+
+### Source checks a reviewer also runs
+
+The commands above do not cover these, and every gate so far has checked them from a brief rather than
+from a document. Written down here so "the check as written" means one thing.
+
+| Check | Permitted exception |
+| --- | --- |
+| No `todo!` or `unimplemented!` anywhere | none |
+| No `unreachable!` outside `#[cfg(test)]` | none |
+| No `unwrap` or `expect` outside `#[cfg(test)]` | the startup abort in `crates/aoko-app/src/main.rs`. Installing the bundled fonts and opening the first window cannot recover, and continuing with a silently substituted family would reflow every measurement in the app |
+| Every `unsafe` block carries a `SAFETY:` comment naming the invariant it relies on | none, and the count is reported so a silent addition is visible |
+| No `thread::sleep` in a test | `crates/aoko-platform/src/tcp.rs`, 20 ms, to force one message across two TCP reads. The failure mode is a weaker test, never a wrong assertion: if the writes coalesce, the reassembly path simply goes unexercised |
+| No assertion on a duration the code chose — a schedule, a retry delay, a loop period | none: those are asserted against an injected clock, never against `Instant::elapsed`. A test may assert that a call **did not block**, provided the deadline is far enough in the past that a real sleep would be unmistakable and the ceiling is loose enough that a scheduler stall cannot trip it. `crates/aoko-core/src/clock.rs` is the only such test: a deadline one second in the past against a 250 ms ceiling |
+| No lint suppression in a manifest (`[lints]`, `[workspace.lints]`, crate-level `allow`) | none. A dead declaration is removed, not hidden: a suppressed `unused_crate_dependencies` is an accurate signal |
+| No colour literal outside `theme/` | none |
+| A doc comment that describes behaviour must match the behaviour | none. This is the check that caught the switch rows described as "wired through `ModuleToggles`" while nothing wired them, and `card_title`'s description of a rule it does not implement |
+
+An exception is not a pass: each one above is a named, justified deviation that the reviewer confirms is
+still justified rather than silently waived. If a check needs a new exception, the exception is argued in
+the review and added here in the same change, so the record cannot drift from the practice.
 
 ## 11. Non-goals for this migration
 
@@ -273,7 +305,8 @@ semantics or workspace dependencies. Neither builder re-opens these.
 | 3 | **Animations stay, gated by a client setting we own.** | Do not probe `ClientAreaAnimation`. Expose an in-app preference through `theme::motion` so one toggle governs every animated site on every platform. |
 | 4 | **One window at control geometry, loader as an in-view state.** | No destroy-and-recreate transition, so window position survives and there is no flicker. The loader is a shell state, not a second window. |
 | 5 | **Client decorations we draw.** | The title bar is ours: themed background, drag region, and our own minimise/maximise/close hit-testing, plus resize edges. It is client area, so it appears in headless captures; that is the better visual-parity outcome and it must be captured. |
-| 6 | **Bundle open font families** for UI and for monospace, shipped as assets. | Identical metrics on Windows and Linux. The drift versus the `Segoe UI` / `Consolas` baseline is accepted once rather than reflowing per platform. The families are recorded in `docs/rust/UI_INVENTORY.md` §3 and must not be re-picked per builder. |
+| 6 | **Bundle open font families** for UI and for monospace, shipped as assets. | Identical metrics on Windows and Linux. The drift versus the `Segoe UI` / `Consolas` baseline is accepted once rather than reflowing per platform. The families are **Liberation Sans** for UI and **Liberation Mono** for monospace — Open, and redistributable under SIL OFL 1.1, which is what makes bundling them in a GPL-3 binary lawful. The record of why, with the licence citation, is the module header at `crates/aoko-app/src/assets/mod.rs`; §3 of `docs/rust/UI_INVENTORY.md` lists the same two and defers to it. Neither builder re-picks them. |
+| 7 | **Drawn-but-unmounted surfaces are named debt, not delivered work.** | The command-search overlay, both dialogs (colour picker, window picker), the loader state and pulse-on-jump are built and unit-tested, but no route reaches them: nothing calls `open_search`, neither dialog type implements `Render`, the shell installs no key listener, and the overlay ignores the motion value handed to it. They stay in the tree behind that boundary and are carried as open items. The consequence is procedural: no builder may describe such a surface as working without a test that reaches it from a window, and no doc comment may claim it is wired. Deliberate debt is auditable; a doc comment that says "wired" is not. |
 
 The existing `gui-*.png` artifacts are **not** parity evidence: `scripts/New-GuiScreenshots.ps1`
 misnamed two of them and never captured Stats or Settings (section 8 item 9).

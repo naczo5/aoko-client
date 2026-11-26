@@ -218,6 +218,36 @@ Also flag: 121 hardcoded colour literals in `MainWindow.xaml` (18 palette previe
 `#40FFFFFF`, `#20000000`, `#16000000`, `#FFA500` at `:1173`). The 18 built-in previews duplicate the
 palette table by hand. In Rust these must be generated from the theme table, or the two will drift.
 
+### Typography and font families
+
+Only five `FontFamily` assignments exist in the whole XAML, and they name two families:
+
+| Family | Sites | Role |
+| --- | --- | --- |
+| `Segoe UI` | `Views/AccountsView.xaml:5`, `Views/ServersView.xaml:5` | the two tab views, set on the root element |
+| `Consolas` | `MainWindow.xaml:2072` (the "Autoclicker" tag), `Views/CommandSearchOverlay.xaml:240` (the "esc" hint), `:369` | monospace badges and key hints |
+
+Nothing else sets a family, `App.xaml` included, so the rest of the shell inherits the WPF default —
+whatever system UI font the machine provides. That inheritance is itself a platform difference: the
+managed app's text has no fixed metrics, which is one reason a C# screenshot from one machine cannot be
+pixel-compared against one from another.
+
+Neither family can be redistributed, so decision 6 (§12 of `MIGRATION_ARCHITECTURE.md`) bundles
+**Liberation Sans** for UI and **Liberation Mono** for monospace — four files under
+`crates/aoko-app/assets/fonts/`, regular and bold of each. The licence rationale and the comparison
+against the alternatives live in the module header at `crates/aoko-app/src/assets/mod.rs`, which is the
+authority for the choice; this section exists so the inventory is complete, not so the decision is
+recorded twice. Do not re-pick it in a widget.
+
+Two consequences to know before building anything with text:
+
+- **GPUI does not fall back the way WPF does.** A family must be installed through
+  `TextSystem::add_fonts` (`GPUI_API_NOTES.md` §8, `text_system.rs:302`) and installed **before** any
+  window opens, because it invalidates cached font resolution and clears layout caches. A family name
+  that does not resolve fails silently — invisible in code, obvious in a screenshot.
+- **Metrics differ from the `Segoe UI` baseline.** Text that fit a given width in C# may need
+  re-measuring here. Take widths from a capture, not from the XAML.
+
 ---
 
 ## 4. Strings and copy
