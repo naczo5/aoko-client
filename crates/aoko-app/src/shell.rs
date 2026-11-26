@@ -47,7 +47,9 @@ use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use gpui::prelude::*;
-use gpui::{div, px, AnyElement, Context, Entity, MouseButton, Render, SharedString, Window};
+use gpui::{
+    div, px, AnyElement, Context, Entity, KeyDownEvent, MouseButton, Render, SharedString, Window,
+};
 
 use aoko_core::app::AppController;
 use aoko_core::search;
@@ -60,7 +62,9 @@ use crate::theme::metrics;
 use crate::theme::motion::{self, Motion};
 use crate::theme::Theme;
 use crate::views::accounts_state::{AccountPanel, AccountsState, OfflineSubmit, PasteSubmit};
-use crate::views::command_search::{CommandSearchState, KeyboardGate, RowFactTable, SearchKey};
+use crate::views::command_search::{
+    CommandSearchState, KeyboardGate, RowFactTable, RowFacts, SearchKey, SearchKeyOutcome,
+};
 use crate::views::copy::{self, Card, Control, TabBody, MODULE_LIST_PREVIEW_SAMPLE};
 use crate::views::forms::FormFields;
 use crate::views::prefs::ClientPrefs;
@@ -1119,10 +1123,9 @@ impl Shell {
 
     /// The command-search state.
     ///
-    /// **Not mounted in Phase 2** (section 12 decision 7): nothing calls
-    /// [`Self::open_search`] and no key listener exists, so there is no overlay on
-    /// screen. This accessor, the state machine and the view are built and tested,
-    /// and the wiring is owed.
+    /// Mounted now: `Ctrl+K`, a typed character and the rail button open it, the root listener
+    /// handles Enter and Escape, and [`Shell::render_search`] paints
+    /// [`crate::overlay::overlay`] over the rail and body while it is open.
     #[must_use]
     pub fn search(&self) -> &CommandSearchState {
         &self.search
@@ -1621,13 +1624,17 @@ impl Shell {
 
     /// Opens the search state, optionally seeded with the typed character.
     ///
-    /// **Nothing calls this in Phase 2** (decision 7): the shell installs no key
-    /// listener, so Ctrl+K and type-to-open do not reach it. When the wiring lands,
-    /// both gestures land here and differ only in the seed.
+    /// Two callers, and they differ only in the seed: the rail button passes `None` and the
+    /// type-to-open path passes the character that opened it.
+    ///
+    /// A click does not consult the text-field half of the gate: a press on the rail button is
+    /// deliberate, and the managed button opens the overlay from any field. What it does
+    /// consult is a live keybind capture, which owns the keyboard outright — an overlay opened
+    /// under a capture would take keys the capture is waiting for.
     pub fn open_search(&mut self, seed: Option<&str>, cx: &mut Context<Self>) {
-        let gate = KeyboardGate::ready();
-        let facts = RowFactTable::default();
-        let dev_mode = false;
+        let facts = self.row_facts();
+        let dev_mode = self.profile.dev_mode;
+        let gate = self.search_gate(None, cx);
         let _ = self
             .search
             .handle_window_key(SearchKey::CtrlK, &gate, dev_mode, &facts);
@@ -1644,6 +1651,167 @@ impl Shell {
         if self.search.close() {
             cx.notify();
         }
+    }
+
+    /// One window keystroke, mapped onto the search and performed.
+    ///
+    /// `Opened` and `Closed` are the outcomes worth stopping propagation for: the overlay has
+    /// taken the keyboard, and letting the key travel on would also hit whatever is behind it.
+    /// Everything else is `Ignored`, and the key goes on to the element that would have had it.
+    fn handle_search_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> SearchKeyOutcome {
+        // Enter jumps the selected row, and only while the overlay is open. It is not a
+        // `SearchKey` because the managed `Jump` is a query-field key, not a window gesture.
+        // The query row is painted rather than focusable (`overlay::query_row`), so the root
+        // listener is what receives it.
+        if self.search.is_open() && event.keystroke.key.eq_ignore_ascii_case("enter") {
+            self.perform_jump(cx);
+            return SearchKeyOutcome::Closed;
+        }
+
+        let Some(key) = search_key_of(event) else {
+            return SearchKeyOutcome::Ignored;
+        };
+
+        let facts = self.row_facts();
+        let dev_mode = self.profile.dev_mode;
+        let gate = self.search_gate(Some(window), cx);
+        let outcome = self.search.handle_window_key(key, &gate, dev_mode, &facts);
+        if outcome != SearchKeyOutcome::Ignored {
+            cx.notify();
+        }
+        outcome
+    }
+
+    /// A click on one result row: select it, then perform the jump.
+    fn jump_to_row(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.search.select(Some(index));
+        self.perform_jump(cx);
+    }
+
+    /// Performs the jump the overlay asked for: the entry's tab, and the pulse on its card.
+    ///
+    /// A row click and Enter both come through here, and `jump_selected` is what closes the
+    /// overlay and hands back the request, so there is one landing place rather than two.
+    ///
+    /// The pulse is started and the state pruned, but nothing paints a ring yet: the card
+    /// border a view would draw is `views/`'s, and no frame loop advances a running pulse. The
+    /// report names that as owed rather than pretending the jump is animated.
+    fn perform_jump(&mut self, cx: &mut Context<Self>) {
+        let Some(request) = self.search.jump_selected() else {
+            return;
+        };
+
+        self.select_tab_named(request.entry.tab, cx);
+
+        let now = self.runtime.now_ms();
+        let motion_enabled = motion::motion().enabled();
+        let _ = self.search.begin_pulse(&request, now, motion_enabled);
+
+        // `entry.card_name` is what a scroll-into-view would target; the shell has no
+        // scroll-to-card yet, so the tab change is the whole navigation.
+        cx.notify();
+    }
+
+    /// The per-module facts the overlay's rows read.
+    ///
+    /// `supported` is the bridge's advertised list through [`Runtime::module_supported`], so
+    /// the row and the capability report cannot disagree; `is_on` is the same flag the card's
+    /// switch shows. `keybind_text` is empty for a module with no bind, which is the managed
+    /// "not bindable" rather than an `Unbound` chip.
+    fn row_facts(&self) -> RowFactTable {
+        let mut facts = RowFactTable::default();
+        for entry in search::entries() {
+            let vk = self.profile.module_keys.get(entry.id).copied().unwrap_or(0);
+            facts.set(
+                entry.id,
+                RowFacts {
+                    supported: self.runtime.module_supported(entry.id),
+                    is_on: self.runtime.module_enabled(entry.id),
+                    keybind_text: if vk > 0 {
+                        crate::views::keybind_text::format_virtual_key(vk)
+                    } else {
+                        String::new()
+                    },
+                },
+            );
+        }
+        facts
+    }
+
+    /// `CanOpenCommandSearch`, as far as this port can answer it.
+    ///
+    /// `capturing_keybind` covers the managed hook flag *and* both pending action binds,
+    /// because a keybind or action bind here is one `KeybindCapture` entity per binding.
+    ///
+    /// `control_mode` also carries the one condition the managed struct never needed: a text
+    /// field with focus. WPF sent window keys to the window, so a field could not swallow a
+    /// chord; GPUI sends a typed character to the focused field and bubbles it to this
+    /// listener, so without the check a typed `a` in the token box would open the overlay as
+    /// well as type. `window` is the focus authority and only a keystroke has one — see
+    /// [`Shell::open_search`] for why a click passes `None`.
+    fn search_gate(&self, window: Option<&Window>, cx: &App) -> KeyboardGate {
+        KeyboardGate {
+            control_mode: !window.is_some_and(|window| self.any_text_field_focused(window, cx)),
+            capturing_keybind: self
+                .captures
+                .values()
+                .any(|held| held.capture.read(cx).is_capturing()),
+            ..KeyboardGate::default()
+        }
+    }
+
+    /// Whether any of the shell's text fields owns the keyboard.
+    ///
+    /// Read off the entities rather than a tracked flag: there are six one place
+    /// (`fields::FormFields`) and a flag beside each would be a second copy of the focus GPUI
+    /// already keeps. A new field added to `FormFields` is in this array, so the gate cannot
+    /// forget it.
+    fn any_text_field_focused(&self, window: &Window, cx: &App) -> bool {
+        [
+            &self.fields.token,
+            &self.fields.offline_name,
+            &self.fields.server_name,
+            &self.fields.server_address,
+            &self.fields.direct_address,
+            &self.fields.config_name,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|field| field.read(cx).focus_handle().is_focused(window))
+    }
+
+    /// The command-search overlay, or `None` while it is closed.
+    ///
+    /// Mounted after the rail and the body row and before the resize strips, so the strips stay
+    /// above the scrim: a resize edge the overlay swallowed would be a bug a user finds by
+    /// trying. The pulse is pruned first, so a ring that has run out does not outlive its
+    /// motion in the state.
+    fn render_search(
+        &self,
+        theme: &Theme,
+        motion: Motion,
+        entity: &Entity<Self>,
+        window: &Window,
+    ) -> Option<AnyElement> {
+        if !self.search.is_open() {
+            return None;
+        }
+
+        let handle = entity.clone();
+        Some(crate::overlay::overlay(
+            theme,
+            &self.search,
+            motion,
+            window.viewport_size(),
+            move |index, _event, _window, cx| {
+                handle.update(cx, |shell, cx| shell.jump_to_row(index, cx));
+            },
+        ))
     }
 
     /// `armed · 7 on`, rebuilt only when a toggle changes.
@@ -1728,6 +1896,12 @@ impl Render for Shell {
         let theme = &self.theme;
         let entity = cx.entity();
 
+        // A pulse that has run out is dropped before the tree is assembled, so a jump's ring
+        // cannot outlive its motion in the state. Nothing paints it yet; see
+        // [`Shell::perform_jump`].
+        let now = self.runtime.now_ms();
+        self.search.prune_pulse(now);
+
         let body = match copy::TABS.get(self.tab).map(|tab| tab.body) {
             // The Stats tab draws `views::stats_view`, which reads the runtime's tracker.
             Some(TabBody::Stats) => {
@@ -1769,6 +1943,21 @@ impl Render for Shell {
             // inherits. Installing the fonts without asking for the family would leave
             // every measurement to whatever fontconfig happens to resolve.
             .font_family(crate::assets::UI_FAMILY)
+            // The window-level keys, all of them: Ctrl+K, Escape, type-to-open and Enter.
+            // GPUI dispatches a key from the focused node up the tree, and with nothing
+            // focused the path starts at the root, so this listener is the one place a
+            // keystroke is guaranteed to arrive.
+            .on_key_down({
+                let handle = entity.clone();
+                move |event, window, cx| {
+                    let outcome =
+                        handle.update(cx, |shell, cx| shell.handle_search_key(event, window, cx));
+                    // Only the two outcomes that take the keyboard stop it here.
+                    if matches!(outcome, SearchKeyOutcome::Opened | SearchKeyOutcome::Closed) {
+                        cx.stop_propagation();
+                    }
+                }
+            })
             .child(self.render_title_bar(theme, &entity, &title))
             .child(
                 div()
@@ -1780,6 +1969,13 @@ impl Render for Shell {
                     .child(self.render_rail(theme, &entity, &chip))
                     .child(div().flex().flex_1().min_w(px(0.0)).child(body)),
             );
+
+        // The overlay sits above the rail and the body and below the resize strips: a strip
+        // the scrim swallowed would be a resize a user cannot perform, which is why this is
+        // one child rather than a wrapper around the tree.
+        if let Some(search) = self.render_search(theme, motion, &entity, window) {
+            root = root.child(search);
+        }
 
         // Decision 5's resize edges. They are last so they paint above the title bar
         // and the tab body, and each consumes its own mouse-down before anything
@@ -1886,12 +2082,10 @@ impl Shell {
             .gap(px(2.0))
             .bg(theme.background);
 
-        // **Inert in Phase 2** (section 12 decision 7 debt): the managed button opens the
-        // command-search overlay (`MainWindow.xaml.cs:1623-1824`). The overlay view and
-        // its state exist, but nothing mounts the view and the shell installs no key
-        // handling, so this is a click handler that does nothing. It keeps the managed
-        // label rather than switching to a disabled style the C# does not have.
-        rail = rail.child(
+        // The rail button opens the overlay, the same state Ctrl+K opens. It was inert in
+        // Phase 2 while nothing mounted the view or listened for keys; both are wired now.
+        rail = rail.child({
+            let handle = entity.clone();
             components::button(
                 "rail-search",
                 theme,
@@ -1906,10 +2100,12 @@ impl Shell {
                     "   ",
                     copy::SEARCH_BUTTON_CHORD,
                 ),
-                |_, _, _| {},
+                move |_, _window, cx| {
+                    handle.update(cx, |shell, cx| shell.open_search(None, cx));
+                },
             )
-            .into_any_element(),
-        );
+            .into_any_element()
+        });
 
         for (index, tab) in copy::TABS.iter().enumerate() {
             rail = rail.child(self.render_rail_item(index, tab.name, theme, entity));
@@ -3099,6 +3295,51 @@ fn keybind_label(profile: &aoko_protocol::profile::Profile, module: &'static str
 #[must_use]
 pub fn module_list_sample() -> &'static str {
     MODULE_LIST_PREVIEW_SAMPLE
+}
+
+/// The search key one keystroke is, or `None` when the search does not care about it.
+///
+/// Ctrl+K and Escape are the managed chord and the managed dismissal. A printable character is
+/// `key_char`, which is what the platform delivers for typing and is `None` for a modifier or a
+/// named key; a chord with a character behind it (`Ctrl+A`) is a text-field gesture, not a
+/// type-to-open, so any of ctrl/alt/platform disqualifies it. Shift does not, because `key_char`
+/// is already the shifted character.
+fn search_key_of(event: &KeyDownEvent) -> Option<SearchKey> {
+    let modifiers = event.keystroke.modifiers;
+    let chorded = modifiers.control || modifiers.alt || modifiers.platform;
+
+    if modifiers.control
+        && !modifiers.alt
+        && !modifiers.platform
+        && event.keystroke.key.eq_ignore_ascii_case("k")
+    {
+        return Some(SearchKey::CtrlK);
+    }
+
+    if event.keystroke.key.eq_ignore_ascii_case("escape") {
+        return Some(SearchKey::Escape);
+    }
+
+    if chorded {
+        return None;
+    }
+
+    // `key_char` is the typed character; `key` is the fallback, because a platform reports some
+    // keys only there and `Keystroke::parse` (which the tests use) puts the character in `key`
+    // and leaves `key_char` empty. A named key ("tab", "f1") is longer than one character and
+    // falls out below.
+    let character = event
+        .keystroke
+        .key_char
+        .as_deref()
+        .unwrap_or(event.keystroke.key.as_str());
+    let mut characters = character.chars();
+    let first = characters.next()?;
+    if characters.next().is_some() {
+        return None;
+    }
+
+    Some(SearchKey::Printable(first))
 }
 
 /// Milliseconds since the Unix epoch, for the `Last used` / `Last joined` lines.
@@ -5053,5 +5294,261 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ---- the command-search overlay -------------------------------------------
+
+    /// The state the overlay paints, as a tuple a test can compare.
+    ///
+    /// The four fields decide what is on screen: whether it is open, the query, the selection
+    /// and the row count. Two paths that open the same overlay have to agree on all of them.
+    fn search_state(shell: &Shell) -> (bool, String, Option<usize>, usize) {
+        let search = shell.search();
+        (
+            search.is_open(),
+            search.query().to_owned(),
+            search.selected_index(),
+            search.rows().len(),
+        )
+    }
+
+    /// A row click dismisses the card and lands on the tab the row names.
+    ///
+    /// The click goes through [`Shell::jump_to_row`], which is the function
+    /// `crate::overlay::overlay`'s row callback calls. The overlay's rows carry no debug
+    /// selector, so a painted click is not addressable at the pin and the model is what is
+    /// asserted. The row is chosen because its tab is **not** the current one: a jump that
+    /// changed nothing would otherwise pass.
+    #[gpui::test]
+    fn a_row_click_dismisses_the_card_and_lands_on_its_tab(cx: &mut gpui::TestAppContext) {
+        use gpui::Keystroke;
+
+        let root = scratch_root();
+        let (shell, handle, mut visual) = shell_in_window(cx, &root);
+
+        visual
+            .cx
+            .dispatch_keystroke(handle, Keystroke::parse("ctrl-k").expect("keystroke"));
+
+        let (open, current, index, tab_of_row) = cx.read(|cx| {
+            let shell = shell.read(cx);
+            let current = shell.selected_tab_name();
+            let index = shell
+                .search()
+                .rows()
+                .iter()
+                .position(|row| !row.entry.tab.eq_ignore_ascii_case(current))
+                .expect("an empty query ranks destinations outside the tab the shell opens on");
+            (
+                shell.search().is_open(),
+                current,
+                index,
+                shell.search().rows()[index].entry.tab,
+            )
+        });
+        assert!(open, "Ctrl+K opened the overlay");
+
+        cx.update(|cx| shell.update(cx, |shell, cx| shell.jump_to_row(index, cx)));
+
+        let (open, tab) = cx.read(|cx| {
+            let shell = shell.read(cx);
+            (shell.search().is_open(), shell.selected_tab_name())
+        });
+        assert!(!open, "the jump dismissed the card");
+        assert_eq!(tab, tab_of_row, "and landed on the tab the row names");
+        assert_ne!(tab, current, "which is not the tab the shell started on");
+    }
+
+    /// Enter dismisses the card and lands where the selected row points.
+    ///
+    /// A typed character is the managed type-to-open gesture, so this also covers the seed.
+    /// The selection is moved onto a row whose tab is not the current one — the model call an
+    /// arrow key lands on — so the landing tab proves the jump rather than coinciding with
+    /// where the shell already was.
+    #[gpui::test]
+    fn enter_dismisses_the_card_and_lands_on_the_selected_rows_tab(cx: &mut gpui::TestAppContext) {
+        use gpui::Keystroke;
+
+        let root = scratch_root();
+        let (shell, handle, mut visual) = shell_in_window(cx, &root);
+
+        visual
+            .cx
+            .dispatch_keystroke(handle, Keystroke::parse("s").expect("keystroke"));
+
+        let (open, query, current, index, tab_of_row) = cx.read(|cx| {
+            let shell = shell.read(cx);
+            let current = shell.selected_tab_name();
+            let index = shell
+                .search()
+                .rows()
+                .iter()
+                .position(|row| !row.entry.tab.eq_ignore_ascii_case(current))
+                .expect("`s` ranks a destination outside the tab the shell opens on");
+            (
+                shell.search().is_open(),
+                shell.search().query().to_owned(),
+                current,
+                index,
+                shell.search().rows()[index].entry.tab,
+            )
+        });
+        assert!(open, "a typed character opens the overlay");
+        assert_eq!(query, "s", "seeded with the character that opened it");
+
+        cx.update(|cx| shell.update(cx, |shell, _| shell.search.select(Some(index))));
+
+        visual
+            .cx
+            .dispatch_keystroke(handle, Keystroke::parse("enter").expect("keystroke"));
+
+        let (open, tab) = cx.read(|cx| {
+            let shell = shell.read(cx);
+            (shell.search().is_open(), shell.selected_tab_name())
+        });
+        assert!(!open, "Enter dismissed the card");
+        assert_eq!(tab, tab_of_row, "and landed on the selected row's tab");
+        assert_ne!(tab, current, "which is not the tab the shell started on");
+    }
+
+    /// A focused text field owns the keyboard: Ctrl+K and a typed character both belong to it.
+    ///
+    /// This condition is the one the managed `CanOpenCommandSearch` never needed. WPF sent
+    /// window keys to the window, so a field could not swallow a chord; GPUI bubbles a typed
+    /// character from the focused field to the root listener, so without the field check a key
+    /// typed into the token box would open the overlay as well as type.
+    ///
+    /// The gate is asserted directly as well as through the keystrokes, because a widget that
+    /// stopped propagation would make the keystroke half pass without the gate ever being
+    /// consulted.
+    #[gpui::test]
+    fn a_focused_text_field_keeps_ctrl_k_and_the_character(cx: &mut gpui::TestAppContext) {
+        use gpui::Keystroke;
+
+        let root = scratch_root();
+        let (shell, handle, mut visual) = shell_in_window(cx, &root);
+
+        visual.update(|window, cx| {
+            assert!(
+                shell
+                    .read(cx)
+                    .search_gate(Some(window), cx)
+                    .can_open_search(),
+                "nothing has focus yet, so the gate is open"
+            );
+        });
+
+        let field = cx
+            .read(|cx| shell.read(cx).fields.token.clone())
+            .expect("the token box exists after the first frame");
+        let focus = cx.read(|cx| field.read(cx).focus_handle().clone());
+        visual.update(|window, cx| window.focus(&focus, cx));
+
+        visual.update(|window, cx| {
+            assert!(
+                !shell
+                    .read(cx)
+                    .search_gate(Some(window), cx)
+                    .can_open_search(),
+                "a focused text field closes the gate"
+            );
+        });
+
+        visual
+            .cx
+            .dispatch_keystroke(handle, Keystroke::parse("ctrl-k").expect("keystroke"));
+        assert!(
+            !cx.read(|cx| shell.read(cx).search().is_open()),
+            "Ctrl+K belongs to the field"
+        );
+
+        visual
+            .cx
+            .dispatch_keystroke(handle, Keystroke::parse("a").expect("keystroke"));
+        assert!(
+            !cx.read(|cx| shell.read(cx).search().is_open()),
+            "and a typed character belongs to the field"
+        );
+        assert_eq!(
+            cx.read(|cx| field.read(cx).text().to_owned()),
+            "a",
+            "the field is what received it"
+        );
+    }
+
+    /// The rail button opens exactly the state Ctrl+K opens.
+    ///
+    /// `components::button` gives the rail button an `ElementId` but installs no
+    /// `debug_selector`, so a painted click is not addressable from a `VisualTestContext`;
+    /// this asserts the state, and the wiring is the single `open_search(None, cx)` call in
+    /// `render_rail`.
+    #[gpui::test]
+    fn the_rail_button_opens_the_state_ctrl_k_opens(cx: &mut gpui::TestAppContext) {
+        use gpui::Keystroke;
+
+        let root = scratch_root();
+        let (shell, handle, mut visual) = shell_in_window(cx, &root);
+
+        visual
+            .cx
+            .dispatch_keystroke(handle, Keystroke::parse("ctrl-k").expect("keystroke"));
+        let by_key = cx.read(|cx| search_state(shell.read(cx)));
+        assert!(by_key.0, "Ctrl+K opened the overlay");
+
+        cx.update(|cx| shell.update(cx, |shell, cx| shell.close_search(cx)));
+        assert!(
+            !cx.read(|cx| shell.read(cx).search().is_open()),
+            "and the dismissal closed it, so the second open starts from closed"
+        );
+
+        cx.update(|cx| shell.update(cx, |shell, cx| shell.open_search(None, cx)));
+        let by_button = cx.read(|cx| search_state(shell.read(cx)));
+
+        assert!(by_button.0, "the rail button's call opened the overlay");
+        assert_eq!(
+            by_button, by_key,
+            "the same open, query, selection and row count"
+        );
+    }
+
+    /// The overlay is mounted: its card paints while it is open and not while it is closed.
+    ///
+    /// `command-search-card` is the one stable selector the overlay carries, and the mount
+    /// sits above the rail and the body in the tree, so this is the assertion that the view
+    /// is in the frame at all rather than only in the state.
+    #[gpui::test]
+    fn the_overlay_paints_only_while_it_is_open(cx: &mut gpui::TestAppContext) {
+        use gpui::Keystroke;
+
+        let root = scratch_root();
+        let (shell, handle, mut visual) = shell_in_window(cx, &root);
+
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            visual.debug_bounds("command-search-card").is_none(),
+            "a closed overlay paints nothing"
+        );
+
+        visual
+            .cx
+            .dispatch_keystroke(handle, Keystroke::parse("ctrl-k").expect("keystroke"));
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            visual.debug_bounds("command-search-card").is_some(),
+            "an open overlay paints its card"
+        );
+
+        cx.update(|cx| shell.update(cx, |shell, cx| shell.close_search(cx)));
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            visual.debug_bounds("command-search-card").is_none(),
+            "and closing it takes the card off screen"
+        );
     }
 }

@@ -68,7 +68,7 @@
 //! view has no copy of its own to go stale. No message carries a click or a CPS value, so the
 //! ingest path feeds nothing and this file says so where the sink is defined.
 
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
 use aoko_core::app::{AppController, StateSnapshot};
@@ -80,6 +80,7 @@ use aoko_platform::{
     CapabilityReport, InputBackend, InputEvent, Key, MouseButton, MouseState, PlatformError,
     WindowInspector,
 };
+use aoko_protocol::capabilities::BridgeCapabilities;
 use aoko_protocol::gtb::{parse_wordlist_js, GtbWordSolver};
 use aoko_protocol::module_catalog::{self, EnabledFlag};
 use aoko_protocol::stats::StatsTracker;
@@ -326,6 +327,17 @@ pub struct Runtime {
     /// One object, so there is one copy of the numbers. `Arc` because the loops hold the sink
     /// on their own threads; `Mutex` because `StatsTracker` records through `&mut self`.
     stats: Arc<StatsFeed>,
+    /// The module list the bridge advertises, kept current by the reader thread.
+    ///
+    /// `aoko_protocol::capabilities::BridgeCapabilities` is the one authority for "this bridge
+    /// supports this module", and the reader is the only thing that receives it, so the cell is
+    /// shared with `crate::ingest` rather than copied here. Before the first capability frame it
+    /// holds the codec's own version fallback — the table the codec would decode against — so a
+    /// question asked before the handshake gets the codec's answer rather than a list this
+    /// crate invented.
+    advertised: Arc<RwLock<BridgeCapabilities>>,
+    /// The instant [`Runtime::now_ms`] counts from: the clock's reading at construction.
+    epoch: Instant,
 }
 
 impl Runtime {
@@ -350,6 +362,9 @@ impl Runtime {
         clock: Arc<dyn Clock>,
         sleeper: Arc<dyn Sleeper>,
     ) -> Self {
+        // The clock's own reading is the origin of the millisecond clock, so a step clock in a
+        // test moves `now_ms` by exactly the steps the test injects and never by wall time.
+        let epoch = clock.now();
         Self {
             controller,
             ingest: None,
@@ -361,6 +376,8 @@ impl Runtime {
             sleeper,
             gtb: None,
             stats: Arc::new(StatsFeed::new()),
+            advertised: Arc::new(RwLock::new(BridgeCapabilities::for_version_fallback(None))),
+            epoch,
         }
     }
 
@@ -395,6 +412,44 @@ impl Runtime {
         &self.controller
     }
 
+    /// Milliseconds on this runtime's clock, counted from its construction.
+    ///
+    /// The overlay's pulse arithmetic is `i64` milliseconds (`views::command_search::CardPulse`),
+    /// while [`Clock::now`] is an `Instant`, so this is the conversion: one subtraction from the
+    /// epoch the constructor read off the same clock.
+    /// Monotonic, and measured on the injected clock, so a test's step clock advances it by
+    /// exactly the steps the test injects and nothing here reads the wall.
+    #[must_use]
+    pub fn now_ms(&self) -> i64 {
+        let elapsed = self.clock.now().saturating_duration_since(self.epoch);
+        i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+    }
+
+    /// Whether the bridge advertises one module, by catalogue id.
+    ///
+    /// The authority is
+    /// [`BridgeCapabilities::supports_module`](aoko_protocol::capabilities::BridgeCapabilities::supports_module)
+    /// over the list the bridge reports at handshake, which the reader thread keeps in the
+    /// shared cell; nothing in the app carries a second list. Case-insensitive, as the codec's
+    /// normalisation is, and `false` for everything the bridge has not advertised — which is
+    /// what makes an overlay row read unavailable rather than guessed at.
+    #[must_use]
+    pub fn module_supported(&self, module_id: &str) -> bool {
+        self.advertised
+            .read()
+            .map(|advertised| advertised.supports_module(module_id))
+            .unwrap_or(false)
+    }
+
+    /// The shared advertised-module cell, for the reader that fills it.
+    ///
+    /// [`Runtime::connect_bridge`] is the only caller: the ingest thread receives the
+    /// capability frames, so it is the one writer, and this gives it the same cell
+    /// [`Runtime::module_supported`] reads.
+    fn advertised_handle(&self) -> Arc<RwLock<BridgeCapabilities>> {
+        Arc::clone(&self.advertised)
+    }
+
     /// Starts the bridge reader on its own thread, once.
     ///
     /// Idempotent so a startup path that runs twice (a reload, a second window) cannot
@@ -405,7 +460,10 @@ impl Runtime {
         if self.ingest.is_some() {
             return;
         }
-        self.ingest = Some(Ingest::spawn(Arc::clone(&self.controller)));
+        self.ingest = Some(Ingest::spawn(
+            Arc::clone(&self.controller),
+            self.advertised_handle(),
+        ));
     }
 
     /// What the bridge link currently reports.
@@ -1475,6 +1533,60 @@ mod tests {
                 *now = deadline;
             }
         }
+    }
+
+    /// The search overlay's clock: `i64` milliseconds on the injected clock.
+    ///
+    /// `CardPulse` counts in milliseconds and the clock hands back an `Instant`, so the accessor
+    /// is the conversion. A step clock proves it is the injected clock and not the wall: the
+    /// accessor moves by exactly the steps the test injects.
+    #[test]
+    fn now_ms_counts_the_injected_clock() {
+        let controller = Arc::new(AppController::default());
+        let source = Arc::new(StepClock::new());
+        let clock: Arc<dyn Clock> = source.clone();
+        let sleeper: Arc<dyn Sleeper> = source.clone();
+
+        let runtime = Runtime::with_time(controller, clock, sleeper);
+        let start = runtime.now_ms();
+        assert_eq!(
+            start, 0,
+            "the epoch is the construction, so it starts at zero"
+        );
+
+        source.advance(Duration::from_millis(250));
+        assert_eq!(
+            runtime.now_ms(),
+            250,
+            "and it moves with the clock, not the wall"
+        );
+
+        source.advance(Duration::from_secs(2));
+        assert_eq!(runtime.now_ms(), 2_250);
+    }
+
+    /// The row facts' `supported` source: the bridge's advertised list, not a list of ours.
+    ///
+    /// The cell starts on the codec's own fallback table, which is what a window opened before
+    /// the handshake would read, and an empty advertised set supports nothing — there is no
+    /// second list in this crate to fall back to.
+    #[test]
+    fn module_support_reads_the_advertised_cell() {
+        let runtime = Runtime::headless();
+        assert!(
+            runtime.module_supported("autoclicker"),
+            "the codec's fallback table advertises autoclicker"
+        );
+        assert!(
+            runtime.module_supported("AutoClicker"),
+            "the lookup is the codec's normalised one, so case does not matter"
+        );
+
+        *runtime.advertised.write().expect("cell") = BridgeCapabilities::empty();
+        assert!(
+            !runtime.module_supported("autoclicker"),
+            "an empty advertised list supports nothing rather than everything"
+        );
     }
 
     /// The switch is the supervisor's only trigger: enabling a loop-driving module starts

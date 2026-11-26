@@ -56,6 +56,13 @@
 //! on traffic that already arrived, so this slice sends on change only. [`crate::ingest`]'s
 //! report names what a real sender would need.
 //!
+//! # The capability frame
+//!
+//! A `capabilities` frame is the one message besides state that changes something: the reader
+//! copies the decoder's table into the cell `Runtime::module_supported` reads, which is what the
+//! command-search overlay's `supported` column shows. It is published once on entry as well, so a
+//! window opened before the handshake asks the codec's question rather than reading an empty list.
+//!
 //! What this deliberately does not do: no reconnect, no command frames, no injection and no
 //! module execution. A failed dial leaves the link down with the reason in the log, and
 //! the connection lifecycle (retry, backoff, teardown) belongs to a later slice. The
@@ -63,12 +70,13 @@
 //! `recv_line` on a live socket cannot be interrupted without closing it, and closing it
 //! is not this slice's job.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use aoko_core::app::{AppController, ConfigFrame};
 use aoko_platform::TcpBridgeTransport;
+use aoko_protocol::capabilities::BridgeCapabilities;
 use aoko_protocol::codec::{Decoder, Inbound, Pump, TransportClient};
 use aoko_protocol::diagnostics::ManagedTransportDiagnostics;
 use aoko_protocol::transport::{Transport, TransportError};
@@ -119,12 +127,15 @@ impl Ingest {
     /// The dial happens inside the thread: a resolved-but-silent address can block for the
     /// OS SYN timeout, and the startup path must not wait for it.
     #[must_use]
-    pub fn spawn(controller: Arc<AppController>) -> Self {
+    pub fn spawn(
+        controller: Arc<AppController>,
+        advertised: Arc<RwLock<BridgeCapabilities>>,
+    ) -> Self {
         Self::start("aoko-bridge-dial", move || {
             match TcpBridgeTransport::connect_bridge() {
                 Ok(transport) => {
                     tracing::info!("bridge connected on the loopback port");
-                    pump(client(transport), &controller);
+                    pump(client(transport), &controller, &advertised);
                     tracing::info!("bridge link closed");
                 }
                 Err(error) => {
@@ -142,9 +153,13 @@ impl Ingest {
     /// connected pair without a socket, so the decode-and-publish path is exercised for
     /// real and nothing touches the network.
     #[must_use]
-    pub fn attach<T: Transport + 'static>(transport: T, controller: Arc<AppController>) -> Self {
+    pub fn attach<T: Transport + 'static>(
+        transport: T,
+        controller: Arc<AppController>,
+        advertised: Arc<RwLock<BridgeCapabilities>>,
+    ) -> Self {
         Self::start("aoko-bridge-read", move || {
-            pump(client(transport), &controller);
+            pump(client(transport), &controller, &advertised);
         })
     }
 
@@ -183,7 +198,14 @@ impl Ingest {
 /// Connected is set on entry and cleared on every exit path, so a closed link, a read
 /// error and a panicking frame handler all leave the store saying "disconnected" rather
 /// than "connected, last seen a while ago".
-fn pump<T: Transport>(mut client: TransportClient<T>, controller: &AppController) {
+///
+/// `advertised` is the cell [`crate::runtime::Runtime::module_supported`] reads. This thread
+/// is its only writer, because it is the thread that receives the capability frame.
+fn pump<T: Transport>(
+    mut client: TransportClient<T>,
+    controller: &AppController,
+    advertised: &RwLock<BridgeCapabilities>,
+) {
     let store = controller.store();
     store.set_connected(true);
 
@@ -191,6 +213,12 @@ fn pump<T: Transport>(mut client: TransportClient<T>, controller: &AppController
     // module docs. The frame carries the HUD layout as well as the payload, because a layout
     // the controller hands back is the one the user moved.
     let mut sent: Option<ConfigFrame> = None;
+
+    // The codec's own table, published once on entry: a window that opens before the handshake
+    // asks the same question the decoder would answer, rather than reading an empty list.
+    if let Ok(mut cell) = advertised.write() {
+        *cell = client.decoder().capabilities().clone();
+    }
 
     loop {
         // Before every read, so a config write can never land inside one. A profile edit made
@@ -208,8 +236,15 @@ fn pump<T: Transport>(mut client: TransportClient<T>, controller: &AppController
                 // `d8e23a4` added. `publish(*state, ..)` would be a move out of the `Arc`.
                 store.publish_shared(state, Instant::now());
             }
-            // Capabilities and command results are decoded but not consumed yet: the
-            // command request queue and the capability-driven UI are later slices.
+            // Command results are decoded and dropped; the command request queue is a later
+            // slice. A capability frame is not: the codec has already applied it to its own
+            // table, so the shared cell is one clone away from being current, and the overlay's
+            // `supported` column reads it through `Runtime::module_supported`.
+            Ok(Pump::Frame(Inbound::Capabilities(_))) => {
+                if let Ok(mut cell) = advertised.write() {
+                    *cell = client.decoder().capabilities().clone();
+                }
+            }
             Ok(Pump::Frame(_)) => {}
             Ok(Pump::TooLong) => {
                 tracing::warn!("bridge line exceeded the 1 MiB inbound cap; discarded");
@@ -374,6 +409,7 @@ mod tests {
                 gate: Arc::clone(&gate),
             },
             Arc::clone(&controller),
+            advertised_cell(),
         );
 
         let state = wait_for_state(&controller, |state| state.health == 7.5);
@@ -451,16 +487,60 @@ mod tests {
 
     /// A reader on a [`Driven`] link, plus the peer that feeds it and records what it writes.
     fn connect(controller: &Arc<AppController>) -> (memory::MemoryPeer, Arc<AtomicBool>, Ingest) {
+        let (peer, closed, ingest, _advertised) = connect_with_cell(controller);
+        (peer, closed, ingest)
+    }
+
+    /// The same reader, handing back the advertised cell it fills.
+    ///
+    /// The cell is not reachable from `Ingest` — it belongs to the caller that passed it in —
+    /// so a test that wants to read what the reader wrote has to keep its own handle.
+    fn connect_with_cell(
+        controller: &Arc<AppController>,
+    ) -> (
+        memory::MemoryPeer,
+        Arc<AtomicBool>,
+        Ingest,
+        Arc<RwLock<BridgeCapabilities>>,
+    ) {
         let closed = Arc::new(AtomicBool::new(false));
         let (transport, peer) = memory::duplex();
+        let advertised = advertised_cell();
         let ingest = Ingest::attach(
             Driven {
                 inner: transport,
                 closed: Arc::clone(&closed),
             },
             Arc::clone(controller),
+            Arc::clone(&advertised),
         );
-        (peer, closed, ingest)
+        (peer, closed, ingest, advertised)
+    }
+
+    /// The advertised-module cell a reader fills, seeded the way `Runtime` seeds its own.
+    fn advertised_cell() -> Arc<RwLock<BridgeCapabilities>> {
+        Arc::new(RwLock::new(BridgeCapabilities::for_version_fallback(None)))
+    }
+
+    /// Waits until the reader has written a cell the predicate accepts.
+    ///
+    /// The reader is on its own thread, so this is a poll with a deadline rather than a fixed
+    /// sleep: when it returns, the frame has been taken and the cell is what the next read of
+    /// `Runtime::module_supported` sees.
+    fn wait_for_advertised(
+        advertised: &Arc<RwLock<BridgeCapabilities>>,
+        predicate: impl Fn(&BridgeCapabilities) -> bool,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if advertised.read().is_ok_and(|cell| predicate(&cell)) {
+                return;
+            }
+            if Instant::now() >= deadline {
+                panic!("the reader never published the capability frame");
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
     }
 
     /// Waits until the client has written `count` lines, then hands back everything it wrote.
@@ -653,5 +733,37 @@ mod tests {
 
         closed.store(true, Ordering::SeqCst);
         ingest.join();
+    }
+
+    /// The advertised cell follows the bridge, and it is the reader that writes it.
+    ///
+    /// `Runtime::module_supported` is what the overlay's `supported` column reads, so once a
+    /// `capabilities` frame arrives the cell has to be that frame. It names one module and
+    /// leaves the other three sets empty, which this also pins: `from_payload` inherits an
+    /// empty set from the fallback, so the settings, state fields and actions survive while the
+    /// module list is replaced outright rather than merged into.
+    #[test]
+    fn a_capability_frame_replaces_the_advertised_cell() {
+        let controller = Arc::new(AppController::default());
+        let (peer, _closed, _ingest, advertised) = connect_with_cell(&controller);
+
+        peer.feed(b"{\"type\":\"capabilities\",\"modules\":[\"killaura\"]}\n");
+
+        wait_for_advertised(&advertised, |capabilities| {
+            capabilities.supports_module("killaura")
+        });
+        let capabilities = advertised.read().expect("cell").clone();
+        assert!(
+            capabilities.supports_module("killaura"),
+            "the module the frame names is advertised"
+        );
+        assert!(
+            !capabilities.supports_module("autoclicker"),
+            "and the codec's fallback module list is replaced, not merged into"
+        );
+        assert!(
+            capabilities.setting_count() > 0,
+            "the sets the frame left empty came from the fallback"
+        );
     }
 }
