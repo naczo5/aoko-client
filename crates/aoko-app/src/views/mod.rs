@@ -16,6 +16,7 @@
 
 pub mod accounts_logic;
 pub mod command_search;
+pub mod copy;
 pub mod relative_time;
 pub mod servers_logic;
 pub mod store_recovery;

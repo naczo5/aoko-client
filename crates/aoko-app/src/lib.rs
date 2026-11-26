@@ -13,20 +13,24 @@
 //! shell              the root view, tab rail and client-drawn title bar
 //! ```
 //!
-//! Everything above `components` is testable without a GPU: the tab decisions,
-//! the command-search state machine and the two dialog state machines are plain
-//! structs with no GPUI type in their signatures, which is what the unit tests in
-//! this crate exercise. GPUI has no widget test harness at the pin, so the pure
-//! layer is the real test surface.
+//! Everything above `components` is testable without a GPU: the tab decisions, the
+//! command-search state machine and the two dialog state machines are plain structs
+//! with no GPUI type in their signatures, which is what the unit tests in this crate
+//! exercise. GPUI has no widget test harness at the pin, so the pure layer is the real
+//! test surface and the capture harness is the visual evidence.
 //!
-//! This file is the crate's single module tree. `theme/` and `assets/` are the
-//! component builder's; `views/` and `dialogs/` are the shell builder's. Declaring
-//! both here is what keeps the two halves in one library target instead of two
-//! binaries that cannot see each other.
+//! This file is the crate's single module tree, shared by both builders. `theme/`,
+//! `components/` and `assets/` are the component builder's; `views/` and `dialogs/` are
+//! the shell builder's. Declaring both here keeps the two halves in one library target
+//! instead of two binaries that cannot see each other. Whoever adds a module adds its
+//! line here and never removes another's.
 
-// `assets/` and `theme/` are the component builder's and land here as they become
-// compilable; `views/` is independent of both.
-// pub mod assets;
-
+pub mod args;
+pub mod assets;
+pub mod capture;
+pub mod components;
 pub mod dialogs;
+pub mod shell;
+pub mod theme;
 pub mod views;
+pub mod window;

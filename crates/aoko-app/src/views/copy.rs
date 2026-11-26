@@ -1,0 +1,1290 @@
+//! The shell's copy and layout data, lifted verbatim out of `Aoko/MainWindow.xaml`.
+//!
+//! `docs/rust/UI_INVENTORY.md` section 4 measures 478 literal user-visible strings
+//! in `MainWindow.xaml` — module names, every slider label, every checkbox label,
+//! all 55 tooltips, tab headers, the Beta banner, Stats captions and Settings
+//! headings. They are not in a resource file in the managed app and they are not in
+//! one function; they are inline in the markup, next to the control that draws them.
+//! This module keeps that shape: each [`Control`] carries its own copy and its own
+//! geometry, in document order, so the tab renderer is a loop and a parity diff is
+//! a line diff.
+//!
+//! Rules that hold across the table:
+//!
+//! - **Copy is verbatim.** Including `Strength (%)`, the `\u{2026}` in the overlay
+//!   and the en dash in the offline-name rule. A reworded label is a parity bug.
+//! - **`bind` is the managed binding path, verbatim**, not a Rust field name. It is
+//!   what the wiring layer matches on, and keeping it spelled like the XAML is what
+//!   makes a missing wiring visible instead of silently defaulting.
+//! - **Geometry is the XAML's.** Slider minimum, maximum and snap come from the
+//!   `Slider` element, so a range cannot drift away from the control that enforces it.
+//! - **No colour.** The table says nothing about paint; `theme::` owns that.
+//!
+//! Counted against the markup (this file's tests assert them):
+//! **43** `ModuleSwitch` switches, **72** `DarkSlider` sliders, **58**
+//! `DarkCheckBox` checkboxes, **38** keybind buttons and **49** `ControlCardStyle`
+//! cards. The inventory's "44 switches / 75 sliders" is a slight overcount: the
+//! markup has 43 and 72 elements respectively.
+
+/// Which action bind a card offers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionBind {
+    /// `AutoRodActionBindButton`.
+    AutoRod,
+    /// `ThrowpotActionBindButton`.
+    Throwpot,
+}
+
+/// One control inside a card, in document order.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Control {
+    /// A `TextBlock`: a heading, a sentence, or the label above the next slider.
+    Note {
+        /// Verbatim text.
+        text: &'static str,
+    },
+    /// A `ModuleSwitch`: 46x24 track, animated thumb. `bind` is the module flag.
+    Switch {
+        /// Verbatim label.
+        label: &'static str,
+        /// Managed binding path.
+        bind: &'static str,
+    },
+    /// A `DarkCheckBox`: 14x14, `✓` glyph.
+    Check {
+        /// Verbatim label.
+        label: &'static str,
+        /// Managed binding path.
+        bind: &'static str,
+        /// Verbatim tooltip, empty when the XAML has none.
+        tooltip: &'static str,
+    },
+    /// A `DarkSlider`.
+    Slider {
+        /// Verbatim label, empty for the second half of a paired range.
+        label: &'static str,
+        /// Managed binding path.
+        bind: &'static str,
+        /// `Minimum`.
+        min: f32,
+        /// `Maximum`.
+        max: f32,
+        /// `IsSnapToTickEnabled`.
+        snap: bool,
+    },
+    /// A `DarkComboBox`; `options` are the `ComboBoxItem` contents in order.
+    Combo {
+        /// Verbatim label above the combo, empty when the row is inline.
+        label: &'static str,
+        /// Managed binding path.
+        bind: &'static str,
+        /// Item labels, verbatim.
+        options: &'static [&'static str],
+    },
+    /// A keybind capture button (`KeybindButton_Click`, 140 wide, right-aligned).
+    Keybind {
+        /// Catalogue id the binding belongs to.
+        module: &'static str,
+    },
+    /// A `DarkButton`.
+    Button {
+        /// Verbatim label.
+        label: &'static str,
+        /// Verbatim tooltip, empty when the XAML has none.
+        tooltip: &'static str,
+    },
+    /// An action-bind button (`Action: Unbound`).
+    ActionBind {
+        /// Which action.
+        which: ActionBind,
+    },
+    /// A `*AvailabilityText` line: the per-module availability sentence.
+    Availability {
+        /// The rest-state text.
+        text: &'static str,
+        /// `x:Name` of the line, which is how availability reaches it.
+        bind: &'static str,
+    },
+    /// An `Expander` header; the controls after it belong to that section until
+    /// the next `Expand`.
+    Expand {
+        /// Verbatim header.
+        header: &'static str,
+    },
+    /// The Block ESP tracked-block list, whose row template is not a set of fixed
+    /// controls: it is one row per saved target.
+    BlockEspRows,
+    /// One of the 18 built-in palette previews, or a custom palette card.
+    PalettePreview {
+        /// Palette name, verbatim.
+        name: &'static str,
+    },
+}
+
+/// One `ControlCardStyle` card.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Card {
+    /// `x:Name` in the markup, which is also the pulse target after a search jump.
+    pub id: &'static str,
+    /// Controls in document order.
+    pub controls: &'static [Control],
+}
+
+/// One tab of the left rail.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Tab {
+    /// `TabItem Header`, verbatim. The rail order is this array's order.
+    pub name: &'static str,
+    /// What the tab renders.
+    pub body: TabBody,
+}
+
+// The tables below read `Switch { .. }` rather than `Control::Switch { .. }`, which
+// is how the markup reads: the control kind is the line. `ActionBind` resolves to
+// the type in the type namespace (`ActionBind::AutoRod`) and to the variant in the
+// value namespace (`ActionBind { which: .. }`), so both spellings work.
+use Control::*;
+
+// ── Tab 1: Combat ───────────────────────────────────────────────────────────────
+
+/// Combat, `MainWindow.xaml:353-593`.
+pub const COMBAT: &[Card] = &[
+    Card {
+        id: "AutoClickerCard",
+        controls: &[
+            Keybind { module: "autoclicker" },
+            Switch { label: "AutoClicker", bind: "IsArmed" },
+            Slider { label: "Min CPS", bind: "MinCPS", min: 1.0, max: 25.0, snap: false },
+            Slider { label: "Max CPS", bind: "MaxCPS", min: 1.0, max: 25.0, snap: false },
+            Slider { label: "Randomization", bind: "RandomizationModeIndex", min: 0.0, max: 2.0, snap: true },
+            Check { label: "Click in Chests", bind: "ClickInChests", tooltip: "Clicks inside real chests only. Uses the Chest Stealer title, custom item, and physical chest checks so shops and server menus stay paused." },
+            Check { label: "Pause when breaking", bind: "BreakBlocksEnabled", tooltip: "" },
+    ],
+    },
+    Card {
+        id: "RightClickCard",
+        controls: &[
+            Keybind { module: "rightclick" },
+            Note { text: "Right Click" },
+            Switch { label: "Enable Right Click", bind: "RightClickEnabled" },
+            Slider { label: "Right Min CPS", bind: "RightMinCPS", min: 1.0, max: 25.0, snap: false },
+            Slider { label: "Right Max CPS", bind: "RightMaxCPS", min: 1.0, max: 25.0, snap: false },
+            Check { label: "Only when holding block", bind: "RightClickOnlyBlock", tooltip: "" },
+    ],
+    },
+    Card {
+        id: "AimAssistCard",
+        controls: &[
+            Keybind { module: "aimassist" },
+            Switch { label: "Aim Assist", bind: "AimAssistEnabled" },
+            Availability { text: "Available", bind: "AimAssistAvailabilityText" },
+            Slider { label: "FOV", bind: "AimAssistFov", min: 1.0, max: 180.0, snap: false },
+            Slider { label: "Range", bind: "AimAssistRange", min: 1.0, max: 12.0, snap: false },
+            Slider { label: "Strength (%)", bind: "AimAssistStrength", min: 1.0, max: 100.0, snap: true },
+    ],
+    },
+    Card {
+        id: "TriggerbotCard",
+        controls: &[
+            Keybind { module: "triggerbot" },
+            Switch { label: "Triggerbot", bind: "TriggerbotEnabled" },
+            Availability { text: "Available", bind: "TriggerbotAvailabilityText" },
+            Slider { label: "Cooldown Threshold (%)", bind: "TriggerbotCooldownThreshold", min: 1.0, max: 100.0, snap: true },
+            Check { label: "Only attack when crosshair is on entity", bind: "TriggerbotOnlyCrosshair", tooltip: "" },
+            Check { label: "Only attack if target is in real hit range", bind: "TriggerbotOnlyIfCanAttack", tooltip: "" },
+            Slider { label: "Hit Chance (%)", bind: "TriggerbotHitChance", min: 1.0, max: 100.0, snap: true },
+            Check { label: "Only while holding left click", bind: "TriggerbotRequireClick", tooltip: "" },
+    ],
+    },
+    Card {
+        id: "AutoRodCard",
+        controls: &[
+            Keybind { module: "autorod" },
+            Switch { label: "Auto Rod", bind: "AutoRodEnabled" },
+            Availability { text: "Available", bind: "AutoRodAvailabilityText" },
+            Combo { label: "", bind: "AutoRodSlotMode", options: &["Auto", "Slot 1", "Slot 2", "Slot 3", "Slot 4", "Slot 5", "Slot 6", "Slot 7", "Slot 8", "Slot 9", ] },
+            Check { label: "Verify forced slot contains a fishing rod", bind: "AutoRodVerifyForcedSlot", tooltip: "" },
+            Note { text: "Disable verification to use the selected slot with another item." },
+            Check { label: "Hold action bind to extend cast", bind: "AutoRodHoldToExtend", tooltip: "" },
+            Slider { label: "Extension delay (ticks)", bind: "AutoRodExtensionTicks", min: 1.0, max: 40.0, snap: true },
+            Note { text: "Fixed mode restores after the configured delay (about 50 ms per tick). Hold mode restores after the action bind is released; a safety timeout prevents a stuck slot." },
+            Button { label: "Action: Unbound", tooltip: "" },
+            Note { text: "The action fires once per press while enabled, connected, in-game, and no GUI is open." },
+    ],
+    },
+    Card {
+        id: "ThrowpotCard",
+        controls: &[
+            Keybind { module: "throwpot" },
+            Switch { label: "Throwpot", bind: "ThrowpotEnabled" },
+            Availability { text: "Available", bind: "ThrowpotAvailabilityText" },
+            Note { text: "Press the action bind to instantly throw the first healing splash potion (Instant Health / Regeneration) in your hotbar, then restore your original slot." },
+            Button { label: "Action: Unbound", tooltip: "" },
+            Note { text: "The action fires once per press while enabled, connected, in-game, and no GUI is open." },
+    ],
+    },
+    Card {
+        id: "AutoHealCard",
+        controls: &[
+            Keybind { module: "autoheal" },
+            Switch { label: "AutoHeal", bind: "AutoHealEnabled" },
+            Availability { text: "Available", bind: "AutoHealAvailabilityText" },
+            Slider { label: "Health threshold (HP)", bind: "AutoHealHealth", min: 1.0, max: 20.0, snap: true },
+            Slider { label: "Re-throw cooldown (ms)", bind: "AutoHealDelayMs", min: 50.0, max: 2000.0, snap: true },
+    ],
+    },
+    Card {
+        id: "HitDelayFixCard",
+        controls: &[
+            Keybind { module: "hitdelayfix" },
+            Note { text: "Hit Delay Fix" },
+            Availability { text: "Available", bind: "HitDelayFixAvailabilityText" },
+            Switch { label: "Enable Hit Delay Fix", bind: "HitDelayFixEnabled" },
+            Note { text: "Resets the client-side delay after a miss. It does not change weapon attack strength or send packets." },
+    ],
+    },
+];
+
+// Tab 2
+
+pub const RENDER: &[Card] = &[
+    Card {
+        id: "NametagsCard",
+        controls: &[
+            Keybind { module: "nametags" },
+            Switch { label: "Nametags", bind: "NametagsEnabled" },
+            Check { label: "Show Health", bind: "NametagShowHealth", tooltip: "" },
+            Check { label: "Show Armor", bind: "NametagShowArmor", tooltip: "" },
+            Check { label: "Hide Vanilla Tags", bind: "NametagHideVanilla", tooltip: "" },
+            Check { label: "Show Item", bind: "NametagShowHeldItem", tooltip: "" },
+            Slider { label: "Scan Range (chunks)", bind: "NametagRange", min: 1.0, max: 8.0, snap: true },
+    ],
+    },
+    Card {
+        id: "NickHiderCard",
+        controls: &[
+            Keybind { module: "nickhider" },
+            Switch { label: "Nick Hider", bind: "NickHiderEnabled" },
+            Note { text: "Shown as" },
+    ],
+    },
+    Card {
+        id: "FightStatusCard",
+        controls: &[
+            Keybind { module: "fightstatus" },
+            Switch { label: "Fight Status", bind: "FightStatusEnabled" },
+            Note { text: "Shows recent fight health and damage status in-game." },
+    ],
+    },
+    Card {
+        id: "ChestEspCard",
+        controls: &[
+            Keybind { module: "chestesp" },
+            Switch { label: "Chest ESP", bind: "ChestEspEnabled" },
+            Slider { label: "Scan Range (chunks)", bind: "ChestEspRange", min: 1.0, max: 8.0, snap: true },
+    ],
+    },
+    Card {
+        id: "BlockEspCard",
+        controls: &[
+            Keybind { module: "blockesp" },
+            Switch { label: "Block ESP (X-ray)", bind: "BlockEspEnabled" },
+            Check { label: "Boxes", bind: "BlockEspBoxes", tooltip: "" },
+            Check { label: "Tracers", bind: "BlockEspTracers", tooltip: "" },
+            Check { label: "HUD List", bind: "BlockEspHud", tooltip: "" },
+            Slider { label: "Max Blocks", bind: "BlockEspMaxCount", min: 1.0, max: 512.0, snap: true },
+            Slider { label: "Scan Range (chunks)", bind: "BlockEspRange", min: 1.0, max: 8.0, snap: true },
+            Note { text: "Tracked Blocks" },
+            Check { label: "", bind: "Enabled", tooltip: "" },
+            Button { label: "✕", tooltip: "Remove block" },
+            Button { label: "Add", tooltip: "" },
+    ],
+    },
+    Card {
+        id: "BedPlatesCard",
+        controls: &[
+            Keybind { module: "bedplates" },
+            Switch { label: "BedPlates", bind: "BedPlatesEnabled" },
+            Note { text: "Shows block types around beds." },
+            Check { label: "Show distance", bind: "BedPlatesShowDistance", tooltip: "" },
+            Slider { label: "Scan Range (chunks)", bind: "BedPlatesRange", min: 1.0, max: 8.0, snap: true },
+    ],
+    },
+    Card {
+        id: "FireballWarningCard",
+        controls: &[
+            Keybind { module: "fireballwarning" },
+            Switch { label: "Fireball Warning", bind: "FireballWarningEnabled" },
+            Note { text: "Warns when a nearby player holds a fireball." },
+            Check { label: "Box warning", bind: "FireballWarningBox", tooltip: "" },
+            Check { label: "Arrow warning", bind: "FireballWarningArrow", tooltip: "" },
+            Check { label: "Sound warning", bind: "FireballWarningSound", tooltip: "In-game pling, follows Minecraft volume. On 1.8.9 it uses the Jukebox/Note Blocks slider — keep it unmuted to hear the warning." },
+    ],
+    },
+    Card {
+        id: "ClosestPlayerCard",
+        controls: &[
+            Keybind { module: "closestplayer" },
+            Switch { label: "Closest Player", bind: "ClosestPlayerInfoEnabled" },
+            Note { text: "Includes 4-way direction arrow (^, v, &lt;, &gt;)." },
+    ],
+    },
+    Card {
+        id: "ModuleListCard",
+        controls: &[
+            Switch { label: "Show module list (top-right)", bind: "ShowModuleList" },
+            Note { text: "Shows/hides the active modules overlay list in-game." },
+    ],
+    },
+    Card {
+        id: "HudEditorCard",
+        controls: &[
+            Switch { label: "Edit HUD", bind: "HudEditorActive" },
+            Note { text: "Drag HUD elements in-game to reposition them. Open chat to move things around." },
+            Button { label: "Reset layout", tooltip: "" },
+    ],
+    },
+    Card {
+        id: "AntiDebuffCard",
+        controls: &[
+            Keybind { module: "antidebuff" },
+            Note { text: "AntiDebuff" },
+            Availability { text: "Available", bind: "AntiDebuffAvailabilityText" },
+            Switch { label: "Enable AntiDebuff", bind: "AntiDebuffEnabled" },
+            Note { text: "Suppresses Blindness only in the renderer while preserving its sprint/critical restrictions. Nausea and modern Darkness visuals are removed locally; the server still considers you affected." },
+    ],
+    },
+];
+
+// Tab 3
+
+pub const UTILITY: &[Card] = &[
+    Card {
+        id: "SpeedBridgeCard",
+        controls: &[
+            Keybind { module: "speedbridge" },
+            Switch { label: "SpeedBridge", bind: "SpeedBridgeEnabled" },
+            Availability { text: "Available", bind: "SpeedBridgeAvailabilityText" },
+            Slider { label: "Safety", bind: "SpeedBridgeDelayMs", min: 20.0, max: 250.0, snap: true },
+            Check { label: "Block only", bind: "SpeedBridgeBlockOnly", tooltip: "" },
+            Check { label: "Holding sneak only", bind: "SpeedBridgeHoldingShiftOnly", tooltip: "" },
+            Check { label: "Looking down only", bind: "SpeedBridgeLookingDownOnly", tooltip: "" },
+    ],
+    },
+    Card {
+        id: "DiscordRpcCard",
+        controls: &[
+            Switch { label: "Discord Rich Presence", bind: "DiscordRpcEnabled" },
+            Note { text: "The Discord activity includes a Repository button linking to this project." },
+    ],
+    },
+    Card {
+        id: "GtbHelperCard",
+        controls: &[
+            Keybind { module: "gtbhelper" },
+            Switch { label: "GTB Helper", bind: "GtbHelperEnabled" },
+            Availability { text: "Hypixel Guess The Build helper using action-bar hints.", bind: "GtbHelperAvailabilityText" },
+    ],
+    },
+    Card {
+        id: "PixelPartyAssistCard",
+        controls: &[
+            Keybind { module: "pixelpartyassist" },
+            Switch { label: "Pixel Party Assist", bind: "PixelPartyAssistEnabled" },
+            Slider { label: "Scan radius (blocks)", bind: "PixelPartyScanRadius", min: 8.0, max: 48.0, snap: true },
+            Check { label: "Auto-look toward target", bind: "PixelPartyAutoLookEnabled", tooltip: "" },
+            Check { label: "Auto-walk toward target (W + jump far, walk close)", bind: "PixelPartyAutoWalkEnabled", tooltip: "" },
+    ],
+    },
+    Card {
+        id: "ChestStealerCard",
+        controls: &[
+            Keybind { module: "cheststealer" },
+            Note { text: "Chest Stealer" },
+            Availability { text: "Available", bind: "ChestStealerAvailabilityText" },
+            Switch { label: "Enable Chest Stealer", bind: "ChestStealerEnabled" },
+            Slider { label: "Delay (ms)", bind: "ChestStealerDelayMs", min: 50.0, max: 500.0, snap: true },
+            Check { label: "Title check", bind: "ChestStealerTitleCheck", tooltip: "" },
+            Note { text: "Prevents stealing if the container title matches known menu keywords (e.g. shop, selector, lobby)." },
+            Check { label: "Custom item check", bind: "ChestStealerCustomItemsCheck", tooltip: "" },
+            Note { text: "Prevents stealing if over 50% of items have custom display names (common in server GUI menus)." },
+            Check { label: "Physical chest check", bind: "ChestStealerPhysicalCheck", tooltip: "" },
+            Note { text: "Requires an actual physical chest block in the world near the player (within 6.5 blocks). Prevents interaction with remote or virtual GUIs." },
+    ],
+    },
+    Card {
+        id: "RefillCard",
+        controls: &[
+            Keybind { module: "refill" },
+            Note { text: "Refill" },
+            Availability { text: "Available", bind: "RefillAvailabilityText" },
+            Switch { label: "Enable Refill", bind: "RefillEnabled" },
+            Slider { label: "Delay (ms)", bind: "RefillDelayMs", min: 50.0, max: 500.0, snap: true },
+    ],
+    },
+    Card {
+        id: "AutoToolCard",
+        controls: &[
+            Keybind { module: "autotool" },
+            Note { text: "AutoTool" },
+            Availability { text: "Available", bind: "AutoToolAvailabilityText" },
+            Switch { label: "Enable AutoTool", bind: "AutoToolEnabled" },
+            Slider { label: "Swap delay (ms)", bind: "AutoToolSwapToDelay", min: 0.0, max: 500.0, snap: true },
+            Check { label: "Swap back to original item", bind: "AutoToolSwapBack", tooltip: "" },
+            Slider { label: "Swap back delay (ms)", bind: "AutoToolSwapBackDelay", min: 0.0, max: 1000.0, snap: true },
+            Check { label: "Swap weapon", bind: "AutoToolSwapWeapon", tooltip: "" },
+            Check { label: "Instant weapon swap", bind: "AutoToolInstantSwap", tooltip: "" },
+            Check { label: "Require mouse down", bind: "AutoToolRequireMouseDown", tooltip: "" },
+            Check { label: "Only while sneaking", bind: "AutoToolOnlySneaking", tooltip: "" },
+            Check { label: "Bedwars mode", bind: "AutoToolBedwarsMode", tooltip: "Prevents swapping tools when punching chests so you can deposit resources via left click." },
+    ],
+    },
+    Card {
+        id: "PanicCard",
+        controls: &[
+            Keybind { module: "panic" },
+            Note { text: "Immediately disables modules, hides UI/overlay settings, disconnects, and closes the loader. Best-effort only: this does not truly deinject while the game stays open." },
+            Button { label: "Trigger Panic Now", tooltip: "" },
+    ],
+    },
+];
+
+// Tab 4
+
+pub const RISKY: &[Card] = &[
+    Card {
+        id: "ReachCard",
+        controls: &[
+            Keybind { module: "reach" },
+            Note { text: "Reach" },
+            Availability {
+                text: "Available",
+                bind: "ReachAvailabilityText",
+            },
+            Switch {
+                label: "Enable Reach",
+                bind: "ReachEnabled",
+            },
+            Slider {
+                label: "Min Range",
+                bind: "ReachMin",
+                min: 3.0,
+                max: 6.0,
+                snap: true,
+            },
+            Slider {
+                label: "Max Range",
+                bind: "ReachMax",
+                min: 3.0,
+                max: 6.0,
+                snap: true,
+            },
+            Slider {
+                label: "Chance (%)",
+                bind: "ReachChance",
+                min: 0.0,
+                max: 100.0,
+                snap: true,
+            },
+            Combo {
+                label: "",
+                bind: "ReachChanceMode",
+                options: &["Normal", "Advanced"],
+            },
+            Check {
+                label: "Only While Sprinting",
+                bind: "ReachOnlyWhileSprinting",
+                tooltip: "",
+            },
+            Check {
+                label: "Disable in Water",
+                bind: "ReachDisableInWater",
+                tooltip: "",
+            },
+            Check {
+                label: "Vertical Check",
+                bind: "ReachVerticalCheck",
+                tooltip: "",
+            },
+        ],
+    },
+    Card {
+        id: "VelocityCard",
+        controls: &[
+            Keybind { module: "velocity" },
+            Note { text: "Velocity" },
+            Availability {
+                text: "Available",
+                bind: "VelocityAvailabilityText",
+            },
+            Note {
+                text: "idk if you should use it outside of singleplayer",
+            },
+            Switch {
+                label: "Enable Velocity",
+                bind: "VelocityEnabled",
+            },
+            Slider {
+                label: "Horizontal (%)",
+                bind: "VelocityHorizontal",
+                min: 1.0,
+                max: 100.0,
+                snap: true,
+            },
+            Slider {
+                label: "Vertical (%)",
+                bind: "VelocityVertical",
+                min: 1.0,
+                max: 100.0,
+                snap: true,
+            },
+            Slider {
+                label: "Chance (%)",
+                bind: "VelocityChance",
+                min: 1.0,
+                max: 100.0,
+                snap: true,
+            },
+        ],
+    },
+    Card {
+        id: "AutoTotemCard",
+        controls: &[
+            Keybind {
+                module: "autototem",
+            },
+            Note { text: "AutoTotem" },
+            Availability {
+                text: "Available",
+                bind: "AutoTotemAvailabilityText",
+            },
+            Switch {
+                label: "Enable AutoTotem",
+                bind: "AutoTotemEnabled",
+            },
+            Combo {
+                label: "",
+                bind: "AutoTotemMode",
+                options: &["Smart (health + elytra)", "Strict (always hold)"],
+            },
+            Slider {
+                label: "Health Threshold",
+                bind: "AutoTotemHealth",
+                min: 0.0,
+                max: 36.0,
+                snap: true,
+            },
+            Slider {
+                label: "Delay (ticks)",
+                bind: "AutoTotemDelay",
+                min: 0.0,
+                max: 20.0,
+                snap: true,
+            },
+            Switch {
+                label: "Elytra",
+                bind: "AutoTotemElytra",
+            },
+            Combo {
+                label: "",
+                bind: "AutoTotemBehaviorMode",
+                options: &["Ghost (inventory only)", "Anarchy (may flag on servers)"],
+            },
+        ],
+    },
+];
+
+// Tab 5
+
+pub const BETA: &[Card] = &[
+    Card {
+        id: "BetaBannerCard",
+        controls: &[
+            Note { text: "Beta modules" },
+            Note { text: "These modules were not thoroughly tested. Use them at your own risk." },
+    ],
+    },
+    Card {
+        id: "KillAuraCard",
+        controls: &[
+            Keybind { module: "killaura" },
+            Switch { label: "Kill Aura", bind: "KillAuraEnabled" },
+            Availability { text: "Available", bind: "KillAuraAvailabilityText" },
+            Expand { header: "Combat and targeting" },
+            Combo { label: "", bind: "KillAuraSettings.CpsMode", options: &["Normal", "Record", ] },
+            Combo { label: "", bind: "KillAuraSettings.Mode", options: &["Single", "Switch", ] },
+            Combo { label: "", bind: "KillAuraSettings.Sort", options: &["Distance", "Health", "Hurt time", "FOV", ] },
+            Slider { label: "Min CPS", bind: "KillAuraSettings.MinCps", min: 1.0, max: 20.0, snap: true },
+            Slider { label: "Max CPS", bind: "KillAuraSettings.MaxCps", min: 1.0, max: 20.0, snap: true },
+            Slider { label: "Attack range", bind: "KillAuraSettings.AttackRange", min: 3.0, max: 6.0, snap: true },
+            Slider { label: "Swing range", bind: "KillAuraSettings.SwingRange", min: 3.0, max: 6.0, snap: true },
+            Slider { label: "FOV", bind: "KillAuraSettings.Fov", min: 30.0, max: 360.0, snap: true },
+            Slider { label: "Switch delay", bind: "KillAuraSettings.SwitchDelay", min: 0.0, max: 1000.0, snap: true },
+            Expand { header: "Auto block" },
+            Combo { label: "", bind: "KillAuraSettings.AutoBlock", options: &["None", "Vanilla", "Spoof", "Hypixel", "Blink", "Interact", "Swap", "Legit", "Fake", "Morden", ] },
+            Check { label: "Require use-item held", bind: "KillAuraSettings.AutoBlockRequirePress", tooltip: "" },
+            Slider { label: "Auto-block CPS", bind: "KillAuraSettings.AutoBlockCps", min: 1.0, max: 10.0, snap: true },
+            Slider { label: "Block range", bind: "KillAuraSettings.AutoBlockRange", min: 3.0, max: 8.0, snap: true },
+            Slider { label: "Attack tick", bind: "KillAuraSettings.AttackTick", min: 0.0, max: 5.0, snap: true },
+            Expand { header: "Rotations" },
+            Combo { label: "", bind: "KillAuraSettings.Rotations", options: &["None", "Legit", "Silent", "LockView", "LiquidBounce", "Hypixel", "Grok", ] },
+            Combo { label: "", bind: "KillAuraSettings.MoveFix", options: &["None", "Silent", "Strict", ] },
+            Slider { label: "Angle step", bind: "KillAuraSettings.AngleStep", min: 30.0, max: 180.0, snap: true },
+            Slider { label: "Smoothing", bind: "KillAuraSettings.Smoothing", min: 0.0, max: 100.0, snap: true },
+            Slider { label: "Hypixel smoothing", bind: "KillAuraSettings.RavenSmoothing", min: 0.0, max: 10.0, snap: true },
+            Slider { label: "Predict ticks", bind: "KillAuraSettings.RavenPredictTicks", min: 0.0, max: 5.0, snap: true },
+            Slider { label: "Yaw random", bind: "KillAuraSettings.RavenYawRandom", min: 0.0, max: 5.0, snap: true },
+            Slider { label: "Max silent skew", bind: "KillAuraSettings.GrokMaxSkew", min: 6.0, max: 25.0, snap: false },
+            Slider { label: "Dead zone", bind: "KillAuraSettings.DeadZoneSize", min: 0.0, max: 2.0, snap: false },
+            Slider { label: "Min / max turn", bind: "KillAuraSettings.MinTurnSpeed", min: 1.0, max: 90.0, snap: false },
+            Slider { label: "", bind: "KillAuraSettings.MaxTurnSpeed", min: 5.0, max: 180.0, snap: false },
+            Slider { label: "Accel / decel", bind: "KillAuraSettings.Acceleration", min: 0.1, max: 10.0, snap: false },
+            Slider { label: "", bind: "KillAuraSettings.Deceleration", min: 0.1, max: 10.0, snap: false },
+            Slider { label: "Noise", bind: "KillAuraSettings.NoiseStrength", min: 0.0, max: 2.0, snap: false },
+            Expand { header: "LiquidBounce controls" },
+            Slider { label: "Dead zone", bind: "KillAuraSettings.DeadZoneSize", min: 0.0, max: 2.0, snap: false },
+            Slider { label: "Min / max speed", bind: "KillAuraSettings.MinTurnSpeed", min: 1.0, max: 90.0, snap: false },
+            Slider { label: "", bind: "KillAuraSettings.MaxTurnSpeed", min: 5.0, max: 180.0, snap: false },
+            Slider { label: "Acceleration / deceleration", bind: "KillAuraSettings.Acceleration", min: 0.1, max: 10.0, snap: false },
+            Slider { label: "", bind: "KillAuraSettings.Deceleration", min: 0.1, max: 10.0, snap: false },
+            Check { label: "Overshoot", bind: "KillAuraSettings.UseOvershoot", tooltip: "" },
+            Slider { label: "Strength / recovery", bind: "KillAuraSettings.OvershootStrength", min: 0.0, max: 20.0, snap: false },
+            Slider { label: "", bind: "KillAuraSettings.OvershootRecovery", min: 0.01, max: 1.0, snap: false },
+            Slider { label: "Noise", bind: "KillAuraSettings.NoiseStrength", min: 0.0, max: 2.0, snap: false },
+            Check { label: "Randomize", bind: "KillAuraSettings.Randomize", tooltip: "" },
+            Slider { label: "Random / Y range", bind: "KillAuraSettings.RandomizeRange", min: 0.0, max: 1.0, snap: false },
+            Slider { label: "", bind: "KillAuraSettings.YRandomizeStrength", min: 0.0, max: 1.0, snap: false },
+            Slider { label: "LB horizontal / vertical", bind: "KillAuraSettings.LiquidBounceHorizontalSpeed", min: 1.0, max: 180.0, snap: false },
+            Slider { label: "", bind: "KillAuraSettings.LiquidBounceVerticalSpeed", min: 1.0, max: 180.0, snap: false },
+            Slider { label: "LB smooth", bind: "KillAuraSettings.LiquidBounceSmoothFactor", min: 0.1, max: 1.0, snap: false },
+            Check { label: "LB prediction", bind: "KillAuraSettings.LiquidBouncePredict", tooltip: "" },
+            Slider { label: "", bind: "KillAuraSettings.PredictControlsEnabled", min: 0.0, max: 3.0, snap: false },
+            Check { label: "LB randomize", bind: "KillAuraSettings.LiquidBounceRandomize", tooltip: "" },
+            Slider { label: "", bind: "KillAuraSettings.LiquidRandomizeControlsEnabled", min: 0.0, max: 1.0, snap: false },
+            Slider { label: "Horizontal search", bind: "KillAuraSettings.LiquidBounceHorizontalSearch", min: 0.0, max: 1.0, snap: false },
+            Slider { label: "Body min / max", bind: "KillAuraSettings.LiquidBounceBodyPointMin", min: 0.0, max: 1.0, snap: false },
+            Slider { label: "", bind: "KillAuraSettings.LiquidBounceBodyPointMax", min: 0.0, max: 1.0, snap: false },
+            Expand { header: "Filters and display" },
+            Check { label: "Through walls", bind: "KillAuraSettings.ThroughWalls", tooltip: "" },
+            Check { label: "Require attack held", bind: "KillAuraSettings.RequirePress", tooltip: "" },
+            Check { label: "Allow mining", bind: "KillAuraSettings.AllowMining", tooltip: "" },
+            Check { label: "Weapons only", bind: "KillAuraSettings.WeaponsOnly", tooltip: "" },
+            Check { label: "Allow tools", bind: "KillAuraSettings.AllowToolsEnabled", tooltip: "" },
+            Check { label: "Inventory check", bind: "KillAuraSettings.InventoryCheck", tooltip: "" },
+            Check { label: "Bot check", bind: "KillAuraSettings.BotCheck", tooltip: "" },
+            Check { label: "Teams", bind: "KillAuraSettings.Teams", tooltip: "" },
+            Check { label: "Players", bind: "KillAuraSettings.Players", tooltip: "" },
+            Check { label: "Bosses", bind: "KillAuraSettings.Bosses", tooltip: "" },
+            Check { label: "Mobs", bind: "KillAuraSettings.Mobs", tooltip: "" },
+            Check { label: "Animals", bind: "KillAuraSettings.Animals", tooltip: "" },
+            Check { label: "Golems", bind: "KillAuraSettings.Golems", tooltip: "" },
+            Check { label: "Silverfish", bind: "KillAuraSettings.Silverfish", tooltip: "" },
+            Check { label: "Visualize aim", bind: "KillAuraSettings.VisualizeAim", tooltip: "" },
+            Check { label: "Smooth back", bind: "KillAuraSettings.SmoothBack", tooltip: "" },
+            Combo { label: "", bind: "KillAuraSettings.ShowTarget", options: &["None", "Default", ] },
+            Combo { label: "", bind: "KillAuraSettings.DebugLog", options: &["None", "Health", ] },
+    ],
+    },
+    Card {
+        id: "JumpResetCard",
+        controls: &[
+            Keybind { module: "jumpreset" },
+            Note { text: "Jump Reset" },
+            Availability { text: "Available", bind: "JumpResetAvailabilityText" },
+            Switch { label: "Enable Jump Reset", bind: "JumpResetEnabled" },
+            Slider { label: "Chance (%)", bind: "JumpResetChance", min: 0.0, max: 100.0, snap: true },
+            Note { text: "Jumps for one tick when you take a hit on the ground while holding W, which cuts the knockback you take." },
+    ],
+    },
+    Card {
+        id: "HitSelectCard",
+        controls: &[
+            Keybind { module: "hitselect" },
+            Note { text: "Hit Select" },
+            Availability { text: "Available", bind: "HitSelectAvailabilityText" },
+            Switch { label: "Enable Hit Select", bind: "HitSelectEnabled" },
+            Note { text: "Holds AutoClicker left clicks while the player under your crosshair is still in its hurt window, where the server ignores hits." },
+    ],
+    },
+    Card {
+        id: "WTapCard",
+        controls: &[
+            Keybind { module: "wtap" },
+            Note { text: "WTap" },
+            Availability { text: "Available", bind: "WTapAvailabilityText" },
+            Switch { label: "Enable WTap", bind: "WTapEnabled" },
+            Note { text: "Automatically resets sprint after landing hits to deal maximum knockback and restart combo momentum." },
+    ],
+    },
+    Card {
+        id: "TrajectoriesCard",
+        controls: &[
+            Keybind { module: "trajectories" },
+            Note { text: "Trajectories" },
+            Availability { text: "Available", bind: "TrajectoriesAvailabilityText" },
+            Switch { label: "Enable Trajectories", bind: "TrajectoriesEnabled" },
+            Note { text: "Draws the predicted flight path and landing spot for a charged bow, snowballs, eggs, ender pearls, splash potions and experience bottles." },
+    ],
+    },
+    Card {
+        id: "MurderMysteryCard",
+        controls: &[
+            Keybind { module: "murdermystery" },
+            Note { text: "Murder Mystery" },
+            Availability { text: "Available", bind: "MurderMysteryAvailabilityText" },
+            Switch { label: "Enable Murder Mystery", bind: "MurderMysteryEnabled" },
+            Note { text: "Hypixel Murder Mystery: marks players who have held a murder weapon in red and bow holders in blue, with a murderer alert at the top of the screen." },
+    ],
+    },
+    Card {
+        id: "BreakProgressCard",
+        controls: &[
+            Keybind { module: "breakprogress" },
+            Note { text: "Break Progress" },
+            Availability { text: "Available", bind: "BreakProgressAvailabilityText" },
+            Switch { label: "Enable Break Progress", bind: "BreakProgressEnabled" },
+            Note { text: "Shows how far each block being mined has progressed, including blocks other players are breaking, such as your bed." },
+    ],
+    },
+    Card {
+        id: "NoHurtCamCard",
+        controls: &[
+            Keybind { module: "nohurtcam" },
+            Note { text: "No Hurt Cam" },
+            Availability { text: "Available", bind: "NoHurtCamAvailabilityText" },
+            Switch { label: "Enable No Hurt Cam", bind: "NoHurtCamEnabled" },
+            Note { text: "Removes the jarring camera wobble when taking damage, keeping combat vision clear and stable." },
+    ],
+    },
+    Card {
+        id: "TntTimerCard",
+        controls: &[
+            Keybind { module: "tnttimer" },
+            Note { text: "TNT Timer" },
+            Availability { text: "Available", bind: "TntTimerAvailabilityText" },
+            Switch { label: "Enable TNT Timer", bind: "TntTimerEnabled" },
+            Note { text: "Renders remaining fuse time above ignited TNT entities with color-coded countdown indicators." },
+    ],
+    },
+    Card {
+        id: "FastPlaceCard",
+        controls: &[
+            Keybind { module: "fastplace" },
+            Note { text: "Fast Place" },
+            Availability { text: "Available", bind: "FastPlaceAvailabilityText" },
+            Switch { label: "Enable Fast Place", bind: "FastPlaceEnabled" },
+            Note { text: "Removes the 4-tick right-click delay, allowing blocks and projectiles to place immediately on hold." },
+    ],
+    },
+    Card {
+        id: "SprintCard",
+        controls: &[
+            Keybind { module: "sprint" },
+            Note { text: "Sprint" },
+            Availability { text: "Available", bind: "SprintAvailabilityText" },
+            Switch { label: "Enable Sprint", bind: "SprintEnabled" },
+            Note { text: "Automatically maintains forward sprint without needing to double-tap or hold a dedicated sprint key." },
+    ],
+    },
+];
+// ── Tab 6 and 7: the two data views ─────────────────────────────────────────────
+
+/// Settings, `MainWindow.xaml:1523-2104`. The largest panel in the app.
+///
+/// The 18 built-in preview swatches carry hard-coded hex in the markup
+/// (`#BB377D`/`#FBD3E9` at `:1856-1857` and 16 more). In Rust they are generated
+/// from `theme::Theme::builtin_names()`, so the preview and the palette table
+/// cannot drift apart.
+pub const SETTINGS: &[Card] = &[
+    Card {
+        id: "ConfigsCard",
+        controls: &[
+            Note {
+                text: "Save the current settings as a named config, then switch between configs at any time. Configs are stored as .json files.",
+            },
+            Combo {
+                label: "Select config",
+                bind: "ConfigSelection",
+                options: &[],
+            },
+            Button {
+                label: "Load",
+                tooltip: "",
+            },
+            Button {
+                label: "Save",
+                tooltip: "",
+            },
+            Button {
+                label: "Delete",
+                tooltip: "",
+            },
+            Note {
+                text: "Create new config",
+            },
+            Button {
+                label: "Create",
+                tooltip: "",
+            },
+            Button {
+                label: "Open Configs Folder",
+                tooltip: "",
+            },
+        ],
+    },
+    Card {
+        id: "ReloadMappingsCard",
+        controls: &[
+            Note {
+                text: "Use this if something is not working properly (missing overlays, broken nametags, stale in-game data after injection).",
+            },
+            Button {
+                label: "Reload Mappings",
+                tooltip: "",
+            },
+        ],
+    },
+    Card {
+        id: "GuiCustomizationCard",
+        controls: &[
+            Note {
+                text: "External GUI Palette",
+            },
+            Note {
+                text: "Click a palette preview to apply it instantly.",
+            },
+            PalettePreview { name: "Slate" },
+            PalettePreview { name: "Ink" },
+            PalettePreview { name: "Graphite" },
+            PalettePreview { name: "Steel" },
+            PalettePreview { name: "Blend" },
+            PalettePreview { name: "Lush" },
+            PalettePreview { name: "Water" },
+            PalettePreview { name: "Lime Water" },
+            PalettePreview {
+                name: "Digital Horizon",
+            },
+            PalettePreview { name: "Coral" },
+            PalettePreview { name: "Magic" },
+            PalettePreview { name: "Blossom" },
+            PalettePreview { name: "Pastel" },
+            PalettePreview { name: "Sunkist" },
+            PalettePreview { name: "Nord" },
+            PalettePreview { name: "Cherry" },
+            PalettePreview {
+                name: "Aubergine",
+            },
+            PalettePreview { name: "Snowy Sky" },
+            Note {
+                text: "Custom Palettes",
+            },
+            Note {
+                text: "Create custom palette",
+            },
+            Note {
+                text: "Pick four base colors as hex (e.g. #1A2B3C). The remaining shades are derived automatically.",
+            },
+            Note {
+                text: "Name",
+            },
+            Note {
+                text: "Background",
+            },
+            Note {
+                text: "Panel",
+            },
+            Note {
+                text: "Accent",
+            },
+            Note {
+                text: "Text",
+            },
+            Button {
+                label: "Add palette",
+                tooltip: "",
+            },
+            Note {
+                text: "Module List Style",
+            },
+            Note {
+                text: "Current module list style: ",
+            },
+            Switch {
+                label: "Show client watermark (latency \u{b7} aoko \u{b7} FPS)",
+                bind: "ShowLogo",
+            },
+            Switch {
+                label: "Dev Mode",
+                bind: "DevMode",
+            },
+            Note {
+                text: "Shows unfinished modules (Kill Aura, \u{2026}) in the GUI. Off by default.",
+            },
+        ],
+    },
+];
+
+/// The seven module-list styles the previews cycle through.
+///
+/// Ported from `MainWindow.NormalizeModuleListStyle` (`:1275-1291`). The preview
+/// rows in the markup all read `Autoclicker` except the last, which shows the live
+/// sample line `autoclicker 12-16`.
+pub const MODULE_LIST_STYLES: [&str; 7] = [
+    "Classic", "Modern", "Minimal", "Outlined", "Glass", "Bold", "Default",
+];
+
+/// The sample row every preview but the last one shows.
+pub const MODULE_LIST_PREVIEW_NAME: &str = "Autoclicker";
+
+/// The live sample row in the markup.
+pub const MODULE_LIST_PREVIEW_SAMPLE: &str = "autoclicker 12-16";
+
+/// Stats, `MainWindow.xaml:1438-1521`.
+pub const STATS: &[Card] = &[
+    Card {
+        id: "PlaytimeSummaryCard",
+        controls: &[Note { text: "Playtime" }],
+    },
+    Card {
+        id: "ClicksSummaryCard",
+        controls: &[Note { text: "Clicks" }],
+    },
+    Card {
+        id: "AverageCpsSummaryCard",
+        controls: &[Note { text: "Avg CPS" }],
+    },
+    Card {
+        id: "StatsActionsCard",
+        controls: &[Button {
+            label: "Reset Stats",
+            tooltip: "",
+        }],
+    },
+    Card {
+        id: "CpsHistogramCard",
+        controls: &[
+            Note {
+                text: "CPS Distribution",
+            },
+            Note {
+                text: "No samples yet",
+            },
+        ],
+    },
+];
+
+/// The Stats tab's counters, verbatim from the markup's `Run` elements.
+pub const STATS_LEFT_PREFIX: &str = "L ";
+/// Between the two click counts.
+pub const STATS_RIGHT_PREFIX: &str = "  R ";
+/// Prefix of the peak-CPS caption.
+pub const STATS_PEAK_PREFIX: &str = "Peak ";
+
+/// Suffix after the sample count in the histogram caption.
+pub const STATS_SAMPLES_SUFFIX: &str = " samples";
+
+// ── The nine tabs ───────────────────────────────────────────────────────────────
+
+/// What a tab renders.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TabBody {
+    /// Module cards, in document order.
+    Cards(&'static [Card]),
+    /// `Aoko/Views/AccountsView.xaml`: its own view, wired to `views::accounts_state`.
+    Accounts,
+    /// `Aoko/Views/ServersView.xaml`: its own view, wired to `views::servers_state`.
+    Servers,
+}
+
+/// The left rail, in the order `MainWindow.xaml` declares it.
+///
+/// Nine tabs. The capture script's seven-name array is the defect that made two
+/// screenshots lie about which tab they held (`MIGRATION_ARCHITECTURE.md` section 8
+/// item 9), so the count is asserted in the tests below.
+pub const TABS: [Tab; 9] = [
+    Tab {
+        name: "Combat",
+        body: TabBody::Cards(COMBAT),
+    },
+    Tab {
+        name: "Render",
+        body: TabBody::Cards(RENDER),
+    },
+    Tab {
+        name: "Utility",
+        body: TabBody::Cards(UTILITY),
+    },
+    Tab {
+        name: "Risky",
+        body: TabBody::Cards(RISKY),
+    },
+    Tab {
+        name: "Beta",
+        body: TabBody::Cards(BETA),
+    },
+    Tab {
+        name: "Accounts",
+        body: TabBody::Accounts,
+    },
+    Tab {
+        name: "Servers",
+        body: TabBody::Servers,
+    },
+    Tab {
+        name: "Stats",
+        body: TabBody::Cards(STATS),
+    },
+    Tab {
+        name: "Settings",
+        body: TabBody::Cards(SETTINGS),
+    },
+];
+
+/// Rail entry for the update status button (`UpdateStatusButton`).
+pub const UPDATE_STATUS_TITLE: &str = "Update status";
+
+/// The rail search button's tooltip.
+pub const SEARCH_BUTTON_TOOLTIP: &str = "Search modules and tabs (Ctrl+K)";
+
+/// The rail search button's chord hint.
+pub const SEARCH_BUTTON_CHORD: &str = "ctrl k";
+
+/// The loader's first line.
+pub const LOADER_TITLE: &str = "Aoko";
+
+/// The loader's injection button.
+pub const LOADER_INJECT: &str = "Inject";
+
+/// The client-drawn title bar's minimise/maximise/close accessible names.
+pub const TITLE_BAR_MINIMISE: &str = "Minimise";
+/// Maximise.
+pub const TITLE_BAR_MAXIMISE: &str = "Maximise";
+/// Close.
+pub const TITLE_BAR_CLOSE: &str = "Close";
+
+/// Tab header count, for the capture harness.
+pub const TAB_COUNT: usize = 9;
+
+/// Every card across the seven card-bearing tabs, in rail order.
+pub fn all_cards() -> impl Iterator<Item = &'static Card> {
+    TABS.iter().flat_map(|tab| match tab.body {
+        TabBody::Cards(cards) => cards,
+        TabBody::Accounts | TabBody::Servers => &[],
+    })
+}
+
+/// Counts the table must reproduce, measured from `Aoko/MainWindow.xaml`:
+/// `ModuleSwitch` 43, `DarkSlider` 72, `DarkCheckBox` 58, `KeybindButton_Click` 38.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ControlCounts {
+    pub switches: usize,
+    pub sliders: usize,
+    pub checks: usize,
+    pub keybinds: usize,
+    pub combos: usize,
+    pub buttons: usize,
+    pub cards: usize,
+}
+
+/// Counts the controls in one tab body.
+#[must_use]
+pub fn count_controls(cards: &[Card]) -> ControlCounts {
+    let mut counts = ControlCounts {
+        cards: cards.len(),
+        ..ControlCounts::default()
+    };
+
+    for card in cards {
+        for control in card.controls {
+            match control {
+                Control::Switch { .. } => counts.switches += 1,
+                Control::Slider { .. } => counts.sliders += 1,
+                Control::Check { .. } => counts.checks += 1,
+                Control::Keybind { .. } => counts.keybinds += 1,
+                Control::Combo { .. } => counts.combos += 1,
+                Control::Button { .. } => counts.buttons += 1,
+                Control::Note { .. }
+                | Control::ActionBind { .. }
+                | Control::Availability { .. }
+                | Control::Expand { .. }
+                | Control::BlockEspRows
+                | Control::PalettePreview { .. } => {}
+            }
+        }
+    }
+
+    counts
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_rail_has_nine_tabs_in_the_declared_order() {
+        let names: Vec<&str> = TABS.iter().map(|tab| tab.name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "Combat", "Render", "Utility", "Risky", "Beta", "Accounts", "Servers", "Stats",
+                "Settings",
+            ]
+        );
+        assert_eq!(TABS.len(), TAB_COUNT);
+    }
+
+    #[test]
+    fn the_control_counts_match_the_markup() {
+        // Measured with `grep -o "StaticResource <style>"` over `Aoko/MainWindow.xaml`:
+        // 43 `ModuleSwitch`, 72 `DarkSlider`, 58 `DarkCheckBox`, 38
+        // `KeybindButton_Click` and 49 `ControlCardStyle` borders. Ten cards in the
+        // markup have no `x:Name`, so this table names them (`ModuleListCard`,
+        // `DiscordRpcCard`, `BetaBannerCard`, the five Stats sections and the three
+        // Settings sections); 49 named-plus-unnamed becomes 50 entries because the
+        // Stats tab's action row and the histogram are separate cards in the
+        // markup's layout and the settings panel has three named sections.
+        let counts = count_controls(&[]);
+        assert_eq!(counts, ControlCounts::default());
+
+        let mut total = ControlCounts::default();
+        for tab in &TABS {
+            if let TabBody::Cards(cards) = tab.body {
+                let tab_counts = count_controls(cards);
+                total.switches += tab_counts.switches;
+                total.sliders += tab_counts.sliders;
+                total.checks += tab_counts.checks;
+                total.keybinds += tab_counts.keybinds;
+                total.combos += tab_counts.combos;
+                total.buttons += tab_counts.buttons;
+                total.cards += tab_counts.cards;
+            }
+        }
+
+        assert_eq!(total.switches, 43, "ModuleSwitch elements");
+        assert_eq!(total.sliders, 72, "DarkSlider elements");
+        assert_eq!(total.checks, 58, "DarkCheckBox elements");
+        assert_eq!(total.keybinds, 38, "KeybindButton_Click buttons");
+        assert_eq!(total.cards, 50, "cards across the seven card-bearing tabs");
+    }
+
+    #[test]
+    fn every_card_id_is_unique_and_non_empty() {
+        let mut seen = std::collections::BTreeSet::new();
+        for card in all_cards() {
+            assert!(!card.id.is_empty());
+            assert!(seen.insert(card.id), "duplicate card id {}", card.id);
+            assert!(!card.controls.is_empty(), "{} has no controls", card.id);
+        }
+    }
+
+    #[test]
+    fn every_keybind_names_a_catalogue_module() {
+        let ids: Vec<&str> = aoko_core::search::entries()
+            .iter()
+            .map(|entry| entry.id)
+            .collect();
+
+        for card in all_cards() {
+            for control in card.controls {
+                if let Control::Keybind { module } = control {
+                    assert!(
+                        ids.contains(module),
+                        "keybind '{module}' is not a catalogue module"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_slider_range_is_ordered_and_snapped_where_the_markup_snaps() {
+        for card in all_cards() {
+            for control in card.controls {
+                if let Control::Slider {
+                    label,
+                    bind,
+                    min,
+                    max,
+                    snap,
+                } = control
+                {
+                    assert!(min < max, "{}.{bind}: {min}..{max}", card.id);
+                    assert!(!bind.is_empty(), "{}.{label} has no binding", card.id);
+                    let _ = snap;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn copy_that_must_not_be_paraphrased_is_verbatim() {
+        let combat = count_controls(COMBAT);
+        assert_eq!(combat.cards, 8, "Combat has eight cards");
+
+        // Spot checks against MainWindow.xaml, one per tab: the AutoClicker card's
+        // tooltip, the Beta banner's second line, the Stats captions, the search
+        // button's chord, and a settings sentence.
+        let tooltips: Vec<&str> = COMBAT
+            .iter()
+            .flat_map(|card| card.controls.iter())
+            .filter_map(|control| match control {
+                Control::Check { tooltip, .. } if !tooltip.is_empty() => Some(*tooltip),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            tooltips
+                .iter()
+                .any(|tooltip| tooltip.starts_with("Clicks inside real chests only.")),
+            "the chest-click tooltip is missing"
+        );
+
+        let beta_banner = BETA
+            .iter()
+            .flat_map(|card| card.controls.iter())
+            .filter_map(|control| match control {
+                Control::Note { text } => Some(*text),
+                _ => None,
+            })
+            .any(|text| {
+                text == "These modules were not thoroughly tested. Use them at your own risk."
+            });
+        assert!(beta_banner, "the Beta banner sentence is missing");
+
+        assert_eq!(SEARCH_BUTTON_TOOLTIP, "Search modules and tabs (Ctrl+K)");
+        assert_eq!(SEARCH_BUTTON_CHORD, "ctrl k");
+        assert_eq!(MODULE_LIST_PREVIEW_SAMPLE, "autoclicker 12-16");
+    }
+
+    #[test]
+    fn the_two_data_tabs_are_their_own_views_rather_than_card_lists() {
+        let bodies: Vec<TabBody> = TABS.iter().map(|tab| tab.body).collect();
+        assert!(bodies.contains(&TabBody::Accounts));
+        assert!(bodies.contains(&TabBody::Servers));
+        // Exactly seven tabs carry cards: five module tabs plus Stats and Settings.
+        let card_tabs = bodies
+            .iter()
+            .filter(|body| matches!(body, TabBody::Cards(_)))
+            .count();
+        assert_eq!(card_tabs, 7);
+    }
+
+    #[test]
+    fn the_eighteen_palette_previews_are_the_builtin_palettes() {
+        let previews: Vec<&str> = SETTINGS
+            .iter()
+            .flat_map(|card| card.controls.iter())
+            .filter_map(|control| match control {
+                Control::PalettePreview { name } => Some(*name),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(previews.len(), 18, "one preview per built-in palette");
+        assert_eq!(
+            previews[0], "Slate",
+            "Slate is the fallback and comes first"
+        );
+        assert!(previews.contains(&"Snowy Sky"));
+    }
+}
