@@ -9,9 +9,8 @@
 //! of the shell, which is the shell's wiring.
 //!
 //! Each view's header says what is and is not interactive: the colour picker's square and
-//! hue bar paint but do not take a press, because [`crate::picker`]'s callbacks carry no
-//! `App`; the target picker's message box is drawn in place rather than opening a second
-//! window.
+//! hue bar take a press and a drag through [`crate::picker`]'s window-and-app callbacks;
+//! the target picker's message box is drawn in place rather than opening a second window.
 //!
 //! Both were product surfaces in the managed app — the colour picker's HSV coupling and the
 //! picker's target/version selection each had real state — so each state machine is a plain

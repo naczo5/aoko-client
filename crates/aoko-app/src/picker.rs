@@ -22,6 +22,14 @@
 //! element's rectangle for pointer-to-local conversion, because
 //! `MouseDownEvent::position` is window-relative and there is no
 //! `Window::element_bounds` at this pin.
+//!
+//! Both widgets take their events as data, the shape `components::slider` uses: the drag
+//! callback receives the element-local position **and** the window and app, so the caller
+//! can write its own state and repaint. That is what makes a press here a value — the
+//! earlier shape (`Fn(f32, f32)`) gave the caller no way to notify an entity, so the
+//! dialog could only paint a dead square. Nothing in this file knows what the caller does
+//! with the position; the widget keeps the drag flag and the captured rectangle and no
+//! colour state at all.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -37,24 +45,34 @@ use crate::theme::{fixed, Color, Theme};
 
 /// The SV thumb's diameter (`ColorPickerDialog.xaml:43`).
 pub const SV_THUMB: f32 = 12.0;
+/// The hue bar's width. The markup gives the bar no width of its own; this is the
+/// fixed 22 px the row next to the 220 px square leaves, and both the track and the
+/// thumb's plate use it.
+pub const HUE_WIDTH: f32 = 22.0;
 /// The hue thumb's height (`:52-68`).
 pub const HUE_THUMB: f32 = 4.0;
 
 /// The saturation/value square.
 ///
-/// `on_drag` receives square-local pixels on press and on every drag move. The caller
-/// updates its own [`ColorPickerState`](crate::dialogs::color_picker::ColorPickerState);
-/// this widget keeps no state beyond the drag flag and the captured bounds.
+/// `on_drag` receives square-local pixels on press and on every move while the left button
+/// is held, plus the window and app so the caller can write its own [`ColorPickerState`]
+/// and repaint; `on_release` ends the drag. The widget keeps no state but the captured
+/// bounds: whether a move belongs to a drag that *started here* is the caller's own flag,
+/// which is why [`ColorPickerState::move_sv`] ignores a move it did not see a press for.
+/// A widget-local flag could not work — the caller's repaint rebuilds this element, and
+/// the flag would be gone before the next move arrives.
+///
+/// [`ColorPickerState`]: crate::dialogs::color_picker::ColorPickerState
+/// [`ColorPickerState::move_sv`]: crate::dialogs::color_picker::ColorPickerState::move_sv
 pub fn sv_square(
     name: impl Into<SharedString>,
     hsv: Hsv,
-    on_drag: impl Fn(f32, f32) + 'static,
-    on_release: impl Fn() + 'static,
+    on_drag: impl Fn(f32, f32, &mut Window, &mut App) + 'static,
+    on_release: impl Fn(&mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let name: SharedString = name.into();
-    let on_drag: Rc<dyn Fn(f32, f32)> = Rc::new(on_drag);
-    let on_release: Rc<dyn Fn()> = Rc::new(on_release);
-    let dragging = Rc::new(Cell::new(false));
+    let on_drag: Rc<dyn Fn(f32, f32, &mut Window, &mut App)> = Rc::new(on_drag);
+    let on_release: Rc<dyn Fn(&mut Window, &mut App)> = Rc::new(on_release);
     let bounds: Rc<Cell<Bounds<Pixels>>> = Rc::new(Cell::new(Bounds::default()));
 
     let paint_bounds = bounds.clone();
@@ -62,31 +80,24 @@ pub fn sv_square(
 
     let down = {
         let on_drag = on_drag.clone();
-        let dragging = dragging.clone();
         let bounds = bounds.clone();
-        move |event: &gpui::MouseDownEvent, _window: &mut Window, _cx: &mut App| {
-            dragging.set(true);
+        move |event: &gpui::MouseDownEvent, window: &mut Window, cx: &mut App| {
             let (x, y) = local(&bounds.get(), event.position);
-            on_drag(x, y);
+            on_drag(x, y, window, cx);
         }
     };
     let moved = {
-        let dragging = dragging.clone();
         let bounds = bounds.clone();
         let on_drag = on_drag.clone();
-        move |event: &gpui::MouseMoveEvent, _window: &mut Window, _cx: &mut App| {
-            if dragging.get() {
+        move |event: &gpui::MouseMoveEvent, window: &mut Window, cx: &mut App| {
+            if event.pressed_button == Some(MouseButton::Left) {
                 let (x, y) = local(&bounds.get(), event.position);
-                on_drag(x, y);
+                on_drag(x, y, window, cx);
             }
         }
     };
-    let up = {
-        let dragging = dragging.clone();
-        move |_event: &gpui::MouseUpEvent, _window: &mut Window, _cx: &mut App| {
-            dragging.set(false);
-            on_release();
-        }
+    let up = move |_event: &gpui::MouseUpEvent, window: &mut Window, cx: &mut App| {
+        on_release(window, cx);
     };
 
     let thumb_x = (hsv.sat as f32).clamp(0.0, 1.0) * SV_WIDTH - SV_THUMB / 2.0;
@@ -129,47 +140,45 @@ pub fn sv_square(
 }
 
 /// The vertical hue bar.
+///
+/// `on_drag` receives bar-local `y` on press and on every move while the left button is
+/// held, plus the window and app, so the caller can write its own
+/// [`ColorPickerState`](crate::dialogs::color_picker::ColorPickerState) and repaint;
+/// `on_release` ends the drag. Same rule as the square: the caller owns the flag that says
+/// the drag started here.
 pub fn hue_bar(
     name: impl Into<SharedString>,
     hsv: Hsv,
-    on_drag: impl Fn(f32) + 'static,
-    on_release: impl Fn() + 'static,
+    on_drag: impl Fn(f32, &mut Window, &mut App) + 'static,
+    on_release: impl Fn(&mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let name: SharedString = name.into();
-    let on_drag: Rc<dyn Fn(f32)> = Rc::new(on_drag);
-    let on_release: Rc<dyn Fn()> = Rc::new(on_release);
-    let dragging = Rc::new(Cell::new(false));
+    let on_drag: Rc<dyn Fn(f32, &mut Window, &mut App)> = Rc::new(on_drag);
+    let on_release: Rc<dyn Fn(&mut Window, &mut App)> = Rc::new(on_release);
     let bounds: Rc<Cell<Bounds<Pixels>>> = Rc::new(Cell::new(Bounds::default()));
 
     let paint_bounds = bounds.clone();
 
     let down = {
         let on_drag = on_drag.clone();
-        let dragging = dragging.clone();
         let bounds = bounds.clone();
-        move |event: &gpui::MouseDownEvent, _window: &mut Window, _cx: &mut App| {
-            dragging.set(true);
+        move |event: &gpui::MouseDownEvent, window: &mut Window, cx: &mut App| {
             let (_, y) = local(&bounds.get(), event.position);
-            on_drag(y);
+            on_drag(y, window, cx);
         }
     };
     let moved = {
-        let dragging = dragging.clone();
         let bounds = bounds.clone();
         let on_drag = on_drag.clone();
-        move |event: &gpui::MouseMoveEvent, _window: &mut Window, _cx: &mut App| {
-            if dragging.get() {
+        move |event: &gpui::MouseMoveEvent, window: &mut Window, cx: &mut App| {
+            if event.pressed_button == Some(MouseButton::Left) {
                 let (_, y) = local(&bounds.get(), event.position);
-                on_drag(y);
+                on_drag(y, window, cx);
             }
         }
     };
-    let up = {
-        let dragging = dragging.clone();
-        move |_event: &gpui::MouseUpEvent, _window: &mut Window, _cx: &mut App| {
-            dragging.set(false);
-            on_release();
-        }
+    let up = move |_event: &gpui::MouseUpEvent, window: &mut Window, cx: &mut App| {
+        on_release(window, cx);
     };
 
     let thumb_y = (hsv.hue as f32 / 360.0).clamp(0.0, 1.0) * HUE_HEIGHT - HUE_THUMB / 2.0;
@@ -177,7 +186,7 @@ pub fn hue_bar(
     div()
         .id(gpui::ElementId::Name(name))
         .relative()
-        .w(px(22.0))
+        .w(px(HUE_WIDTH))
         .h(px(HUE_HEIGHT))
         .overflow_hidden()
         .rounded(px(3.0))
@@ -201,7 +210,7 @@ pub fn hue_bar(
                 .absolute()
                 .top(px(thumb_y))
                 .left(px(0.0))
-                .w(px(22.0))
+                .w(px(HUE_WIDTH))
                 .h(px(HUE_THUMB))
                 .border_1()
                 .border_color(fixed::CONTRAST_LABEL)
@@ -329,5 +338,270 @@ mod tests {
         };
         assert_eq!(local(&bounds, point(px(40.0), px(60.0))), (0.0, 0.0));
         assert_eq!(local(&bounds, point(px(150.0), px(150.0))), (110.0, 90.0));
+    }
+
+    // ── The press becomes a value ───────────────────────────────────────────────
+    //
+    // These are the tests the wiring was missing: the painters were geometry and the
+    // callback carried no app, so nothing could turn a press into a colour. The state
+    // machine is real, so the value asserted is the one a caller's `drag_sv`/`drag_hue`
+    // would produce, not a number this file made up.
+
+    use std::sync::{Arc, Mutex};
+
+    use gpui::{Modifiers, MouseButton, Render, TestAppContext, VisualTestContext, WindowOptions};
+
+    use crate::dialogs::color_picker::{rgb_to_hsv, ColorPickerState};
+
+    /// Which widget the probe draws.
+    #[derive(Clone, Copy)]
+    enum Widget {
+        Square,
+        Hue,
+    }
+
+    /// One widget over a real state machine, recording every colour it produced.
+    struct PickerProbe {
+        state: ColorPickerState,
+        widget: Widget,
+        colours: Arc<Mutex<Vec<Rgb>>>,
+        releases: Arc<Mutex<usize>>,
+    }
+
+    impl Render for PickerProbe {
+        fn render(
+            &mut self,
+            _window: &mut Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl IntoElement {
+            let hsv = self.state.hsv();
+            let colours = self.colours.clone();
+            let releases = self.releases.clone();
+            let pressed = cx.entity();
+            let released = pressed.clone();
+
+            let widget = match self.widget {
+                Widget::Square => sv_square(
+                    "test-sv",
+                    hsv,
+                    move |x, y, _window, cx| {
+                        pressed.update(cx, |probe, cx| {
+                            probe.state.drag_sv(x, y);
+                            colours
+                                .lock()
+                                .expect("colours")
+                                .push(probe.state.selected());
+                            cx.notify();
+                        });
+                    },
+                    move |_window, cx| {
+                        released.update(cx, |probe, cx| {
+                            probe.state.end_sv();
+                            *releases.lock().expect("releases") += 1;
+                            cx.notify();
+                        });
+                    },
+                ),
+                Widget::Hue => hue_bar(
+                    "test-hue",
+                    hsv,
+                    move |y, _window, cx| {
+                        pressed.update(cx, |probe, cx| {
+                            probe.state.drag_hue(y);
+                            colours
+                                .lock()
+                                .expect("colours")
+                                .push(probe.state.selected());
+                            cx.notify();
+                        });
+                    },
+                    move |_window, cx| {
+                        released.update(cx, |probe, cx| {
+                            probe.state.end_hue();
+                            *releases.lock().expect("releases") += 1;
+                            cx.notify();
+                        });
+                    },
+                ),
+            };
+
+            // The wrapper is the widget's own box, so the bounds a test reads are the
+            // rectangle the press lands in.
+            let (width, height) = match self.widget {
+                Widget::Square => (SV_WIDTH, SV_HEIGHT),
+                Widget::Hue => (HUE_WIDTH, HUE_HEIGHT),
+            };
+            div()
+                .w(px(width))
+                .h(px(height))
+                .debug_selector(|| String::from("test-picker-widget"))
+                .child(widget)
+        }
+    }
+
+    struct Probe {
+        visual: VisualTestContext,
+        colours: Arc<Mutex<Vec<Rgb>>>,
+        releases: Arc<Mutex<usize>>,
+    }
+
+    impl Probe {
+        fn widget_box(&mut self) -> Bounds<Pixels> {
+            self.visual
+                .debug_bounds("test-picker-widget")
+                .expect("the widget records its bounds in a debug build")
+        }
+
+        fn colours(&self) -> Vec<Rgb> {
+            self.colours.lock().expect("colours").clone()
+        }
+
+        fn releases(&self) -> usize {
+            *self.releases.lock().expect("releases")
+        }
+    }
+
+    /// A point at a fraction of the widget's own box.
+    fn at(bounds: Bounds<Pixels>, x: f32, y: f32) -> gpui::Point<Pixels> {
+        point(
+            bounds.origin.x + px(f32::from(bounds.size.width) * x),
+            bounds.origin.y + px(f32::from(bounds.size.height) * y),
+        )
+    }
+
+    fn probe(cx: &mut TestAppContext, widget: Widget) -> Probe {
+        let colours: Arc<Mutex<Vec<Rgb>>> = Arc::new(Mutex::new(Vec::new()));
+        let releases: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+        let (recorded, released) = (colours.clone(), releases.clone());
+        let entity = cx.update(|cx| {
+            cx.new(|_| PickerProbe {
+                // Pure red: hue 0, full saturation, full value.
+                state: ColorPickerState::new(Rgb::new(255, 0, 0)),
+                widget,
+                colours: recorded,
+                releases: released,
+            })
+        });
+        let window = cx.update(|cx| {
+            cx.open_window(WindowOptions::default(), |_, _| entity.clone())
+                .expect("test window")
+        });
+        let mut visual = VisualTestContext::from_window(window.into(), cx);
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        Probe {
+            visual,
+            colours,
+            releases,
+        }
+    }
+
+    #[gpui::test]
+    fn a_press_inside_the_square_reports_a_colour(cx: &mut TestAppContext) {
+        let mut probe = probe(cx, Widget::Square);
+        let widget = probe.widget_box();
+
+        probe.visual.simulate_mouse_down(
+            at(widget, 0.25, 0.75),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        probe.visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let colours = probe.colours();
+        assert_eq!(colours.len(), 1, "one press, one value");
+        assert_ne!(
+            colours[0],
+            Rgb::new(255, 0, 0),
+            "the press is a colour, not the one the state already had"
+        );
+        // Read back through the state: a quarter across and three quarters down is a
+        // quarter saturated and a quarter bright.
+        let hsv = rgb_to_hsv(colours[0]);
+        assert!(
+            hsv.sat < 0.5,
+            "a press near the left edge desaturates: {}",
+            hsv.sat
+        );
+        assert!(
+            hsv.val < 0.5,
+            "a press near the bottom darkens: {}",
+            hsv.val
+        );
+    }
+
+    #[gpui::test]
+    fn a_drag_reports_a_sequence_and_a_release(cx: &mut TestAppContext) {
+        let mut probe = probe(cx, Widget::Square);
+        let widget = probe.widget_box();
+
+        probe.visual.simulate_mouse_down(
+            at(widget, 0.1, 0.5),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        probe.visual.simulate_mouse_move(
+            at(widget, 0.5, 0.5),
+            Some(MouseButton::Left),
+            Modifiers::default(),
+        );
+        probe.visual.simulate_mouse_move(
+            at(widget, 0.9, 0.5),
+            Some(MouseButton::Left),
+            Modifiers::default(),
+        );
+        probe.visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        probe.visual.simulate_mouse_up(
+            at(widget, 0.9, 0.5),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+
+        let colours = probe.colours();
+        assert_eq!(
+            colours.len(),
+            3,
+            "the press and both moves are values, not one: {colours:?}"
+        );
+        let saturations: Vec<f64> = colours.iter().map(|rgb| rgb_to_hsv(*rgb).sat).collect();
+        assert!(
+            saturations.windows(2).all(|pair| pair[1] > pair[0]),
+            "moving right saturates: {saturations:?}"
+        );
+        assert!(saturations[0] < 0.2, "the press was at the left edge");
+        assert_eq!(probe.releases(), 1, "the release ends the drag");
+    }
+
+    #[gpui::test]
+    fn a_press_on_the_hue_bar_reports_a_new_hue(cx: &mut TestAppContext) {
+        let mut probe = probe(cx, Widget::Hue);
+        let widget = probe.widget_box();
+
+        probe.visual.simulate_mouse_down(
+            at(widget, 0.5, 0.75),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        probe.visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let colours = probe.colours();
+        assert_eq!(colours.len(), 1, "one press, one value");
+        assert_ne!(
+            colours[0],
+            Rgb::new(255, 0, 0),
+            "three quarters down the bar is not hue 0"
+        );
+        let hue = rgb_to_hsv(colours[0]).hue;
+        assert!(
+            (hue - 270.0).abs() < 5.0,
+            "y = 0.75 * 180 is 270 degrees, got {hue}"
+        );
     }
 }

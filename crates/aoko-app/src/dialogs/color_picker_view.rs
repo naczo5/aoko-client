@@ -15,12 +15,12 @@
 //!   (`HexBox_KeyDown`); OK and Cancel report a [`PickResult`] with the state machine's own
 //!   [`accept`](ColorPickerState::accept) / [`cancel`](ColorPickerState::cancel), so the
 //!   caller's colour is untouched on cancel.
-//! * **Not wired: pressing the square or the hue bar.** The painters in
-//!   [`crate::picker`] take `Fn(f32, f32)` / `Fn(f32)` callbacks with no `App`, so a press
-//!   there cannot notify this entity and the thumb would not move until something else
-//!   repainted. Wiring it means giving those two functions the `Entity`-shaped callback
-//!   the other components use; `picker.rs` is not this round's file, so the gap is named
-//!   here rather than worked around with a second painter that would drift.
+//! * **Wired: pressing and dragging the square and the hue bar.** [`crate::picker`]'s two
+//!   painters take the window and app on their drag and release callbacks, so a press
+//!   writes [`ColorPickerState::drag_sv`] / [`drag_hue`](ColorPickerState::drag_hue) and
+//!   notifies this entity; the thumb and the preview follow on the next frame. The
+//!   press-versus-move distinction is the state machine's own drag flag, so a move that
+//!   began outside the widget is ignored rather than applied.
 //! * **Not wired: the commit on focus loss.** `HexBox_LostFocus` commits the same way
 //!   Enter does. The state machine's commit is reachable and tested; the trigger needs a
 //!   blur subscription on the field's focus handle, which the view cannot register in
@@ -246,10 +246,50 @@ impl Render for ColorPickerView {
         let entity = cx.entity();
         let hex = self.hex.clone();
 
-        // Pressing the square or the bar is the documented gap: these painters take a
-        // callback with no `App`, so it cannot notify this entity. See the module docs.
-        let square = crate::picker::sv_square("color-picker-sv", hsv, |_, _| {}, || {});
-        let hue = crate::picker::hue_bar("color-picker-hue", hsv, |_| {}, || {});
+        // Pressing the square or the bar writes this entity's state and repaints: the
+        // painters take the window and app so a press becomes a value. `drag_sv`/`drag_hue`
+        // set the state machine's own drag flag, which is what keeps a move that started
+        // elsewhere from being applied.
+        let square = {
+            let handle = entity.clone();
+            let released = entity.clone();
+            crate::picker::sv_square(
+                "color-picker-sv",
+                hsv,
+                move |x, y, _window, cx| {
+                    handle.update(cx, |view, cx| {
+                        view.state.drag_sv(x, y);
+                        cx.notify();
+                    });
+                },
+                move |_window, cx| {
+                    released.update(cx, |view, cx| {
+                        view.state.end_sv();
+                        cx.notify();
+                    });
+                },
+            )
+        };
+        let hue = {
+            let handle = entity.clone();
+            let released = entity.clone();
+            crate::picker::hue_bar(
+                "color-picker-hue",
+                hsv,
+                move |y, _window, cx| {
+                    handle.update(cx, |view, cx| {
+                        view.state.drag_hue(y);
+                        cx.notify();
+                    });
+                },
+                move |_window, cx| {
+                    released.update(cx, |view, cx| {
+                        view.state.end_hue();
+                        cx.notify();
+                    });
+                },
+            )
+        };
         let swatch = crate::picker::preview_swatch(&theme, selected);
 
         let commit = entity.clone();
@@ -510,6 +550,31 @@ mod tests {
             probe.hex_text(),
             "#FF0000",
             "the commit reverted the field to the selected colour"
+        );
+    }
+
+    #[gpui::test]
+    fn a_press_on_the_square_writes_the_colour_and_the_hex_box_follows(cx: &mut TestAppContext) {
+        let mut probe = probe(cx);
+
+        // The centre of the square: half saturation, half value, which is neither the red
+        // the dialog opened on nor a colour any other control wrote.
+        probe.click("color-picker-sv");
+        // `sync_hex` runs at the start of a frame, so paint before reading the field.
+        probe.visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let selected = probe.selected();
+        assert_ne!(selected, Rgb::new(255, 0, 0), "the press wrote a colour");
+        let field = probe
+            .visual
+            .cx
+            .read(|cx| probe.view.read(cx).hex.read(cx).text().to_owned());
+        assert_eq!(
+            field,
+            selected.to_hex(),
+            "the hex box follows the state, which is what `sync_hex` exists for"
         );
     }
 }
