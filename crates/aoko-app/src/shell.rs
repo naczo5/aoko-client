@@ -178,6 +178,9 @@ impl Shell {
     ///
     /// The bridge reader is started here too, and only here: it dials on its own thread,
     /// so a bridge that is not running costs a `warn!` instead of a stalled first frame.
+    /// Supervision is switched on in the same place, which is what makes a module switch
+    /// start and stop the automation loops — a shell built for a test never gets that far,
+    /// so no test and no capture run owns an automation thread.
     #[must_use]
     pub fn from_system(theme: Theme) -> Self {
         let capabilities = aoko_platform::probe_capabilities();
@@ -194,6 +197,9 @@ impl Shell {
         shell.runtime = Runtime::new(Arc::new(AppController::new(capabilities)));
         // Nothing else connects the store to a bridge; see `crate::ingest`.
         shell.runtime.connect_bridge();
+        // From here on a module switch starts and stops loop threads; see
+        // `Runtime::start_supervision`.
+        shell.runtime.start_supervision();
         shell
     }
 

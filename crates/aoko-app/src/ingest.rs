@@ -17,20 +17,14 @@
 //!   test uses it with `aoko_protocol::transport::memory::duplex`, which is why no test
 //!   opens a socket.
 //!
-//! # Why there is a local reader and not `TransportClient`
+//! # Reading through `TransportClient`
 //!
-//! `aoko_protocol::codec::TransportClient::pump` calls `recv_line` **without clearing its
-//! line buffer first** (`codec.rs:250-262`), while the `Transport` contract says the
-//! implementation appends and the caller clears (`transport.rs:139-140`).
-//! `TcpBridgeTransport` honours the appending half (`tcp.rs:155`), so from the second
-//! frame on the buffer would hold `{frame one}{frame two}`, which is not JSON: a real
-//! bridge would publish exactly one state and then nothing. The in-memory transport
-//! clears `out` on the caller's behalf (`framing.rs:126`), which is why the protocol
-//! crate's own seam tests never see it.
-//!
-//! `crate::ingest::Reader` is the same fifteen lines with the `clear()` the contract asks
-//! for, so this slice can ship without editing a crate its owner is working in. When
-//! `pump` grows that one line, `Reader` can become a thin wrapper around it.
+//! `aoko_protocol::codec::TransportClient` owns the transport, the decoder and the line
+//! buffer, and its `pump` clears the buffer before every read (`codec.rs:250-256`), which
+//! the `Transport` contract requires because `recv_line` appends. That clear was missing
+//! until `4f50b00`; this module carried a fifteen-line reader while it was absent and now
+//! uses the client directly. `memory::MemoryTransport` appends as well, so the seam tests
+//! exercise the same contract the socket does.
 //!
 //! What this deliberately does not do: no reconnect, no command sending, no injection and
 //! no module execution. A failed dial leaves the link down with the reason in the log, and
@@ -45,39 +39,28 @@ use std::time::{Duration, Instant};
 
 use aoko_core::app::AppController;
 use aoko_platform::TcpBridgeTransport;
-use aoko_protocol::codec::{Decoder, Inbound, Pump};
-use aoko_protocol::transport::{LineBuf, RecvOutcome, Transport, TransportError};
+use aoko_protocol::codec::{Decoder, Inbound, Pump, TransportClient};
+use aoko_protocol::diagnostics::ManagedTransportDiagnostics;
+use aoko_protocol::transport::Transport;
 
-/// Reads lines off one transport and decodes them, clearing the buffer between frames.
+/// Ticks per second the transport diagnostics are counted against.
 ///
-/// See the module docs for why this is not `aoko_protocol::codec::TransportClient`.
-struct Reader<T: Transport> {
-    transport: T,
-    decoder: Decoder,
-    line: LineBuf,
-}
+/// The managed host measures its read loop against the same rate. The counters are off
+/// unless `AOKO_PERF_DIAGNOSTICS` is set; the object is required by
+/// `aoko_protocol::codec::TransportClient`.
+const DIAGNOSTICS_TICKS_PER_SECOND: u64 = 20;
 
-impl<T: Transport> Reader<T> {
-    fn new(transport: T) -> Self {
-        Self {
-            transport,
-            decoder: Decoder::new(),
-            line: LineBuf::with_capacity(4096),
-        }
-    }
-
-    /// Reads and decodes one line.
-    ///
-    /// The `clear()` is the whole reason this type exists: `TransportClient::pump` omits
-    /// it, and `TcpBridgeTransport` appends.
-    fn next(&mut self) -> Result<Pump, TransportError> {
-        self.line.clear();
-        match self.transport.recv_line(&mut self.line)? {
-            RecvOutcome::EndOfStream => Ok(Pump::Closed),
-            RecvOutcome::TooLong => Ok(Pump::TooLong),
-            RecvOutcome::Line => Ok(Pump::Frame(self.decoder.ingest(self.line.as_str()))),
-        }
-    }
+/// A decoder over one transport, with diagnostics taken from the environment.
+///
+/// `TransportClient` clears its line buffer before every read (`codec.rs:250-256`), which
+/// is the half of the `Transport` contract `4f50b00` restored; the reader is that client
+/// and nothing of our own.
+fn client<T: Transport>(transport: T) -> TransportClient<T> {
+    TransportClient::new(
+        transport,
+        Decoder::new(),
+        ManagedTransportDiagnostics::from_environment(DIAGNOSTICS_TICKS_PER_SECOND, 0),
+    )
 }
 
 /// What the bridge link currently reports.
@@ -111,7 +94,7 @@ impl Ingest {
             match TcpBridgeTransport::connect_bridge() {
                 Ok(transport) => {
                     tracing::info!("bridge connected on the loopback port");
-                    pump(Reader::new(transport), &controller);
+                    pump(client(transport), &controller);
                     tracing::info!("bridge link closed");
                 }
                 Err(error) => {
@@ -131,7 +114,7 @@ impl Ingest {
     #[must_use]
     pub fn attach<T: Transport + 'static>(transport: T, controller: Arc<AppController>) -> Self {
         Self::start("aoko-bridge-read", move || {
-            pump(Reader::new(transport), &controller);
+            pump(client(transport), &controller);
         })
     }
 
@@ -169,12 +152,12 @@ impl Ingest {
 /// Connected is set on entry and cleared on every exit path, so a closed link, a read
 /// error and a panicking frame handler all leave the store saying "disconnected" rather
 /// than "connected, last seen a while ago".
-fn pump<T: Transport>(mut reader: Reader<T>, controller: &AppController) {
+fn pump<T: Transport>(mut client: TransportClient<T>, controller: &AppController) {
     let store = controller.store();
     store.set_connected(true);
 
     loop {
-        match reader.next() {
+        match client.pump() {
             Ok(Pump::Frame(Inbound::State { state, .. })) => {
                 // `publish_shared`, not `publish`: the frame already arrives as an `Arc`
                 // (`codec.rs:51-54`), and handing it over unchanged is the zero-copy path
@@ -247,6 +230,9 @@ mod tests {
     }
 
     /// A memory transport whose end of stream waits for the gate.
+    ///
+    /// The only thing it adds is the gate; reading, framing and the appending contract are
+    /// the fake's own, so this test goes through the same `TransportClient` a socket does.
     struct HeldTransport {
         inner: memory::MemoryTransport,
         gate: Arc<Gate>,
@@ -254,23 +240,11 @@ mod tests {
 
     impl Transport for HeldTransport {
         fn recv_line(&mut self, out: &mut LineBuf) -> Result<RecvOutcome, TransportError> {
-            // Read into a scratch buffer and append, which is what `TcpBridgeTransport`
-            // does (`tcp.rs:155`) and what `memory::MemoryTransport` hides by clearing
-            // `out` itself. Without the append, a reader that forgot to clear its buffer
-            // would still pass this test, and the defect that motivated `Reader` would go
-            // unguarded.
-            let mut scratch = LineBuf::new();
-            match self.inner.recv_line(&mut scratch)? {
-                RecvOutcome::Line => {
-                    out.extend_from_slice(scratch.as_slice());
-                    Ok(RecvOutcome::Line)
-                }
-                RecvOutcome::TooLong => Ok(RecvOutcome::TooLong),
-                RecvOutcome::EndOfStream => {
-                    self.gate.wait_for_release();
-                    Ok(RecvOutcome::EndOfStream)
-                }
+            let outcome = self.inner.recv_line(out)?;
+            if outcome == RecvOutcome::EndOfStream {
+                self.gate.wait_for_release();
             }
+            Ok(outcome)
         }
 
         fn send_line(&mut self, line: &[u8]) -> Result<(), TransportError> {
