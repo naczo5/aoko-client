@@ -32,7 +32,7 @@ use aoko_protocol::module_catalog::{self, EnabledFlag};
 use aoko_protocol::profile::Profile;
 use aoko_protocol::state::GameState;
 use arc_swap::ArcSwapOption;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::{MappedRwLockReadGuard, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::discord::{self, PresenceInputs, PresenceSnapshot};
 use crate::loops::LoopSense;
@@ -186,6 +186,13 @@ pub struct AppController {
     profile: RwLock<Profile>,
     modules: RwLock<Vec<EnabledFlag>>,
     capabilities: CapabilityReport,
+    /// The `config` frame the current profile produces: built on first use, dropped by
+    /// [`AppController::update_profile`] and [`AppController::replace_profile`], which are the
+    /// only two writers of `profile`.
+    ///
+    /// Always locked before `profile`. A rebuild holds this and then reads the profile; the
+    /// invalidators take this and then the profile write. One order, so no cycle.
+    frame_cache: RwLock<Option<ConfigFrame>>,
 }
 
 impl AppController {
@@ -198,6 +205,7 @@ impl AppController {
             profile: RwLock::new(Profile::default()),
             modules: RwLock::new(Vec::new()),
             capabilities,
+            frame_cache: RwLock::new(None),
         }
     }
 
@@ -239,8 +247,14 @@ impl AppController {
 
     /// Mutates the active profile in place, returning whether the mutation
     /// reported a change.
+    ///
+    /// Always drops the cached `config` frame, whatever the closure reports: the closure can
+    /// write any field, and a caller that returns `false` may still have moved the HUD.
     pub fn update_profile(&self, update: impl FnOnce(&mut Profile) -> bool) -> bool {
-        update(&mut self.profile.write())
+        let mut cache = self.frame_cache.write();
+        let changed = update(&mut self.profile.write());
+        *cache = None;
+        changed
     }
 
     /// Replaces the whole profile, as loading a saved config does.
@@ -253,7 +267,9 @@ impl AppController {
     /// was handed. Returns whether anything was changed by normalisation.
     pub fn replace_profile(&self, mut profile: Profile) -> bool {
         let normalised = profile.normalize_action_binds();
+        let mut cache = self.frame_cache.write();
         *self.profile.write() = profile;
+        *cache = None;
         normalised
     }
 
@@ -341,7 +357,7 @@ impl AppController {
     }
 
     /// The `config` frame this host would send right now: the payload and the HUD layout it
-    /// carries.
+    /// carries, served from a cache that the profile's writers drop.
     ///
     /// The frame is more than [`config_payload`](Self::config_payload) because the encoding
     /// takes a `HudLayout`, and the layout lives on the profile as the managed JSON blob. This
@@ -350,22 +366,37 @@ impl AppController {
     /// `hudLayout` — the default profile, and any profile older than the field — parses to
     /// `HudLayout::new`, which is the managed `BuildDefaults`.
     ///
-    /// One profile read covers both halves, so a settings change landing mid-send cannot pair
-    /// a new payload with the old layout.
+    /// One profile read covers both halves at build time, so a settings change landing
+    /// mid-build cannot pair a new payload with an old layout.
     ///
-    /// The parse is per call rather than cached: `Profile::to_hud_layout` rebuilds the blob as
-    /// `serde_json` values for `HudLayout::from_json`, which costs `1 + 5n` allocations for `n`
-    /// stored elements — 36 for a complete seven-element layout, none for the default. Because
-    /// [`ConfigFrame`] compares both halves, a sender that keeps the frame it sent pays that
-    /// once per tick and sees a HUD-only change; a sender that compares
-    /// [`config_payload`](Self::config_payload) pays nothing per tick and cannot see one.
+    /// # Cost
+    ///
+    /// A warm call allocates nothing: it takes the cache lock, finds the frame and hands back
+    /// a guard, which is why the return type is [`ConfigFrameRef`] and not a clone. A rebuild
+    /// is the only expensive path, and it is `2` allocations for the payload — `gtb_hint` and
+    /// `gtb_preview` both own a `"-"`, every other default string is empty — plus
+    /// `Profile::to_hud_layout`'s `1 + 5n` for `n` stored elements: 36 for a complete
+    /// seven-element blob, none when the profile stores no `hudLayout`. So one invalidation
+    /// costs nothing by itself and makes the next call a rebuild: 38 allocations with a stored
+    /// layout, 2 without. Predicted from the code, not measured; CI reports the real numbers.
+    ///
+    /// Because [`ConfigFrame`] compares both halves, a sender that keeps the frame it sent
+    /// sees a HUD-only change; a sender comparing [`config_payload`](Self::config_payload)
+    /// cannot see one.
     #[must_use]
-    pub fn config_frame(&self) -> ConfigFrame {
-        let profile = self.profile.read();
-        ConfigFrame {
-            payload: Self::payload(&profile),
-            hud_layout: profile.to_hud_layout(),
+    pub fn config_frame(&self) -> ConfigFrameRef<'_> {
+        let mut cache = self.frame_cache.write();
+        if cache.is_none() {
+            let profile = self.profile.read();
+            *cache = Some(ConfigFrame {
+                payload: Self::payload(&profile),
+                hud_layout: profile.to_hud_layout(),
+            });
         }
+        ConfigFrameRef(RwLockReadGuard::map(
+            RwLockWriteGuard::downgrade(cache),
+            |cache| cache.as_ref().expect("the frame was built above"),
+        ))
     }
 
     /// The payload half of the `config` frame: everything but the HUD layout.
@@ -422,6 +453,25 @@ impl ConfigFrame {
     #[must_use]
     pub fn to_line(&self) -> String {
         self.payload.to_line(&self.hud_layout)
+    }
+}
+
+/// A read guard on the cached [`ConfigFrame`].
+///
+/// [`AppController::config_frame`] hands this back rather than a clone, so a sender compares
+/// and encodes through it without building a second frame. It dereferences to the
+/// `ConfigFrame`, and the lock stays out of the public signature.
+///
+/// It is a read lock on the cache, so hold it for the compare and the encode and let it go
+/// before the socket write: a stalled bridge would otherwise block every profile write behind
+/// this lock. `(*frame).clone()` is how a sender keeps what it sent.
+pub struct ConfigFrameRef<'a>(MappedRwLockReadGuard<'a, ConfigFrame>);
+
+impl std::ops::Deref for ConfigFrameRef<'_> {
+    type Target = ConfigFrame;
+
+    fn deref(&self) -> &ConfigFrame {
+        &self.0
     }
 }
 
@@ -756,26 +806,28 @@ mod tests {
     /// `Profile::hud_layout`, so a customised HUD shipped the canonical default.
     #[test]
     fn the_config_frame_carries_the_profile_hud_layout() {
-        let default_frame = AppController::default().config_frame();
+        let defaults = AppController::default();
+        let default_line = defaults.config_frame().to_line();
 
         // The default's module list sits at the top right, and a default profile — no stored
         // blob — sends exactly that, which is the managed `BuildDefaults`.
-        assert!(default_frame
-            .to_line()
-            .contains("\"modulelist\":{\"x\":0.985,\"y\":0.02,\"scale\":1}"));
+        assert!(default_line.contains("\"modulelist\":{\"x\":0.985,\"y\":0.02,\"scale\":1}"));
         assert_eq!(
-            default_frame.hud_layout,
+            defaults.config_frame().hud_layout,
             HudLayout::new(),
             "a default profile must send the managed default layout"
         );
         assert_eq!(
-            default_frame.to_line(),
-            default_frame.payload.to_line(&HudLayout::new()),
+            default_line,
+            defaults.config_payload().to_line(&HudLayout::new()),
             "and encode it exactly as the default layout encodes"
         );
 
-        // A customised one sends what the user set, not the default.
+        // A customised one sends what the user set. The cache is warm before the write, so a
+        // frame cache that is not dropped on a profile write keeps the default and fails here.
         let app = AppController::default();
+        assert_eq!(app.config_frame().to_line(), default_line);
+
         let mut layout = HudLayout::new();
         layout.set(
             element_id::MODULE_LIST,
@@ -799,16 +851,30 @@ mod tests {
         );
         assert_ne!(
             frame.to_line(),
-            default_frame.to_line(),
+            default_line,
             "a moved HUD must not encode to the default layout"
         );
 
         // The sender compares frames, so a HUD-only change has to read as one: the payload is
         // identical here, and only the layout differs.
-        assert_eq!(frame.payload, default_frame.payload);
+        assert_eq!(frame.payload, defaults.config_payload());
         assert_ne!(
-            frame, default_frame,
+            *frame,
+            *defaults.config_frame(),
             "a moved HUD must reach the bridge even when the payload is unchanged"
+        );
+
+        // The guard is a read lock on the cache, and the next line writes it: let it go first.
+        drop(frame);
+
+        // `replace_profile` is the other writer of the profile, and it drops the cache too.
+        let mut loaded = Profile::default();
+        loaded.hud_layout = Some(Profile::hud_layout_map(&HudLayout::new()));
+        let _ = app.replace_profile(loaded);
+        assert_eq!(
+            app.config_frame().hud_layout,
+            HudLayout::new(),
+            "loading a profile has to drop the cached frame as well"
         );
     }
 
