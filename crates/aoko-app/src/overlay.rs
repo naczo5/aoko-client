@@ -1,5 +1,12 @@
 //! The command-search overlay view and its rows.
 //!
+//! **Not mounted in Phase 2** (section 12 decision 7): [`overlay`] and [`row_element`]
+//! have no caller. The shell installs no `on_key_down`, so Ctrl+K and type-to-open do not
+//! exist and nothing draws this view; it is the painting half of a surface whose state
+//! half ([`crate::views::command_search`]) is equally unreachable. Kept because the
+//! geometry, the copy and the row policy are the expensive part, and a later round
+//! mounts it rather than rewriting it.
+//!
 //! Split by interface, as `UI_INVENTORY.md` §7 requires: **this module draws**, and
 //! [`crate::views::command_search`] owns open/close, Ctrl+K, the query, ranking,
 //! selection and the row actions. So there is no state here at all — the overlay is a

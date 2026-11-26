@@ -21,6 +21,7 @@ pub mod bindings;
 pub mod command_search;
 pub mod copy;
 pub mod forms;
+pub mod keybind_text;
 pub mod prefs;
 pub mod profiles;
 pub mod relative_time;

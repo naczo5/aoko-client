@@ -1381,6 +1381,11 @@ impl Shell {
             .gap(px(2.0))
             .bg(theme.background);
 
+        // **Inert in Phase 2** (section 12 decision 7 debt): the managed button opens the
+        // command-search overlay (`MainWindow.xaml.cs:1623-1824`). The overlay view and
+        // its state exist, but nothing mounts the view and the shell installs no key
+        // handling, so a click reaches no handler. It keeps the managed label rather than
+        // switching to a disabled style the C# does not have.
         rail = rail.child(
             components::button(
                 "rail-search",
@@ -1565,13 +1570,20 @@ impl Shell {
         }
 
         if let Some(module) = card_module(card) {
-            row = row.child(
-                div()
-                    .flex()
-                    .justify_end()
-                    .w(px(140.0))
-                    .child(keybind_button(card.id, module, theme, entity)),
-            );
+            // `DockPanel` docks the button right and gives it `Width="140"`
+            // (`MainWindow.xaml:359`); the row's 8 px gap is that button's
+            // `Margin="8,0,0,0"`. `button_sized` sets the width on the button itself, as
+            // WPF's `Width` does, so the fill is 140 px rather than the label's width.
+            let mut slot = div().ml_auto();
+            if let Some(selector) = keybind_debug_selector(card.id) {
+                slot = slot.debug_selector(move || selector.to_owned());
+            }
+            row = row.child(slot.child(keybind_button(
+                card.id,
+                &keybind_label(&self.profile, module),
+                theme,
+                entity,
+            )));
         }
 
         row.into_any_element()
@@ -2008,14 +2020,12 @@ impl Shell {
                 column.into_any_element()
             }
 
-            Control::Keybind { module } => components::button(
-                SharedString::from(format!("{}-keybind", card.id)),
+            Control::Keybind { module } => keybind_button(
+                card.id,
+                &keybind_label(&self.profile, module),
                 theme,
-                ButtonVariant::Secondary,
-                SharedString::from(keybind_label(module)),
-                |_, _, _| {},
-            )
-            .into_any_element(),
+                entity,
+            ),
 
             Control::Button { label, tooltip } => {
                 // The configs card's buttons are real actions: Load and Save
@@ -2057,6 +2067,9 @@ impl Shell {
                 }
             }
 
+            // **Inert in Phase 2** (decision 7 debt), same reason as the keybind buttons:
+            // `AutoRodActionBindButton_Click` (`MainWindow.xaml.cs:1954-1963`) starts the
+            // key capture, and there is no capture surface to start.
             Control::ActionBind { which } => components::button(
                 SharedString::from(format!("{}-{which:?}", card.id)),
                 theme,
@@ -2272,6 +2285,18 @@ fn switch_target(bind: &'static str) -> SwitchTarget {
     }
 }
 
+/// The debug selector for the keybind button the geometry test measures.
+///
+/// Same rule as [`switch_debug_selector`]: name only what a test targets, because the
+/// selector is a `String` and every card would otherwise record one. A no-op outside a
+/// debug build with `test-support`.
+fn keybind_debug_selector(card_id: &'static str) -> Option<&'static str> {
+    match card_id {
+        "AutoClickerCard" => Some("keybind-AutoClickerCard"),
+        _ => None,
+    }
+}
+
 /// The debug selector for the switches the click tests target.
 ///
 /// `debug_selector` takes a `&'static str`, and an id built from a card and a bind
@@ -2311,17 +2336,23 @@ fn control_is_header(control: &Control, header: Option<copy::CardHeader>) -> boo
 }
 
 /// The 140-wide keybind button the managed header docks right.
+///
+/// **Inert in Phase 2** (section 12 decision 7 debt). `KeybindButton_Click`
+/// (`MainWindow.xaml.cs:1943-1952`) starts the global key capture; this crate has no
+/// capture surface yet, so the handler is a documented no-op rather than a second capture
+/// path, and the button keeps the managed copy so a reader can see it is the same control.
 fn keybind_button(
     card_id: &'static str,
-    module: &'static str,
+    label: &str,
     theme: &Theme,
     _entity: &Entity<Shell>,
 ) -> AnyElement {
-    components::button(
+    components::button::button_sized(
         SharedString::from(format!("{card_id}-keybind")),
         theme,
         ButtonVariant::Secondary,
-        SharedString::from(keybind_label(module)),
+        SharedString::from(label.to_owned()),
+        140.0,
         |_, _, _| {},
     )
     .into_any_element()
@@ -2347,10 +2378,17 @@ fn module_for_bind(bind: &'static str) -> Option<&'static str> {
         .map(|entry| entry.id)
 }
 
-/// The keybind button's rest label: the markup shows the formatted key, and an
-/// unbound module reads `Unbound` here (the capture never seeds keybinds).
-fn keybind_label(_module: &'static str) -> &'static str {
-    "Unbound"
+/// The keybind button's rest label.
+///
+/// The XAML button has no `Content` (`MainWindow.xaml:359`): every label comes from
+/// `SetKeybindButtonContent` (`MainWindow.xaml.cs:2143-2156`), which composes
+/// ``Bind: {FormatVirtualKey(InputHooks.GetModuleKey(module))}`` from the module's
+/// virtual key, or `Unbound` when there is none — so an untouched profile reads
+/// `Bind: Unbound`. See [`crate::views::keybind_text`] for the format and the one
+/// branch (`Key` enum names) that is not ported.
+fn keybind_label(profile: &aoko_protocol::profile::Profile, module: &'static str) -> String {
+    let vk = profile.module_keys.get(module).copied().unwrap_or(0);
+    crate::views::keybind_text::button_label(vk)
 }
 
 /// So `MODULE_LIST_PREVIEW_SAMPLE` stays referenced: the Settings tab draws the
@@ -2889,9 +2927,18 @@ mod tests {
         );
     }
 
-    /// Serialises the tests that write the process-wide animation gate, and restores
-    /// it even when an assertion panics: the re-review caught a failed mutation
-    /// leaving the flag `false` and taking an unrelated test down with it.
+    /// Serialises the tests that write the process-wide animation gate, and restores it
+    /// even when an assertion panics: the re-review caught a failed mutation leaving the
+    /// flag `false` and taking an unrelated test down with it.
+    ///
+    /// Full independence is not reachable from this module. The gate is one `AtomicBool`
+    /// owned by [`crate::theme::motion`], whose own `the_client_setting_drives_the_gate`
+    /// asserts the ambient default is `true` and cannot take this lock; `theme/` is the
+    /// component builder's file, so the fix is a `motion`-exposed test lock rather than an
+    /// edit here. What this module can do, and does: order the tests *we* write the gate
+    /// in, restore it on unwind through [`GateReset`], and restore it immediately after
+    /// each assertion, so the window a concurrently scheduled test could observe is the
+    /// write plus the read instead of the whole test.
     static MOTION_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     struct GateReset;
@@ -2903,9 +2950,13 @@ mod tests {
     }
 
     fn gate_lock() -> std::sync::MutexGuard<'static, ()> {
-        MOTION_GATE
+        let guard = MOTION_GATE
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Start from the shipped default rather than whatever a previous test left, so
+        // "the gate did not move" is a claim about this test's work.
+        motion::set_animations_enabled(true);
+        guard
     }
 
     #[test]
@@ -2935,6 +2986,9 @@ mod tests {
             !motion::animations_enabled(),
             "the gate is set before the first frame, not at the first repaint"
         );
+        // Restore now, not at the end of the test: `GateReset` covers the panic path, this
+        // keeps the contaminated window to the two lines above.
+        motion::set_animations_enabled(true);
         assert_eq!(shell.prefs_status(), "");
         assert!(
             shell.prefs.is_some(),
@@ -3029,6 +3083,8 @@ mod tests {
             prefs.load(),
             Ok(crate::views::prefs::ClientPrefs { animations: true })
         );
+        // Already true here, but stated: this test must not end with the gate down.
+        motion::set_animations_enabled(true);
     }
 
     #[gpui::test]
@@ -3153,6 +3209,43 @@ mod tests {
             "a second click flips it back"
         );
     }
+    /// The header button is WPF's `Width="140"` on the button itself
+    /// (`MainWindow.xaml:359`), not a 140 px slot with a content-sized button inside it.
+    /// The re-review measured the slot version: a 71 px fill and a 54 px gap.
+    #[gpui::test]
+    fn the_keybind_button_is_140_wide_and_docked_right(cx: &mut gpui::TestAppContext) {
+        use gpui::WindowOptions;
+
+        let shell = cx.update(|cx| cx.new(|_| Shell::new(Theme::slate())));
+        let window = cx.update(|cx| {
+            cx.open_window(WindowOptions::default(), |_, _| shell.clone())
+                .expect("test window")
+        });
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let button = visual
+            .debug_bounds("keybind-AutoClickerCard")
+            .expect("the keybind button records its bounds in a debug build");
+        assert_eq!(
+            f32::from(button.size.width),
+            140.0,
+            "the button fills WPF's Width=140, not its label's width"
+        );
+
+        let switch = visual
+            .debug_bounds("switch-IsArmed")
+            .expect("the header's switch is beside it");
+        assert!(
+            button.origin.x >= switch.origin.x + switch.size.width + px(8.0),
+            "DockPanel docks the button right with Margin=8,0,0,0: button at {}, switch ends at {}",
+            f32::from(button.origin.x),
+            f32::from(switch.origin.x + switch.size.width),
+        );
+    }
+
     /// The tab whose card list holds `card_id`, for the switch tests.
     fn test_tab_of(card_id: &str) -> &'static str {
         copy::TABS

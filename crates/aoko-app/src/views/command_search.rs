@@ -1,6 +1,12 @@
 //! Command search: open/close, the query, ranking, selection, row actions and the
 //! pulse-on-jump.
 //!
+//! **Not mounted in Phase 2** (section 12 decision 7): `open_search`/`close_search` have
+//! no caller, because the shell installs no `on_key_down`, so Ctrl+K, type-to-open and
+//! every row action are unreachable from the running app. The state machine, the ranking
+//! and the pulse are exercised by unit tests only. [`crate::overlay`] is the matching
+//! view, and it is equally unmounted.
+//!
 //! The overlay *view* is the component builder's; this is the state behind it,
 //! ported from `Aoko/Views/CommandSearchOverlay.xaml.cs` (open/close, the query,
 //! ranking, selection movement, row actions) and `Aoko/MainWindow.xaml.cs`
