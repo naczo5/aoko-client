@@ -96,21 +96,30 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             pkg-config gcc-mingw-w64-x86-64 wine64
 
-      # The package that owns the launcher differs between distributions and
-      # releases: some ship /usr/bin/wine, others only /usr/bin/wine64. Cargo's
-      # runner variable takes one name, so resolve it here rather than
-      # hard-coding a name that may not exist on the runner image.
+      # The launcher is not in one predictable place. On Ubuntu noble the
+      # `wine64` package installs /usr/lib/wine/wine64 and puts nothing on PATH,
+      # which is why the first run of this workflow failed here; other images
+      # ship /usr/bin/wine. Cargo's runner variable takes one name, so resolve
+      # it once, from PATH and then from the known library path.
       - name: resolve the wine launcher
         run: |
           mkdir -p "$RUNNER_TEMP/bin"
-          for candidate in wine wine64; do
-            if command -v "$candidate" >/dev/null 2>&1; then
-              ln -sf "$(command -v "$candidate")" "$RUNNER_TEMP/bin/wine"
-              echo "using $(command -v "$candidate")"
+          launcher=""
+          for candidate in "$(command -v wine || true)" \
+                           "$(command -v wine64 || true)" \
+                           /usr/lib/wine/wine64 \
+                           /usr/bin/wine; do
+            if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+              launcher="$candidate"
               break
             fi
           done
-          test -x "$RUNNER_TEMP/bin/wine" || { echo "no wine launcher found"; exit 1; }
+          if [ -z "$launcher" ]; then
+            echo "no wine launcher found on PATH or at /usr/lib/wine/wine64"
+            exit 1
+          fi
+          ln -sf "$launcher" "$RUNNER_TEMP/bin/wine"
+          echo "using $launcher"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
       # Building is not enough: without the runner variable cargo
