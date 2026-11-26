@@ -33,9 +33,9 @@
 //!
 //! # Deviations from managed
 //!
-//! Two behaviours here are **not** ports, both because the managed behaviour is a trap
+//! Three behaviours here are **not** ports, all because the managed behaviour is a trap
 //! rather than a quirk. Each is pinned by a test that fails if the managed behaviour is
-//! restored, and both are recorded in the migration's trade-offs section.
+//! restored, and all are recorded in the migration's trade-offs section.
 //!
 //! * **The built-in name guard is case-insensitive.** `BuiltInPaletteNames.Contains`
 //!   (`MainWindow.xaml.cs:1105`) is ordinal, so managed accepted a palette named `slate`;
@@ -50,6 +50,12 @@
 //!   (`MainWindow.xaml.cs:1183-1209`), so it removed nothing and said it had. Reporting
 //!   success for a failure is the defect class this migration exists to remove, so
 //!   [`PaletteStore::delete`] refuses with [`DeleteError::NotFound`] and writes nothing.
+//! * **A saved card's swatches are what applying the palette paints.** Managed built them with
+//!   `ParseHexOr(palette.Panel, Colors.Black)` and three siblings
+//!   (`MainWindow.xaml.cs:1049-1052`), so a hand-edited role painted black on the card while
+//!   the apply fell back to a derived shade. [`PaletteStore::rows`] resolves through
+//!   [`Theme::from_custom`] — the chain `RegisterPalette` uses — so the preview cannot
+//!   disagree with the click.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -231,6 +237,44 @@ pub enum DraftOutcome {
     },
 }
 
+/// One saved palette as its card paints it: the name and the four swatches
+/// (`MainWindow.xaml:1917-1935`, the `DataTemplate` of `CustomPalettesItems`).
+///
+/// The four colours are resolved through [`Theme::from_custom`], which is the same fallback
+/// chain `RegisterPalette` (`MainWindow.xaml.cs:1005-1032`) uses when the palette is
+/// applied, so the card previews what a click on it would paint. Managed built the same four
+/// swatches from `ParseHexOr(..., Colors.Black)` / `ParseHexOr(..., Colors.Gray)`
+/// (`:1049-1052`): a stored role that does not parse painted black, so a palette with a
+/// corrupt `panel` previewed a colour it would never paint. See the module header, and
+/// `a_corrupt_role_previews_what_applying_would_paint`, which fails if the black fallback
+/// returns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaletteRow {
+    /// The stored spelling, which is what the `Current palette:` line shows.
+    pub name: String,
+    /// `BackgroundSwatch` (`:1049`).
+    pub background: Color,
+    /// `PanelSwatch` (`:1050`).
+    pub panel: Color,
+    /// `SliderSwatch` (`:1051`), from the palette's `slider_background`.
+    pub slider: Color,
+    /// `AccentSwatch` (`:1052`).
+    pub accent: Color,
+}
+
+/// What a delete press did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteOutcome {
+    /// `Deleted palette '<name>'.` (`MainWindow.xaml.cs:1209`).
+    pub status: String,
+    /// The palette that replaced the applied one when the removed palette was applied —
+    /// `Slate` (`:1199-1206`) — and `None` when what is applied did not move.
+    ///
+    /// The caller persists it to the profile's `GuiTheme`, because the profile is the file the
+    /// applied name lives in; [`PaletteStore::current_name`] already reflects the same name.
+    pub fallback: Option<&'static str>,
+}
+
 /// Why a delete press removed nothing.
 ///
 /// A distinct type from [`DraftError`] because the two failures a delete can hit are not
@@ -370,6 +414,28 @@ impl PaletteStore {
         resolve_in(&self.palettes(), name)
     }
 
+    /// The saved palettes as their cards paint them, in file order.
+    ///
+    /// One row per palette rather than a row per role, so the card holds no slice of names and
+    /// no second parse of the four stored hexes: this is the list's shape, and
+    /// [`PaletteRow`] explains why its colours come from the theme the apply builds.
+    #[must_use]
+    pub fn rows(&self) -> Vec<PaletteRow> {
+        self.palettes()
+            .into_iter()
+            .map(|palette| {
+                let theme = Theme::from_custom(&palette.name, roles_of(&palette));
+                PaletteRow {
+                    name: theme.name,
+                    background: theme.background,
+                    panel: theme.panel,
+                    slider: theme.slider_background,
+                    accent: theme.accent,
+                }
+            })
+            .collect()
+    }
+
     /// The theme the current palette paints, which is what the shell renders with.
     #[must_use]
     pub fn theme(&self) -> Theme {
@@ -379,7 +445,10 @@ impl PaletteStore {
     /// Makes a palette current, as a preview row's click does
     /// (`GuiPaletteButton_Click`, `MainWindow.xaml.cs:930-960`).
     ///
-    /// The name is stored as given; [`PaletteStore::theme`] normalises when it paints.
+    /// The name is stored as given; [`PaletteStore::theme`] normalises when it paints. This is
+    /// the store half only. Managed sets `clicker.GuiTheme` and then calls `ApplyGuiTheme`, and
+    /// the profile is the file that name lives in, so the caller persists it here too; a caller
+    /// that does not leaves the store and the profile disagreeing at the next load.
     pub fn apply(&mut self, name: &str) {
         self.current = name.to_owned();
     }
@@ -437,11 +506,13 @@ impl PaletteStore {
         )
     }
 
-    /// Deletes a palette by name after the confirmation, returning the status line.
+    /// Deletes a palette by name after the confirmation.
     ///
-    /// Deleting the applied palette falls back to `Slate` (`MainWindow.xaml.cs:1199-1206`).
-    /// A name that is not in the file is **not** reported as a deletion: managed ran a
-    /// `RemoveAll` and then printed `Deleted palette '<name>'.` regardless
+    /// Deleting the applied palette falls back to `Slate` (`MainWindow.xaml.cs:1199-1206`), so
+    /// the outcome names that fallback and the caller writes it to the profile's `GuiTheme`;
+    /// returning only the status line would leave the profile pointing at a palette that is no
+    /// longer in the file. A name that is not in the file is **not** reported as a deletion:
+    /// managed ran a `RemoveAll` and then printed `Deleted palette '<name>'.` regardless
     /// (`:1183-1209`), which claimed a success that did not happen. The port returns
     /// [`DeleteError::NotFound`] and writes nothing. See the module header.
     ///
@@ -449,7 +520,7 @@ impl PaletteStore {
     /// [`DeleteError::NotFound`] for a name the file does not contain, or
     /// [`DeleteError::Write`] when the file cannot be written; nothing is written in
     /// either case.
-    pub fn delete(&mut self, name: &str) -> Result<String, DeleteError> {
+    pub fn delete(&mut self, name: &str) -> Result<DeleteOutcome, DeleteError> {
         let mut palettes = self.palettes();
         if !palettes.iter().any(|stored| same_name(&stored.name, name)) {
             return Err(DeleteError::NotFound(name.to_owned()));
@@ -457,10 +528,16 @@ impl PaletteStore {
         delete(&mut palettes, name);
         write_palettes(&self.path, &palettes).map_err(DeleteError::Write)?;
 
-        if same_name(&self.current, name) {
+        let fallback = if same_name(&self.current, name) {
             self.current = DEFAULT_PALETTE.to_owned();
-        }
-        Ok(copy::PALETTE_STATUS_DELETED.replace("{name}", name))
+            Some(DEFAULT_PALETTE)
+        } else {
+            None
+        };
+        Ok(DeleteOutcome {
+            status: copy::PALETTE_STATUS_DELETED.replace("{name}", name),
+            fallback,
+        })
     }
 }
 
@@ -991,9 +1068,12 @@ mod tests {
         assert_eq!(prompt, "Delete custom palette 'Mine'?");
         assert_eq!(title, "Delete Palette");
 
+        let deleted = store.delete("Mine").expect("deleted");
+        assert_eq!(deleted.status, "Deleted palette 'Mine'.");
         assert_eq!(
-            store.delete("Mine").expect("deleted"),
-            "Deleted palette 'Mine'."
+            deleted.fallback,
+            Some(DEFAULT_PALETTE),
+            "the applied palette moved, so the caller is told to persist Slate"
         );
         assert!(store.palettes().is_empty());
         assert_eq!(
@@ -1036,11 +1116,104 @@ mod tests {
 
         // A name that differs only by case is a different question: the file is searched
         // case-insensitively, so that one is found and removed.
+        let deleted = store.delete("MINE").expect("case-insensitive");
+        assert_eq!(deleted.status, "Deleted palette 'MINE'.");
         assert_eq!(
-            store.delete("MINE").expect("case-insensitive"),
-            "Deleted palette 'MINE'."
+            deleted.fallback,
+            Some(DEFAULT_PALETTE),
+            "different casing is the applied palette, so it falls back too"
         );
         assert!(store.palettes().is_empty());
+    }
+
+    #[test]
+    fn deleting_a_palette_that_is_not_applied_leaves_the_current_name_alone() {
+        let mut store = store();
+        store.draft_mut().name = "Mine".to_owned();
+        store.save_draft(false).expect("first save");
+        store.draft_mut().name = "Other".to_owned();
+        store.save_draft(false).expect("second save");
+        assert_eq!(store.current_name(), "Other", "the second save is applied");
+
+        let deleted = store.delete("Mine").expect("deleted");
+        assert_eq!(
+            deleted.fallback, None,
+            "what is applied did not move, so the caller has nothing to persist"
+        );
+        assert_eq!(
+            store.current_name(),
+            "Other",
+            "the applied palette is still the one that was applied"
+        );
+        assert_eq!(store.palettes().len(), 1);
+    }
+
+    #[test]
+    fn the_saved_cards_paint_the_name_and_the_four_swatches() {
+        let mut store = store();
+        store.draft_mut().name = "Mine".to_owned();
+        store.set("PaletteBgBox", "#1A2B3C");
+        store.set("PalettePanelBox", "#202020");
+        store.set("PaletteAccentBox", "#C7625A");
+        store.set("PaletteTextBox", "#E8EAEE");
+        store.save_draft(false).expect("save");
+
+        let rows = store.rows();
+        assert_eq!(rows.len(), 1, "one row per saved palette");
+        let row = &rows[0];
+        let panel = Color::from_hex(0x20_20_20);
+
+        assert_eq!(
+            row.name, "Mine",
+            "the stored spelling, as the card shows it"
+        );
+        assert_eq!(row.background, Color::from_hex(0x1A_2B_3C));
+        assert_eq!(row.panel, panel);
+        assert_eq!(
+            row.slider,
+            panel.lighten(0.06),
+            "SliderSwatch is the stored slider_background, which the save derived"
+        );
+        assert_eq!(row.accent, Color::from_hex(0xC7_62_5A));
+    }
+
+    /// Deviation, pinned: a card previews the palette the apply would paint.
+    ///
+    /// Managed built the four swatches with `ParseHexOr(..., Colors.Black)` and
+    /// `ParseHexOr(..., Colors.Gray)` (`MainWindow.xaml.cs:1049-1052`), so a hand-edited role
+    /// painted black on the card while the apply fell back to a derived shade. If someone
+    /// restores the black fallback, the panel assertion below turns black and fails.
+    #[test]
+    fn a_corrupt_role_previews_what_applying_would_paint() {
+        let store = store();
+        fs::create_dir_all(store.path().parent().expect("parent")).expect("dir");
+        let broken = CustomPalette {
+            name: "Broken".to_owned(),
+            background: "#1A2B3C".to_owned(),
+            panel: "not-a-colour".to_owned(),
+            accent: "#C7625A".to_owned(),
+            ..CustomPalette::default()
+        };
+        fs::write(store.path(), to_palettes_json(&[broken.clone()])).expect("write");
+
+        let row = store.rows().pop().expect("the file has one palette");
+        assert_eq!(row.name, "Broken");
+        assert_eq!(row.background, Color::from_hex(0x1A_2B_3C));
+        assert_eq!(
+            row.panel,
+            Color::from_hex(0x1A_2B_3C),
+            "a role that does not parse falls back the way the apply does, not to black"
+        );
+        assert_eq!(
+            row.panel,
+            resolve_in(std::slice::from_ref(&broken), "Broken").panel,
+            "the card and the apply read one chain"
+        );
+        assert_ne!(
+            row.panel,
+            Color::rgb(0, 0, 0),
+            "managed's ParseHexOr fallback was black"
+        );
     }
 
     #[test]

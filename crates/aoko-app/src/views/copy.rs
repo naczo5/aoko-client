@@ -1305,6 +1305,32 @@ pub const LOADER_STATUS_PREFIX: &str = "Status: ";
 
 // ── The palette editor ──────────────────────────────────────────────────────────
 
+/// `Custom Palettes`, the heading above the saved cards, `MainWindow.xaml:1906`.
+pub const PALETTE_HEADING_SAVED: &str = "Custom Palettes";
+
+/// `Create custom palette`, the heading on the editor box, `MainWindow.xaml:1951`.
+pub const PALETTE_HEADING_CREATE: &str = "Create custom palette";
+
+/// The editor's explanation, `MainWindow.xaml:1952-1954`. The markup wraps it; the string
+/// is one line, and the port wraps at the same width the box gives it.
+pub const PALETTE_DESCRIPTION: &str =
+    "Pick four base colors as hex (e.g. #1A2B3C). The remaining shades are derived automatically.";
+
+/// The caption on the name box's row, `MainWindow.xaml:1961`.
+///
+/// The box beside it (`:1962`) has **no** placeholder or hint text in the markup, so the
+/// port draws none: an invented `e.g. Mine` would be copy the managed card never shows.
+pub const PALETTE_NAME_LABEL: &str = "Name";
+
+/// The add button's label, the `DarkButton` at `MainWindow.xaml:1999`.
+pub const PALETTE_ADD: &str = "Add palette";
+
+/// The `✕` the markup draws as a button's content in two places: the remove cap on a saved
+/// palette card (`MainWindow.xaml:1923`) and the remove cap on a tracked-block row
+/// (`:699`). One constant because it is one character drawn twice; the tooltip beside each
+/// ([`PALETTE_DELETE_TOOLTIP`], [`BLOCK_ESP_REMOVE_TOOLTIP`]) is what distinguishes them.
+pub const REMOVE_GLYPH: &str = "✕";
+
 /// The swatch beside each hex box in the create-palette card, repeated for all four
 /// rows: `MainWindow.xaml:1962` (Background), `:1973` (Panel), `:1984` (Accent) and
 /// `:1995` (Text).
@@ -1378,6 +1404,10 @@ pub const PALETTE_DELETE_PROMPT: &str = "Delete custom palette '{name}'?";
 pub const PALETTE_DELETE_TITLE: &str = "Delete Palette";
 
 // ── The Block ESP rows ──────────────────────────────────────────────────────────
+
+/// The remove cap on a tracked-block row, `MainWindow.xaml:701`. Its content is
+/// [`REMOVE_GLYPH`]; this is the sentence that says what it removes.
+pub const BLOCK_ESP_REMOVE_TOOLTIP: &str = "Remove block";
 
 /// The colour swatch in a tracked-block row, `MainWindow.xaml:705`. The row's own
 /// swatch is the click target; there is no button beside it.
