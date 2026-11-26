@@ -272,9 +272,15 @@ CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUNNER=wine \
   cargo test -p aoko-platform --target x86_64-pc-windows-gnu
 ```
 
-Without it the target still builds and never runs, so a suite that executed nothing reads as a pass. The doc gate needs `RUSTDOCFLAGS` set on the command line rather than in a manifest: plain `cargo doc` treats a broken intra-doc link as a warning, and on a crate with this many cross-references an unchecked link rots silently.
+Without it the target still builds and never runs, so a suite that executed nothing reads as a pass.
 
-CI runs the Linux and Windows matrices; `McInjector` DLL pipelines are untouched.
+Prefer the `wine` package over `wine64` on Ubuntu noble. `wine64` installs only `/usr/lib/wine/wine64` with nothing on `PATH`, and calling that path directly fails with "could not exec the wine loader" because it expects the wrapper to set a loader path; `wine64` also cannot create the prefix. The workflow resolves the launcher with `command -v wine` and fails loudly instead of falling back to a binary that does not work. Run `wineboot -u` once before the suite, so prefix creation does not interleave with test output and read as a failure.
+
+The doc gate needs `RUSTDOCFLAGS` set on the command line rather than in a manifest: plain `cargo doc` treats a broken intra-doc link as a warning, and on a crate with this many cross-references an unchecked link rots silently.
+
+A checkout also needs the native libraries `gpui_linux` links, which the workspace probes through `pkg-config`: `pkg-config libx11-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libfontconfig1-dev libfreetype6-dev libegl1-mesa-dev libvulkan-dev libssl-dev`. The capture run adds `mesa-vulkan-drivers`, because it renders through the headless path and needs a software Vulkan driver rather than a display.
+
+CI runs the Linux, Windows and capture matrices; `McInjector` DLL pipelines are untouched. Two things it deliberately does not do: assert timings, since a shared runner is too noisy and a flaky budget teaches people to ignore the gate (the benchmarks are compiled, never run — the numbers live in `docs/performance/rust-baseline.md`, measured out of band on named hardware), and build incrementally, since `CARGO_INCREMENTAL=0` is what makes a green run mean a clean build rather than a cache hit.
 
 ### Source checks a reviewer also runs
 
