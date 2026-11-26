@@ -53,7 +53,7 @@ pub use srv::{
 };
 pub use tcp::{TcpBridgeTransport, BRIDGE_ADDRESS, SEND_TIMEOUT};
 pub use version::{normalize_detected_version, resolve_bridge_dll_name, try_parse_version};
-pub use window::{sort_windows, Rect, WindowHandle, WindowInfo, WindowInspector};
+pub use window::{is_game_window, sort_windows, Rect, WindowHandle, WindowInfo, WindowInspector};
 
 #[cfg(target_os = "linux")]
 pub use evdev_table::{code_for_key, key_from_code};

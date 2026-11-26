@@ -181,6 +181,28 @@ impl WindowInspector for LinuxWindowInspector {
         x11.geometry(window)
             .ok_or_else(|| PlatformError::not_found(format!("window {} disappeared", handle.0)))
     }
+
+    /// Linux cannot answer this, and says so instead of guessing.
+    ///
+    /// The managed host asks `GetCursorInfo` for `CURSOR_SHOWING` plus a non-null
+    /// `hCursor`. X11 has no equivalent request: `XQueryPointer` returns
+    /// position, child and `same_screen`, never visibility, and while `XFixes`
+    /// can hide and show a cursor it exposes no getter for that state. The way
+    /// the game actually hides the pointer - GLFW's transparent cursor or SDL's
+    /// relative mode - is a client-side `XDefineCursor`, which only the pixels of
+    /// `XFixesGetCursorImage` would reveal: inference, not a state query, and
+    /// `XFixes` is not even linked here.
+    ///
+    /// Wayland exposes nothing about the pointer to clients at all, so the
+    /// answer is the same on GLFW-native and XWayland sessions.
+    ///
+    /// This override is explicit rather than an inherited default so the limit
+    /// is greppable here, is named in [`crate::CapabilityReport`]'s notes, and is
+    /// pinned by `cursor_visibility_is_reported_as_unobservable`.
+    /// Callers must not read `None` as "the cursor is hidden".
+    fn cursor_visible(&self) -> Option<bool> {
+        None
+    }
 }
 
 /// `WM_CLASS` carries two NUL-terminated strings: instance then class. The
@@ -242,5 +264,25 @@ mod tests {
         if !inspector.is_available() {
             assert!(inspector.enumerate().is_err());
         }
+    }
+
+    // `WindowInspector::cursor_visible` is a platform limit on Linux, not a gap:
+    // the refusal is explicit, identical with and without a display, and never
+    // claims the cursor is hidden.
+    #[test]
+    fn cursor_visibility_is_reported_as_unobservable() {
+        let without_display = LinuxWindowInspector {
+            x11: None,
+            unavailable: Some(PlatformError::unsupported("test: no display")),
+        };
+        assert_eq!(without_display.cursor_visible(), None);
+
+        let live = LinuxWindowInspector::new();
+        assert_eq!(live.cursor_visible(), None);
+
+        // `None` must not be mistaken for the managed `false`, which would let a
+        // `!cursor_visible` gate act.
+        assert_ne!(live.cursor_visible(), Some(false));
+        assert_ne!(live.cursor_visible(), Some(true));
     }
 }

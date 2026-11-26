@@ -134,6 +134,16 @@ impl Detected {
                     .to_string(),
             );
         }
+        // A third question, distinct from "events are observed" and "state can be
+        // sampled": no Linux session can say whether the pointer is drawn, so the
+        // managed `GetCursorInfo` test has no counterpart here. Reported on every
+        // session because the limit is a property of the platform, not of this one.
+        notes.push(
+            "cursor visibility cannot be queried on Linux: X11 has no request for it and \
+             Wayland exposes nothing to clients, so a 'cursor hidden' test always answers \
+             unknown here - do not read that as hidden, or the loops act on a guess"
+                .to_string(),
+        );
         if self.discord_sockets == 0 {
             notes.push("no Discord IPC socket found; Discord is probably not running".to_string());
         }
@@ -342,6 +352,36 @@ mod tests {
         .report();
         assert_eq!(report.session, SessionKind::X11);
         assert!(report.window_inspection);
+    }
+
+    #[test]
+    fn every_report_names_the_unobservable_cursor_as_a_platform_limit() {
+        // `WindowInspector::cursor_visible` returns `None` on Linux, so the report
+        // has to carry the reason on any session, X11 or not.
+        for detected in [
+            Detected::default(),
+            Detected {
+                x11: true,
+                procfs: true,
+                pointer_state: true,
+                ..Detected::default()
+            },
+            Detected {
+                wayland: true,
+                procfs: true,
+                ..Detected::default()
+            },
+        ] {
+            let report = detected.report();
+            assert!(
+                report
+                    .notes
+                    .iter()
+                    .any(|note| note.contains("cursor visibility cannot be queried")),
+                "a {:?} session must name the cursor limit",
+                report.session
+            );
+        }
     }
 
     #[test]

@@ -233,19 +233,14 @@ pub fn select_best_window(
     windows: &[crate::window::WindowInfo],
 ) -> Option<&crate::window::WindowInfo> {
     windows.iter().min_by(|left, right| {
-        is_game_title(&right.title)
-            .cmp(&is_game_title(&left.title))
+        crate::window::is_game_title(&right.title)
+            .cmp(&crate::window::is_game_title(&left.title))
             .then_with(|| (right.handle.0 != 0).cmp(&(left.handle.0 != 0)))
     })
 }
 
-fn is_game_title(title: &str) -> bool {
-    let lower = title.to_lowercase();
-    lower.contains("minecraft") || lower.contains("lunar") || lower.contains("badlion")
-}
-
 /// `string.Contains(marker, OrdinalIgnoreCase)`, ASCII-folded.
-fn contains_any(haystack: &str, markers: &[&str]) -> bool {
+pub(crate) fn contains_any(haystack: &str, markers: &[&str]) -> bool {
     markers
         .iter()
         .any(|marker| find_ignore_case(haystack, marker).is_some())
