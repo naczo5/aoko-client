@@ -70,7 +70,7 @@ use crate::views::command_search::{
 };
 use crate::views::copy::{self, Card, Control, TabBody, MODULE_LIST_PREVIEW_SAMPLE};
 use crate::views::forms::FormFields;
-use crate::views::palette_store::{self, PaletteDraft, PaletteStore};
+use crate::views::palette_store::{self, PaletteStore};
 use crate::views::prefs::ClientPrefs;
 use crate::views::profiles::{CreateOutcome, Profiles};
 use crate::views::servers_state::{AddOutcome, JoinOutcome, PingRequest, ServersState};
@@ -572,8 +572,8 @@ impl Shell {
     ///
     /// The seam [`Profiles::with_store`] gives the profile side: a test that saves a draft
     /// should write into its scratch root rather than this machine's palette file. It builds a
-    /// fresh store, so the draft returns to [`PaletteDraft::default`] — which is why it belongs
-    /// before the first frame and not in the middle of an edit.
+    /// fresh store, so the draft returns to [`palette_store::PaletteDraft::default`] — which is
+    /// why it belongs before the first frame and not in the middle of an edit.
     pub fn set_palette_path(&mut self, path: impl Into<std::path::PathBuf>) {
         self.palette = PaletteStore::at(path);
     }
@@ -800,10 +800,8 @@ impl Shell {
                 continue;
             }
 
-            let seed = draft_field(self.palette.draft(), bind)
-                .cloned()
-                .unwrap_or_default();
-            if let Some(color) = palette_store::parse_entry(&seed) {
+            let seed = self.palette.get(bind).unwrap_or_default().to_owned();
+            if let Some(color) = self.palette.get(bind).and_then(palette_store::parse_entry) {
                 self.swatches.insert(bind, color);
             }
 
@@ -827,22 +825,21 @@ impl Shell {
     /// The one write path for a palette row's text: the box's `on_change`, the Enter commit and
     /// the colour picker all land here.
     ///
-    /// The draft is the owner, so the text is stored even when it does not parse: `PaletteDraft`
-    /// deliberately keeps an invalid entry visible so it can be fixed, and the Add press is where
-    /// it is refused. The swatch's memo only moves on a successful parse, so a half-typed `#0A`
-    /// leaves the colour it had rather than flashing empty.
+    /// The draft is the owner, and [`PaletteStore::set`] is the only way in: the text is stored
+    /// even when it does not parse, because `PaletteDraft` deliberately keeps an invalid entry
+    /// visible so it can be fixed, and the Add press is where it is refused. The swatch's memo
+    /// only moves on a successful parse, so a half-typed `#0A` leaves the colour it had rather
+    /// than flashing empty.
     ///
-    /// [`palette_store::parse_entry`] is the tolerant reader the Add press itself uses, so a form
-    /// the swatch accepts is a form the press accepts — `#123`, `123` and `#123456` all land.
+    /// The parse reads the draft back rather than the argument, so the swatch can only show what
+    /// the store holds — an unknown bind writes nothing, and a row for it gets no colour either.
+    /// [`palette_store::parse_entry`] is the reader the Add press itself uses, so a form the
+    /// swatch accepts is a form the press accepts and a role the picker shows as valid cannot be
+    /// the reason the save refuses.
     fn set_color_text(&mut self, bind: &'static str, text: &str, cx: &mut Context<Self>) {
-        if let Some(stored) = draft_field_mut(self.palette.draft_mut(), bind) {
-            if stored.as_str() != text {
-                stored.clear();
-                stored.push_str(text);
-            }
-        }
+        self.palette.set(bind, text);
 
-        if let Some(color) = palette_store::parse_entry(text) {
+        if let Some(color) = self.palette.get(bind).and_then(palette_store::parse_entry) {
             if self.swatches.get(bind) != Some(&color) {
                 self.swatches.insert(bind, color);
             }
@@ -3699,34 +3696,6 @@ const COLOR_FIELDS: [&str; 4] = [
     "PaletteAccentBox",
     "PaletteTextBox",
 ];
-
-/// The draft field one palette box edits, by managed name.
-///
-/// The four names and the four draft fields are exactly the pairing
-/// [`crate::views::palette_store`] owns, so this is the seam that wants to be
-/// `PaletteDraft::get(bind)` there (with the writable mirror beside it). Until then the pairing
-/// lives here once, rather than a second set of initial hexes beside it: the box, the swatch and
-/// the eventual picker all read the one string the draft holds.
-fn draft_field<'a>(draft: &'a PaletteDraft, bind: &str) -> Option<&'a String> {
-    match bind {
-        "PaletteBgBox" => Some(&draft.background),
-        "PalettePanelBox" => Some(&draft.panel),
-        "PaletteAccentBox" => Some(&draft.accent),
-        "PaletteTextBox" => Some(&draft.text),
-        _ => None,
-    }
-}
-
-/// The writable half of [`draft_field`].
-fn draft_field_mut<'a>(draft: &'a mut PaletteDraft, bind: &str) -> Option<&'a mut String> {
-    match bind {
-        "PaletteBgBox" => Some(&mut draft.background),
-        "PalettePanelBox" => Some(&mut draft.panel),
-        "PaletteAccentBox" => Some(&mut draft.accent),
-        "PaletteTextBox" => Some(&mut draft.text),
-        _ => None,
-    }
-}
 
 /// Whether a control was already painted as part of the card's header.
 ///
