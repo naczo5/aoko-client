@@ -1284,19 +1284,26 @@ impl Shell {
         }
     }
 
-    /// Drops the status line the binding's last capture wrote.
+    /// Drops the status line the binding's last capture wrote, and puts the button back on its
+    /// resting label.
     ///
     /// A capture that loses focus stores nothing, so the outcome on the row is stale: taking
-    /// the line away is how the row reads the explanatory copy again. The repaint is
-    /// unconditional, and that is the half that matters on screen: the button also has to go
-    /// back to its resting label, and the label lives on the capture entity, so the frame is
-    /// what paints it. A conditional notify here left the button reading
-    /// `Bind: [Press key or mouse...]` after focus moved away.
+    /// the line away is how the row reads the explanatory copy again.
+    ///
+    /// The label is the other half and it is not reachable from the status line. The label lives
+    /// on the capture entity, and [`Shell::ensure_capture`] rebuilds that entity only when the
+    /// *profile's* key changes — which an abandoned capture never does. Leaving the entity in
+    /// place therefore left the button reading `Bind: [Press key or mouse...]` for good after
+    /// focus moved away, which is the failure this replaces the entity to fix.
     fn clear_capture_status(&mut self, target: KeyTarget, cx: &mut Context<Self>) {
         match target {
             KeyTarget::Module(_) => self.keybind_conflict = None,
             KeyTarget::Action(which) => self.action_status[status_slot(which)] = None,
         }
+        // A fresh entity, built from the same profile key the old one held: the key is unchanged,
+        // so nothing but the label differs, and that is exactly the part to rebuild.
+        self.captures.remove(&target);
+        self.ensure_capture(target, cx);
         cx.notify();
     }
 
