@@ -235,30 +235,10 @@ impl PaletteStore {
         read_palettes(&self.path)
     }
 
-    /// The theme a palette name paints, or `Slate`.
-    ///
-    /// The order is `NormalizeThemeName`'s (`MainWindow.xaml.cs:1292-1306`): the name is
-    /// trimmed, a built-in wins, then the file is searched case-insensitively, and
-    /// anything else — including an unknown custom name — is `Slate`. The returned
-    /// theme's `name` is the stored spelling, which is what the cards and the
-    /// `Current palette:` line show.
+    /// The theme a palette name paints out of this store's file, or `Slate`.
     #[must_use]
     pub fn resolve(&self, name: &str) -> Theme {
-        let trimmed = name.trim();
-        if trimmed.is_empty() {
-            return Theme::slate();
-        }
-        if is_builtin_ignoring_case(trimmed) {
-            return Theme::by_name(trimmed);
-        }
-        match self
-            .palettes()
-            .iter()
-            .find(|stored| same_name(&stored.name, trimmed))
-        {
-            Some(palette) => Theme::from_custom(&palette.name, roles_of(palette)),
-            None => Theme::slate(),
-        }
+        resolve_in(&self.palettes(), name)
     }
 
     /// The theme the current palette paints, which is what the shell renders with.
@@ -344,6 +324,47 @@ impl PaletteStore {
             self.current = DEFAULT_PALETTE.to_owned();
         }
         Ok(copy::PALETTE_STATUS_DELETED.replace("{name}", name))
+    }
+}
+
+/// The theme a palette name paints out of a given palette set, or `Slate`.
+///
+/// The order is `NormalizeThemeName`'s (`MainWindow.xaml.cs:1292-1306`): the name is
+/// trimmed, a built-in wins, then the set is searched case-insensitively, and anything
+/// else — including an unknown custom name — is `Slate`. The returned theme's `name` is
+/// the stored spelling, which is what the cards and the `Current palette:` line show.
+///
+/// Takes the set rather than reading it, so the rule is testable without a file; the
+/// shell's entry point is [`theme_for`].
+#[must_use]
+pub fn resolve_in(palettes: &[CustomPalette], name: &str) -> Theme {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Theme::slate();
+    }
+    if is_builtin_ignoring_case(trimmed) {
+        return Theme::by_name(trimmed);
+    }
+    match palettes
+        .iter()
+        .find(|stored| same_name(&stored.name, trimmed))
+    {
+        Some(palette) => Theme::from_custom(&palette.name, roles_of(palette)),
+        None => Theme::slate(),
+    }
+}
+
+/// The theme a profile's `GuiTheme` name paints, reading the palette file.
+///
+/// This is the one call that replaces `Theme::by_name(&profile.gui_theme)` in the shell,
+/// because `by_name` knows the 18 built-ins and cannot see a custom name. A platform
+/// that names no app-data directory falls back to the built-in table, which is the same
+/// answer `by_name` gives.
+#[must_use]
+pub fn theme_for(name: &str) -> Theme {
+    match PaletteStore::from_system() {
+        Ok(store) => store.resolve(name),
+        Err(_) => Theme::by_name(name),
     }
 }
 
@@ -639,6 +660,34 @@ mod tests {
             Color::from_hex(0x1A_2B_3C),
             "the stored palette is unreachable, which is what managed does too"
         );
+    }
+
+    #[test]
+    fn resolving_out_of_a_set_keeps_the_documented_order_without_a_file() {
+        let mut palettes = vec![CustomPalette {
+            name: "Mine".to_owned(),
+            background: "#1A2B3C".to_owned(),
+            ..CustomPalette::default()
+        }];
+
+        let custom = resolve_in(&palettes, "mine");
+        assert_eq!(custom.name, "Mine", "the stored spelling, was `mine`");
+        assert_eq!(custom.background, Color::from_hex(0x1A_2B_3C));
+        assert_eq!(resolve_in(&palettes, "Slate").name, "Slate");
+        assert_eq!(resolve_in(&palettes, "").name, "Slate", "blank is Slate");
+        assert_eq!(resolve_in(&palettes, "   ").name, "Slate");
+        assert_eq!(resolve_in(&palettes, "Gone").name, "Slate");
+
+        // A custom entry that shadows a built-in is unreachable, as managed has it:
+        // the built-ins are matched first and case-insensitively.
+        palettes.push(CustomPalette {
+            name: "slate".to_owned(),
+            background: "#1A2B3C".to_owned(),
+            ..CustomPalette::default()
+        });
+        let shadowed = resolve_in(&palettes, "slate");
+        assert_eq!(shadowed.name, "Slate");
+        assert_ne!(shadowed.background, Color::from_hex(0x1A_2B_3C));
     }
 
     #[test]
