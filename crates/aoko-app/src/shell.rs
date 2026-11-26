@@ -201,6 +201,10 @@ impl Shell {
         // From here on a module switch starts and stops loop threads; see
         // `Runtime::start_supervision`.
         shell.runtime.start_supervision();
+        // The playtime clock starts with the window, as managed starts its own timer here
+        // (`MainWindow.xaml.cs:421`). A shell built for a test or a capture never gets this
+        // far, so its playtime stays at zero.
+        shell.runtime.start_session();
         shell
     }
 
@@ -381,6 +385,10 @@ impl Shell {
             if let Some(shell) = handle.upgrade() {
                 shell.update(cx, |shell, _cx| {
                     let _ = shell.save_profile();
+                    // Managed stops its playtime timer in `OnClosed`
+                    // (`MainWindow.xaml.cs:1865`), not on disconnect, and keeps the total; see
+                    // `Runtime::stop_session`.
+                    shell.runtime.stop_session();
                 });
             }
             // Never block the close: the save failing is reported in the Settings
@@ -1410,6 +1418,10 @@ impl Render for Shell {
         // a `&str` comparison — no allocation, which is what keeps the section-6 render
         // budget intact.
         self.runtime.poll_gtb(Instant::now());
+        // The playtime timer rides the same hook. It is the same shape of decision: with no
+        // session running, or with no whole second since the last tick, it returns before it
+        // touches the clock's value, so an idle frame costs one branch.
+        self.runtime.sample_playtime();
 
         let motion = motion::motion();
         // The two chrome strings are built before the theme is borrowed: each needs
@@ -1422,10 +1434,8 @@ impl Render for Shell {
         let entity = cx.entity();
 
         let body = match copy::TABS.get(self.tab).map(|tab| tab.body) {
-            // The Stats tab draws `views::stats_view`, which reads the runtime's tracker, so
-            // it is not a card table however the table spells it. `is_stats_body` holds the
-            // reason the key is the slice and not a `TabBody` variant.
-            Some(body) if is_stats_body(body) => {
+            // The Stats tab draws `views::stats_view`, which reads the runtime's tracker.
+            Some(TabBody::Stats) => {
                 let handle = cx.entity();
                 crate::views::stats_view::render(
                     &self.runtime.stats(),
@@ -2507,17 +2517,6 @@ enum SwitchTarget {
     Profile(&'static str),
 }
 
-/// Whether a tab body is the Stats tab, which `render` mounts on `stats_view`.
-///
-/// The table spells the Stats tab as a `Cards(STATS)` row because `TabBody` belongs to
-/// `views/copy.rs` and a fourth variant would need arms in `views/bindings.rs`, which this
-/// slice does not own. Keying on the table's own `STATS` slice keeps the decision inside
-/// `copy.rs`'s vocabulary — no hard-coded index, no name string — and the Stats test fails if
-/// the row is ever reordered, renamed or duplicated.
-fn is_stats_body(body: TabBody) -> bool {
-    matches!(body, TabBody::Cards(cards) if std::ptr::eq(cards, copy::STATS))
-}
-
 /// Which of the two a switch's bind names. Never falls back to the card.
 fn switch_target(bind: &'static str) -> SwitchTarget {
     match module_for_bind(bind) {
@@ -2752,15 +2751,18 @@ mod tests {
             .iter()
             .position(|tab| tab.name == "Stats")
             .expect("a Stats tab");
+        // The variant itself, because that is what the render match dispatches on: keying the
+        // old mount on the `STATS` slice's address made the arm a guard, and a guard is what
+        // let the tab stay a static copy table.
+        assert_eq!(copy::TABS[stats_tab].body, TabBody::Stats);
         assert!(
-            is_stats_body(copy::TABS[stats_tab].body),
-            "the row render keys on is the Stats one"
+            matches!(copy::TABS[0].body, TabBody::Cards(_)),
+            "Combat keeps its cards"
         );
-        assert!(!is_stats_body(copy::TABS[0].body), "Combat keeps its cards");
         assert_eq!(
             copy::TABS
                 .iter()
-                .filter(|tab| is_stats_body(tab.body))
+                .filter(|tab| tab.body == TabBody::Stats)
                 .count(),
             1,
             "exactly one row is the Stats view"
@@ -2789,7 +2791,7 @@ mod tests {
     fn card_headers_are_the_managed_shapes_and_never_an_identifier() {
         let cards = match copy::TABS[0].body {
             TabBody::Cards(cards) => cards,
-            TabBody::Accounts | TabBody::Servers => &[],
+            TabBody::Stats | TabBody::Accounts | TabBody::Servers => &[],
         };
 
         // `MainWindow.xaml:359-362`: the header of a module card is its switch.
@@ -3744,7 +3746,7 @@ mod tests {
             .iter()
             .find(|tab| match tab.body {
                 TabBody::Cards(cards) => cards.iter().any(|card| card.id == card_id),
-                TabBody::Accounts | TabBody::Servers => false,
+                TabBody::Stats | TabBody::Accounts | TabBody::Servers => false,
             })
             .map(|tab| tab.name)
             .expect("the card is in a tab")

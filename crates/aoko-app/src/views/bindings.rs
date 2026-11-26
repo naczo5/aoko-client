@@ -264,6 +264,9 @@ pub fn control_count() -> usize {
         .iter()
         .filter_map(|tab| match tab.body {
             TabBody::Cards(cards) => Some(cards),
+            // A view, not a card table: `stats_view` paints counters and one button, and none
+            // of them is a bound slider, check or combo.
+            TabBody::Stats => None,
             TabBody::Accounts | TabBody::Servers => None,
         })
         .flatten()
@@ -284,6 +287,8 @@ pub fn occurrences(bind: &str) -> usize {
         .iter()
         .filter_map(|tab| match tab.body {
             TabBody::Cards(cards) => Some(cards),
+            // No bound row lives on the Stats view, so it contributes no occurrence.
+            TabBody::Stats => None,
             TabBody::Accounts | TabBody::Servers => None,
         })
         .flatten()

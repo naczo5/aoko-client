@@ -69,7 +69,7 @@
 //! ingest path feeds nothing and this file says so where the sink is defined.
 
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use aoko_core::app::{AppController, StateSnapshot};
 use aoko_core::chest_stealer::FRESH_STATE_MS;
@@ -92,6 +92,16 @@ use crate::ingest::{Ingest, IngestStatus};
 /// it, so two bodies sharing a seed would pace identically. Deterministic on purpose — a
 /// loop test that failed once can be replayed.
 const LOOP_SEED: u64 = 0x00A0_C0DE;
+
+/// The most whole seconds one [`Runtime::sample_playtime`] call may hand the tracker.
+///
+/// A frame loop calls the sample roughly thirty times a second, so a running app offers one
+/// second per call and never reaches the cap. It is reached only after a stall — a debugger
+/// break, a suspended machine — where the clock jumped by minutes: replaying those seconds
+/// would put time on the Stats tab that the app was not running to observe. The managed host's
+/// `Timer` coalesces the ticks it misses for the same reason, so the cap follows it instead of
+/// inventing a rule. Five seconds is far beyond any frame gap a running app has.
+const PLAYTIME_MAX_CATCH_UP_SECS: u64 = 5;
 
 /// Why a synthetic action is refused when this session has no platform input backend.
 ///
@@ -253,6 +263,41 @@ impl ClickSink for StatsFeed {
     }
 }
 
+/// The platform's two surfaces, built once per runtime.
+///
+/// `aoko_platform::default_services()` is what builds them and it probes the machine, so it is
+/// asked for at most once: the loop bundle takes a clone of `input`, and the playtime session
+/// reads the same `windows`. A runtime that neither supervises nor starts a session — every
+/// test and every capture — never asks, so nothing here reaches the platform at all.
+struct PlatformSurfaces {
+    input: Arc<dyn InputBackend>,
+    windows: Option<Arc<dyn WindowInspector>>,
+}
+
+/// The session timer behind the Stats tab's playtime counter.
+///
+/// `StatsTracker.StartSessionTimer` (`Aoko/Core/StatsTracker.cs:123-131`) is a `Timer` that
+/// fires once a second and hands `RecordPlaytimeSample` four facts: whether the game window is
+/// foreground, whether the bridge is connected, the current state, and whether the cursor is
+/// visible. This is that timer with the same four facts, read from the same [`LoopSense`] the
+/// click bodies use, so the playtime counter and the loops cannot disagree about whether the
+/// game is in front.
+///
+/// **It is not a thread.** [`Runtime::sample_playtime`] runs from the shell's one per-frame
+/// hook and counts the whole seconds that have passed since the previous call, so a frame that
+/// finds none costs one comparison and no lock. The clock is the injected seam:
+/// `Runtime::with_time` hands a test a step clock, and the test advances seconds instead of
+/// waiting for them.
+struct SessionTimer {
+    /// What the host can see, built when the session starts over the same window surface the
+    /// loops get. No window inspection reads as "not foreground", which counts no playtime
+    /// rather than counting it anyway.
+    sense: Arc<dyn LoopSense>,
+    /// The instant playtime is accounted up to; the next sample counts the whole seconds after
+    /// it, so a sub-second remainder is carried rather than dropped.
+    last: Instant,
+}
+
 /// The application's runtime state: the controller, the id mapping the switches need to
 /// reach it, the bridge reader, and — on the shipped path only — the loop supervisor.
 pub struct Runtime {
@@ -267,6 +312,10 @@ pub struct Runtime {
     supervise: bool,
     /// The running loop bundle, `None` while nothing is enabled.
     loops: Option<ClickerLoops>,
+    /// The platform surfaces, built the first time the loops or the session ask for them.
+    platform: Option<PlatformSurfaces>,
+    /// The playtime session, `Some` from `Shell::from_system` until the window closes.
+    session: Option<SessionTimer>,
     /// The time source the loop bodies park on; a test swaps in its own before enabling.
     clock: Arc<dyn Clock>,
     sleeper: Arc<dyn Sleeper>,
@@ -283,18 +332,19 @@ impl Runtime {
     /// A runtime over a controller the caller built.
     ///
     /// This is the seam a test uses to hold the same controller the UI writes through.
-    /// It builds no bridge reader, starts no loop and solves nothing: `connect_bridge`,
-    /// `start_supervision` and `poll_gtb` are the three things that do work, and none of them
-    /// runs on its own.
+    /// It builds no bridge reader, starts no loop, solves nothing and starts no session:
+    /// `connect_bridge`, `start_supervision`, `start_session` and `poll_gtb` are what do work,
+    /// and none of them runs on its own.
     #[must_use]
     pub fn new(controller: Arc<AppController>) -> Self {
         Self::with_time(controller, Arc::new(SystemClock), Arc::new(ThreadSleeper))
     }
 
-    /// A runtime with an explicit time source for its loop bodies.
+    /// A runtime with an explicit time source for its loop bodies and its session timer.
     ///
     /// Production passes `SystemClock`/`ThreadSleeper` throughout [`Runtime::new`]; a test
-    /// passes a virtual clock so a body's parks cost no real time.
+    /// passes a step clock so a body's parks cost no real time and playtime is advanced by the
+    /// test rather than by the wall.
     fn with_time(
         controller: Arc<AppController>,
         clock: Arc<dyn Clock>,
@@ -305,6 +355,8 @@ impl Runtime {
             ingest: None,
             supervise: false,
             loops: None,
+            platform: None,
+            session: None,
             clock,
             sleeper,
             gtb: None,
@@ -494,7 +546,10 @@ impl Runtime {
     /// production path without starting a thread.
     #[must_use]
     pub fn click_sink(&self) -> Arc<dyn ClickSink> {
-        Arc::clone(&self.stats)
+        // `Arc::clone` does not unsize; the annotation on the binding is what coerces
+        // `Arc<StatsFeed>` into `Arc<dyn ClickSink>`, so the clone has to land in one first.
+        let sink: Arc<dyn ClickSink> = self.stats.clone();
+        sink
     }
 
     /// `StatsTracker.Reset` (`MainWindow.xaml.cs:1978`), through the one owner of the tracker.
@@ -516,6 +571,107 @@ impl Runtime {
     pub fn start_supervision(&mut self) {
         self.supervise = true;
         self.reconcile_loops();
+    }
+
+    /// Starts the playtime session: the Stats tab's counter begins at this instant.
+    ///
+    /// `Shell::from_system` is the only caller, next to `start_supervision`. That is where the
+    /// managed host starts its own timer (`MainWindow.xaml.cs:421`), so the two agree about when
+    /// a session begins. A headless runtime and every capture never call this, and
+    /// `the_session_timer_counts_playtime_from_the_clock` pins that they count nothing however
+    /// long they live.
+    ///
+    /// The sense is built over the same window surface the loops get, so playtime is only
+    /// counted while [`game_is_foreground`] confirms the game — the same strict rule that gates
+    /// injection. A session that cannot inspect windows has no sense that says "foreground",
+    /// and therefore accrues no playtime.
+    pub fn start_session(&mut self) {
+        if self.session.is_some() {
+            return;
+        }
+        let windows = self.platform().windows.clone();
+        let sense: Arc<dyn LoopSense> =
+            Arc::new(ControllerSense::new(Arc::clone(&self.controller), windows));
+        self.start_session_with(sense);
+    }
+
+    /// The session start with the sense handed in.
+    ///
+    /// The seam a test uses to drive the timer over a fake window inspector: it cannot reach
+    /// [`Runtime::platform`] without a capability report that claims window inspection, and a
+    /// report that claims it would build the real inspector.
+    fn start_session_with(&mut self, sense: Arc<dyn LoopSense>) {
+        let last = self.clock.now();
+        self.session = Some(SessionTimer { sense, last });
+    }
+
+    /// Stops the playtime session and keeps the total.
+    ///
+    /// The managed host stops its timer in `OnClosed` (`MainWindow.xaml.cs:1865`) — when the
+    /// window closes, not when the bridge disconnects — and `StopSessionTimer`
+    /// (`StatsTracker.cs:129`) only disposes the timer: `TotalPlaytime` keeps its value until
+    /// `Reset`. This follows that, so a bridge that drops and reconnects does not lose the
+    /// session's time, and the shell's close hook is the only caller.
+    pub fn stop_session(&mut self) {
+        self.session = None;
+    }
+
+    /// The session timer's tick: offers the tracker the whole seconds since the last call.
+    ///
+    /// Returns how many seconds were offered, so a test can assert the clock reading rather
+    /// than the total. Whether a second *counts* is the tracker's own decision:
+    /// `StatsTracker.record_playtime_sample` returns early when the game is not foreground, or
+    /// when the bridge is connected with a blocking GUI open
+    /// (`Aoko/Core/StatsTracker.cs:181-193`), so this feeds it the four facts and adds nothing of
+    /// its own.
+    ///
+    /// At most five seconds are offered per call (see `PLAYTIME_MAX_CATCH_UP_SECS`), and a
+    /// sub-second remainder is carried into the next one.
+    pub fn sample_playtime(&mut self) -> u64 {
+        // No session is the headless and capture case: one branch, and the clock is not
+        // read at all.
+        let Some(session) = self.session.as_mut() else {
+            return 0;
+        };
+
+        let now = self.clock.now();
+        let elapsed = now.saturating_duration_since(session.last);
+        let whole = elapsed.as_secs();
+        if whole == 0 {
+            return 0;
+        }
+
+        let counted = whole.min(PLAYTIME_MAX_CATCH_UP_SECS);
+        // Advance by the seconds that were counted rather than to `now`, so the sub-second
+        // remainder is carried: at thirty frames a second the sample lands on the second
+        // boundary every time instead of drifting a frame later on each tick. When the cap
+        // clips a long stall there is no remainder worth carrying, so jump to `now` and drop
+        // it — see the constant.
+        session.last = if whole > PLAYTIME_MAX_CATCH_UP_SECS {
+            now
+        } else {
+            session.last + Duration::from_secs(counted)
+        };
+
+        let sense = Arc::clone(&session.sense);
+        let connected = sense.is_connected();
+        let active = sense.minecraft_active();
+        let cursor_visible = sense.cursor_visible();
+        let snapshot = sense.snapshot();
+
+        // No snapshot is not "no game": the managed host reads `GameStateClient.CurrentState`,
+        // which is a default instance before the first frame, and still counts the second when
+        // the game is foreground and no menu is open. One default per tick, not per second.
+        let fallback = aoko_protocol::state::GameState::default();
+        let state: &aoko_protocol::state::GameState = snapshot
+            .as_deref()
+            .map_or(&fallback, |snapshot| snapshot.state.as_ref());
+
+        let mut tracker = self.stats.tracker();
+        for _ in 0..counted {
+            tracker.record_playtime_sample(active, connected, state, cursor_visible);
+        }
+        counted
     }
 
     /// The names the supervisor has registered, empty when nothing is running.
@@ -565,18 +721,39 @@ impl Runtime {
         })
     }
 
+    /// The platform's two surfaces, built on first use and shared afterwards.
+    ///
+    /// [`select_loop_surfaces`] is still the only decision about *what* the session may reach;
+    /// this decides only *when* the services behind that decision are built.
+    /// `aoko_platform::default_services` probes the machine, so a session that both starts the
+    /// loop bundle and counts playtime must not probe it twice. A runtime that does neither
+    /// never calls this, which is why no test and no capture touches the platform.
+    fn platform(&mut self) -> &PlatformSurfaces {
+        let surfaces = select_loop_surfaces(self.controller.capabilities());
+        self.platform.get_or_insert_with(|| {
+            let (input, windows) = platform_surfaces(&surfaces);
+            PlatformSurfaces { input, windows }
+        })
+    }
+
     /// Starts the five bodies on their own threads.
     ///
     /// The backend and the window surface are not chosen here:
     /// [`crate::runtime::select_loop_surfaces`] decides from the controller's capability
-    /// report, and `platform_surfaces` builds exactly what that decision allows.
+    /// report, and `platform_surfaces` builds exactly what that decision allows. Both surfaces
+    /// come from [`Runtime::platform`], so a session that is also counting playtime shares one
+    /// construction of them.
     fn start_loops(&mut self) {
-        let surfaces = select_loop_surfaces(self.controller.capabilities());
-        let (input, windows) = platform_surfaces(&surfaces);
+        let (input, windows) = {
+            let platform = self.platform();
+            // Already unsized, so a plain clone — `Arc::clone` on a concrete `Arc` would need
+            // the annotation to coerce, and there is nothing to coerce here.
+            (Arc::clone(&platform.input), platform.windows.clone())
+        };
         let sense: Arc<dyn LoopSense> =
             Arc::new(ControllerSense::new(Arc::clone(&self.controller), windows));
         // The one click feed: the sink the bodies record into, which is `StatsFeed`.
-        let sink: Arc<dyn ClickSink> = Arc::clone(&self.stats);
+        let sink: Arc<dyn ClickSink> = self.stats.clone();
 
         let clock = Arc::clone(&self.clock);
         let sleeper = Arc::clone(&self.sleeper);
@@ -1114,7 +1291,6 @@ impl InputBackend for NoInjection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
 
     /// The suite must not depend on the machine: a headless runtime reports that it
     /// probed nothing, and its module state still works.
@@ -1273,6 +1449,15 @@ mod tests {
                 now: std::sync::Mutex::new(Instant::now()),
             }
         }
+
+        /// Moves the clock forward without parking a body.
+        ///
+        /// A loop body only moves this clock by parking on the sleeper, and the playtime timer
+        /// never parks, so this is how a test crosses a second boundary — at no real cost.
+        fn advance(&self, by: Duration) {
+            let mut now = self.now.lock().expect("clock");
+            *now += by;
+        }
     }
 
     impl Clock for StepClock {
@@ -1370,6 +1555,112 @@ mod tests {
             "no supervision, no threads"
         );
         assert_eq!(runtime.loops_owned(), 0);
+    }
+
+    // ---- playtime ---------------------------------------------------------------------
+
+    /// The session timer counts the seconds the clock moves, and only those.
+    ///
+    /// The clock is [`StepClock`], so nothing here waits: `advance` is what crosses a second.
+    /// The game is reported foreground through the same [`ControllerSense`] the click bodies
+    /// read, over a fake window inspector — no window is opened and nothing is injected.
+    #[test]
+    fn the_session_timer_counts_playtime_from_the_clock() {
+        let controller = Arc::new(AppController::default());
+        let source = Arc::new(StepClock::new());
+        let clock: Arc<dyn Clock> = source.clone();
+        let sleeper: Arc<dyn Sleeper> = source.clone();
+        let mut runtime = Runtime::with_time(Arc::clone(&controller), clock, sleeper);
+
+        let game: Arc<dyn WindowInspector> = Arc::new(FakeWindows {
+            foreground: Some(window("Minecraft 1.8.9", "java")),
+            cursor: None,
+        });
+        let sense: Arc<dyn LoopSense> =
+            Arc::new(ControllerSense::new(Arc::clone(&controller), Some(game)));
+
+        // Before the session starts nothing counts, however far the clock moves.
+        source.advance(Duration::from_secs(3));
+        assert_eq!(runtime.sample_playtime(), 0, "no session, no tick");
+        assert_eq!(runtime.stats().total_playtime(), Duration::ZERO);
+
+        runtime.start_session_with(Arc::clone(&sense));
+
+        source.advance(Duration::from_secs(3));
+        assert_eq!(runtime.sample_playtime(), 3, "three whole seconds");
+        assert_eq!(
+            runtime.stats().total_playtime(),
+            Duration::from_secs(3),
+            "the tracker adds one second per sample"
+        );
+
+        // Half a second is not a sample, and it is not lost either: the next half completes
+        // the second, which is what keeps the count from drifting behind the clock.
+        source.advance(Duration::from_millis(500));
+        assert_eq!(runtime.sample_playtime(), 0, "half a second is no sample");
+        source.advance(Duration::from_millis(500));
+        assert_eq!(runtime.sample_playtime(), 1, "the remainder is carried");
+        assert_eq!(runtime.stats().total_playtime(), Duration::from_secs(4));
+
+        // A closed window stops the counting and keeps the total, as `OnClosed` does.
+        runtime.stop_session();
+        source.advance(Duration::from_secs(10));
+        assert_eq!(
+            runtime.sample_playtime(),
+            0,
+            "a closed session counts nothing"
+        );
+        assert_eq!(
+            runtime.stats().total_playtime(),
+            Duration::from_secs(4),
+            "StopSessionTimer disposes the timer, not the total"
+        );
+    }
+
+    /// The two ways playtime must not accrue: no session at all, and an open menu.
+    ///
+    /// A headless runtime never starts a session, so it samples nothing. The second half is
+    /// the tracker's own gate: connected, game foreground, cursor drawn and `GuiOpen` set is a
+    /// blocking GUI, and `StatsTracker.record_playtime_sample` returns before adding the second.
+    #[test]
+    fn playtime_counts_nothing_without_a_session_or_behind_an_open_menu() {
+        use aoko_protocol::state::GameState;
+
+        let mut headless = Runtime::headless();
+        assert_eq!(headless.sample_playtime(), 0);
+        assert_eq!(headless.stats().total_playtime(), Duration::ZERO);
+
+        let controller = Arc::new(AppController::default());
+        let source = Arc::new(StepClock::new());
+        let clock: Arc<dyn Clock> = source.clone();
+        let sleeper: Arc<dyn Sleeper> = source.clone();
+        let mut runtime = Runtime::with_time(Arc::clone(&controller), clock, sleeper);
+
+        let game: Arc<dyn WindowInspector> = Arc::new(FakeWindows {
+            foreground: Some(window("Minecraft 1.8.9", "java")),
+            cursor: Some(true),
+        });
+        runtime.start_session_with(Arc::new(ControllerSense::new(
+            Arc::clone(&controller),
+            Some(game),
+        )));
+
+        controller.store().set_connected(true);
+        controller.store().publish(
+            GameState {
+                gui_open: true,
+                ..GameState::default()
+            },
+            source.now(),
+        );
+
+        source.advance(Duration::from_secs(2));
+        assert_eq!(runtime.sample_playtime(), 2, "the seconds were offered");
+        assert_eq!(
+            runtime.stats().total_playtime(),
+            Duration::ZERO,
+            "the tracker refuses them: connected, menu open, cursor drawn"
+        );
     }
 
     // ---- platform surfaces: the decision, and the sense behind it -------------------

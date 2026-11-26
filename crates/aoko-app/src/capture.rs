@@ -127,11 +127,13 @@ pub fn registry() -> Vec<Screen> {
 /// on at FOV 45 / range 4.5 / strength 40, SpeedBridge on at 150 ms).
 ///
 /// What this does **not** seed, because there is nothing to seed it through: the script
-/// also synthesised 120 left clicks and 45 right clicks, and `stats.png` therefore shows
-/// the empty state ("No samples yet", blank summary cards). The Stats tab is still the
-/// static copy table from `views/copy.rs`; its cards carry `Note`s, and no render site
-/// reads `aoko_protocol::stats::StatsTracker`. Wiring that tab is what would make the
-/// click statistics exist, and the capture will start showing them when it does.
+/// also synthesised 120 left clicks and 45 right clicks. The Stats tab renders
+/// `views::stats_view` over the runtime's own `aoko_protocol::stats::StatsTracker`, and a
+/// capture has no bridge and records no clicks, so `stats.png` shows that tracker empty:
+/// `00:00` playtime, `0` clicks (`L 0  R 0`), `n/a` for average and peak, `0 samples`, and the
+/// histogram's centred "No samples yet" — the managed empty state, not a broken chart. Seeding
+/// the tracker here would put numbers on a screenshot that no run produced, so the screen
+/// stays honest and the clicks appear when a real session feeds them.
 ///
 /// Capability fabrication is not repeated here: `aoko-protocol`'s
 /// `BridgeCapabilities::for_version_fallback` is the same table the bridge reports,

@@ -1097,6 +1097,13 @@ pub enum TabBody {
     Accounts,
     /// `Aoko/Views/ServersView.xaml`: its own view, wired to `views::servers_state`.
     Servers,
+    /// `MainWindow.xaml:1438-1521`: its own view, `views::stats_view`.
+    ///
+    /// The copy is still this table's ([`STATS`]), but the numbers on it are live: the view
+    /// reads the runtime's `StatsTracker` rather than the `Note`s, which is why the tab is a
+    /// variant of its own and not a `Cards(STATS)` row. A card list is what a `Cards` tab
+    /// paints; a tab that paints counters is a view.
+    Stats,
 }
 
 /// The left rail, in the order `MainWindow.xaml` declares it.
@@ -1135,7 +1142,7 @@ pub const TABS: [Tab; 9] = [
     },
     Tab {
         name: "Stats",
-        body: TabBody::Cards(STATS),
+        body: TabBody::Stats,
     },
     Tab {
         name: "Settings",
@@ -1172,6 +1179,9 @@ pub const TAB_COUNT: usize = 9;
 pub fn all_cards() -> impl Iterator<Item = &'static Card> {
     TABS.iter().flat_map(|tab| match tab.body {
         TabBody::Cards(cards) => cards,
+        // Stats is a view rather than a card tab, but it paints these cards: leaving them out
+        // would quietly drop the summary cards from every test that walks the table's cards.
+        TabBody::Stats => STATS,
         TabBody::Accounts | TabBody::Servers => &[],
     })
 }
@@ -1418,17 +1428,25 @@ mod tests {
         assert_eq!(MODULE_LIST_PREVIEW_SAMPLE, "autoclicker 12-16");
     }
 
+    /// The view tabs are their own views, and the card tabs are the module ones plus Settings.
+    ///
+    /// The two data tabs are Accounts and Servers, each rendering a view of its own, and Stats
+    /// joins them now that `views::stats_view` is mounted; the remaining card tabs are the five
+    /// module tabs and Settings. The count is exact on purpose — a range would stay green if
+    /// the Stats row quietly went back to being a static copy table.
     #[test]
-    fn the_two_data_tabs_are_their_own_views_rather_than_card_lists() {
+    fn the_view_tabs_are_their_own_views_rather_than_card_lists() {
         let bodies: Vec<TabBody> = TABS.iter().map(|tab| tab.body).collect();
         assert!(bodies.contains(&TabBody::Accounts));
         assert!(bodies.contains(&TabBody::Servers));
-        // Exactly seven tabs carry cards: five module tabs plus Stats and Settings.
+        assert!(bodies.contains(&TabBody::Stats));
+        // Six tabs carry cards: the five module tabs and Settings. Accounts, Servers and Stats
+        // render views, so a seventh card table would mean a view regressed to a copy table.
         let card_tabs = bodies
             .iter()
             .filter(|body| matches!(body, TabBody::Cards(_)))
             .count();
-        assert_eq!(card_tabs, 7);
+        assert_eq!(card_tabs, 6);
     }
 
     #[test]
