@@ -26,6 +26,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use aoko_platform::{BridgeSupport, CapabilityReport, SessionKind, WindowInfo};
+use aoko_protocol::config_payload::ConfigPayload;
 use aoko_protocol::module_catalog::{self, EnabledFlag};
 use aoko_protocol::profile::Profile;
 use aoko_protocol::state::GameState;
@@ -337,6 +338,24 @@ impl AppController {
             notes: self.capabilities.notes.clone(),
         }
     }
+
+    /// The `config` frame this host would send right now.
+    ///
+    /// Only the fields the profile owns are filled from live state; everything else is
+    /// still the managed `Clicker` default that `ConfigPayload::default` documents, because
+    /// aoko-core does not own the clicker's property surface yet.
+    ///
+    /// `fightStatus` is [`Profile::fight_status_enabled`], never a second copy kept on the
+    /// payload: the managed host sent `clicker.FightStatusEnabled`, and `ProfileManager`
+    /// loaded that field from the profile, so the profile is the one owner of the truth and
+    /// this is the one direction it flows.
+    #[must_use]
+    pub fn config_payload(&self) -> ConfigPayload {
+        ConfigPayload {
+            fight_status: self.profile.read().fight_status_enabled,
+            ..ConfigPayload::default()
+        }
+    }
 }
 
 impl Default for AppController {
@@ -365,6 +384,7 @@ mod tests {
     use crate::testing::VirtualClock;
     use aoko_platform::Rect;
     use aoko_platform::WindowHandle;
+    use aoko_protocol::hud::HudLayout;
 
     fn transport_only() -> CapabilityReport {
         CapabilityReport::transport_only(SessionKind::None)
@@ -535,6 +555,47 @@ mod tests {
 
         assert!(!app.replace_profile(profile));
         assert_eq!(app.profile().auto_rod_action_key, 0x53);
+    }
+
+    /// The gap the retired `Profile.cs` source pin was hiding: the profile carries
+    /// `fight_status_enabled` and the payload carries `fightStatus`, and until this test
+    /// existed nothing connected them.
+    #[test]
+    fn the_config_payload_carries_the_profile_fight_status() {
+        let app = AppController::default();
+
+        // The connect-time value, in both hosts for the same reason: the managed frame sent
+        // `clicker.FightStatusEnabled`, whose backing field is `false`, and `ProfileManager`
+        // loaded that from `Profile.FightStatusEnabled = false`. This port keeps one copy of
+        // the truth, on the profile, and the payload reads it.
+        assert!(!app.profile().fight_status_enabled);
+        let payload = app.config_payload();
+        assert!(!payload.fight_status);
+        assert_eq!(
+            payload,
+            ConfigPayload::default(),
+            "a default profile must produce exactly the managed defaults"
+        );
+
+        // Flipping the profile is the only way to move it, in either direction.
+        assert!(app.update_profile(|profile| {
+            profile.fight_status_enabled = true;
+            true
+        }));
+        let payload = app.config_payload();
+        assert!(payload.fight_status);
+        assert!(
+            payload
+                .to_line(&HudLayout::default())
+                .contains("\"fightStatus\":true"),
+            "the frame the bridge parses has to carry it, not just the struct"
+        );
+
+        assert!(app.update_profile(|profile| {
+            profile.fight_status_enabled = false;
+            true
+        }));
+        assert!(!app.config_payload().fight_status);
     }
 
     #[test]

@@ -10,7 +10,10 @@
 //! managed writer is the byte-for-byte reference.
 //!
 //! The payload is a *shape*: `aoko-core` fills every field from `Clicker`, and
-//! this crate deliberately does not duplicate those defaults.
+//! this crate deliberately does not duplicate those defaults. A caller that sends
+//! `ConfigPayload::default()` unchanged is sending defaults rather than state; the
+//! builder that reads live state is `aoko_core::app::AppController::config_payload`,
+//! which is where fields like `fightStatus` come from the profile.
 
 use crate::hud::HudLayout;
 
@@ -222,7 +225,11 @@ pub struct ConfigPayload {
     pub gui_theme: String,
     /// `clicker.ClosestPlayerInfoEnabled`
     pub closest_player_info: bool,
-    /// `clicker.FightStatusEnabled`
+    /// `clicker.FightStatusEnabled`, which the managed host loaded from the profile.
+    ///
+    /// The truth is [`crate::profile::Profile::fight_status_enabled`]; `aoko-core`'s
+    /// `AppController::config_payload` fills this field from it when the payload is built.
+    /// Nothing else should write it, or the payload becomes a second copy of the flag.
     pub fight_status: bool,
     /// `clicker.NametagShowHealth`
     pub nametag_show_health: bool,
