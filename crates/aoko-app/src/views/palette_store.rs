@@ -481,10 +481,24 @@ fn same_name(left: &str, right: &str) -> bool {
 /// `TryParseHex` (`MainWindow.xaml.cs:1227-1253`): `#RGB`, `#RRGGBB`, and either form
 /// without the `#`.
 ///
-/// Unlike [`Color::parse_hex`] this rejects the 8-digit ARGB form, because a palette file
-/// stores opaque colours only and the managed parser rejects anything that is not six
-/// digits after the shorthand expansion.
-fn parse_entry(text: &str) -> Option<Color> {
+/// Trims, drops leading `#` characters, expands the three-digit shorthand by doubling each
+/// digit, and rejects anything that is not six digits after that. Unlike
+/// [`Color::parse_hex`] it rejects the 8-digit ARGB form, because a palette file stores
+/// opaque colours only and the managed parser rejects anything that is not six digits once
+/// the shorthand is expanded.
+///
+/// One known leniency, documented rather than changed: this drops *every* leading `#` where
+/// `TryParseHex` removes one, so `##abc` parses here and is refused there. Every other shape
+/// it accepts is a managed shape.
+///
+/// Public because a consumer outside this store has to accept exactly what
+/// [`PaletteStore::save_draft`] accepts. The colour swatch in the shell's
+/// `Control::ColorField` parses the entry it is handed with this function, so a single role
+/// the picker shows as valid cannot then be the reason the save is refused. The alternative
+/// is a second copy of the rule in `shell.rs`, which is free to disagree with this one — the
+/// defect where a swatch paints a colour the press rejects.
+#[must_use]
+pub fn parse_entry(text: &str) -> Option<Color> {
     let digits = text.trim().trim_start_matches('#');
     let expanded: String = if digits.len() == 3 {
         digits.chars().flat_map(|digit| [digit, digit]).collect()
