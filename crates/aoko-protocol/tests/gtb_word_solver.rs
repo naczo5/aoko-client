@@ -4,7 +4,7 @@
 //! private statics to reset the cache. Here each case builds its own solver over
 //! an in-memory word list, which is the same thing without the I/O.
 
-use aoko_protocol::gtb::{load_custom_words, parse_wordlist_js, GtbWordSolver};
+use aoko_protocol::gtb::{extract_mask, load_custom_words, parse_wordlist_js, GtbWordSolver};
 
 fn solver() -> GtbWordSolver {
     GtbWordSolver::from_words(["cat", "cot", "cut", "dog"])
@@ -146,4 +146,47 @@ fn custom_words_have_no_comment_syntax() {
     let words = load_custom_words("# comment\nzebra\n");
 
     assert_eq!(words, ["comment", "zebra"]);
+}
+
+/// The mask pipeline is now a chain of stages that write into reusable buffers instead
+/// of returning fresh strings. These pin the stages that made the rewrite worth doing —
+/// colour codes, brackets, counters, ratios, the colon fallback and the tokenised form —
+/// so a future "cleanup" of a stage has to face what it is for. Every expectation here
+/// is what the C# `GtbWordSolver` produced, not what the new buffers happen to give.
+#[test]
+fn extract_mask_normalises_the_shapes_the_bridge_sends() {
+    // `§x` colour-code pairs are two characters each: the code and the one it colours.
+    assert_eq!(
+        extract_mask("\u{00A7}cThe theme \u{00A7}fis C_T (1)"),
+        "c_t"
+    );
+    // A bracketed prefix is replaced rather than stripped.
+    assert_eq!(extract_mask("[Aoko] The theme is C_T"), "c_t");
+    // The trailing `(12)` counter goes before the mask is taken.
+    assert_eq!(extract_mask("The theme is C_T (12)"), "c_t");
+    // Every line is a candidate: the first with a mask wins, CRLF included.
+    assert_eq!(extract_mask("line one\r\nThe theme is D_G"), "d_g");
+}
+
+#[test]
+fn extract_mask_falls_back_to_the_last_colon() {
+    // No `theme ... is` guard, so everything after the last colon is the candidate.
+    assert_eq!(extract_mask("x:y:z_w"), "z_w");
+}
+
+#[test]
+fn extract_mask_keeps_each_segment_that_carries_an_underscore() {
+    // The token is a run of space-separated segments, each with an underscore.
+    assert_eq!(extract_mask("a_b c_d e_f"), "a_b c_d e_f");
+}
+
+#[test]
+fn extract_mask_decodes_the_tokenised_form() {
+    // Four lone tokens is the spaced form the challenge list uses, so the single spaces
+    // between them are dropped and the characters are joined: `____`.
+    assert_eq!(extract_mask("3/5 _ _ _ _"), "____");
+    // Three lone tokens is not that form, so the spaces stay and only the segment that
+    // carries the underscore is the mask. Pinned because it looks like a bug and is the
+    // managed behaviour.
+    assert_eq!(extract_mask("The theme is C _ T"), "_");
 }

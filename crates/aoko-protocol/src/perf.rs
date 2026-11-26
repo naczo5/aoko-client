@@ -161,7 +161,7 @@ mod tests {
     use super::*;
     use crate::codec::{Decoder, Inbound};
     use crate::framing::BoundedLineReader;
-    use crate::gtb::{extract_mask, GtbWordSolver};
+    use crate::gtb::GtbWordSolver;
     use crate::state::{EntityInfo, GameState};
     use crate::state_patch::apply_into;
     use crate::transport::{LineBuf, RecvOutcome};
@@ -340,27 +340,41 @@ mod tests {
     }
 
     #[test]
-    fn a_new_action_bar_line_pays_the_mask_pipeline_and_its_matches() {
+    fn a_new_gtb_line_pays_only_the_words_it_returns() {
         // A line the solver has not seen is not steady state: it has to normalise the
-        // action-bar text (a chain of temporary strings), remember the line, and clone
-        // the words it returns. The bound is that decomposition and nothing else, so a
-        // path that also copied the wordlist or the previous answer would fail here.
-        let line = "The theme is C_T (1)";
-
-        let (_, pipeline) = measure(|| extract_mask(line));
-        assert_eq!(
-            pipeline.count, 19,
-            "the mask pipeline's temporary strings, as recorded in the baseline doc"
-        );
-
+        // action-bar text and remember the line. That normalisation used to be a chain
+        // of temporary strings, 19 allocations in all, plus one to remember the line;
+        // every stage now writes into the solver's scratch, which `GtbWordSolver`'s
+        // `Default` sizes, so the only allocator calls left are the output: the vector
+        // of matches and one clone per matched word. Twenty-four before this round.
         let mut solver = solver();
-        let (matched, allocations) = measure(|| solver.solve(line, 8).1.len());
 
+        let (matched, cold) = measure(|| solver.solve("The theme is C_T (1)", 8).1.len());
         assert_eq!(matched, 3);
         assert_eq!(
-            allocations.count,
-            pipeline.count + 1 + 3 + 1, // line + matches + vector
-            "a new line pays the pipeline, the memo and the output, and nothing else"
+            cold,
+            Allocations {
+                // `Vec<String>` starts at capacity four, so one allocation of 4 * 24
+                // bytes, plus one three-byte clone per matched word.
+                count: 4,
+                bytes: 96 + 9
+            },
+            "the match vector and the three words it returns, and no temporaries"
+        );
+
+        // The bound is not a property of the first call. A second line the solver has
+        // never seen reuses the same buffers, so its cost is its own output too; a stage
+        // that kept an allocation behind would show up here rather than in the first
+        // measurement.
+        let (matched, second) = measure(|| solver.solve("The theme is D_G (2)", 8).1.len());
+        assert_eq!(matched, 1);
+        assert_eq!(
+            second,
+            Allocations {
+                count: 2,
+                bytes: 96 + 3
+            },
+            "one matched word and the vector holding it"
         );
     }
 

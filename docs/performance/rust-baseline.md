@@ -71,10 +71,13 @@ so a test cannot be disturbed by the other tests `cargo test` runs in parallel.
 | Partial frame, a reader still holds the last one | 12 | 1572 | parse + **one** state copy + **one** fresh snapshot | `a_shared_merge_costs_its_parse_the_state_copy_and_the_fresh_snapshot` |
 | One complete frame through `Decoder::ingest` | 17 | 1902 | parse + decode + **one** `Arc`, no copy | `a_complete_frame_costs_its_parse_and_decode_plus_one_shared_snapshot` |
 | GTB, repeated action-bar line | 0 | 0 | **exactly zero** | `a_repeated_gtb_mask_is_answered_without_touching_the_allocator` |
-| GTB, new action-bar line | 24 | 521 | pipeline (19) + memo line + matches + vector | `a_new_action_bar_line_pays_the_mask_pipeline_and_its_matches` |
+| GTB, new action-bar line | 4\* | 105\* | **output only**: the match vector and one clone per word | `a_new_gtb_line_pays_only_the_words_it_returns` |
 | One click-loop tick that clicks | 0 | 0 | **exactly zero** | `one_click_tick_allocates_nothing` |
 | One click-loop tick that only waits | 0 | 0 | **exactly zero** | `one_waiting_tick_allocates_nothing` |
 | Publishing a shared snapshot into `StateStore` | 1 | 40 | **one snapshot box**, no copy | `publishing_a_shared_state_costs_the_snapshot_box_and_no_copy` |
+
+\* Predicted by this round and not yet measured: CI has not run the rewrite. Every
+other row has a measurement behind it.
 
 Four of those numbers need the decomposition to be readable:
 
@@ -91,6 +94,15 @@ Four of those numbers need the decomposition to be readable:
   count, and it is why this row is 12 and not 8. Losing the copy would mean mutating a
   value another thread is reading, so the pair of tests exists to keep both halves true
   at once.
+- **The complete frame's 17** is 13 for the JSON parse (1464 B), 3 for the decode out of
+  the parsed tree (86 B) and 1 for the `Arc` the decoded state moves into
+  (352 B = 336 B of `GameState` plus the `Arc` header's two counters).
+- **The GTB new line's 4** is the vector of matches and one clone per matched word, for
+  three words in this fixture. It was 24: 19 for the mask pipeline's temporary strings,
+  1 to remember the line, 3 for the matching words and 1 for the vector holding them.
+  Every pipeline stage now writes into a buffer the solver keeps, and those buffers are
+  sized at construction, so the 19 and the 1 are gone. A repeated line never reached any
+  of it either way.
 
 For scale: cloning a populated `GameState` (two strings, a module-status map with one
 entry, one named entity) costs 7 allocations and 667 bytes. Phase 3 paid that clone for
@@ -127,9 +139,11 @@ of dominating a single-tick one. `click.deadline` is
 `ClickDeadlineScheduler::schedule_next` walked forward one interval per call, which is
 the absolute-deadline rule section 6 asks for.
 
-The `codec.partial_frame` figure predates the Phase 4 shape change and is stale in the
-direction it should be: it timed a frame that allocated a state copy, and the frame no
-longer does. CI's numbers replace it.
+Two figures predate a shape change and are stale in the direction they should be.
+`codec.partial_frame` timed a frame that allocated a state copy, and the frame no longer
+does. `gtb.new_line` timed the mask pipeline building a temporary string at every stage,
+and it writes into reusable buffers now, so the figure includes work that is gone. CI's
+numbers replace both.
 
 Two figures deserve a second look, because they are larger than the rest:
 `framing.reused_buffer` is a byte-at-a-time copy loop over a 54-byte line, and
@@ -166,7 +180,7 @@ Two paths violated the contract and were fixed, both without changing behaviour:
    on record: with the old line restored, both tick tests fail with
    `Allocations { count: 1, bytes: 7 }`.
 
-Three paths were restructured rather than loosened:
+Four paths were restructured rather than loosened:
 
 3. **Patch merging deep-cloned the snapshot per packet.** `state_patch::apply_into`
    merges into the live state and parses each carried field straight out of the borrowed
@@ -178,7 +192,14 @@ Three paths were restructured rather than loosened:
    into the decoder's own state. (Phase 3 still handed that state out as a copy; Phase 4
    shares it, which is the section above.)
 
-5. **A complete frame deep-copied the parsed document before decoding it.**
+5. **The mask pipeline built a temporary string at every stage.** `extract_mask`
+   returned a fresh `String` from each of its stages, 19 allocations before the memo
+   could answer a line it had not seen. The stages now write into buffers the solver
+   keeps, and `GtbWordSolver`'s `Default` sizes them, so a cold line costs only the words
+   it returns. `extract_mask` keeps its signature and builds a scratch per call, which is
+   the honest price of a one-shot extraction; the solver is the path that reuses.
+
+6. **A complete frame deep-copied the parsed document before decoding it.**
    `from_value::<GameState>(root.clone())` cloned the whole parsed tree and then decoded
    it, on the path the legacy bridge uses for every frame. It decodes from the borrowed
    document now, which is what
@@ -226,3 +247,14 @@ unmentioned one is not.
    `StateStore::publish_shared` drops the previous snapshot on publish, so a pump loop
    that publishes before it reads again pays nothing. This is a property to keep, not a
    clause to close.
+2. **The GTB scratch is a fixed 256 bytes per buffer, not a property of the input.** The
+   gap recorded last round — a first-time line normalising through 19 allocations — is
+   closed: every stage writes into the solver's scratch and the scratch is sized at
+   construction, so a cold line costs its output only. What is left is a bound. A line
+   longer than 256 bytes grows the buffer it overflows once and pays that growth; a real
+   action bar is an order of magnitude under that. Nothing here claims the bound is a
+   cliff, only that no realistic line reaches it.
+3. **No bench framework.** `crates/aoko-protocol/benches/protocol.rs` and
+   `crates/aoko-core/benches/loops.rs` are hand-rolled `harness = false` binaries that
+   print one line per case. There is no regression gate on the numbers, by design:
+   nothing here is stable enough on this machine to fail a build.
