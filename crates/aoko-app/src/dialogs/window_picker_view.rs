@@ -28,7 +28,7 @@
 use std::sync::Arc;
 
 use gpui::prelude::*;
-use gpui::{div, px, App, Context, Entity, MouseButton, Render, SharedString, Window};
+use gpui::{div, px, AnyElement, App, Context, Entity, MouseButton, Render, SharedString, Window};
 
 use crate::components::{button, button_sized, combo, scroll, ButtonVariant};
 use crate::dialogs::window_picker::{
