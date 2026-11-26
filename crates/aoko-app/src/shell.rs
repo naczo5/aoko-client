@@ -2898,8 +2898,8 @@ impl Shell {
                 .text_size(px(metrics::text::CAPTION))
                 .text_color(theme.dim_text)
                 // Empty until the row controls land: the managed list has no empty state to
-                // copy, because `BlockEspTargets` arrives populated by default. An invented
-                // "add a block to start" line would be a port invention, not a gap.
+                // copy, because `BlockEspTargets` arrives populated by default. A placeholder
+                // sentence here would be a port invention, not a gap to fill with wording.
                 .into_any_element(),
 
             Control::BlockEspAdd { bind } => self.render_block_add(bind, theme, entity),
@@ -4033,7 +4033,8 @@ mod tests {
     fn loading_a_config_applies_its_palette() {
         let root = scratch_root();
         let mut shell = Shell::with_store(Theme::slate(), aoko_platform::ProfileStore::new(&root));
-        // A real palette name: an unknown one normalises to Slate (`Theme::by_name`).
+        // A real palette name: an unknown one resolves to Slate
+        // (`palette_store::resolve_in`), which is why this one has to be a built-in.
         shell.profile.gui_theme = "Ink".to_owned();
         shell.save_config("Dark").expect("save");
         assert_eq!(shell.theme().name, "Slate", "saving does not repaint");
