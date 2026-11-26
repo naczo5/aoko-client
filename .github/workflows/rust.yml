@@ -94,33 +94,37 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            pkg-config gcc-mingw-w64-x86-64 wine64
+            pkg-config gcc-mingw-w64-x86-64 wine
 
-      # The launcher is not in one predictable place. On Ubuntu noble the
-      # `wine64` package installs /usr/lib/wine/wine64 and puts nothing on PATH,
-      # which is why the first run of this workflow failed here; other images
-      # ship /usr/bin/wine. Cargo's runner variable takes one name, so resolve
-      # it once, from PATH and then from the known library path.
+      # Resolve the launcher rather than hard-coding it.
+      #
+      # `wine64` on Ubuntu noble installs only /usr/lib/wine/wine64 and nothing on
+      # PATH, and invoking that binary directly fails with "could not exec the wine
+      # loader" because it expects the wrapper to set its loader path. The `wine`
+      # package provides /usr/bin/wine, so prefer it and fail loudly if it is absent
+      # instead of falling back to a launcher that does not work.
       - name: resolve the wine launcher
         run: |
           mkdir -p "$RUNNER_TEMP/bin"
-          launcher=""
-          for candidate in "$(command -v wine || true)" \
-                           "$(command -v wine64 || true)" \
-                           /usr/lib/wine/wine64 \
-                           /usr/bin/wine; do
-            if [ -n "$candidate" ] && [ -x "$candidate" ]; then
-              launcher="$candidate"
-              break
-            fi
-          done
+          launcher="$(command -v wine || true)"
           if [ -z "$launcher" ]; then
-            echo "no wine launcher found on PATH or at /usr/lib/wine/wine64"
+            launcher="$(command -v wine64 || true)"
+          fi
+          if [ -z "$launcher" ]; then
+            echo "no wine launcher on PATH; install the wine package, not just wine64"
             exit 1
           fi
           ln -sf "$launcher" "$RUNNER_TEMP/bin/wine"
           echo "using $launcher"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      # First run of wine creates its prefix; doing it explicitly keeps that work out
+      # of the test output, where it would look like a failure.
+      - name: initialise the wine prefix
+        run: |
+          export WINEDEBUG=-all
+          wineboot -u || true
+          wine --version
 
       # Building is not enough: without the runner variable cargo
       # cross-compiles and executes nothing, so a suite that ran no tests would
