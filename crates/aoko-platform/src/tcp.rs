@@ -110,6 +110,12 @@ impl TcpBridgeTransport {
     /// A second handle for a dedicated sender, so a config write does not wait
     /// for [`Transport::recv_line`] to return.
     ///
+    /// Available and exported rather than unused: a caller that writes from the
+    /// pump's own thread does not need it, because one writer cannot tear a
+    /// frame, but a write that has to reach the wire while the reader is blocked
+    /// does, and there is no other supported way to get one. Nothing here is a
+    /// stub.
+    ///
     /// `TcpStream::try_clone` is `dup(2)` on Unix and `WSADuplicateSocket` +
     /// `WSASocket` on Windows, so this is a genuinely separate handle with its
     /// own close: dropping it leaves the connection open, and the connection
@@ -181,8 +187,18 @@ impl TcpBridgeTransport {
 ///
 /// Obtained from [`TcpBridgeTransport::try_clone_writer`], which carries the
 /// platform answer in full: a duplicated handle on the same socket, no
-/// user-space buffering, no flush ordering to respect, and one frame mutex
-/// shared with the reader so two writers cannot interleave a frame.
+/// user-space buffering, and no flush ordering to respect.
+///
+/// The frame mutex is not redundant bookkeeping, and the next reader of a bare
+/// `Mutex<()>` here should not delete it. `try_clone` is `dup(2)` on Unix and
+/// `WSADuplicateSocket` on Windows, so both handles write into one kernel send
+/// buffer, and one `write_all` can issue several `write` calls when that buffer
+/// is full. Two handles writing at once therefore put bytes of two different
+/// frames on the wire in an order neither side wrote: a corrupt JSON line the
+/// bridge can only reject or misparse. No flush discipline prevents that,
+/// because `std::net::TcpStream` has nothing to flush. Holding a single lock
+/// across the whole `write_all` is what makes a frame whole, and the lock is
+/// shared with the reader's handle so both send paths obey the same one.
 ///
 /// It holds its own frame buffer and nothing else - no inbound bytes, no
 /// consumed cursor, no discard state - so a half-read frame can never be
@@ -546,8 +562,34 @@ mod tests {
         );
     }
 
+    /// Whether this process currently ignores `SIGPIPE`.
+    ///
+    /// The closed-peer test depends on it: under `SIG_DFL` the write kills the
+    /// whole test binary, which CI reports as a crash rather than as a failed
+    /// assertion. Reading the disposition back is the difference between
+    /// assuming that and checking it.
+    #[cfg(target_os = "linux")]
+    fn sigpipe_is_ignored() -> bool {
+        // SAFETY: all-zero is a valid `sigaction` - every field is an integer or
+        // a pointer - and the call below only writes the current disposition.
+        let mut previous: libc::sigaction = unsafe { std::mem::zeroed() };
+        // SAFETY: `previous` is live and correctly aligned for the duration of
+        // the call, and a null `act` installs no handler.
+        let queried =
+            unsafe { libc::sigaction(libc::SIGPIPE, std::ptr::null(), &mut previous) } == 0;
+        queried && previous.sa_sigaction == libc::SIG_IGN
+    }
+
     #[test]
     fn a_send_to_a_closed_peer_is_a_classified_error_not_a_panic() {
+        // Guard the assumption this test rests on rather than inheriting it from
+        // the runtime: a SIGPIPE handler installed by a harness would turn the
+        // write below into a dead process.
+        #[cfg(target_os = "linux")]
+        assert!(
+            sigpipe_is_ignored(),
+            "SIGPIPE is not ignored, so writing to a closed peer would kill the test binary"
+        );
         let (listener, addr) = listener();
         let server = std::thread::spawn(move || {
             let (_socket, _) = listener.accept().expect("accept");
