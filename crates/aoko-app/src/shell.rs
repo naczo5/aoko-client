@@ -6505,6 +6505,15 @@ mod tests {
         let field = cx
             .read(|cx| shell.read(cx).fields.token.clone())
             .expect("the token box exists after the first frame");
+        // The token box is on the Accounts tab's sign-in card, and the shell opens on Combat. A
+        // keystroke reaches only an element the frame painted — a focus handle with no dispatch
+        // node falls back to the tree's synthetic root, which carries no listeners — so the tab is
+        // selected and drawn before the field is focused. Without this the box is "focused" in the
+        // window's state and still receives nothing, which is exactly the failure this test caught.
+        cx.update(|cx| shell.update(cx, |shell, cx| shell.select_tab_named("accounts", cx)));
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
         let focus = cx.read(|cx| field.read(cx).focus_handle().clone());
         visual.update(|window, cx| window.focus(&focus, cx));
 
@@ -6627,6 +6636,15 @@ mod tests {
         shell: &Entity<Shell>,
         visual: &mut gpui::VisualTestContext,
     ) -> Entity<TextInput> {
+        // The box is on the Render tab's Block ESP card. A keystroke reaches only an element that
+        // is in the painted tree — a focus handle with no dispatch node falls back to the tree's
+        // synthetic root, which carries no listeners — so the tab is selected and drawn before
+        // the field is focused.
+        cx.update(|cx| shell.update(cx, |shell, cx| shell.select_tab_named("render", cx)));
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
         let field = cx
             .read(|cx| shell.read(cx).block_add.clone())
             .expect("the add box exists after the first frame");
@@ -6784,7 +6802,13 @@ mod tests {
         let root = scratch_root();
         let (shell, _, mut visual) = shell_in_window(cx, &root);
 
-        // `BlockEspCard` is on Combat, and the card sits below the fold at the test viewport.
+        // `BlockEspCard` is on the Render tab, and the card sits below the fold at the test
+        // viewport. The tab is selected first: the row is painted only in its own tab's body, and
+        // this test is about what the paint carries, not about which tab the shell opens on.
+        cx.update(|cx| shell.update(cx, |shell, cx| shell.select_tab_named("render", cx)));
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
         scroll_into_view(&mut visual, "blockesp-add");
         let bounds = visual
             .debug_bounds("blockesp-add")
@@ -6872,6 +6896,16 @@ mod tests {
         visual: &mut gpui::VisualTestContext,
         bind: &'static str,
     ) -> Entity<TextInput> {
+        // The four boxes are on the Settings tab's palette card, and a keystroke reaches only an
+        // element that is in the painted tree: a focus handle with no dispatch node falls back to
+        // the tree's synthetic root, which has no listeners, so the character would go nowhere.
+        // Selecting the tab and drawing once is what puts the box on the path — the same two
+        // steps `typing_in_the_config_name_box_reaches_the_shell` takes for the config box.
+        cx.update(|cx| shell.update(cx, |shell, cx| shell.select_tab_named("settings", cx)));
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
         let field = cx
             .read(|cx| shell.read(cx).color_fields.get(bind).cloned())
             .expect("the box exists after the first frame");
