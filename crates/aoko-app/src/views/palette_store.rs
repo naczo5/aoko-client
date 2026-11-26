@@ -24,9 +24,12 @@
 //! [`PaletteStore::resolve`] reproduces that order — built-ins first, then the file — so
 //! a name that exists as both resolves the way managed resolves it.
 //!
-//! Nothing paints this yet. The palette editor card is in the Settings table
-//! (`copy::SETTINGS`) and its rows are shell-owned `Control` variants that do not exist;
-//! this module is what those rows will read, and it deliberately imports no GPUI type.
+//! The four colour boxes are painted: the shell builds a `Control::ColorField` per bind and its
+//! row reads and writes the draft through [`PaletteStore::get`] and [`PaletteStore::set`], so a
+//! typed hex and the swatch beside it move the one string the Add press judges, and a colour the
+//! picker commits later will land there too. The rest of the editor card — the name box, the Add
+//! and Delete presses, the saved-palette list and the current-name row — is still shell-owned
+//! control work that does not exist yet. This module deliberately imports no GPUI type.
 //!
 //! # Deviations from managed
 //!
@@ -136,6 +139,38 @@ impl PaletteDraft {
             tab_selected: panel.lighten(0.10).to_hex(),
             tab_hover: panel.lighten(0.04).to_hex(),
         })
+    }
+}
+
+/// One of the four roles a palette colour box edits.
+///
+/// The enum exists so the box names are paired with the draft's fields in exactly one place,
+/// [`role`]. [`PaletteStore::get`] and [`PaletteStore::set`] then match the variants
+/// exhaustively, so adding a role breaks both at compile time instead of letting the read and
+/// the write drift apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Role {
+    Background,
+    Panel,
+    Accent,
+    Text,
+}
+
+/// The role one palette box edits, by managed box name.
+///
+/// The four names are the boxes' own `x:Name`s — `PaletteBgBox` (`MainWindow.xaml:1963`),
+/// `PalettePanelBox` (`:1974`), `PaletteAccentBox` (`:1985`) and `PaletteTextBox` (`:1996`) —
+/// which are also the bind strings a `Control::ColorField` is built with, so a caller passes the
+/// bind it already holds and keeps no pairing of its own. `PaletteDraft::build`'s four `parse_entry`
+/// calls read the same fields, so the box, the swatch and the Add press all agree on which string
+/// is which role.
+fn role(bind: &str) -> Option<Role> {
+    match bind {
+        "PaletteBgBox" => Some(Role::Background),
+        "PalettePanelBox" => Some(Role::Panel),
+        "PaletteAccentBox" => Some(Role::Accent),
+        "PaletteTextBox" => Some(Role::Text),
+        _ => None,
     }
 }
 
@@ -273,6 +308,45 @@ impl PaletteStore {
     /// The editor state, for the five boxes' `on_input` handlers.
     pub fn draft_mut(&mut self) -> &mut PaletteDraft {
         &mut self.draft
+    }
+
+    /// The drafted text one palette colour box holds, by managed box name.
+    ///
+    /// The same four names `role` pairs, and the same strings `PaletteDraft::build` reads when
+    /// [`PaletteStore::save_draft`] runs the Add press, so a row that paints what this returns
+    /// shows the text the press will judge. Anything else answers `None`: a bind that is not one
+    /// of the four boxes has no draft field, and guessing a role would paint one row's colour on
+    /// another.
+    #[must_use]
+    pub fn get(&self, bind: &str) -> Option<&str> {
+        let draft = &self.draft;
+        Some(match role(bind)? {
+            Role::Background => draft.background.as_str(),
+            Role::Panel => draft.panel.as_str(),
+            Role::Accent => draft.accent.as_str(),
+            Role::Text => draft.text.as_str(),
+        })
+    }
+
+    /// Writes one palette role back into the draft, by the names [`PaletteStore::get`] reads.
+    ///
+    /// The text is stored as given, even when it does not parse: [`PaletteDraft`] deliberately
+    /// keeps an invalid entry visible so it can be fixed, and [`PaletteStore::save_draft`] is
+    /// where it is refused. An unknown bind writes nothing rather than panicking — the caller
+    /// painting a row for it has no text to start from either.
+    pub fn set(&mut self, bind: &str, text: impl Into<String>) {
+        let text = text.into();
+        let field = match role(bind) {
+            Some(Role::Background) => &mut self.draft.background,
+            Some(Role::Panel) => &mut self.draft.panel,
+            Some(Role::Accent) => &mut self.draft.accent,
+            Some(Role::Text) => &mut self.draft.text,
+            None => return,
+        };
+
+        if field.as_str() != text.as_str() {
+            *field = text;
+        }
     }
 
     /// Every saved palette, in file order.
@@ -643,6 +717,77 @@ mod tests {
 
         assert!(!store.path().exists(), "a refused press writes nothing");
         assert_eq!(store.current_name(), DEFAULT_PALETTE);
+    }
+
+    /// One row's text: `set` writes the draft and `get` reads it back, so a shell row holds no
+    /// copy of the four names and cannot show a different hex from the one the Add press judges.
+    #[test]
+    fn a_written_role_reads_back_through_get() {
+        let mut store = store();
+
+        store.set("PaletteBgBox", "#1a2b3c");
+        store.set("PalettePanelBox", "#202020");
+        store.set("PaletteAccentBox", "#abc");
+        store.set("PaletteTextBox", String::from("E8EAEE"));
+
+        assert_eq!(store.get("PaletteBgBox"), Some("#1a2b3c"));
+        assert_eq!(store.get("PalettePanelBox"), Some("#202020"));
+        assert_eq!(store.get("PaletteAccentBox"), Some("#abc"));
+        assert_eq!(
+            store.get("PaletteTextBox"),
+            Some("E8EAEE"),
+            "`set` takes a String as readily as a &str"
+        );
+        assert_eq!(
+            store.draft().background,
+            "#1a2b3c",
+            "the draft is the owner, not a copy beside it"
+        );
+        assert_eq!(
+            store.get("PaletteBgBox"),
+            Some(store.draft().background.as_str())
+        );
+    }
+
+    #[test]
+    fn the_save_path_stores_what_set_wrote() {
+        let mut store = store();
+        store.draft_mut().name = "Mine".to_owned();
+        store.set("PaletteBgBox", "#1A2B3C");
+        store.set("PalettePanelBox", "#202020");
+        store.set("PaletteAccentBox", "#abc");
+        store.set("PaletteTextBox", "#E8EAEE");
+
+        let DraftOutcome::Saved { palette, .. } =
+            store.save_draft(false).expect("a new name saves")
+        else {
+            panic!("a new name does not need a confirmation");
+        };
+
+        assert_eq!(palette.background, "#1A2B3C");
+        assert_eq!(palette.panel, "#202020");
+        assert_eq!(palette.accent, "#AABBCC", "the shorthand expands as ever");
+        assert_eq!(palette.text, "#E8EAEE");
+        assert_eq!(
+            store.get("PaletteBgBox"),
+            Some("#1A2B3C"),
+            "saving does not rewrite the drafts it read"
+        );
+    }
+
+    #[test]
+    fn an_unknown_bind_is_a_no_op_rather_than_a_panic() {
+        let mut store = store();
+        let before = store.draft().clone();
+
+        assert_eq!(store.get("PaletteBorderBox"), None);
+        assert_eq!(store.get(""), None);
+        assert_eq!(store.get("palettebgbox"), None, "the names are exact");
+
+        store.set("PaletteBorderBox", "#FF0000");
+        store.set("", "#FF0000");
+
+        assert_eq!(store.draft(), &before, "an unknown bind writes nothing");
     }
 
     /// `TryParseHex` removes **one** leading `#` (`MainWindow.xaml.cs:1233-1234`), so a
