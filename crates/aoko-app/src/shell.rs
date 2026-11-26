@@ -60,6 +60,8 @@ use crate::components;
 use crate::components::text_input::TextInput;
 use crate::components::ButtonVariant;
 use crate::components::FieldVariant;
+use crate::dialogs::color_picker::{PickResult, Rgb};
+use crate::dialogs::color_picker_view::ColorPickerView;
 use crate::runtime::Runtime;
 use crate::theme::metrics;
 use crate::theme::motion::{self, Motion};
@@ -180,6 +182,14 @@ pub struct Shell {
     /// keeps the colour it had rather than flashing empty. Seeded from the draft's own defaults,
     /// so the first frame paints what the managed card paints.
     swatches: HashMap<&'static str, Color>,
+    /// The colour picker, while it is open: the palette row it edits and the dialog entity.
+    ///
+    /// `None` is closed, and the bind is the managed box name the row already keys on, so the
+    /// write lands on the row the picker was opened for even if the tab or the draft moved on.
+    ///
+    /// The dialog reports and does not dismiss itself, so this is the host's half: it is cleared
+    /// on any result, and the row is written only for an acceptance.
+    picker: Option<(&'static str, Entity<ColorPickerView>)>,
     /// The new-config name box's text (`NewConfigNameBox`, `MainWindow.xaml:1552`).
     config_name: String,
     /// Whether the session can hand a folder to the file manager
@@ -861,29 +871,98 @@ impl Shell {
             return;
         };
 
-        let canonical = color.to_hex();
-        self.set_color_text(bind, &canonical, cx);
-        if text != canonical {
-            field.update(cx, |field, cx| field.set_text(canonical, cx));
+        self.write_color_text(bind, &color.to_hex(), cx);
+    }
+
+    /// The commit half shared by Enter and the picker: the store, the memo, then the box.
+    ///
+    /// One function so the two gestures cannot end in different places. The store is written by
+    /// [`Shell::set_color_text`], which is also what moves the memo; the box is written last
+    /// because it is the display, and `set_text` does not fire `on_change`, so this cannot feed
+    /// itself back through the write path it just used.
+    fn write_color_text(&mut self, bind: &'static str, canonical: &str, cx: &mut Context<Self>) {
+        self.set_color_text(bind, canonical, cx);
+        if let Some(field) = self.color_fields.get(bind).cloned() {
+            if field.read(cx).text() != canonical {
+                field.update(cx, |field, cx| field.set_text(canonical.to_owned(), cx));
+            }
         }
+    }
+
+    /// Opens the colour picker on the colour one palette row is painting.
+    ///
+    /// The initial value is the swatch's memo — the colour on screen — with the draft's own text
+    /// as the fallback for a row whose memo has not been seeded. Not `Rgb::default()`: a picker
+    /// that opened on black would change the row simply by being accepted.
+    ///
+    /// The dialog is built here and given the one callback it reports through; it neither writes
+    /// the row nor dismisses itself. `Accepted` is what the callback carries, and a refusal has
+    /// to leave every one of the three writes alone.
+    pub fn open_color_picker(&mut self, bind: &'static str, cx: &mut Context<Self>) {
+        let initial = self
+            .swatches
+            .get(bind)
+            .copied()
+            .or_else(|| self.palette.get(bind).and_then(palette_store::parse_entry))
+            .map(Rgb::from)
+            .unwrap_or_default();
+
+        let theme = self.theme.clone();
+        let handle = cx.entity().downgrade();
+        let view = cx.new(move |cx| {
+            ColorPickerView::new(cx, theme, initial).on_result(move |result, _window, cx| {
+                if let Some(shell) = handle.upgrade() {
+                    shell.update(cx, |shell, cx| shell.finish_color_picker(bind, result, cx));
+                }
+            })
+        });
+
+        self.picker = Some((bind, view));
+        cx.notify();
+    }
+
+    /// The picker reported: close it, and write the row only when the report was an acceptance.
+    ///
+    /// A refusal changes no colour, no draft text, no memo and no status line. It says nothing
+    /// because the dialog has already said whatever there was to say about the entry it refused,
+    /// and because Cancel is not an error. Closing happens either way, which is the host's half
+    /// of the contract: the view reports an outcome and never dismisses itself.
+    fn finish_color_picker(
+        &mut self,
+        bind: &'static str,
+        result: PickResult,
+        cx: &mut Context<Self>,
+    ) {
+        self.picker = None;
+        if result.accepted {
+            self.apply_color(bind, result.color, cx);
+        }
+        cx.notify();
+    }
+
+    /// Writes a picked colour into one row.
+    ///
+    /// The same three writes as Enter, minus the parse: the picker hands back an `Rgb`, which is
+    /// a colour by construction, so there is nothing to refuse here. A picked role and a typed
+    /// one therefore cannot end up in different places.
+    pub fn apply_color(&mut self, bind: &'static str, color: Rgb, cx: &mut Context<Self>) {
+        let canonical = color.to_hex();
+        self.write_color_text(bind, &canonical, cx);
     }
 
     /// One palette-editor row: the caption, the swatch, and the hex box beside it.
     ///
     /// `MainWindow.xaml:1962` is the swatch's geometry — 22×22, radius 3, a 1 px `#40FFFFFF`
     /// edge — and the edge is [`crate::theme::fixed::CONTRAST_LABEL`] at alpha `0x40` rather than
-    /// a new colour literal.
-    ///
-    /// The swatch is painted and is not yet a picker host: the press has to open
-    /// `dialogs::color_picker_view::ColorPickerView`, which no route in this app mounts yet. The
-    /// hand cursor and the managed "Click to pick a color" tooltip stay, so the affordance is the
-    /// one the managed card has; what it needs is reported rather than stubbed with a handler that
-    /// does nothing.
+    /// a new colour literal. The hand cursor and the managed "Click to pick a color" tooltip are
+    /// the affordance the press now answers: a swatch press opens
+    /// [`ColorPickerView`] on this row's colour ([`Shell::open_color_picker`]).
     fn render_color_field(
         &self,
         label: &'static str,
         bind: &'static str,
         theme: &Theme,
+        entity: &Entity<Self>,
     ) -> AnyElement {
         let swatch = self
             .swatches
@@ -892,6 +971,7 @@ impl Shell {
             .unwrap_or(Color::TRANSPARENT);
         let row_selector = format!("palette-row-{bind}");
         let swatch_selector = format!("palette-swatch-{bind}");
+        let handle = entity.clone();
 
         let field = match self.color_fields.get(bind) {
             Some(field) => field.clone().into_any_element(),
@@ -927,7 +1007,10 @@ impl Shell {
                             .bg(swatch)
                             .cursor_pointer()
                             .tooltip(components::tooltip(theme, copy::PALETTE_SWATCH_TOOLTIP))
-                            .debug_selector(move || swatch_selector),
+                            .debug_selector(move || swatch_selector)
+                            .on_mouse_down(MouseButton::Left, move |_, _window, cx| {
+                                handle.update(cx, |shell, cx| shell.open_color_picker(bind, cx));
+                            }),
                     )
                     .child(div().flex_1().min_w(px(0.0)).child(field)),
             )
@@ -2065,6 +2148,17 @@ impl Shell {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> SearchKeyOutcome {
+        // Escape cancels the colour picker. That is the managed `IsCancel="True"` on the dialog's
+        // Cancel button (`ColorPickerDialog.xaml:109`): WPF closed the window with
+        // `DialogResult = false`, so nothing was written and nothing was said. The dialog itself
+        // has no key handler, so the window's Escape lands here, and closing is the whole of the
+        // refusal — the row, its text and its memo are not touched.
+        if self.picker.is_some() && event.keystroke.key.eq_ignore_ascii_case("escape") {
+            self.picker = None;
+            cx.notify();
+            return SearchKeyOutcome::Ignored;
+        }
+
         // Enter in the Block ESP add box submits. `components::TextInput` deliberately leaves
         // Tab, Enter and Escape to its owner (`text_input.rs:421`), so a focused box hands the
         // key up the tree and this listener is where it lands. It is checked before the overlay
@@ -2174,7 +2268,12 @@ impl Shell {
     /// [`Shell::open_search`] for why a click passes `None`.
     fn search_gate(&self, window: Option<&Window>, cx: &App) -> KeyboardGate {
         KeyboardGate {
-            control_mode: !window.is_some_and(|window| self.any_text_field_focused(window, cx)),
+            // A modal owns the keyboard while it is up. The picker's hex box is the dialog's own
+            // entity, so it is not in [`Shell::any_text_field_focused`] — without this a
+            // character typed into it would also be read as type-to-open, and the overlay would
+            // open behind the dialog that is taking the keys.
+            control_mode: self.picker.is_none()
+                && !window.is_some_and(|window| self.any_text_field_focused(window, cx)),
             capturing_keybind: self
                 .captures
                 .values()
@@ -2225,6 +2324,33 @@ impl Shell {
                 .is_focused(window)
                 .then_some(*bind)
         })
+    }
+
+    /// The colour picker's host layer: the dialog's card, centred, over everything else.
+    ///
+    /// The dialog paints its own card and no backdrop, because managed opened it as a second
+    /// window and modality came from WPF. Here it is a child of this window, so modality is this
+    /// layer's job: it covers the window, centres the card, and takes the press — a modal that
+    /// let a press through to a switch behind it would be modal only in name.
+    ///
+    /// It paints no backdrop. The scrim the search overlay uses is that overlay's; inventing a
+    /// second one for a dialog that was never a scrim in managed would be a visual decision
+    /// rather than a port, so the layer is transparent and reports that it is owed a look.
+    fn render_picker(&self, view: Entity<ColorPickerView>) -> AnyElement {
+        div()
+            .absolute()
+            .top(px(0.0))
+            .left(px(0.0))
+            .w_full()
+            .h_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            // A press outside the card lands here and goes no further. Deeper listeners — the
+            // card's buttons, the hex box — have already run by the time this bubbles up.
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(view)
+            .into_any_element()
     }
 
     /// The command-search overlay, or `None` while it is closed.
@@ -2428,6 +2554,13 @@ impl Render for Shell {
         // one child rather than a wrapper around the tree.
         if let Some(search) = self.render_search(theme, motion, &entity, window) {
             root = root.child(search);
+        }
+
+        // The colour picker, when a swatch press opened it. Same layer as the overlay and above
+        // the strips for the same reason: a modal must not cost the user a resize edge.
+        if let Some((_, view)) = &self.picker {
+            let view = view.clone();
+            root = root.child(self.render_picker(view));
         }
 
         // Decision 5's resize edges. They are last so they paint above the title bar
@@ -3334,7 +3467,9 @@ impl Shell {
 
             Control::BlockEspAdd { bind } => self.render_block_add(bind, theme, entity),
 
-            Control::ColorField { label, bind } => self.render_color_field(label, bind, theme),
+            Control::ColorField { label, bind } => {
+                self.render_color_field(label, bind, theme, entity)
+            }
 
             Control::PalettePreview { name } => {
                 let preview_accent = Theme::accent_by_name(name);
@@ -6091,7 +6226,7 @@ mod tests {
             let field = shell.search_query.as_ref().expect("the box still exists");
             (
                 field.read(cx).text().to_owned(),
-                field.read(cx).caret(),
+                field.read(cx).edit().caret(),
                 shell.search().query().to_owned(),
             )
         });
@@ -6138,7 +6273,7 @@ mod tests {
             (
                 shell.search().is_open(),
                 field.read(cx).text().to_owned(),
-                field.read(cx).caret(),
+                field.read(cx).edit().caret(),
                 shell.search().query().to_owned(),
             )
         });
@@ -6883,5 +7018,234 @@ mod tests {
                 "and the box is left exactly as typed, so it can be fixed"
             );
         }
+    }
+
+    // ---- the colour picker's host ----------------------------------------------
+
+    /// Puts one palette row in the state a user leaves it in before pressing anything: text in
+    /// the box, no Enter, so the store holds the typed spelling rather than the canonical form.
+    ///
+    /// That difference is what makes the accept below observable. A row that was already
+    /// canonical would be written back unchanged, and the test would pass without the picker
+    /// having written anything.
+    fn seed_uncanonical_row(
+        cx: &mut gpui::TestAppContext,
+        shell: &Entity<Shell>,
+        bind: &'static str,
+        text: &'static str,
+    ) {
+        cx.update(|cx| {
+            shell.update(cx, |shell, cx| shell.write_color_text(bind, text, cx));
+        });
+    }
+
+    /// Selects Settings, draws, and scrolls one palette swatch into view, returning its box.
+    fn show_swatch(
+        cx: &mut gpui::TestAppContext,
+        shell: &Entity<Shell>,
+        visual: &mut gpui::VisualTestContext,
+        selector: &'static str,
+    ) -> gpui::Bounds<gpui::Pixels> {
+        cx.update(|cx| shell.update(cx, |shell, cx| shell.select_tab_named("settings", cx)));
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        scroll_into_view(visual, selector);
+        visual.debug_bounds(selector).expect("the swatch paints")
+    }
+
+    /// A swatch press opens the picker on the colour that row is painting.
+    ///
+    /// The initial value is the swatch memo, not `Rgb::default()`: a picker that opened on black
+    /// would change the row merely by being accepted, which is the bug this pins.
+    #[gpui::test]
+    fn a_swatch_press_opens_the_picker_on_the_rows_colour(cx: &mut gpui::TestAppContext) {
+        use gpui::Modifiers;
+
+        let root = scratch_root();
+        let (shell, _, mut visual) = shell_in_window(cx, &root);
+        let bounds = show_swatch(cx, &shell, &mut visual, "palette-swatch-PaletteBgBox");
+
+        visual.simulate_click(bounds.center(), Modifiers::default());
+
+        let (bind, selected, painted) = cx.read(|cx| {
+            let shell = shell.read(cx);
+            let opened = shell
+                .picker
+                .as_ref()
+                .map(|(bind, view)| (*bind, view.read(cx).selected()));
+            let (bind, selected) = match opened {
+                Some((bind, color)) => (Some(bind), Some(color)),
+                None => (None, None),
+            };
+            (
+                bind,
+                selected,
+                shell.swatches.get("PaletteBgBox").copied().map(Rgb::from),
+            )
+        });
+        assert_eq!(
+            bind,
+            Some("PaletteBgBox"),
+            "the press opened the bg row's picker"
+        );
+        assert_eq!(
+            selected, painted,
+            "and it opened on the colour the swatch is showing"
+        );
+    }
+
+    /// OK writes the store, the memo and the box; a row whose text was not canonical comes back
+    /// canonical, which is the only way the write is visible.
+    #[gpui::test]
+    fn accepting_the_picker_writes_the_store_and_the_box(cx: &mut gpui::TestAppContext) {
+        use gpui::Modifiers;
+
+        let root = scratch_root();
+        let (shell, _, mut visual) = shell_in_window(cx, &root);
+        seed_uncanonical_row(cx, &shell, "PaletteBgBox", "123456");
+        let swatch = show_swatch(cx, &shell, &mut visual, "palette-swatch-PaletteBgBox");
+
+        visual.simulate_click(swatch.center(), Modifiers::default());
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let opened_on = cx.read(|cx| {
+            shell
+                .read(cx)
+                .picker
+                .as_ref()
+                .map(|(_, view)| view.read(cx).selected())
+        });
+        assert_eq!(
+            opened_on,
+            Some(Rgb::new(0x12, 0x34, 0x56)),
+            "the dialog opened on the colour the row is showing"
+        );
+
+        let ok = visual
+            .debug_bounds("color-picker-ok")
+            .expect("the dialog's OK paints in the host layer");
+        visual.simulate_click(ok.center(), Modifiers::default());
+
+        let (store, box_text, open) = cx.read(|cx| {
+            let shell = shell.read(cx);
+            (
+                shell.palette.get("PaletteBgBox").map(str::to_owned),
+                shell
+                    .color_fields
+                    .get("PaletteBgBox")
+                    .map(|field| field.read(cx).text().to_owned()),
+                shell.picker.is_some(),
+            )
+        });
+        assert_eq!(
+            store.as_deref(),
+            Some("#123456"),
+            "the accepted colour reached the store in canonical form"
+        );
+        assert_eq!(
+            box_text.as_deref(),
+            Some("#123456"),
+            "and the box shows the same string, so the row cannot disagree with the store"
+        );
+        assert!(!open, "and the dialog closed");
+    }
+
+    /// Cancel closes the dialog and writes nothing at all — not the colour, not the text.
+    #[gpui::test]
+    fn cancelling_the_picker_writes_nothing(cx: &mut gpui::TestAppContext) {
+        use gpui::Modifiers;
+
+        let root = scratch_root();
+        let (shell, _, mut visual) = shell_in_window(cx, &root);
+        seed_uncanonical_row(cx, &shell, "PaletteBgBox", "123456");
+        let swatch = show_swatch(cx, &shell, &mut visual, "palette-swatch-PaletteBgBox");
+
+        visual.simulate_click(swatch.center(), Modifiers::default());
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let cancel = visual
+            .debug_bounds("color-picker-cancel")
+            .expect("the dialog's Cancel paints in the host layer");
+        visual.simulate_click(cancel.center(), Modifiers::default());
+
+        let (store, box_text, swatch, open) = cx.read(|cx| {
+            let shell = shell.read(cx);
+            (
+                shell.palette.get("PaletteBgBox").map(str::to_owned),
+                shell
+                    .color_fields
+                    .get("PaletteBgBox")
+                    .map(|field| field.read(cx).text().to_owned()),
+                shell.swatches.get("PaletteBgBox").copied(),
+                shell.picker.is_some(),
+            )
+        });
+        assert_eq!(
+            store.as_deref(),
+            Some("123456"),
+            "a refusal leaves the store's text exactly as it was"
+        );
+        assert_eq!(
+            box_text.as_deref(),
+            Some("123456"),
+            "and the box, which is the display of that same text"
+        );
+        assert_eq!(
+            swatch,
+            palette_store::parse_entry("123456"),
+            "and the swatch keeps the colour it had"
+        );
+        assert!(
+            !open,
+            "the dialog still closes: Cancel is an answer, not an error"
+        );
+    }
+
+    /// Escape cancels the picker, which is the managed `IsCancel="True"` on its Cancel button.
+    ///
+    /// WPF closed the dialog with `DialogResult = false` and wrote nothing; this asserts the same
+    /// two halves, because the dialog has no key handler of its own and the host is where the
+    /// window's Escape lands.
+    #[gpui::test]
+    fn escape_cancels_the_picker_like_the_managed_is_cancel(cx: &mut gpui::TestAppContext) {
+        use gpui::Keystroke;
+
+        let root = scratch_root();
+        let (shell, handle, mut visual) = shell_in_window(cx, &root);
+        seed_uncanonical_row(cx, &shell, "PaletteBgBox", "123456");
+        let swatch = show_swatch(cx, &shell, &mut visual, "palette-swatch-PaletteBgBox");
+
+        visual.simulate_click(swatch.center(), gpui::Modifiers::default());
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        visual
+            .cx
+            .dispatch_keystroke(handle, Keystroke::parse("escape").expect("keystroke"));
+
+        let (open, store, box_text) = cx.read(|cx| {
+            let shell = shell.read(cx);
+            (
+                shell.picker.is_some(),
+                shell.palette.get("PaletteBgBox").map(str::to_owned),
+                shell
+                    .color_fields
+                    .get("PaletteBgBox")
+                    .map(|field| field.read(cx).text().to_owned()),
+            )
+        });
+        assert!(!open, "Escape closed the dialog, as `IsCancel` does");
+        assert_eq!(
+            store.as_deref(),
+            Some("123456"),
+            "and wrote nothing: the refusal is the whole of it"
+        );
+        assert_eq!(box_text.as_deref(), Some("123456"), "the box included");
     }
 }
