@@ -15,6 +15,7 @@ mod discord;
 mod evdev;
 mod injector;
 mod input;
+mod open;
 mod process;
 mod srv;
 mod uinput;
@@ -25,6 +26,7 @@ pub use appdata::app_data_directory;
 pub use discord::LinuxDiscordTransport;
 pub use injector::LinuxBridgeInjector;
 pub use input::LinuxInputBackend;
+pub use open::{open_path, opener_available};
 pub use process::{parse_proc_cmdline, LinuxProcessInspector};
 pub use window::LinuxWindowInspector;
 
@@ -47,6 +49,8 @@ pub struct Detected {
     pub discord_sockets: usize,
     /// Resolvers configured in `/etc/resolv.conf`.
     pub dns_servers: usize,
+    /// An executable `xdg-open` is on `PATH`.
+    pub file_manager: bool,
     /// An X11 connection exists *and* `XQueryPointer` answered, which is exactly what
     /// [`crate::InputBackend::probe_mouse_state`] gates on. This is deliberately not
     /// the same question as `evdev_devices > 0`: a Wayland session can deliver
@@ -77,6 +81,7 @@ impl Detected {
             uinput: uinput::is_available(),
             discord_sockets: LinuxDiscordTransport::available_socket_count(),
             dns_servers: srv::collect_system_dns_servers().len(),
+            file_manager: opener_available(),
         }
     }
 
@@ -132,6 +137,13 @@ impl Detected {
         if self.discord_sockets == 0 {
             notes.push("no Discord IPC socket found; Discord is probably not running".to_string());
         }
+        if !self.file_manager {
+            notes.push(
+                "no xdg-open on PATH, so a folder cannot be revealed from here; install \
+                 xdg-utils to enable the configs-folder button"
+                    .to_string(),
+            );
+        }
         if self.dns_servers == 0 {
             notes.push(
                 "no nameserver in /etc/resolv.conf; SRV lookups will ask the public resolvers \
@@ -159,6 +171,7 @@ impl Detected {
             // UDP DNS needs no session at all, so a host with no display and no
             // input devices can still resolve a record.
             srv_resolution: true,
+            open_path: self.file_manager,
             bridge: BridgeSupport::UnsupportedOnLinuxYet,
             notes,
         }
@@ -200,6 +213,7 @@ mod tests {
             discord_sockets: 1,
             dns_servers: 1,
             pointer_state: true,
+            file_manager: true,
         }
         .report();
 
@@ -211,6 +225,7 @@ mod tests {
         assert!(report.input_synthesis);
         assert!(report.discord_rpc);
         assert_eq!(report.bridge, BridgeSupport::UnsupportedOnLinuxYet);
+        assert!(report.open_path, "the fake session has a launcher");
         // The bridge note is always present so the UI can explain the gap.
         assert!(report
             .notes
@@ -232,6 +247,7 @@ mod tests {
             discord_sockets: 1,
             dns_servers: 1,
             pointer_state: false,
+            file_manager: false,
         }
         .report();
 
@@ -261,6 +277,7 @@ mod tests {
             discord_sockets: 0,
             dns_servers: 0,
             pointer_state: false,
+            file_manager: false,
         }
         .report();
 

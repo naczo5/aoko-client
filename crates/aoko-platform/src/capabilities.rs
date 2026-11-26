@@ -66,6 +66,11 @@ pub struct CapabilityReport {
     pub discord_rpc: bool,
     /// SRV resolution for a host entered without an explicit port.
     pub srv_resolution: bool,
+    /// A path can be revealed in the OS file manager, i.e. [`crate::open_path`] has a
+    /// launcher to call.
+    ///
+    /// Linux needs `xdg-open` on `PATH`; Windows always has the shell.
+    pub open_path: bool,
     /// Native bridge injection status.
     pub bridge: BridgeSupport,
     /// Human-readable notes explaining any `false` above.
@@ -85,6 +90,7 @@ impl CapabilityReport {
             input_synthesis: false,
             discord_rpc: false,
             srv_resolution: true,
+            open_path: false,
             bridge: BridgeSupport::UnsupportedOnLinuxYet,
             notes: vec!["OS services unavailable in this build".to_string()],
         }
@@ -113,6 +119,7 @@ mod tests {
         assert!(!report.input_synthesis);
         assert!(!report.pointer_state_sampling);
         assert!(report.srv_resolution, "UDP needs no OS service");
+        assert!(!report.open_path, "and no file manager either");
         assert!(!report.bridge.is_usable());
         assert!(!report.notes.is_empty());
     }

@@ -10,6 +10,7 @@ mod discord;
 mod handles;
 mod injector;
 mod input;
+mod open;
 mod process;
 mod raw;
 mod srv;
@@ -19,6 +20,7 @@ pub use appdata::app_data_directory;
 pub use discord::WindowsDiscordTransport;
 pub use injector::WindowsBridgeInjector;
 pub use input::{install_hooks, uninstall_hooks, HookGuard, WindowsInputBackend};
+pub use open::{open_path, opener_available};
 pub use process::{read_command_line, WindowsProcessInspector};
 pub use window::{process_image_name, window_title, WindowsWindowInspector};
 
@@ -57,6 +59,8 @@ pub fn probe_capabilities() -> CapabilityReport {
         input_synthesis: true,
         discord_rpc: discord_pipes > 0,
         srv_resolution: true,
+        // `shell32` is always loaded in an interactive session.
+        open_path: opener_available(),
         bridge: BridgeSupport::Supported,
         notes,
     }
