@@ -6831,39 +6831,61 @@ mod tests {
         );
     }
 
-    /// Every id form names one block, and a second add enables rather than duplicates.
+    /// Every id form names one block; a new block appends, a tracked one is enabled.
+    ///
+    /// The two halves need different blocks, which is the thing the first version got wrong: the
+    /// default profile is seeded from `PRESETS`, so an id in that catalog exercises *enable* and
+    /// an id outside it exercises *append*.
     #[gpui::test]
     fn adding_a_known_block_enables_it_and_stores_no_second_entry(cx: &mut gpui::TestAppContext) {
         let root = scratch_root();
         let (shell, handle, mut visual) = shell_in_window(cx, &root);
 
         let before = cx.read(|cx| shell.read(cx).profile().block_esp_targets.len());
-        submit_block_add(cx, &shell, &mut visual, handle, "minecraft:Diamond_Ore");
+        // A block the presets do not cover, because the append half cannot be tested with one
+        // they do: `build_default_targets` seeds all twenty `PRESETS`
+        // (`aoko-protocol/src/block_esp.rs:266-281`), so the first version's
+        // `minecraft:diamond_ore` was already tracked and took the *enable* branch — the
+        // assertion `before + 1` was unreachable against a default profile rather than failing
+        // on a broken add.
+        submit_block_add(
+            cx,
+            &shell,
+            &mut visual,
+            handle,
+            "minecraft:Amethyst_Cluster",
+        );
 
         let after = cx.read(|cx| shell.read(cx).profile().block_esp_targets.clone());
         assert_eq!(after.len(), before + 1, "one target was appended");
         let index = after
             .iter()
-            .position(|target| target.registry_id == "minecraft:diamond_ore")
+            .position(|target| target.registry_id == "minecraft:amethyst_cluster")
             .expect("the namespaced, mixed-case form normalises to the registry id");
-        assert_eq!(after[index].display_name, "diamond ore");
+        assert_eq!(after[index].display_name, "amethyst cluster");
 
-        // Turn it off behind the box's back, then add the bare form: the same block.
-        cx.update(|cx| {
-            shell.update(cx, |shell, _| {
-                shell.profile.block_esp_targets[index].enabled = false;
-            });
-        });
-        submit_block_add(cx, &shell, &mut visual, handle, "diamond_ore");
+        // The enable half is a preset, which the default profile already tracks and seeds
+        // disabled: the rule under test is that the second add turns it on instead of appending.
+        let preset = after
+            .iter()
+            .position(|target| target.registry_id == "minecraft:emerald_ore")
+            .expect("the presets seed emerald ore");
+        assert!(
+            !after[preset].enabled,
+            "the default profile seeds emerald ore disabled"
+        );
+
+        // The bare form of the same block: normalisation is what makes it the same entry.
+        submit_block_add(cx, &shell, &mut visual, handle, "emerald_ore");
 
         let after = cx.read(|cx| shell.read(cx).profile().block_esp_targets.clone());
         assert_eq!(
             after.len(),
             before + 1,
-            "no second entry for the same block"
+            "no second entry for a block that was already tracked"
         );
         assert!(
-            after[index].enabled,
+            after[preset].enabled,
             "the existing target was enabled rather than duplicated"
         );
     }
