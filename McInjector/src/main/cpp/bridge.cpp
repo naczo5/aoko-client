@@ -50,6 +50,7 @@
 #include "kill_aura_premotion.h"
 #include "native_perf_diagnostics.h"
 #include "telemetry_schedule.h"
+#include "mc_overlay_font.h"
 #include "jni_core/scoped_env.h"
 #include "jni_core/local_frame.h"
 #include "jni_core/matrix_reader.h"
@@ -1332,6 +1333,12 @@ void InitLogPath(HMODULE hModule) {
 }
 
 void Log(const std::string& msg) {
+    // Several threads log (render, state reader, scan worker, socket). Each call opens
+    // its own stream, so two concurrent appends interleaved mid-line and produced the
+    // torn fragments ("18 player/ClientLevel;") that made bridge_debug.log unreadable.
+    // The mutex is a leaf lock: nothing is acquired while it is held.
+    static Mutex s_logMutex;
+    LockGuard lk(s_logMutex);
     std::ofstream f(g_logPath.c_str(), std::ios_base::app);
     f << "[Bridge] " << msg << std::endl;
 }
@@ -14129,8 +14136,12 @@ static void UpdatePlayerListOverlayLegacy(JNIEnv* env, const Config& config) {
     }
 
     constexpr int kEntityJsonCap = 20;
+    // `aimAssist` is in this list because it consumes the entity telemetry this loop
+    // produces: without it the loop stops after the first kEntityJsonCap entities in
+    // world-list order, so on a populated server the entity the crosshair is over is
+    // routinely missing from `entities` and aim assist has nothing to steer towards.
     const int entityProcessCap = (fightStatusEnabled || config.closestPlayerInfo ||
-        config.fireballWarning ||
+        config.fireballWarning || config.aimAssist ||
         hideVanillaTags || g_legacyNametagSuppressionActive || nametagsEnabled)
         ? (std::max)(1, size)
         : kEntityJsonCap;
@@ -15294,13 +15305,33 @@ static void PublishBedPlatesFromCache18(JNIEnv* env, double px, double py, doubl
         result.push_back(std::move(d));
     }
 
+    // Diagnostics, not telemetry: this publisher runs every scan tick while a bed is
+    // in range, and the old form logged every 2 s regardless of whether anything had
+    // changed - most of a 30 s bridge_debug.log was identical "BedPlates: halves=.."
+    // repeats. Log a change only (nametag logger's static last-logged value) with the
+    // 2 s floor, so a flapping count cannot spam. Not behind the perf switch: a user's
+    // log is the only evidence we get from a session we cannot reproduce.
     static DWORD s_lastBedDiagMs = 0;
+    static int s_lastBedHalves = -1;
+    static int s_lastBedPlates = -1;
+    static int s_lastBedChunks = -1;
+    static int s_lastBedScanned = -1;
     if (now - s_lastBedDiagMs > 2000) {
-        s_lastBedDiagMs = now;
-        Log("BedPlates: halves=" + std::to_string(allBeds.size())
-            + " plates=" + std::to_string(result.size())
-            + " cachedChunks=" + std::to_string(g_bedPlatesChunkCache18.size())
-            + " scannedThisTick=" + std::to_string(scanned));
+        const int halves = (int)allBeds.size();
+        const int plates = (int)result.size();
+        const int chunks = (int)g_bedPlatesChunkCache18.size();
+        if (halves != s_lastBedHalves || plates != s_lastBedPlates ||
+            chunks != s_lastBedChunks || scanned != s_lastBedScanned) {
+            s_lastBedDiagMs = now;
+            s_lastBedHalves = halves;
+            s_lastBedPlates = plates;
+            s_lastBedChunks = chunks;
+            s_lastBedScanned = scanned;
+            Log("BedPlates: halves=" + std::to_string(halves)
+                + " plates=" + std::to_string(plates)
+                + " cachedChunks=" + std::to_string(chunks)
+                + " scannedThisTick=" + std::to_string(scanned));
+        }
     }
 
     { LockGuard lk(g_bedPlateListMutex); g_bedPlateList.swap(result); }
@@ -16821,8 +16852,26 @@ static void ConfigureImGuiFontAndStyle(HWND hwnd) {
         }
     }
     if (!loadedFont) {
-        io.Fonts->AddFontDefault(&fontCfg);
-        Log("No overlay font found (Manrope/Minecraftia), using default ImGui font.");
+        // The packaged zip carries only aoko.exe and the two bridge DLLs, so every
+        // candidate above - all relative to GetBridgeDir() - misses and the HUD used
+        // to render with ImGui's ProggyClean. Fall back to the face compiled into
+        // the DLL; the file lookup stays first so an install can still override it.
+        ImFontConfig embeddedCfg = fontCfg;
+        // Static storage in mc_overlay_font.h outlives the atlas, and ImGui 1.92
+        // keeps font sources alive for the atlas' whole lifetime: never let the
+        // atlas free a .rdata pointer.
+        embeddedCfg.FontDataOwnedByAtlas = false;
+        loadedFont = io.Fonts->AddFontFromMemoryTTF(
+            const_cast<unsigned char*>(lc::kOverlayFontTtf),
+            lc::kOverlayFontTtfSize,
+            embeddedCfg.SizePixels,
+            &embeddedCfg);
+        if (loadedFont) {
+            Log("Loaded embedded overlay font: Manrope Medium");
+        } else {
+            io.Fonts->AddFontDefault(&fontCfg);
+            Log("No overlay font found (Manrope/Minecraftia), using default ImGui font.");
+        }
     }
 
     io.FontGlobalScale = 1.0f;
@@ -18074,6 +18123,27 @@ void ServerLoop() {
                 jsonToSend += "\"posY\":" + std::to_string(state.posY) + ",";
                 jsonToSend += "\"posZ\":" + std::to_string(state.posZ) + ",";
                 jsonToSend += "\"pitch\":" + std::to_string(state.pitch) + ",";
+                // Aim assist needs the camera FOV and the viewport it projects in. The
+                // host's controller sizes its step from both and otherwise assumes 70
+                // degrees and the OS window rect. RenderNametags projects entities with
+                // GetClientRect(w, h) on this window, so publish that same space, and
+                // the FOV the camera poll already captured (BgCamState18::fov, filled in
+                // ReadCameraState18 from gameSettings.fovSetting). No extra JNI call.
+                char fovBuf[32];
+                snprintf(fovBuf, sizeof(fovBuf), "%.2f", SnapshotBgCam18().fov);
+                jsonToSend += "\"fov\":";
+                jsonToSend += fovBuf;
+                jsonToSend += ",";
+                int viewportW = 1920, viewportH = 1080;
+                if (g_gameHwnd && IsWindow(g_gameHwnd)) {
+                    RECT viewportRect{};
+                    if (GetClientRect(g_gameHwnd, &viewportRect)) {
+                        viewportW = (std::max)(1, (int)(viewportRect.right - viewportRect.left));
+                        viewportH = (std::max)(1, (int)(viewportRect.bottom - viewportRect.top));
+                    }
+                }
+                jsonToSend += "\"viewportWidth\":" + std::to_string(viewportW) + ",";
+                jsonToSend += "\"viewportHeight\":" + std::to_string(viewportH) + ",";
                 jsonToSend += "\"holdingBlock\":" + std::string(state.holdingBlock ? "true" : "false") + ",";
                 jsonToSend += "\"lookingAtBlock\":" + std::string(state.lookingAtBlock ? "true" : "false") + ",";
                 jsonToSend += "\"lookingAtEntity\":" + std::string(state.lookingAtEntity ? "true" : "false") + ",";

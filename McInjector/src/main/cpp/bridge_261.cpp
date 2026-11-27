@@ -60,6 +60,7 @@
 #include "screen_projection.h"
 #include "telemetry_schedule.h"
 #include "native_perf_diagnostics.h"
+#include "mc_overlay_font.h"
 #include "mapping_probe_gate.h"
 #include "jni_core/scoped_env.h"
 #include "jni_core/local_frame.h"
@@ -9784,14 +9785,35 @@ static void PublishBedPlatesFromCache121(JNIEnv* env, double sx, double sy, doub
         result.push_back(std::move(d));
     }
 
+    // Diagnostics, not telemetry: this publisher runs every scan tick while a bed is
+    // in range, and the old form logged every 2 s regardless of whether anything had
+    // changed - identical "BedPlates: halves=.." repeats dominated the 1.8.9 log and
+    // this one behaves the same way. Log a change only (nametag logger's static
+    // last-logged value) with the 2 s floor, so a flapping count cannot spam. Not
+    // behind the perf switch: a user's log is the only evidence we get from a session
+    // we cannot reproduce.
     static DWORD s_lastBedDiagMs = 0;
+    static int s_lastBedHalves = -1;
+    static int s_lastBedPlates = -1;
+    static int s_lastBedChunks = -1;
+    static int s_lastBedScanned = -1;
     if (now - s_lastBedDiagMs > 2000) {
-        s_lastBedDiagMs = now;
-        Log("BedPlates: halves=" + std::to_string(allBeds.size())
-            + " plates=" + std::to_string(result.size())
-            + " cachedChunks=" + std::to_string(g_bedPlatesChunkCache.size())
-            + " scannedThisTick=" + std::to_string(scanned)
-            + " translationKey=" + (g_blockGetTranslationKey_121 ? "1" : "0"));
+        const int halves = (int)allBeds.size();
+        const int plates = (int)result.size();
+        const int chunks = (int)g_bedPlatesChunkCache.size();
+        if (halves != s_lastBedHalves || plates != s_lastBedPlates ||
+            chunks != s_lastBedChunks || scanned != s_lastBedScanned) {
+            s_lastBedDiagMs = now;
+            s_lastBedHalves = halves;
+            s_lastBedPlates = plates;
+            s_lastBedChunks = chunks;
+            s_lastBedScanned = scanned;
+            Log("BedPlates: halves=" + std::to_string(halves)
+                + " plates=" + std::to_string(plates)
+                + " cachedChunks=" + std::to_string(chunks)
+                + " scannedThisTick=" + std::to_string(scanned)
+                + " translationKey=" + (g_blockGetTranslationKey_121 ? "1" : "0"));
+        }
     }
 
     { LockGuard lk(g_bedPlateListMutex); g_bedPlateList.swap(result); }
@@ -13399,6 +13421,12 @@ static bool WaitForOwnedThreadExit(HANDLE& handle, const char* name, DWORD timeo
 static std::string g_logPath = "bridge_261_debug.log";
 
 static void Log(const std::string& msg) {
+    // Several threads log (render, state reader, scan worker, socket). Each call opens
+    // its own stream, so two concurrent appends interleaved mid-line and produced the
+    // torn fragments that made bridge_261_debug.log unreadable. The mutex is a leaf
+    // lock: nothing is acquired while it is held.
+    static Mutex s_logMutex;
+    LockGuard lk(s_logMutex);
     std::ofstream out(g_logPath, std::ios_base::app);
     out << msg << "\n";
 }
@@ -15292,9 +15320,24 @@ static bool IsInWorldNow(JNIEnv* env) {
                 "Lnet/minecraft/world/level/Level;",
                 nullptr
             };
+            // This runs from the 50 ms in-world poll, so an unresolved mapping used to
+            // write 4x4 probe lines plus a warning every tick: one Fabric session left
+            // ~70k of those lines in a 5 MB log. Keep the first probe verbose - that is
+            // the trace worth having when a new mapping set lands - then repeat the
+            // burst at most once every 30 s.
+            static DWORD s_lastWorldProbeLogMs = 0;
+            static bool s_worldProbeLogged = false;
+            const DWORD worldProbeNow = GetTickCount();
+            const bool logWorldProbe =
+                (!s_worldProbeLogged || (worldProbeNow - s_lastWorldProbeLogMs) >= 30000);
+            if (logWorldProbe) {
+                s_worldProbeLogged = true;
+                s_lastWorldProbeLogMs = worldProbeNow;
+            }
             for (int ni = 0; worldNames[ni] && !g_worldField_121; ni++) {
                 for (int si = 0; worldSigs[si] && !g_worldField_121; si++) {
-                    Log(std::string("Trying world field: ") + worldNames[ni] + " sig: " + worldSigs[si]);
+                    if (logWorldProbe)
+                        Log(std::string("Trying world field: ") + worldNames[ni] + " sig: " + worldSigs[si]);
                     g_worldField_121 = env->GetFieldID(mcCls, worldNames[ni], worldSigs[si]);
                     if (env->ExceptionCheck()) { env->ExceptionClear(); g_worldField_121 = nullptr; }
                     else if (g_worldField_121) {
@@ -15305,7 +15348,8 @@ static bool IsInWorldNow(JNIEnv* env) {
                 }
             }
             if (!g_worldField_121) {
-                Log("WARNING: World field unresolved from known names/signatures.");
+                if (logWorldProbe)
+                    Log("WARNING: World field unresolved from known names/signatures.");
             }
             env->DeleteLocalRef(mcCls);
         }
@@ -21021,8 +21065,26 @@ static bool EnsureImGuiContextNeutral(HWND hwnd, bool forOpenGL) {
         }
     }
     if (!loadedFont) {
-        io.Fonts->AddFontDefault(&fontCfg);
-        Log("No overlay font found (Manrope/Minecraftia), using default ImGui font.");
+        // The packaged zip carries only aoko.exe and the two bridge DLLs, so every
+        // candidate above - all relative to GetBridgeDir() - misses and the HUD used
+        // to render with ImGui's ProggyClean. Fall back to the face compiled into
+        // the DLL; the file lookup stays first so an install can still override it.
+        ImFontConfig embeddedCfg = fontCfg;
+        // Static storage in mc_overlay_font.h outlives the atlas, and ImGui 1.92
+        // keeps font sources alive for the atlas' whole lifetime: never let the
+        // atlas free a .rdata pointer.
+        embeddedCfg.FontDataOwnedByAtlas = false;
+        loadedFont = io.Fonts->AddFontFromMemoryTTF(
+            const_cast<unsigned char*>(lc::kOverlayFontTtf),
+            lc::kOverlayFontTtfSize,
+            embeddedCfg.SizePixels,
+            &embeddedCfg);
+        if (loadedFont) {
+            Log("Loaded embedded overlay font: Manrope Medium");
+        } else {
+            io.Fonts->AddFontDefault(&fontCfg);
+            Log("No overlay font found (Manrope/Minecraftia), using default ImGui font.");
+        }
     }
     io.FontGlobalScale = 1.0f;
     ImGuiStyle& st = ImGui::GetStyle();
