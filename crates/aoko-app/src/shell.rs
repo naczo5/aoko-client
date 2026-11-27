@@ -773,14 +773,17 @@ impl Shell {
     /// Writes the auto-save slot. The managed app does this on exit
     /// (`MainWindow.xaml.cs:1866-1869`), which is why the close paths call it.
     ///
-    /// The profile it writes is the controller's
-    /// ([`AppController::profile_for_save`]), not this view's `self.profile` copy: a switch press
-    /// writes the controller's flag set and never touches that copy, so saving it wrote the state
-    /// from before the press — which is how a module switched on came back off after a restart.
-    /// Managed rebuilt the profile from the clicker at every save
-    /// (`ProfileManager.CreateFromClicker()`, `:956-958`, `:1867-1869`), which is the same rule.
+    /// The profile it writes comes from [`AppController::profile_for_save`], which takes this
+    /// view's working copy and writes every switch boolean from the controller's flag set. Neither
+    /// source alone will do: a switch press writes the controller's flags and never touches
+    /// `self.profile`, so saving the copy alone wrote the state from before the press — which is how
+    /// a module switched on came back off after a restart — while the controller's own profile lags
+    /// a palette apply, so saving that alone wrote the old theme over the new one. Managed rebuilt
+    /// the clicker's flags into the profile at every save
+    /// (`ProfileManager.CreateFromClicker()`, `:956-958`, `:1867-1869`) and had one copy to begin
+    /// with, which is why it needed neither half of this.
     pub fn save_profile(&mut self) -> Result<(), String> {
-        let mut profile = self.controller().profile_for_save();
+        let mut profile = self.controller().profile_for_save(&self.profile);
         let result = self.profiles.save_auto(&mut profile);
         self.profile = profile;
         // The store stamps the profile's name before it writes (`save_auto`), so the copy it
@@ -792,10 +795,10 @@ impl Shell {
 
     /// The Settings card's Save: writes the selected config name.
     ///
-    /// Starts from the controller's profile for the same reason [`Shell::save_profile`] does: the
-    /// live switches are the controller's, and a copy of `self.profile` never carries them.
+    /// Starts from the same call [`Shell::save_profile`] does: the live switches are the
+    /// controller's, and this view's working copy is the newest theme.
     pub fn save_config(&mut self, name: &str) -> Result<(), String> {
-        let mut profile = self.controller().profile_for_save();
+        let mut profile = self.controller().profile_for_save(&self.profile);
         let result = self.profiles.save_named(name, &mut profile);
         self.profile = profile;
         // Same as [`Shell::save_profile`]: `save_named` sets `profile.name` on the way through.
@@ -3005,9 +3008,10 @@ impl Shell {
     /// the card's field and the profile is the same live snapshot Save writes.
     pub fn configs_create(&mut self, cx: &mut Context<Self>) {
         let raw = self.config_name.clone();
-        // The controller's profile, as in [`Shell::save_profile`]: `create` writes a file, and a
-        // second write site that saved the view's copy would forget every switch the user closed.
-        let mut profile = self.controller().profile_for_save();
+        // The same live snapshot [`Shell::save_profile`] takes: `create` writes a file, and a
+        // second write site that saved only one of the two sources would drop either the switches
+        // the user closed or the theme they just applied.
+        let mut profile = self.controller().profile_for_save(&self.profile);
         let outcome = self.profiles.create(&raw, &mut profile, false);
         self.profile = profile;
         // `create` stamps `profile.name`; the controller's copy has to follow, as in
@@ -3024,9 +3028,9 @@ impl Shell {
         let Some(name) = self.profiles.create_pending_name().map(str::to_owned) else {
             return;
         };
-        // The controller's profile again: the overwrite path writes the same file, so it is the same
+        // The same live snapshot again: the overwrite path writes the same file, so it is the same
         // rule — see [`Shell::save_profile`].
-        let mut profile = self.controller().profile_for_save();
+        let mut profile = self.controller().profile_for_save(&self.profile);
         let _ = self.profiles.create(&name, &mut profile, true);
         self.profile = profile;
         // The overwrite path stamps the name too; see [`Shell::configs_create`].
