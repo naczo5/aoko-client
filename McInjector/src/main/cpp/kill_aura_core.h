@@ -10,6 +10,25 @@
 namespace killaura {
 
 enum TargetMode { TARGET_SINGLE = 0, TARGET_SWITCH = 1 };
+enum KillAuraPhase {
+    KA_PHASE_NO_TARGET = 0,
+    KA_PHASE_ACQUIRING = 1,
+    KA_PHASE_ROTATING = 2,
+    KA_PHASE_ATTACKING = 3,
+    KA_PHASE_BLOCKING = 4,
+    KA_PHASE_COOLDOWN = 5
+};
+
+inline const char* KillAuraPhaseName(int phase) {
+    switch (phase) {
+    case KA_PHASE_ACQUIRING: return "acquiring";
+    case KA_PHASE_ROTATING: return "rotating";
+    case KA_PHASE_ATTACKING: return "attacking";
+    case KA_PHASE_BLOCKING: return "blocking";
+    case KA_PHASE_COOLDOWN: return "cooldown";
+    default: return "no-target";
+    }
+}
 enum SortMode { SORT_DISTANCE = 0, SORT_HEALTH = 1, SORT_HURT_TIME = 2, SORT_FOV = 3 };
 enum RotationMode { ROT_NONE = 0, ROT_LEGIT = 1, ROT_SILENT = 2, ROT_LOCK_VIEW = 3, ROT_LIQUID_BOUNCE = 4, ROT_HYPIXEL = 5, ROT_GROK = 6 };
 enum MoveFixMode { MOVE_FIX_NONE = 0, MOVE_FIX_SILENT = 1, MOVE_FIX_STRICT = 2 };

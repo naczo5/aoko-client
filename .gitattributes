@@ -1,8 +1,13 @@
 # Enforce consistent line endings to prevent CRLF/LF diff churn.
-# This is a Windows-only project: blobs are stored with LF in the repository
-# and checked out as CRLF in the working tree, regardless of each contributor's
-# core.autocrlf setting.
+# Managed C#/XAML sources are checked out as CRLF in the working tree, regardless
+# of each contributor's core.autocrlf setting. Rust sources stay LF everywhere so
+# they match rustfmt and the Linux CI matrix.
 * text=auto eol=crlf
+
+# Rust workspace: LF on every platform.
+*.rs         text eol=lf
+*.toml       text eol=lf
+Cargo.lock   text eol=lf
 
 # Binary assets: never apply EOL conversion or text diffing.
 *.dll   binary

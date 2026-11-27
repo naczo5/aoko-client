@@ -27,6 +27,7 @@
 #include "auto_rod_core.h"
 #include "throwpot_core.h"
 #include "auto_tool_core.h"
+#include "exclusive_resource_arbiter.h"
 #include "bridge_capabilities.h"
 #include "nick_hider.h"
 #include "nick_hider_jvmti.h"
@@ -49,10 +50,12 @@
 #include "kill_aura_premotion.h"
 #include "native_perf_diagnostics.h"
 #include "telemetry_schedule.h"
+#include "mc_overlay_font.h"
 #include "jni_core/scoped_env.h"
 #include "jni_core/local_frame.h"
 #include "jni_core/matrix_reader.h"
 #include "jni_core/helper_bridge.h"
+#include "jni_core/account_command_router.h"
 #include "reach_core.h"
 #include "reach_bytecode_injector.h"
 
@@ -124,6 +127,7 @@ public:
 // ===================== GLOBALS =====================
 JavaVM* g_jvm = nullptr;
 static volatile LONG g_running = 1;
+static lc::ExclusiveResourceArbiter g_exclusiveArbiter;
 static bool IsBridgeRunning() {
     return InterlockedCompareExchange(&g_running, 0, 0) != 0;
 }
@@ -451,7 +455,8 @@ enum AutoRodLegacyPhase {
     AutoRodLegacyIdle = 0,
     AutoRodLegacySelected,
     AutoRodLegacyUsed,
-    AutoRodLegacyRestoring
+    AutoRodLegacyRestoring,
+    AutoRodLegacyAborting
 };
 
 struct AutoRodLegacyTransaction {
@@ -479,6 +484,7 @@ static bool HasPendingAutoRodLegacyTransaction() {
 static void ResetAutoRodLegacyTransaction() {
     g_autoRodTransaction18 = AutoRodLegacyTransaction();
     InterlockedExchange(&g_autoRodReleaseRequested, 0);
+    g_exclusiveArbiter.Release(lc::ExclusiveResource::Hotbar, lc::ExclusiveOwner::AutoRod);
 }
 
 static void ClearAutoRodQueue() {
@@ -515,7 +521,8 @@ enum ThrowPotLegacyPhase {
     ThrowPotLegacyIdle = 0,
     ThrowPotLegacySelected,
     ThrowPotLegacyUsed,
-    ThrowPotLegacyRestoring
+    ThrowPotLegacyRestoring,
+    ThrowPotLegacyAborting
 };
 
 struct ThrowPotLegacyTransaction {
@@ -540,6 +547,7 @@ static bool HasPendingThrowPotLegacyTransaction() {
 
 static void ResetThrowPotLegacyTransaction() {
     g_throwPotTransaction18 = ThrowPotLegacyTransaction();
+    g_exclusiveArbiter.Release(lc::ExclusiveResource::Hotbar, lc::ExclusiveOwner::ThrowPot);
 }
 
 // ===== AutoHeal (auto health-threshold splash throw) =====
@@ -550,7 +558,8 @@ enum AutoHealLegacyPhase {
     AutoHealLegacyIdle = 0,
     AutoHealLegacySelected,
     AutoHealLegacyUsed,
-    AutoHealLegacyRestoring
+    AutoHealLegacyRestoring,
+    AutoHealLegacyAborting
 };
 
 struct AutoHealLegacyTransaction {
@@ -576,6 +585,7 @@ static bool HasPendingAutoHealLegacyTransaction() {
 
 static void ResetAutoHealLegacyTransaction() {
     g_autoHealTransaction18 = AutoHealLegacyTransaction();
+    g_exclusiveArbiter.Release(lc::ExclusiveResource::Hotbar, lc::ExclusiveOwner::AutoHeal);
 }
 
 
@@ -630,12 +640,43 @@ struct GameState {
 };
 static GameState g_gameState;
 static Mutex g_stateMutex;
+
+// Last moduleAction accepted from the loader. requestId lets the managed side
+// distinguish a delivered action from one lost on the socket.
+static Mutex g_lastActionMutex;
+static int g_lastActionRequestId = 0;
+static std::string g_lastActionResult;
+
+static void SetLastActionResult(int requestId, const char* result) {
+    if (requestId <= 0) return;
+    LockGuard lk(g_lastActionMutex);
+    // A delayed older packet must not overwrite the newest acknowledgement.
+    if (requestId < g_lastActionRequestId) return;
+    g_lastActionRequestId = requestId;
+    g_lastActionResult = result ? result : "";
+}
+
+static void ResetLastActionState() {
+    LockGuard lk(g_lastActionMutex);
+    g_lastActionRequestId = 0;
+    g_lastActionResult.clear();
+}
+
+static std::string LastActionJson() {
+    LockGuard lk(g_lastActionMutex);
+    std::string out = "\"lastActionId\":" + std::to_string(g_lastActionRequestId);
+    out += ",\"lastActionResult\":\"" + g_lastActionResult + "\"";
+    return out;
+}
 // Overlay-only telemetry sampled on the JNI worker; never sent over TCP.
 static std::atomic<int> g_overlayPingMs(-1);
 static float g_moduleListBaseWidth = 220.0f;
 static float g_moduleListBaseHeight = 240.0f;
 static int UpdateOverlayPingLegacy(JNIEnv* env, jobject player);
-static Mutex g_socketMutex; // Protects socket writes
+// Serializes the two send() sites on the client socket. Both run on the inbound
+// socket thread (ServerLoop), so this mutex never actually contends; it is kept so
+// a future second writer cannot interleave into the middle of a frame.
+static Mutex g_socketMutex;
 static Mutex g_jsonMutex;   // Protects shared JSON buffer
 static std::string g_pendingJson; // Entity telemetry projected on the render thread
 static unsigned long long g_lastEntitySeenMs = 0;
@@ -709,6 +750,19 @@ static void* g_legacyIatSwapOriginal = nullptr;
 static jclass g_mcClass = nullptr;
 static jobject g_mcInstance = nullptr;
 static jobject g_gameClassLoader = nullptr;
+// Binary name of the resolved Minecraft class, snapshotted at discovery so the
+// account command path never has to read g_mcInstance off the discovery thread.
+// Also guards the last connect-path triple the warm load handed to the helper.
+static Mutex g_mcClassNameMutex;
+static std::string g_mcClassName;
+// Last connect-path names handed to the helper by WarmLoadSessionHelper(). The helper
+// method is static synchronized and can wait behind a session command's 4 s game-thread
+// await, so a discovery pass only re-hints when a resolved name actually changed. The
+// first hint is always taken, even when nothing resolved.
+static bool g_connectHintTaken = false;
+static std::string g_connectHint;
+static std::string g_serverAddressHint;
+static std::string g_serverDataHint;
 static jfieldID g_thePlayerField = nullptr;
 static jfieldID g_currentScreenField = nullptr;
 static jmethodID g_getHealthMethod = nullptr;
@@ -917,6 +971,7 @@ static std::string g_killAuraUnavailableReason;
 static Mutex g_killAuraUnavailableMutex;
 static bool g_killAuraHasTarget = false;
 static bool g_killAuraBlocking = false;
+static int g_killAuraPhase18 = killaura::KA_PHASE_NO_TARGET;
 static jclass    g_killAuraC03Class = nullptr;             // C03PacketPlayer (global)
 static jfieldID  g_killAuraC03Yaw = nullptr;
 static jfieldID  g_killAuraC03Pitch = nullptr;
@@ -982,6 +1037,7 @@ static bool g_loggedBlindDetectFail = false;
 static bool g_blindRenderHookArmed = false;
 static bool g_reachRawInputPrevDown = false;
 static bool g_speedBridgeManagingSneak = false;
+static bool g_speedBridgeReleasePending = false;
 static bool g_speedBridgeHaveLastPos = false;
 static double g_speedBridgeLastPosX = 0.0;
 static double g_speedBridgeLastPosZ = 0.0;
@@ -990,13 +1046,11 @@ static int g_speedBridgeDirZ = 0;
 // Hysteresis state to prevent sneak flicker / void falls.
 static bool g_speedBridgeWasEdge = false;
 static DWORD g_speedBridgeLastEdgeMs = 0;
-static DWORD g_chestStealerNextClickMs = 0;
-static int g_chestStealerWindowId = -1;
-static int g_chestStealerLastSlotCount = -1;
-static DWORD g_chestStealerWindowOpenedMs = 0;
-static bool g_chestStealerWindowCompleted = false;
-static std::vector<int> g_chestStealerSlots;
-static unsigned int g_chestStealerRng = 0xA0C0123u;
+// Pauses module/scans/overlay work while the world or player instance is being replaced.
+static bool g_worldTransitionActive = false;
+static bool g_worldTransitionRequiresWorld = true;
+static volatile LONG g_worldTransitionReadyPolls = 0;
+static Mutex g_worldTransitionMutex;
 static DWORD g_lastChestStealerMappingLogMs = 0;
 static DWORD g_lastChestStealerSkipLogMs = 0;
 // NOTE: g_getItemMethod, g_getDisplayNameMethod, g_getUnlocalizedNameMethod,
@@ -1279,8 +1333,31 @@ void InitLogPath(HMODULE hModule) {
 }
 
 void Log(const std::string& msg) {
+    // Several threads log (render, state reader, scan worker, socket). Each call opens
+    // its own stream, so two concurrent appends interleaved mid-line and produced the
+    // torn fragments ("18 player/ClientLevel;") that made bridge_debug.log unreadable.
+    // The mutex is a leaf lock: nothing is acquired while it is held.
+    static Mutex s_logMutex;
+    LockGuard lk(s_logMutex);
     std::ofstream f(g_logPath.c_str(), std::ios_base::app);
     f << "[Bridge] " << msg << std::endl;
+}
+
+static void ObserveExclusiveResource(lc::ExclusiveResource resource,
+                                     lc::ExclusiveOwner owner) {
+    lc::ExclusiveResourceArbiter::Attempt attempt =
+        g_exclusiveArbiter.ObserveAttempt(resource, owner);
+    if (!attempt.conflict) return;
+
+    static std::atomic<DWORD> lastConflictLogMs(0);
+    const DWORD now = GetTickCount();
+    DWORD last = lastConflictLogMs.load(std::memory_order_relaxed);
+    if (now - last < 2000) return;
+    if (!lastConflictLogMs.compare_exchange_strong(last, now)) return;
+    Log(std::string("Resource conflict (shadow): ")
+        + lc::ExclusiveResourceName(resource) + " held by "
+        + lc::ExclusiveOwnerName(attempt.previous) + ", claimed by "
+        + lc::ExclusiveOwnerName(owner));
 }
 
 static bool NativePerfDiagnosticsEnabled()
@@ -1478,10 +1555,30 @@ std::string JsonEscape(const std::string& s) {
         case '\n': out += "\\n"; break;
         case '\r': out += "\\r"; break;
         case '\t': out += "\\t"; break;
-        default: out += c; break;
+        default:
+            // A JSON string cannot carry a raw control byte: the host's parser
+            // rejects the whole document, so one stray byte from a server's action
+            // bar would stop every state update until it scrolled away.
+            if (static_cast<unsigned char>(c) < 0x20) {
+                char escaped[8];
+                snprintf(escaped, sizeof(escaped), "\\u%04x", (unsigned)(unsigned char)c);
+                out += escaped;
+            } else {
+                out += c;
+            }
+            break;
         }
     }
     return out;
+}
+
+// JSON has no NaN or Infinity literal, so one such value makes the whole line
+// unparsable and the host drops every state line until it goes away. A NaN
+// coordinate happens in 1.8.9 (a bad velocity packet, a broken plugin, a
+// teleport mid-move), so a value that cannot be written is published as the
+// neutral one instead of taking the session's telemetry down with it.
+static double JsonFiniteNumber(double value, double fallback) {
+    return std::isfinite(value) ? value : fallback;
 }
 
 // ===================== JNI HELPERS =====================
@@ -1548,6 +1645,70 @@ jclass LoadClassWithLoader(JNIEnv* env, jobject cl, const char* name) {
     env->DeleteLocalRef(cCL);
     if (env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
     return cls;
+}
+
+// First of the candidates that this client's loader actually has. loadClass runs no
+// static initialiser, so probing a not-yet-loaded class here is free.
+static std::string FirstLoadableClassName(JNIEnv* env, jobject gcl, const char* const* names) {
+    if (!env || !gcl) return std::string();
+    for (int i = 0; names[i]; ++i) {
+        jclass c = LoadClassWithLoader(env, gcl, names[i]);
+        if (!c) continue;
+        env->DeleteLocalRef(c);
+        return std::string(names[i]);
+    }
+    return std::string();
+}
+
+// Resolve the session helper as soon as the game loader is known, instead of on the
+// first account command, and hand it the connect-path names this client resolves.
+// Never sleeps and never runs on the render thread; an unready loader leaves the
+// helper unloaded and the socket-thread load retries later.
+static void WarmLoadSessionHelper(JNIEnv* env, jobject gcl, const std::string& mcName) {
+    if (!env || !gcl) return;
+    if (!AccountCommandRouter::LoadHelper(env, gcl, mcName.empty() ? nullptr : mcName.c_str()))
+        return;
+
+    const char* connectNames[] = {
+        "net.minecraft.client.multiplayer.GuiConnecting",
+        "net.minecraft.client.gui.GuiConnecting",
+        "net.minecraft.client.gui.screens.ConnectScreen",
+        nullptr
+    };
+    const char* addressNames[] = {
+        "net.minecraft.client.multiplayer.ServerAddress",
+        "net.minecraft.client.multiplayer.resolver.ServerAddress",
+        nullptr
+    };
+    const char* dataNames[] = {
+        "net.minecraft.client.multiplayer.ServerData",
+        nullptr
+    };
+    const std::string connect = FirstLoadableClassName(env, gcl, connectNames);
+    const std::string address = FirstLoadableClassName(env, gcl, addressNames);
+    const std::string data = FirstLoadableClassName(env, gcl, dataNames);
+
+    // hintConnect() is static synchronized, so calling it on every pass would park this
+    // thread on the helper monitor while a session command holds it across its 4 s
+    // game-thread await. Re-hint only when a resolved name changed; the compare and the
+    // store stay out of the JNI call so the monitor is never taken under the lock.
+    {
+        LockGuard lk(g_mcClassNameMutex);
+        if (g_connectHintTaken && connect == g_connectHint
+                && address == g_serverAddressHint && data == g_serverDataHint) {
+            return;
+        }
+    }
+    AccountCommandRouter::HintConnectPath(
+        env,
+        connect.empty() ? nullptr : connect.c_str(),
+        address.empty() ? nullptr : address.c_str(),
+        data.empty() ? nullptr : data.c_str());
+    LockGuard lk(g_mcClassNameMutex);
+    g_connectHintTaken = true;
+    g_connectHint = connect;
+    g_serverAddressHint = address;
+    g_serverDataHint = data;
 }
 
 // ===================== CLASS DISCOVERY =====================
@@ -2011,6 +2172,11 @@ bool DiscoverMappings(JNIEnv* env) {
 
     g_mcClass = (jclass)env->NewGlobalRef(mcClass);
     g_mcInstance = env->NewGlobalRef(mcInst);
+    {
+        LockGuard lk(g_mcClassNameMutex);
+        g_mcClassName = mcName;
+    }
+    WarmLoadSessionHelper(env, gcl, mcName);
     if (g_mcInstance && g_thePlayerField)
         ka_premotion::BindMcPlayerLookup(g_mcInstance, g_thePlayerField);
     
@@ -4452,6 +4618,7 @@ static void KillAuraResetState() {
     g_killAuraAimFracZ = 0.5f;
     g_killAuraNextAimPointMs = 0;
     g_killAuraPrevValid = false;
+    g_exclusiveArbiter.Release(lc::ExclusiveResource::UseItem, lc::ExclusiveOwner::KillAuraBlock);
     ka_premotion::SetSilentCombatAngles(false, 0.0f, 0.0f, 0.0f, false);
 }
 
@@ -5396,11 +5563,18 @@ static bool KillAuraPremotionTickGate(JNIEnv* env, jobject selfObj) {
             acted = KillAuraStopBlockLegacy(env, selfObj);
         }
         g_killAuraAutoBlockState = killaura::AutoBlockState();
+        g_exclusiveArbiter.Release(lc::ExclusiveResource::UseItem, lc::ExclusiveOwner::KillAuraBlock);
         { LockGuard lk(g_killAuraUnavailableMutex); g_killAuraBlocking = false; }
         return !acted;
     }
 
     killaura::AutoBlockResult result = killaura::StepAutoBlock(g_killAuraAutoBlockState, input);
+    const uint32_t useActions = killaura::ACTION_START_BLOCK | killaura::ACTION_INTERACT;
+    if ((result.actions & useActions) != 0) {
+        ObserveExclusiveResource(lc::ExclusiveResource::UseItem, lc::ExclusiveOwner::KillAuraBlock);
+    } else if ((result.actions & killaura::ACTION_STOP_BLOCK) != 0) {
+        g_exclusiveArbiter.Release(lc::ExclusiveResource::UseItem, lc::ExclusiveOwner::KillAuraBlock);
+    }
     { LockGuard lk(g_killAuraUnavailableMutex); g_killAuraBlocking = g_killAuraAutoBlockState.isBlocking; }
 
     if ((result.actions & killaura::ACTION_BLINK_ON) != 0) {
@@ -5771,6 +5945,23 @@ static void UpdateKillAuraLegacy(JNIEnv* env, const Config& cfg) {
     { LockGuard lk(g_killAuraUnavailableMutex);
         g_killAuraHasTarget = haveChosen && chosenEnt;
         g_killAuraBlocking = g_killAuraAutoBlockState.isBlocking;
+        g_killAuraPhase18 = !haveChosen ? killaura::KA_PHASE_NO_TARGET
+            : (g_killAuraAutoBlockState.isBlocking ? killaura::KA_PHASE_BLOCKING
+            : (g_killAuraAttackDelayMs > 0 ? killaura::KA_PHASE_COOLDOWN
+            : killaura::KA_PHASE_ROTATING));
+    }
+    {
+        int phaseNow = 0;
+        { LockGuard lk(g_killAuraUnavailableMutex); phaseNow = g_killAuraPhase18; }
+        static int s_lastPhase18 = -1;
+        static DWORD s_lastPhaseLogMs18 = 0;
+        const DWORD phaseNowMs = GetTickCount();
+        if (phaseNow != s_lastPhase18 &&
+            (s_lastPhaseLogMs18 == 0 || phaseNowMs - s_lastPhaseLogMs18 >= 2000)) {
+            s_lastPhase18 = phaseNow;
+            s_lastPhaseLogMs18 = phaseNowMs;
+            Log(std::string("KillAura phase: ") + killaura::KillAuraPhaseName(phaseNow));
+        }
     }
     if (haveCur && haveBest && curRangeTier > bestRangeTier) haveCur = false;
 
@@ -7610,19 +7801,38 @@ static bool SetSneakKeyBindingState(JNIEnv* env, bool pressed) {
 
 static void SetSpeedBridgeSneak(JNIEnv* env, bool pressed) {
     if (SetSneakKeyBindingState(env, pressed)) {
-        g_speedBridgeManagingSneak = true;
+        g_speedBridgeManagingSneak = pressed;
+        if (!pressed) g_speedBridgeReleasePending = false;
+        return;
+    }
+    if (!pressed && g_speedBridgeManagingSneak) {
+        g_speedBridgeReleasePending = true;
     }
 }
 
 static void ReleaseSpeedBridgeSneak(JNIEnv* env) {
-    if (!g_speedBridgeManagingSneak) return;
+    if (!g_speedBridgeManagingSneak) {
+        g_speedBridgeReleasePending = false;
+        return;
+    }
     if (IsConfiguredSneakPhysicallyDown(env)) {
         g_speedBridgeManagingSneak = false;
+        g_speedBridgeReleasePending = false;
         return;
     }
 
-    SetSneakKeyBindingState(env, false);
-    g_speedBridgeManagingSneak = false;
+    if (SetSneakKeyBindingState(env, false)) {
+        g_speedBridgeManagingSneak = false;
+        g_speedBridgeReleasePending = false;
+        return;
+    }
+
+    // Keep ownership until the release write is confirmed. Clearing it here
+    // would leave a synthetic sneak latched with no owner to retry it.
+    if (!g_speedBridgeReleasePending) {
+        g_speedBridgeReleasePending = true;
+        Log("SpeedBridge: sneak release pending; retrying on the next tick.");
+    }
 }
 
 static void ResetSpeedBridgeMovementTracking() {
@@ -8294,49 +8504,6 @@ static void UpdateSpeedBridge(JNIEnv* env, const Config& cfg, const GameState& s
     }
 }
 
-static unsigned int ChestStealerRand() {
-    if (g_chestStealerRng == 0xA0C0123u) {
-        g_chestStealerRng ^= (unsigned int)GetTickCount();
-        if (g_chestStealerRng == 0) g_chestStealerRng = 0x6D2B79F5u;
-    }
-    unsigned int x = g_chestStealerRng;
-    x ^= x << 13;
-    x ^= x >> 17;
-    x ^= x << 5;
-    g_chestStealerRng = x ? x : 0x6D2B79F5u;
-    return g_chestStealerRng;
-}
-
-static int ChestStealerRandRange(int minVal, int maxVal) {
-    if (maxVal <= minVal) return minVal;
-    unsigned int span = (unsigned int)(maxVal - minVal + 1);
-    return minVal + (int)(ChestStealerRand() % span);
-}
-
-static void ShuffleChestStealerSlots(std::vector<int>& slots) {
-    for (int i = (int)slots.size() - 1; i > 0; --i) {
-        int j = ChestStealerRandRange(0, i);
-        std::swap(slots[i], slots[j]);
-    }
-}
-
-static int NextChestStealerDelayMs(const Config& cfg) {
-    int baseDelay = (std::max)(50, (std::min)(500, cfg.chestStealerDelayMs));
-    baseDelay = (std::max)(180, baseDelay);
-    int variance = (std::max)(70, baseDelay / 2);
-    int delay = baseDelay + ChestStealerRandRange(-variance, variance);
-    return (std::max)(160, (std::min)(900, delay));
-}
-
-static void ResetChestStealerRuntime() {
-    g_chestStealerNextClickMs = 0;
-    g_chestStealerWindowId = -1;
-    g_chestStealerLastSlotCount = -1;
-    g_chestStealerWindowOpenedMs = 0;
-    g_chestStealerWindowCompleted = false;
-    g_chestStealerSlots.clear();
-}
-
 static void LogChestStealerMappingMissing(const char* detail) {
     DWORD now = GetTickCount();
     if (now - g_lastChestStealerMappingLogMs < 5000) return;
@@ -8401,8 +8568,10 @@ static void UpdateFastPlaceLegacy(JNIEnv* env, const Config& cfg, const GameStat
     jint delay = env->GetIntField(g_mcInstance, g_rightClickDelayTimerField);
     if (env->ExceptionCheck()) { env->ExceptionClear(); return; }
     if (delay > 0) {
+        ObserveExclusiveResource(lc::ExclusiveResource::UseItem, lc::ExclusiveOwner::FastPlace);
         env->SetIntField(g_mcInstance, g_rightClickDelayTimerField, 0);
         if (env->ExceptionCheck()) env->ExceptionClear();
+        g_exclusiveArbiter.Release(lc::ExclusiveResource::UseItem, lc::ExclusiveOwner::FastPlace);
     }
 }
 
@@ -8712,6 +8881,7 @@ static jmethodID g_autoToolGetIdFromBlock18 = nullptr;
 
 static void ResetAutoToolLegacyJniCaches(JNIEnv* env) {
     g_autoToolState18.Reset();
+    g_exclusiveArbiter.Release(lc::ExclusiveResource::Hotbar, lc::ExclusiveOwner::AutoTool);
     g_autoToolGetStrVsBlock18 = nullptr;
     g_autoToolGetItem18 = nullptr;
     g_autoToolGetIdFromItem18 = nullptr;
@@ -9001,6 +9171,7 @@ static void ApplyAutoToolSlotLegacy(JNIEnv* env, jobject inventory, int targetSl
 static void UpdateAutoToolLegacy(JNIEnv* env, const Config& cfg, const GameState& state) {
     if (!cfg.autoToolEnabled) {
         g_autoToolState18.Reset();
+        g_exclusiveArbiter.Release(lc::ExclusiveResource::Hotbar, lc::ExclusiveOwner::AutoTool);
         return;
     }
 
@@ -9205,7 +9376,12 @@ static void UpdateAutoToolLegacy(JNIEnv* env, const Config& cfg, const GameState
 
     autotool::AutoToolAction action = autotool::UpdateAutoToolState(g_autoToolState18, coreCfg, input);
     if (action.switchSlot && action.targetSlot >= 0 && action.targetSlot < 9) {
+        ObserveExclusiveResource(lc::ExclusiveResource::Hotbar, lc::ExclusiveOwner::AutoTool);
         ApplyAutoToolSlotLegacy(env, inventory, action.targetSlot);
+    }
+    if (!g_autoToolState18.swapped && !g_autoToolState18.swapPending &&
+        !g_autoToolState18.swapBackPending) {
+        g_exclusiveArbiter.Release(lc::ExclusiveResource::Hotbar, lc::ExclusiveOwner::AutoTool);
     }
 
     env->PopLocalFrame(nullptr);
@@ -10026,183 +10202,6 @@ static std::string BuildRefillStateJson(JNIEnv* env, bool enabled) {
     return out.str();
 }
 
-static void UpdateChestStealer(JNIEnv* env, const Config& cfg) {
-    if (!cfg.chestStealer) {
-        ResetChestStealerRuntime();
-        return;
-    }
-    if (!env || !g_mcInstance || !g_currentScreenField || !g_thePlayerField) return;
-
-    DWORD now = GetTickCount();
-    if (now < g_chestStealerNextClickMs) return;
-
-    if (env->PushLocalFrame(128) < 0) {
-        if (env->ExceptionCheck()) env->ExceptionClear();
-        return;
-    }
-
-    jobject currentScreen = env->GetObjectField(g_mcInstance, g_currentScreenField);
-    if (env->ExceptionCheck()) { env->ExceptionClear(); currentScreen = nullptr; }
-    if (!currentScreen || !IsLegacyChestScreen(env, currentScreen)) {
-        ResetChestStealerRuntime();
-        env->PopLocalFrame(nullptr);
-        return;
-    }
-
-    if (!ResolveChestStealerMappings(env, currentScreen)) {
-        LogChestStealerMappingMissing("playerController/windowClick/container/slot mappings");
-        env->PopLocalFrame(nullptr);
-        return;
-    }
-
-    jobject player = env->GetObjectField(g_mcInstance, g_thePlayerField);
-    jobject controller = env->GetObjectField(g_mcInstance, g_playerControllerField);
-    jobject container = env->GetObjectField(currentScreen, g_guiContainerInventorySlotsField);
-    if (env->ExceptionCheck()) { env->ExceptionClear(); player = nullptr; controller = nullptr; container = nullptr; }
-    if (!player || !controller || !container) {
-        ResetChestStealerRuntime();
-        env->PopLocalFrame(nullptr);
-        return;
-    }
-
-    int windowId = env->GetIntField(container, g_containerWindowIdField);
-    if (env->ExceptionCheck()) { env->ExceptionClear(); ResetChestStealerRuntime(); env->PopLocalFrame(nullptr); return; }
-
-    std::string title = GetLegacyChestScreenTitle(env, currentScreen);
-    std::string titleLower = ChestStealerLower(title);
-    bool titleIsMenu = false;
-    if (cfg.chestStealerTitleCheck && !titleLower.empty()) {
-        if (titleLower.find("shop") != std::string::npos ||
-            titleLower.find("selector") != std::string::npos ||
-            titleLower.find("upgrade") != std::string::npos ||
-            titleLower.find("menu") != std::string::npos ||
-            titleLower.find("game") != std::string::npos ||
-            titleLower.find("cosmetic") != std::string::npos ||
-            titleLower.find("play") != std::string::npos ||
-            titleLower.find("lobby") != std::string::npos ||
-            titleLower.find("teleport") != std::string::npos ||
-            titleLower.find("profile") != std::string::npos ||
-            titleLower.find("quest") != std::string::npos ||
-            titleLower.find("store") != std::string::npos) {
-            titleIsMenu = true;
-        }
-    }
-
-    bool physicalCheckFailed = cfg.chestStealerPhysicalCheck && !HasPhysicalChestNearPlayer(env, player);
-    if (titleIsMenu || physicalCheckFailed) {
-        if (title.empty()) title = "unknown";
-        LogChestStealerSkippedMenu(title + (titleIsMenu ? " [menu-title]" : " [no-chest-nearby]"));
-        g_chestStealerWindowId = windowId;
-        g_chestStealerWindowCompleted = true;
-        g_chestStealerNextClickMs = now + 1000;
-        env->PopLocalFrame(nullptr);
-        return;
-    }
-
-    jobject slotsList = env->GetObjectField(container, g_containerInventorySlotsField);
-    if (env->ExceptionCheck()) { env->ExceptionClear(); slotsList = nullptr; }
-    if (!slotsList) {
-        ResetChestStealerRuntime();
-        env->PopLocalFrame(nullptr);
-        return;
-    }
-
-    int size = env->CallIntMethod(slotsList, g_listSizeMethod);
-    if (env->ExceptionCheck()) { env->ExceptionClear(); size = 0; }
-    int chestSlotCount = size - 36;
-    if (chestSlotCount <= 0) {
-        ResetChestStealerRuntime();
-        env->PopLocalFrame(nullptr);
-        return;
-    }
-
-    bool newWindow = (windowId != g_chestStealerWindowId || chestSlotCount != g_chestStealerLastSlotCount);
-    if (newWindow) {
-        g_chestStealerWindowId = windowId;
-        g_chestStealerLastSlotCount = chestSlotCount;
-        g_chestStealerWindowOpenedMs = now;
-        g_chestStealerWindowCompleted = false;
-        g_chestStealerNextClickMs = now + (DWORD)ChestStealerRandRange(350, 700);
-        g_chestStealerSlots.clear();
-        env->PopLocalFrame(nullptr);
-        return;
-    }
-
-    if (g_chestStealerWindowCompleted) {
-        env->PopLocalFrame(nullptr);
-        return;
-    }
-
-    if (g_chestStealerWindowOpenedMs > 0 && now - g_chestStealerWindowOpenedMs < 350) {
-        g_chestStealerNextClickMs = g_chestStealerWindowOpenedMs + 350;
-        env->PopLocalFrame(nullptr);
-        return;
-    }
-
-    if (g_chestStealerSlots.empty()) {
-        g_chestStealerSlots.clear();
-        int customItemCount = 0;
-        int totalItemCount = 0;
-        for (int i = 0; i < chestSlotCount; ++i) {
-            jobject slot = env->CallObjectMethod(slotsList, g_listGetMethod, i);
-            if (env->ExceptionCheck()) { env->ExceptionClear(); slot = nullptr; }
-            if (!slot) continue;
-
-            bool hasStack = env->CallBooleanMethod(slot, g_slotGetHasStackMethod) != JNI_FALSE;
-            if (env->ExceptionCheck()) { env->ExceptionClear(); hasStack = false; }
-            if (hasStack) {
-                totalItemCount++;
-                if (g_slotGetStackMethod) {
-                    jobject stack = env->CallObjectMethod(slot, g_slotGetStackMethod);
-                    if (env->ExceptionCheck()) { env->ExceptionClear(); stack = nullptr; }
-                    if (stack) {
-                        if (g_itemStackHasDisplayNameMethod) {
-                            bool isCustom = env->CallBooleanMethod(stack, g_itemStackHasDisplayNameMethod) != JNI_FALSE;
-                            if (env->ExceptionCheck()) { env->ExceptionClear(); isCustom = false; }
-                            if (isCustom) customItemCount++;
-                        }
-                        env->DeleteLocalRef(stack);
-                    }
-                }
-                int slotNumber = g_slotSlotNumberField ? env->GetIntField(slot, g_slotSlotNumberField) : i;
-                if (env->ExceptionCheck()) { env->ExceptionClear(); slotNumber = i; }
-                g_chestStealerSlots.push_back(slotNumber);
-            }
-            env->DeleteLocalRef(slot);
-        }
-
-        if (cfg.chestStealerCustomItemsCheck && totalItemCount > 0 && (((float)customItemCount / (float)totalItemCount) > 0.5f)) {
-            if (title.empty()) title = "unknown";
-            LogChestStealerSkippedMenu(title + " [custom-items]");
-            g_chestStealerWindowCompleted = true;
-            g_chestStealerNextClickMs = now + 1000;
-            g_chestStealerSlots.clear();
-            env->PopLocalFrame(nullptr);
-            return;
-        }
-
-        ShuffleChestStealerSlots(g_chestStealerSlots);
-    }
-
-    if (g_chestStealerSlots.empty()) {
-        g_chestStealerWindowCompleted = true;
-        env->PopLocalFrame(nullptr);
-        return;
-    }
-
-    int slotNumber = g_chestStealerSlots.back();
-    g_chestStealerSlots.pop_back();
-
-    (void)controller;
-    (void)slotNumber;
-    // Chest Stealer uses C# physical mouse input. Do not emit direct windowClick packets here.
-    if (g_chestStealerSlots.empty()) {
-        g_chestStealerWindowCompleted = true;
-    }
-    g_chestStealerNextClickMs = now + (DWORD)NextChestStealerDelayMs(cfg);
-    env->PopLocalFrame(nullptr);
-}
-
 static bool SetAutoRodLegacySlot(JNIEnv* env, jobject inventory, int slot) {
     if (!env || !inventory || !g_autoRodCurrentItemField18 ||
         slot < 0 || slot >= autorod::kHotbarSlots) return false;
@@ -10503,6 +10502,19 @@ static void ProcessPendingAutoRodLegacy(JNIEnv* env, const Config& cfg, const Ga
         g_autoRodTransaction18.cancelled = true;
     }
 
+    if (g_autoRodTransaction18.phase == AutoRodLegacyAborting) {
+        bool restored = RestoreAutoRodLegacySlot(env, inventory);
+        if (restored) {
+            g_autoRodTransaction18.phase = AutoRodLegacyRestoring;
+            g_autoRodTransaction18.phaseStartTick = currentTick;
+        } else if (timedOut) {
+            LogAutoRodLegacyRateLimited("abort restore failed at safety timeout");
+            ResetAutoRodLegacyTransaction();
+        }
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
     if (g_autoRodTransaction18.phase == AutoRodLegacySelected) {
         const bool selectDelayElapsed = autorod::HasElapsedTicks(
             currentTick, g_autoRodTransaction18.phaseStartTick, autorod::kSelectToUseTicks);
@@ -10512,13 +10524,8 @@ static void ProcessPendingAutoRodLegacy(JNIEnv* env, const Config& cfg, const Ga
         }
 
         if (g_autoRodTransaction18.cancelled || timedOut) {
-            bool restored = RestoreAutoRodLegacySlot(env, inventory);
-            if (restored) {
-                g_autoRodTransaction18.phase = AutoRodLegacyRestoring;
-                g_autoRodTransaction18.phaseStartTick = currentTick;
-            } else if (timedOut) {
-                ResetAutoRodLegacyTransaction();
-            }
+            g_autoRodTransaction18.phase = AutoRodLegacyAborting;
+            g_autoRodTransaction18.phaseStartTick = currentTick;
             env->PopLocalFrame(nullptr);
             return;
         }
@@ -10540,7 +10547,13 @@ static void ProcessPendingAutoRodLegacy(JNIEnv* env, const Config& cfg, const Ga
             currentTick, g_autoRodTransaction18.phaseStartTick,
             g_autoRodTransaction18.extensionTicks,
             g_autoRodTransaction18.holdToExtend, releaseRequested);
-        if (!restoreDelayElapsed && !timedOut) {
+        if (timedOut) {
+            g_autoRodTransaction18.phase = AutoRodLegacyAborting;
+            g_autoRodTransaction18.phaseStartTick = currentTick;
+            env->PopLocalFrame(nullptr);
+            return;
+        }
+        if (!restoreDelayElapsed) {
             env->PopLocalFrame(nullptr);
             return;
         }
@@ -10549,9 +10562,6 @@ static void ProcessPendingAutoRodLegacy(JNIEnv* env, const Config& cfg, const Ga
         if (restored) {
             g_autoRodTransaction18.phase = AutoRodLegacyRestoring;
             g_autoRodTransaction18.phaseStartTick = currentTick;
-        } else if (timedOut) {
-            LogAutoRodLegacyRateLimited("restore field write failed at safety timeout");
-            ResetAutoRodLegacyTransaction();
         }
         env->PopLocalFrame(nullptr);
         return;
@@ -10630,6 +10640,7 @@ static void ExecuteAutoRodLegacy(JNIEnv* env, const Config& cfg, const GameState
     }
 
     g_autoRodTransaction18.phase = AutoRodLegacySelected;
+    ObserveExclusiveResource(lc::ExclusiveResource::Hotbar, lc::ExclusiveOwner::AutoRod);
     g_autoRodTransaction18.originalSlot = originalSlot;
     g_autoRodTransaction18.targetSlot = targetSlot;
     g_autoRodTransaction18.phaseStartTick = selectTick;
@@ -10765,6 +10776,21 @@ static void ProcessPendingThrowPotLegacy(JNIEnv* env, const Config& cfg, const G
         g_throwPotTransaction18.cancelled = true;
     }
 
+    if (g_throwPotTransaction18.phase == ThrowPotLegacyAborting) {
+        env->SetIntField(inventory, g_autoRodCurrentItemField18,
+            g_throwPotTransaction18.originalSlot);
+        const bool restored = !env->ExceptionCheck();
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        if (restored) {
+            g_throwPotTransaction18.phase = ThrowPotLegacyRestoring;
+            g_throwPotTransaction18.phaseStartTick = currentTick;
+        } else if (timedOut) {
+            ResetThrowPotLegacyTransaction();
+        }
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
     if (g_throwPotTransaction18.phase == ThrowPotLegacySelected) {
         const bool selectDelayElapsed = throwpot::HasElapsedTicks(
             currentTick, g_throwPotTransaction18.phaseStartTick, autorod::kSelectToUseTicks);
@@ -10774,16 +10800,8 @@ static void ProcessPendingThrowPotLegacy(JNIEnv* env, const Config& cfg, const G
         }
 
         if (g_throwPotTransaction18.cancelled || timedOut) {
-            env->SetIntField(inventory, g_autoRodCurrentItemField18,
-                g_throwPotTransaction18.originalSlot);
-            const bool restored = !env->ExceptionCheck();
-            if (env->ExceptionCheck()) env->ExceptionClear();
-            if (restored) {
-                g_throwPotTransaction18.phase = ThrowPotLegacyRestoring;
-                g_throwPotTransaction18.phaseStartTick = currentTick;
-            } else if (timedOut) {
-                ResetThrowPotLegacyTransaction();
-            }
+            g_throwPotTransaction18.phase = ThrowPotLegacyAborting;
+            g_throwPotTransaction18.phaseStartTick = currentTick;
             env->PopLocalFrame(nullptr);
             return;
         }
@@ -10801,7 +10819,13 @@ static void ProcessPendingThrowPotLegacy(JNIEnv* env, const Config& cfg, const G
     if (g_throwPotTransaction18.phase == ThrowPotLegacyUsed) {
         const bool restoreDelayElapsed = throwpot::HasElapsedTicks(
             currentTick, g_throwPotTransaction18.phaseStartTick, throwpot::kUseToRestoreTicks);
-        if (!restoreDelayElapsed && !timedOut) {
+        if (timedOut) {
+            g_throwPotTransaction18.phase = ThrowPotLegacyAborting;
+            g_throwPotTransaction18.phaseStartTick = currentTick;
+            env->PopLocalFrame(nullptr);
+            return;
+        }
+        if (!restoreDelayElapsed) {
             env->PopLocalFrame(nullptr);
             return;
         }
@@ -10809,7 +10833,6 @@ static void ProcessPendingThrowPotLegacy(JNIEnv* env, const Config& cfg, const G
         env->SetIntField(inventory, g_autoRodCurrentItemField18, g_throwPotTransaction18.originalSlot);
         if (env->ExceptionCheck()) {
             env->ExceptionClear();
-            if (timedOut) ResetThrowPotLegacyTransaction();
             env->PopLocalFrame(nullptr);
             return;
         }
@@ -10887,6 +10910,7 @@ static void ExecuteThrowPotLegacy(JNIEnv* env, const Config& cfg, const GameStat
     }
 
     g_throwPotTransaction18.phase = ThrowPotLegacySelected;
+    ObserveExclusiveResource(lc::ExclusiveResource::Hotbar, lc::ExclusiveOwner::ThrowPot);
     g_throwPotTransaction18.originalSlot = originalSlot;
     g_throwPotTransaction18.targetSlot = targetSlot;
     g_throwPotTransaction18.phaseStartTick = selectTick;
@@ -10975,6 +10999,21 @@ static void ProcessPendingAutoHealLegacy(JNIEnv* env, const Config& cfg, const G
         g_autoHealTransaction18.cancelled = true;
     }
 
+    if (g_autoHealTransaction18.phase == AutoHealLegacyAborting) {
+        env->SetIntField(inventory, g_autoRodCurrentItemField18,
+            g_autoHealTransaction18.originalSlot);
+        const bool restored = !env->ExceptionCheck();
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        if (restored) {
+            g_autoHealTransaction18.phase = AutoHealLegacyRestoring;
+            g_autoHealTransaction18.phaseStartTick = currentTick;
+        } else if (timedOut) {
+            ResetAutoHealLegacyTransaction();
+        }
+        env->PopLocalFrame(nullptr);
+        return;
+    }
+
     if (g_autoHealTransaction18.phase == AutoHealLegacySelected) {
         const bool selectDelayElapsed = throwpot::HasElapsedTicks(
             currentTick, g_autoHealTransaction18.phaseStartTick, autorod::kSelectToUseTicks);
@@ -10984,16 +11023,8 @@ static void ProcessPendingAutoHealLegacy(JNIEnv* env, const Config& cfg, const G
         }
 
         if (g_autoHealTransaction18.cancelled || timedOut) {
-            env->SetIntField(inventory, g_autoRodCurrentItemField18,
-                g_autoHealTransaction18.originalSlot);
-            const bool restored = !env->ExceptionCheck();
-            if (env->ExceptionCheck()) env->ExceptionClear();
-            if (restored) {
-                g_autoHealTransaction18.phase = AutoHealLegacyRestoring;
-                g_autoHealTransaction18.phaseStartTick = currentTick;
-            } else if (timedOut) {
-                ResetAutoHealLegacyTransaction();
-            }
+            g_autoHealTransaction18.phase = AutoHealLegacyAborting;
+            g_autoHealTransaction18.phaseStartTick = currentTick;
             env->PopLocalFrame(nullptr);
             return;
         }
@@ -11010,7 +11041,13 @@ static void ProcessPendingAutoHealLegacy(JNIEnv* env, const Config& cfg, const G
     if (g_autoHealTransaction18.phase == AutoHealLegacyUsed) {
         const bool restoreDelayElapsed = throwpot::HasElapsedTicks(
             currentTick, g_autoHealTransaction18.phaseStartTick, throwpot::kUseToRestoreTicks);
-        if (!restoreDelayElapsed && !timedOut) {
+        if (timedOut) {
+            g_autoHealTransaction18.phase = AutoHealLegacyAborting;
+            g_autoHealTransaction18.phaseStartTick = currentTick;
+            env->PopLocalFrame(nullptr);
+            return;
+        }
+        if (!restoreDelayElapsed) {
             env->PopLocalFrame(nullptr);
             return;
         }
@@ -11018,7 +11055,6 @@ static void ProcessPendingAutoHealLegacy(JNIEnv* env, const Config& cfg, const G
         env->SetIntField(inventory, g_autoRodCurrentItemField18, g_autoHealTransaction18.originalSlot);
         if (env->ExceptionCheck()) {
             env->ExceptionClear();
-            if (timedOut) ResetAutoHealLegacyTransaction();
             env->PopLocalFrame(nullptr);
             return;
         }
@@ -11107,6 +11143,7 @@ static void ExecuteAutoHealLegacy(JNIEnv* env, const Config& cfg, const GameStat
 
     g_autoHealLastHealMs = nowMs;
     g_autoHealTransaction18.phase = AutoHealLegacySelected;
+    ObserveExclusiveResource(lc::ExclusiveResource::Hotbar, lc::ExclusiveOwner::AutoHeal);
     g_autoHealTransaction18.originalSlot = originalSlot;
     g_autoHealTransaction18.targetSlot = targetSlot;
     g_autoHealTransaction18.phaseStartTick = selectTick;
@@ -11182,24 +11219,31 @@ GameState ReadGameState(JNIEnv* env) {
 
     if (g_currentScreenField) {
         jobject scr = env->GetObjectField(g_mcInstance, g_currentScreenField);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); scr = nullptr; }
         s.guiOpen = (scr != nullptr);
         if (scr) {
             jclass c = env->GetObjectClass(scr);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); c = nullptr; }
             jclass classClass = env->FindClass("java/lang/Class");
-            if (classClass) {
+            if (c && classClass) {
                 jmethodID m = env->GetMethodID(classClass, "getSimpleName", "()Ljava/lang/String;");
                 if (m) {
                     jstring jn = (jstring)env->CallObjectMethod(c, m);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); jn = nullptr; }
                     if (jn) {
-                        const char* cn = env->GetStringUTFChars(jn, nullptr); 
-                        s.screenName = cn;
-                        env->ReleaseStringUTFChars(jn, cn);
+                        const char* cn = env->GetStringUTFChars(jn, nullptr);
+                        if (cn) {
+                            s.screenName = cn;
+                            env->ReleaseStringUTFChars(jn, cn);
+                        } else if (env->ExceptionCheck()) {
+                            env->ExceptionClear();
+                        }
                         env->DeleteLocalRef(jn);
                     }
                 }
                 env->DeleteLocalRef(classClass);
             }
-            env->DeleteLocalRef(c);
+            if (c) env->DeleteLocalRef(c);
             env->DeleteLocalRef(scr);
         } else {
             s.screenName = "none";
@@ -11222,6 +11266,11 @@ GameState ReadGameState(JNIEnv* env) {
             if (g_posZField) s.posZ = env->GetDoubleField(player, g_posZField);
             if (g_rotationPitchField) s.pitch = env->GetFloatField(player, g_rotationPitchField);
             if (g_rotationYawField) s.rotationYaw = env->GetFloatField(player, g_rotationYawField);
+            // A field id that stopped resolving (a remap, an unloaded class) throws
+            // here. Left pending it would silently turn every later call in this
+            // function into a no-op, so the session would keep publishing a state
+            // that never changes and never says why.
+            if (env->ExceptionCheck()) { env->ExceptionClear(); }
 
             // Check current item
             s.holdingBlock = false;
@@ -11247,12 +11296,16 @@ GameState ReadGameState(JNIEnv* env) {
 
                     if (g_getCurrentItemMethod) {
                         jobject itemStack = env->CallObjectMethod(inventory, g_getCurrentItemMethod);
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); itemStack = nullptr; }
                         if (itemStack) {
                             jclass stackClass = env->GetObjectClass(itemStack);
-                            jmethodID getItem = env->GetMethodID(stackClass, "getItem", "()Lnet/minecraft/item/Item;");
-                            if (!getItem) { env->ExceptionClear(); getItem = env->GetMethodID(stackClass, "func_77973_b", "()Lnet/minecraft/item/Item;"); }
+                            if (env->ExceptionCheck()) { env->ExceptionClear(); stackClass = nullptr; }
+                            jmethodID getItem = stackClass
+                                ? env->GetMethodID(stackClass, "getItem", "()Lnet/minecraft/item/Item;")
+                                : nullptr;
+                            if (!getItem) { env->ExceptionClear(); getItem = stackClass ? env->GetMethodID(stackClass, "func_77973_b", "()Lnet/minecraft/item/Item;") : nullptr; }
                             if (!getItem) env->ExceptionClear();
-                            env->DeleteLocalRef(stackClass);
+                            if (stackClass) env->DeleteLocalRef(stackClass);
                             
                             if (getItem) {
                                 jobject item = env->CallObjectMethod(itemStack, getItem);
@@ -11620,7 +11673,10 @@ extern "C" __declspec(dllexport) void Detach() {
     CreateThread(nullptr, 0, [](LPVOID) -> DWORD {
         if (!WaitForOwnedThreadExit(g_legacyScanThreadHandle, "overlay scan thread", 5000) ||
             !WaitForOwnedThreadExit(g_legacyFastPollThreadHandle, "fast poll thread", 5000) ||
-            !WaitForLegacyMainThreadExit(5000)) {
+            // A setSession already in flight can sit in the helper's 4 s
+            // runOnGameThread await plus a follow-up read, so give this thread more
+            // than one 5 s budget before giving up on a clean teardown.
+            !WaitForLegacyMainThreadExit(15000)) {
             // Permit a later Detach call to retry after a transient server/JNI
     // stall rather than permanently latching a failed teardown.
             InterlockedExchange(&g_legacyDetachRequested, 0);
@@ -14116,8 +14172,12 @@ static void UpdatePlayerListOverlayLegacy(JNIEnv* env, const Config& config) {
     }
 
     constexpr int kEntityJsonCap = 20;
+    // `aimAssist` is in this list because it consumes the entity telemetry this loop
+    // produces: without it the loop stops after the first kEntityJsonCap entities in
+    // world-list order, so on a populated server the entity the crosshair is over is
+    // routinely missing from `entities` and aim assist has nothing to steer towards.
     const int entityProcessCap = (fightStatusEnabled || config.closestPlayerInfo ||
-        config.fireballWarning ||
+        config.fireballWarning || config.aimAssist ||
         hideVanillaTags || g_legacyNametagSuppressionActive || nametagsEnabled)
         ? (std::max)(1, size)
         : kEntityJsonCap;
@@ -14551,7 +14611,10 @@ void RenderNametags(
     }
 }
 
-static void RenderFightStatus(int w, int h) {
+// `config` is the render thread's lock-copied snapshot, not the live global: the
+// theme name is a std::string the socket thread reassigns under g_configMutex, and
+// reading it here unserialized is a torn read of its buffer.
+static void RenderFightStatus(int w, int h, const Config& config) {
     FightStatusDrawSnapshot18 snapshot;
     { LockGuard lk(g_fightStatusMutex18); snapshot = g_fightStatusDrawSnapshot18; }
     if (!snapshot.valid || snapshot.distance > 16.0f || !snapshot.hasWorldPos) return;
@@ -14572,7 +14635,7 @@ static void RenderFightStatus(int w, int h) {
         headY >= 0.0f && headY <= h;
     if (!onScreen) return;
 
-    OverlayTheme fightTheme = ResolveOverlayTheme(g_config.guiTheme);
+    OverlayTheme fightTheme = ResolveOverlayTheme(config.guiTheme);
     ImDrawList* fg = ImGui::GetForegroundDrawList();
     const float rawHeight = std::fabs(feetY - headY);
     const float barHeight = (std::max)(48.0f, (std::min)(110.0f, rawHeight));
@@ -15281,13 +15344,33 @@ static void PublishBedPlatesFromCache18(JNIEnv* env, double px, double py, doubl
         result.push_back(std::move(d));
     }
 
+    // Diagnostics, not telemetry: this publisher runs every scan tick while a bed is
+    // in range, and the old form logged every 2 s regardless of whether anything had
+    // changed - most of a 30 s bridge_debug.log was identical "BedPlates: halves=.."
+    // repeats. Log a change only (nametag logger's static last-logged value) with the
+    // 2 s floor, so a flapping count cannot spam. Not behind the perf switch: a user's
+    // log is the only evidence we get from a session we cannot reproduce.
     static DWORD s_lastBedDiagMs = 0;
+    static int s_lastBedHalves = -1;
+    static int s_lastBedPlates = -1;
+    static int s_lastBedChunks = -1;
+    static int s_lastBedScanned = -1;
     if (now - s_lastBedDiagMs > 2000) {
-        s_lastBedDiagMs = now;
-        Log("BedPlates: halves=" + std::to_string(allBeds.size())
-            + " plates=" + std::to_string(result.size())
-            + " cachedChunks=" + std::to_string(g_bedPlatesChunkCache18.size())
-            + " scannedThisTick=" + std::to_string(scanned));
+        const int halves = (int)allBeds.size();
+        const int plates = (int)result.size();
+        const int chunks = (int)g_bedPlatesChunkCache18.size();
+        if (halves != s_lastBedHalves || plates != s_lastBedPlates ||
+            chunks != s_lastBedChunks || scanned != s_lastBedScanned) {
+            s_lastBedDiagMs = now;
+            s_lastBedHalves = halves;
+            s_lastBedPlates = plates;
+            s_lastBedChunks = chunks;
+            s_lastBedScanned = scanned;
+            Log("BedPlates: halves=" + std::to_string(halves)
+                + " plates=" + std::to_string(plates)
+                + " cachedChunks=" + std::to_string(chunks)
+                + " scannedThisTick=" + std::to_string(scanned));
+        }
     }
 
     { LockGuard lk(g_bedPlateListMutex); g_bedPlateList.swap(result); }
@@ -16006,6 +16089,108 @@ void RenderBreakProgressLegacy(int w, int h, const Config& config) {
         });
 }
 
+static bool IsWorldTransitionActive() {
+    LockGuard lk(g_worldTransitionMutex);
+    return g_worldTransitionActive;
+}
+
+static bool WorldTransitionRequiresWorld() {
+    LockGuard lk(g_worldTransitionMutex);
+    return g_worldTransitionRequiresWorld;
+}
+
+static void ResetLegacyRuntimeState(JNIEnv* env, const char* reason) {
+    CancelAutoRodRequests();
+    AbortAutoRodLegacyTransaction(env, true);
+    InterlockedExchange(&g_throwPotRequested, 0);
+    ResetThrowPotLegacyTransaction();
+    ResetAutoHealLegacyTransaction();
+    g_autoToolState18.Reset();
+    ReleaseSpeedBridgeSneak(env);
+    ResetSpeedBridgeMovementTracking();
+    ResetFightStatusState18();
+    g_exclusiveArbiter.Release(lc::ExclusiveResource::UseItem, lc::ExclusiveOwner::KillAuraBlock);
+    g_exclusiveArbiter.Release(lc::ExclusiveResource::Hotbar, lc::ExclusiveOwner::AutoTool);
+
+    { LockGuard lk(g_overlayChestsMutex18); g_overlayChests18.clear(); }
+    { LockGuard lk(g_blockEspListMutex); g_blockEspList.clear(); }
+    { LockGuard lk(g_bedPlateListMutex); g_bedPlateList.clear(); }
+    { LockGuard lk(g_blockScanJniMutex); g_blockEspChunkCache18.clear(); g_bedPlatesChunkCache18.clear(); }
+    { LockGuard lk(g_bgCamMutex18); g_bgCamState18 = BgCamState18(); }
+    { LockGuard lk(g_pixelPartyMutex); g_pixelPartySnap = PixelPartySnap(); }
+    ClearLegacyOverlayPlayers();
+    ClearLegacyTrajectory();
+    // MurderMystery owns unsynchronized JVM refs and is cleared by the overlay
+    // scan thread once the transition gate makes worldReady false.
+    { LockGuard lk(g_legacyBreaksMutex); g_legacyBreaks.clear(); }
+
+    if (reason && *reason) {
+        Log(std::string("Runtime state reset (") + reason + ")");
+    }
+}
+
+static void ScheduleWorldTransition(JNIEnv* env, const char* reason) {
+    // Suspend Premotion before world-owned JNI references can be replaced.
+    ka_premotion::SuspendForWorldChange(env);
+
+    {
+        LockGuard lk(g_worldTransitionMutex);
+        const bool wasActive = g_worldTransitionActive;
+        g_worldTransitionActive = true;
+        if (!wasActive) g_worldTransitionRequiresWorld = true;
+    }
+    InterlockedExchange(&g_worldTransitionReadyPolls, 0);
+    ResetLegacyRuntimeState(env, reason);
+}
+
+static void CancelWorldTransition(JNIEnv* env) {
+    bool wasActive = false;
+    {
+        LockGuard lk(g_worldTransitionMutex);
+        wasActive = g_worldTransitionActive;
+        g_worldTransitionActive = false;
+        g_worldTransitionRequiresWorld = true;
+    }
+    InterlockedExchange(&g_worldTransitionReadyPolls, 0);
+    if (!wasActive) return;
+
+    // Do not resume Premotion with stale KillAura gate inputs.
+    g_killAuraAutoBlockState = killaura::AutoBlockState();
+    InterlockedExchange(&g_killAuraGateArmed, 0);
+    InterlockedExchange(&g_killAuraGateHasTarget, 0);
+    InterlockedExchange(&g_killAuraGateCanBlock, 0);
+    g_killAuraHasTarget = false;
+    g_killAuraBlocking = false;
+    g_killAuraPhase18 = killaura::KA_PHASE_NO_TARGET;
+    KillAuraResetState();
+    if (env) ka_premotion::ClearPendingAttack(env);
+    ka_premotion::ResumeAfterWorldChange();
+}
+
+static bool TryCompleteWorldTransition(JNIEnv* env, bool inWorldNow) {
+    if (!env || !IsWorldTransitionActive()) return false;
+
+    const bool requiresWorld = WorldTransitionRequiresWorld();
+    if (requiresWorld) {
+        if (!inWorldNow || !HasLiveWorld(env) || !HasLivePlayer(env)) {
+            InterlockedExchange(&g_worldTransitionReadyPolls, 0);
+            return false;
+        }
+    }
+
+    const LONG readyPolls = InterlockedIncrement(&g_worldTransitionReadyPolls);
+    if (readyPolls < 3) return false;
+
+    {
+        LockGuard lk(g_worldTransitionMutex);
+        g_worldTransitionActive = false;
+    }
+    InterlockedExchange(&g_worldTransitionReadyPolls, 0);
+    ka_premotion::ResumeAfterWorldChange();
+    Log("World transition: legacy overlay/modules resumed.");
+    return true;
+}
+
 static DWORD WINAPI OverlayScanThreadProc18(LPVOID) {
     JNIEnv* env = JniEnv::Get(g_jvm);
     if (!env) return 1;
@@ -16027,6 +16212,8 @@ static DWORD WINAPI OverlayScanThreadProc18(LPVOID) {
         { LockGuard lk(g_stateMutex); stateSnap = g_gameState; }
 
         const bool inWorld = stateSnap.inWorld && g_mapped && g_mcInstance;
+        const bool worldReady = inWorld && !ShouldHideWorldRenderModules(stateSnap) &&
+            !IsWorldTransitionActive();
         const DWORD nowMs = GetTickCount();
         const bool entityProducerEnabled =
             cfg.nametags || cfg.nickHiderEnabled || cfg.closestPlayerInfo ||
@@ -16042,7 +16229,7 @@ static DWORD WINAPI OverlayScanThreadProc18(LPVOID) {
         const unsigned int playerInterval = lc::PlayerOverlayIntervalMs(cfg.aimAssist);
         {
             LockGuard overlayJni(g_renderJniMutex);
-            if (inWorld && !ShouldHideWorldRenderModules(stateSnap)) {
+            if (worldReady) {
                 if (overlayWork) {
                     if (lc::IsTelemetryIntervalDue(nowMs, lastCameraMs, lc::kOverlayCameraIntervalMs)) {
                         ReadCameraState18(env);
@@ -16114,14 +16301,14 @@ static DWORD WINAPI OverlayScanThreadProc18(LPVOID) {
         // BlockESP / BedPlates chunk scans can be very expensive during chunk reloads. Run
         // them outside g_renderJniMutex (the function self-locks on g_blockScanJniMutex) so a
         // long scan never stalls the camera / nametag / chest-ESP producers above.
-        if (inWorld && !ShouldHideWorldRenderModules(stateSnap) && overlayWork && chunkScanEnabled) {
+        if (worldReady && overlayWork && chunkScanEnabled) {
             NativePerfScope sectionScanPerf(lc::PERF_BLOCK_SCAN);
             UpdateSectionChunkScansLegacy(env, cfg);
         }
 
         {
             LockGuard overlayJni(g_renderJniMutex);
-            if (!(inWorld && !ShouldHideWorldRenderModules(stateSnap))) {
+            if (!worldReady) {
                 if (entityProducerWasEnabled) {
                     ClearLegacyOverlayPlayers();
                     ResetFightStatusState18();
@@ -16139,7 +16326,7 @@ static DWORD WINAPI OverlayScanThreadProc18(LPVOID) {
         }
         RecordNativePerfSince(lc::PERF_SCAN_LOOP, scanLoopPerfStarted);
         unsigned int sleepMs = lc::kWorkerIdleIntervalMs;
-        if (inWorld && !ShouldHideWorldRenderModules(stateSnap)) {
+        if (worldReady) {
             const DWORD sleepNow = GetTickCount();
             lc::ConsiderJobSleep(
                 &sleepMs, sleepNow, lastCameraMs, lc::kOverlayCameraIntervalMs, overlayWork);
@@ -16704,8 +16891,26 @@ static void ConfigureImGuiFontAndStyle(HWND hwnd) {
         }
     }
     if (!loadedFont) {
-        io.Fonts->AddFontDefault(&fontCfg);
-        Log("No overlay font found (Manrope/Minecraftia), using default ImGui font.");
+        // The packaged zip carries only aoko.exe and the two bridge DLLs, so every
+        // candidate above - all relative to GetBridgeDir() - misses and the HUD used
+        // to render with ImGui's ProggyClean. Fall back to the face compiled into
+        // the DLL; the file lookup stays first so an install can still override it.
+        ImFontConfig embeddedCfg = fontCfg;
+        // Static storage in mc_overlay_font.h outlives the atlas, and ImGui 1.92
+        // keeps font sources alive for the atlas' whole lifetime: never let the
+        // atlas free a .rdata pointer.
+        embeddedCfg.FontDataOwnedByAtlas = false;
+        loadedFont = io.Fonts->AddFontFromMemoryTTF(
+            const_cast<unsigned char*>(lc::kOverlayFontTtf),
+            lc::kOverlayFontTtfSize,
+            embeddedCfg.SizePixels,
+            &embeddedCfg);
+        if (loadedFont) {
+            Log("Loaded embedded overlay font: Manrope Medium");
+        } else {
+            io.Fonts->AddFontDefault(&fontCfg);
+            Log("No overlay font found (Manrope/Minecraftia), using default ImGui font.");
+        }
     }
 
     io.FontGlobalScale = 1.0f;
@@ -16925,6 +17130,9 @@ BOOL WINAPI HookedSwapBuffers(HDC hdc) {
     GameState state;
     { LockGuard lk(g_stateMutex); state = g_gameState; }
 
+    // World-owned render state is invalid while the transition handshake runs.
+    if (IsWorldTransitionActive()) return CallOriginalSwapBuffers(hdc);
+
     static bool s_wasNonChatMinecraftScreen = false;
     bool nonChatScreenOpen = ShouldHideWorldRenderModules(state);
     if (nonChatScreenOpen) {
@@ -16969,7 +17177,7 @@ BOOL WINAPI HookedSwapBuffers(HDC hdc) {
                 h,
                 renderConfig,
                 &closestPlayerSnapshot);
-            RenderFightStatus(w, h);
+            RenderFightStatus(w, h, renderConfig);
             RenderClosestPlayerInfo(
                 w,
                 h,
@@ -17170,11 +17378,48 @@ void InstallSwapBuffersHook() {
 }
 
 // ===================== TCP SERVER =====================
+
+// accountCommand / serverCommand. Runs on the inbound socket thread: attach JNI
+// here, load com.aoko.helper.SessionSwitcher once a game ClassLoader exists, and
+// queue the reply for this same thread's send path (never the render hook).
+static void HandleAccountCommand(const std::string& packetType,
+                                 const lc::SimpleJsonConfigReader& reader) {
+    std::string reply;
+    JNIEnv* env = JniEnv::Get(g_jvm);
+    if (env && !SessionHelperBridge::IsLoaded()) {
+        jobject classLoader = EnsureGameClassLoader(env);
+        // g_mcInstance is owned by the discovery path; only ever use the name it
+        // snapshotted, never the object.
+        std::string mcClassName;
+        {
+            LockGuard lk(g_mcClassNameMutex);
+            mcClassName = g_mcClassName;
+        }
+        static bool loggedLoadFailure = false;
+        if (AccountCommandRouter::LoadHelper(env, classLoader, mcClassName.c_str())) {
+            loggedLoadFailure = false;
+        } else if (!loggedLoadFailure) {
+            loggedLoadFailure = true;
+            Log("Session helper not loaded yet; the reply reports not-ready until it resolves.");
+        }
+    }
+    AccountCommandRouter::Handle(env, packetType, reader, &reply);
+    AccountCommandRouter::PushReply(reply);
+}
+
 void ParseConfig(const std::string& line) {
     lc::SimpleJsonConfigReader reader(line);
 
     std::string type = reader.GetString("type");
+    if (type == "accountCommand" || type == "serverCommand") {
+        // Over-long command lines are answered by InboundCommandTracker; never let
+        // one reach the helper, even if the transport still delivered it.
+        if (line.size() > AccountCommandRouter::kCommandLineLimit) return;
+        HandleAccountCommand(type, reader);
+        return;
+    }
     if (type == "moduleAction") {
+        const int requestId = reader.GetInt("requestId", 0);
         if (reader.GetString("action") == "autoRod") {
             const std::string phase = reader.GetString("phase");
             if (phase == "release") {
@@ -17188,13 +17433,19 @@ void ParseConfig(const std::string& line) {
                     lc::ClampInt(reader.GetInt("extensionTicks", autorod::kUseToRestoreTicks),
                                  autorod::kMinExtensionTicks, autorod::kMaxExtensionTicks),
                     reader.GetBool("holdToExtend", false)));
+                SetLastActionResult(requestId, "queued");
             } else {
                 CancelAutoRodRequests();
+                SetLastActionResult(requestId, "cancelled");
             }
         } else if (reader.GetString("action") == "throwPot") {
             // One-shot press; no hold/release semantics.
-            if (reader.GetBool("enabled", true))
+            if (reader.GetBool("enabled", true)) {
                 InterlockedExchange(&g_throwPotRequested, 1);
+                SetLastActionResult(requestId, "queued");
+            } else {
+                SetLastActionResult(requestId, "rejected");
+            }
         }
         return;
     }
@@ -17623,16 +17874,30 @@ void ServerLoop() {
     AtomicSocketStore(&g_serverSocket, serverSocket);
     int opt = 1; setsockopt(serverSocket, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
     sockaddr_in addr = {}; addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY; addr.sin_port = htons(25590);
-    bind(serverSocket, (sockaddr*)&addr, sizeof(addr));
-    listen(serverSocket, 1);
+    // Loopback only: this port carries the live session, including the access token
+    // setSession() writes into the game, so it must not be reachable from the LAN.
+    // The loader always connects to 127.0.0.1:25590.
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK); addr.sin_port = htons(25590);
+    // The port is a single resource: a second client that injects while the first
+    // one still holds 25590 gets WSAEADDRINUSE here and never becomes reachable.
+    // Report that once, by name, instead of leaving a silent bridge whose HUD never
+    // appears - the log is the only evidence a user can send us.
+    const int bindResult = bind(serverSocket, (sockaddr*)&addr, sizeof(addr));
+    const int listenResult = (bindResult == SOCKET_ERROR) ? SOCKET_ERROR : listen(serverSocket, 1);
+    if (bindResult == SOCKET_ERROR) {
+        Log("ERROR: bind 127.0.0.1:25590 failed, err=" + std::to_string(WSAGetLastError())
+            + ". Another process already owns the bridge port; this client cannot be reached.");
+    } else if (listenResult == SOCKET_ERROR) {
+        Log("ERROR: listen 127.0.0.1:25590 failed, err=" + std::to_string(WSAGetLastError()));
+    }
 
     // FIX: Force C locale for correct JSON float formatting (dots not commas)
     setlocale(LC_NUMERIC, "C"); 
 
-    JNIEnv* env; JavaVMAttachArgs args;
-    args.version = JNI_VERSION_1_8; args.name = (char*)"LegoBridge"; args.group = nullptr;
-    g_jvm->AttachCurrentThread((void**)&env, &args);
+    // Attach through JniEnv so the TLS slot records this thread: DetachThisThread() at
+    // the end of this function is then the only detach path for it, whether or not an
+    // account command ran and primed the slot.
+    JNIEnv* env = JniEnv::AttachThisThread(g_jvm, "LegoBridge");
     lc::InstallNickHiderJvmti(g_jvm, lc::NickHiderJvmtiGeneration::Legacy189, Log);
     anti_debuff_jvmti::Install(g_jvm, Log);
     ka_premotion::Install(g_jvm, Log);
@@ -17643,22 +17908,38 @@ void ServerLoop() {
     bool mapped = DiscoverMappings(env);
     Log(mapped ? "Discovery OK" : "Discovery FAILED");
 
+    // One "waiting" line per accept cycle, not per failed accept: when the port
+    // was never taken accept() fails immediately, and a line here would both spin
+    // a core and flood the log.
+    if (listenResult != SOCKET_ERROR) Log("Waiting for client...");
     while (IsBridgeRunning()) {
-        Log("Waiting for client...");
         SOCKET clientSocket = accept(serverSocket, nullptr, nullptr);
         AtomicSocketStore(&g_clientSocket, clientSocket);
-        if (clientSocket == INVALID_SOCKET) { if (!IsBridgeRunning()) break; continue; }
+        if (clientSocket == INVALID_SOCKET) {
+            if (!IsBridgeRunning()) break;
+            // Never retry an accept that cannot succeed without pausing: a socket
+            // that is not listening fails instantly.
+            Sleep(100);
+            continue;
+        }
         Log("Client connected");
+        ResetLastActionState();
+        AccountCommandRouter::ClearReplies();
 
         // Set non-blocking for reading config from C#
         u_long mode = 1; ioctlsocket(clientSocket, FIONBIO, &mode);
 
         lc::BoundedNewlineBuffer readBuf(1024 * 1024);
+        // Watches the raw stream so an over-long account/server command line is
+        // answered instead of dropped. Config line handling stays untouched.
+        AccountCommandRouter::InboundCommandTracker commandTracker;
         std::vector<std::string> receivedConfigLines;
         bool capabilitiesSent = false;
         bool capabilitiesAttempted = false;
         DWORD lastStateReadMs = 0;
         DWORD lastStatePublishMs = 0;
+        bool hadWorldSample = false;
+        bool lastInWorld = false;
         DWORD lastSpeedBridgeMs = 0;
         DWORD lastKillAuraMs = 0;
         DWORD lastAutoRodMs = 0;
@@ -17765,7 +18046,8 @@ void ServerLoop() {
             const bool jniDue =
                 stateDue || speedBridgeDue || autoRodDue || throwPotDue || autoHealDue || autoToolDue || hitDelayDue ||
                 reachDue || velocityDue || killAuraDue || pixelPartyDue || antiDebuffDue ||
-                fastPlaceDue || sprintDue || wTapDue || noHurtCamDue || jumpResetDue;
+                fastPlaceDue || sprintDue || wTapDue || noHurtCamDue || jumpResetDue ||
+                IsWorldTransitionActive();
             if (jniDue) {
                 LockGuard jniLk(g_stateJniMutex);
                 if (stateDue) {
@@ -17784,10 +18066,23 @@ void ServerLoop() {
                     UpdateSimpleModuleStatusLegacy(cfgSnapshot);
                     lastStateReadMs = nowMs;
                     { LockGuard lk(g_stateMutex); g_gameState = state; }
+
+                    const bool inWorldNow = state.mapped && state.inWorld;
+                    if (hadWorldSample && inWorldNow != lastInWorld) {
+                        ScheduleWorldTransition(env, inWorldNow ? "world-entered" : "left-world");
+                    }
+                    hadWorldSample = true;
+                    lastInWorld = inWorldNow;
                 } else {
                     LockGuard lk(g_stateMutex);
                     state = g_gameState;
                 }
+
+                bool transitionActive = IsWorldTransitionActive();
+                if (transitionActive && stateDue) {
+                    transitionActive = !TryCompleteWorldTransition(env, state.mapped && state.inWorld);
+                }
+                if (!transitionActive) {
                 if (autoRodDue) {
                     TrackAutoRodLegacyWorld(env);
                     ExecuteAutoRodLegacy(env, cfgSnapshot, state);
@@ -17855,6 +18150,7 @@ void ServerLoop() {
                     UpdateNoHurtCamLegacy(env, cfgSnapshot, state);
                     lastNoHurtCamMs = nowMs;
                 }
+                }
             } else {
                 LockGuard lk(g_stateMutex);
                 state = g_gameState;
@@ -17865,6 +18161,9 @@ void ServerLoop() {
             }
             if (!cfgSnapshot.velocityEnabled) {
                 g_lastHurtTime = 0;
+            }
+            if (!cfgSnapshot.autoToolEnabled) {
+                g_exclusiveArbiter.Release(lc::ExclusiveResource::Hotbar, lc::ExclusiveOwner::AutoTool);
             }
 
             bool publishFailed = false;
@@ -17877,11 +18176,36 @@ void ServerLoop() {
                 jsonToSend += "\"guiOpen\":" + std::string(state.guiOpen ? "true" : "false") + ",";
                 jsonToSend += "\"screenName\":\"" + JsonEscape(state.screenName) + "\",";
                 jsonToSend += "\"actionBar\":\"" + JsonEscape(state.actionBar) + "\",";
-                jsonToSend += "\"health\":" + std::to_string(state.health) + ",";
-                jsonToSend += "\"posX\":" + std::to_string(state.posX) + ",";
-                jsonToSend += "\"posY\":" + std::to_string(state.posY) + ",";
-                jsonToSend += "\"posZ\":" + std::to_string(state.posZ) + ",";
-                jsonToSend += "\"pitch\":" + std::to_string(state.pitch) + ",";
+                jsonToSend += "\"health\":" + std::to_string(JsonFiniteNumber(state.health, 20.0)) + ",";
+                jsonToSend += "\"posX\":" + std::to_string(JsonFiniteNumber(state.posX, 0.0)) + ",";
+                jsonToSend += "\"posY\":" + std::to_string(JsonFiniteNumber(state.posY, 0.0)) + ",";
+                jsonToSend += "\"posZ\":" + std::to_string(JsonFiniteNumber(state.posZ, 0.0)) + ",";
+                jsonToSend += "\"pitch\":" + std::to_string(JsonFiniteNumber(state.pitch, 0.0)) + ",";
+                // Aim assist needs the camera FOV and the viewport it projects in. The
+                // host's controller sizes its step from both and otherwise assumes 70
+                // degrees and the OS window rect. RenderNametags projects entities with
+                // GetClientRect(w, h) on this window, so publish that same space, and
+                // the FOV the camera poll already captured (BgCamState18::fov, filled in
+                // ReadCameraState18 from gameSettings.fovSetting). No extra JNI call.
+                // Until the first camera poll (and for one tick after a world change
+                // clears it) the snapshot still holds 0, which is not a usable FOV.
+                char fovBuf[32];
+                float publishedFov = SnapshotBgCam18().fov;
+                if (!(publishedFov > 0.0f) || !std::isfinite(publishedFov)) publishedFov = 70.0f;
+                snprintf(fovBuf, sizeof(fovBuf), "%.2f", publishedFov);
+                jsonToSend += "\"fov\":";
+                jsonToSend += fovBuf;
+                jsonToSend += ",";
+                int viewportW = 1920, viewportH = 1080;
+                if (g_gameHwnd && IsWindow(g_gameHwnd)) {
+                    RECT viewportRect{};
+                    if (GetClientRect(g_gameHwnd, &viewportRect)) {
+                        viewportW = (std::max)(1, (int)(viewportRect.right - viewportRect.left));
+                        viewportH = (std::max)(1, (int)(viewportRect.bottom - viewportRect.top));
+                    }
+                }
+                jsonToSend += "\"viewportWidth\":" + std::to_string(viewportW) + ",";
+                jsonToSend += "\"viewportHeight\":" + std::to_string(viewportH) + ",";
                 jsonToSend += "\"holdingBlock\":" + std::string(state.holdingBlock ? "true" : "false") + ",";
                 jsonToSend += "\"lookingAtBlock\":" + std::string(state.lookingAtBlock ? "true" : "false") + ",";
                 jsonToSend += "\"lookingAtEntity\":" + std::string(state.lookingAtEntity ? "true" : "false") + ",";
@@ -17894,6 +18218,7 @@ void ServerLoop() {
                 jsonToSend += "\"killAuraUnavailableReason\":\"" + JsonEscape(state.killAuraUnavailableReason) + "\",";
                 jsonToSend += "\"killAuraHasTarget\":" + std::string(state.killAuraHasTarget ? "true" : "false") + ",";
                 jsonToSend += "\"killAuraBlocking\":" + std::string(state.killAuraBlocking ? "true" : "false") + ",";
+                jsonToSend += LastActionJson() + ",";
                 jsonToSend += "\"stateMs\":" + std::to_string(state.stateMs) + ",";
                 jsonToSend += "\"chestStealerState\":";
                 jsonToSend += state.chestStealerStateJson.empty() ? "null" : state.chestStealerStateJson;
@@ -17965,6 +18290,13 @@ void ServerLoop() {
             int r = recv(clientSocket, buf, sizeof(buf) - 1, 0);
             if (r > 0) {
                 receivedConfigLines.clear();
+                // The tracker answers over-long command lines straight into the
+                // reply queue, in line order, before ParseConfig sees them.
+                if (commandTracker.Observe(buf, static_cast<size_t>(r))) {
+                    Log("Rejected account/server command line over "
+                        + std::to_string(AccountCommandRouter::kCommandLineLimit)
+                        + " bytes.");
+                }
                 size_t discarded = readBuf.Append(
                     buf,
                     static_cast<size_t>(r),
@@ -17980,6 +18312,27 @@ void ServerLoop() {
             } else {
                 int err = WSAGetLastError();
                 if (err != WSAEWOULDBLOCK) break;
+            }
+
+            // accountCommand / serverCommand answers travel on the same connection
+            // through the existing state send path. Drained every iteration, not
+            // only after a recv, so a reply that hit backpressure is retried instead
+            // of waiting for the client to speak again.
+            {
+                std::string commandReply;
+                while (AccountCommandRouter::PeekReply(&commandReply)) {
+                    int sent = 0;
+                    {
+                        LockGuard lk(g_socketMutex);
+                        sent = SendJsonLine(clientSocket, commandReply);
+                    }
+                    if (sent == 0) break;   // backpressure: keep it queued
+                    if (sent < 0) {         // stream is unusable: drop the backlog
+                        AccountCommandRouter::ClearReplies();
+                        break;
+                    }
+                    AccountCommandRouter::PopReply();
+                }
             }
 
             MaybeLogNativePerfDiagnostics();
@@ -18026,22 +18379,27 @@ void ServerLoop() {
         }
         {
             LockGuard jniLk(g_stateJniMutex);
-            ReleaseSpeedBridgeSneak(env);
-            ResetSpeedBridgeMovementTracking();
             AbortAutoRodLegacyTransaction(env, true);
+            ResetLegacyRuntimeState(env, "client-disconnected");
+            CancelWorldTransition(env);
         }
         SOCKET ownedClient = AtomicSocketTake(&g_clientSocket);
         if (ownedClient != INVALID_SOCKET) closesocket(ownedClient);
         Log("Client disconnected");
+        Log("Waiting for client...");
     }
     {
         LockGuard jniLk(g_stateJniMutex);
-        ReleaseSpeedBridgeSneak(env);
-        ResetSpeedBridgeMovementTracking();
+        ResetLegacyRuntimeState(env, "shutdown");
+        CancelWorldTransition(env);
         ResetAutoRodLegacyJniCaches(env);
         ResetAutoToolLegacyJniCaches(env);
         ResetFightStatusState18();
         HelperBridge::Unload(env);
+        // The helper's global class ref and cached jmethodIDs are released only
+        // here: this is the same thread that calls into it, so no other thread can
+        // hold the ids when they go.
+        SessionHelperBridge::Unload(env);
         const bool antiDebuffSafeToUnload = anti_debuff_jvmti::Shutdown(env);
         if (antiDebuffSafeToUnload) {
             lc::ShutdownNickHiderJvmti(env);
@@ -18059,7 +18417,10 @@ void ServerLoop() {
         g_blindRenderHookArmed = false;
         InterlockedExchange(&g_blindFogSuppress, 0);
     }
-    g_jvm->DetachCurrentThread();
+    // One detach path owns this thread: the attachment from the top of this function
+    // lives in the JniEnv TLS slot, so this call detaches once and clears the slot once.
+    JniEnv::DetachThisThread(g_jvm);
+    AccountCommandRouter::ClearReplies();
     SOCKET ownedServer = AtomicSocketTake(&g_serverSocket);
     if (ownedServer != INVALID_SOCKET) closesocket(ownedServer);
     WSACleanup();

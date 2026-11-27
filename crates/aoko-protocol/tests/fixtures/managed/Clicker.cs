@@ -1,0 +1,3360 @@
+using System;
+using System.Collections.ObjectModel;
+using System.Collections.Specialized;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Diagnostics;
+using System.Linq;
+
+namespace Aoko.Core;
+
+public class Clicker : INotifyPropertyChanged
+{
+    private const int AimAssistStateFreshMs = 220;
+    private const int TriggerbotStateFreshMs = 35;
+    private static Clicker? _instance;
+    public static Clicker Instance => _instance ??= new Clicker();
+
+    // P/Invoke declarations
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
+    [DllImport("user32.dll", SetLastError = true, EntryPoint = "SendInput")]
+    private static extern uint SendInputKeyboard(uint nInputs, INPUT_KEY[] pInputs, int cbSize);
+    [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int vKey);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct INPUT
+    {
+        public uint Type;
+        public MOUSEINPUT Mi;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MOUSEINPUT
+    {
+        public int Dx;
+        public int Dy;
+        public uint MouseData;
+        public uint DwFlags;
+        public uint Time;
+        public IntPtr DwExtraInfo;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct KEYBDINPUT
+    {
+        public ushort WVk;
+        public ushort WScan;
+        public uint DwFlags;
+        public uint Time;
+        public IntPtr DwExtraInfo;
+    }
+
+    [StructLayout(LayoutKind.Explicit)]
+    private struct INPUTUNION
+    {
+        [FieldOffset(0)] public MOUSEINPUT Mi;
+        [FieldOffset(0)] public KEYBDINPUT Ki;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct INPUT_KEY
+    {
+        public uint Type;
+        public INPUTUNION U;
+    }
+
+    private const uint INPUT_MOUSE = 0;
+    private const uint MOUSEEVENTF_MOVE = 0x0001;
+    private const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
+    private const uint MOUSEEVENTF_LEFTUP = 0x0004;
+    private const uint MOUSEEVENTF_RIGHTDOWN = 0x0008;
+    private const uint MOUSEEVENTF_RIGHTUP = 0x0010;
+    private const int VK_LBUTTON = 0x01;
+    private const int VK_W = 0x57;
+    private const int VK_A = 0x41;
+    private const int VK_D = 0x44;
+    private const int VK_SPACE = 0x20;
+    private const int PixelPartyJumpPulseHalfMs = 55;
+    private const float PixelPartyWalkAlignMaxDeg = 18f;
+    private const float PixelPartyPrecisionAlignMaxDeg = 55f;
+    private const float PixelPartyPrecisionDist = 4f;
+    private const float PixelPartyJumpMinDist = 5f;
+    private const float PixelPartyMinWalkDist = 0.45f;
+    // Coast on the last known target for a short window when the target momentarily
+    // disappears (e.g. mid-jump) so we don't release keys/steering and stutter.
+    private const int PixelPartyTargetGraceMs = 160;
+    private const uint INPUT_KEYBOARD = 1;
+    private const uint KEYEVENTF_KEYUP = 0x0002;
+    private static readonly int MouseInputSize = Marshal.SizeOf<INPUT>();
+    private static readonly int KeyboardInputSize = Marshal.SizeOf<INPUT_KEY>();
+    
+    // State
+    private enum ClickerActivity
+    {
+        None = 0,
+        Left = 1,
+        Right = 2
+    }
+
+    private readonly object _stateLock = new();
+    private int _activity; // ClickerActivity, accessed through Volatile
+    private bool _isArmed;
+    private CancellationTokenSource? _clickCts;
+    private Task? _clickTask;
+    private readonly AimAssistMotionController _aimAssistMotionController = new();
+    private readonly OwnedAsyncLoop _aimAssistLoop = new(
+        "Aim Assist",
+        exception => Debug.WriteLine($"[Aim Assist] loop failed and will restart: {exception}"));
+    private readonly OwnedAsyncLoop _triggerbotLoop = new(
+        "Triggerbot",
+        exception => Debug.WriteLine($"[Triggerbot] loop failed and will restart: {exception}"));
+    private int _panicInProgress;
+    
+    // Settings
+    private float _minCPS = 8.0f;
+    private float _maxCPS = 12.0f;
+    private bool _leftClickEnabled = false;
+    private bool _rightClickEnabled = false;
+    private ClickRandomizationMode _randomizationMode = ClickRandomizationMode.Medium;
+    private readonly AdvancedClickTimingState _leftTimingState = new();
+    private readonly AdvancedClickTimingState _rightTimingState = new();
+
+    
+    // Right Click Settings
+    private float _rightMinCPS = 10.0f;
+    private float _rightMaxCPS = 14.0f;
+    private bool _rightClickOnlyBlock = false;
+    private bool _breakBlocksEnabled = false;
+    private bool _isMiningIntent = false;
+    
+    private readonly object _sendInputLock = new();
+    private readonly ChestStealerController _chestStealerController = new();
+    private readonly RefillController _refillController = new();
+    public KillAuraSettings KillAuraSettings { get; } = new();
+    private readonly INPUT[] _leftClickInputs;
+    private readonly INPUT[] _rightClickInputs;
+    private readonly INPUT[] _aimAssistMoveInput;
+    private readonly INPUT_KEY[] _pixelPartyKeyInput = new INPUT_KEY[1];
+    
+    public event PropertyChangedEventHandler? PropertyChanged;
+    public event Action? StateChanged;
+    
+    private Clicker()
+    {
+        _leftClickInputs = new INPUT[2];
+        _leftClickInputs[0].Type = INPUT_MOUSE;
+        _leftClickInputs[0].Mi.DwFlags = MOUSEEVENTF_LEFTDOWN;
+        _leftClickInputs[1].Type = INPUT_MOUSE;
+        _leftClickInputs[1].Mi.DwFlags = MOUSEEVENTF_LEFTUP;
+
+        _rightClickInputs = new INPUT[2];
+        _rightClickInputs[0].Type = INPUT_MOUSE;
+        _rightClickInputs[0].Mi.DwFlags = MOUSEEVENTF_RIGHTDOWN;
+        _rightClickInputs[1].Type = INPUT_MOUSE;
+        _rightClickInputs[1].Mi.DwFlags = MOUSEEVENTF_RIGHTUP;
+
+        _aimAssistMoveInput = new INPUT[1];
+        _aimAssistMoveInput[0].Type = INPUT_MOUSE;
+        _aimAssistMoveInput[0].Mi.DwFlags = MOUSEEVENTF_MOVE;
+
+        AttachBlockEspTargets(_blockEspTargets);
+        KillAuraSettings.Changed += () => StateChanged?.Invoke();
+    }
+    
+    
+    private string _guiTheme = "Slate";
+    public string GuiTheme { get => _guiTheme; set { _guiTheme = value; OnPropertyChanged(nameof(GuiTheme)); } }
+
+    private string _moduleListStyle = "Default";
+    public string ModuleListStyle { get => _moduleListStyle; set { _moduleListStyle = value; OnPropertyChanged(nameof(ModuleListStyle)); } }
+
+    private bool _showLogo = true;
+    public bool ShowLogo { get => _showLogo; set { _showLogo = value; OnPropertyChanged(nameof(ShowLogo)); } }
+
+    private bool _devMode = false;
+    /// <summary>Shows unfinished/dev-only modules (e.g. Kill Aura) in the external GUI.</summary>
+    public bool DevMode
+    {
+        get => _devMode;
+        set
+        {
+            if (_devMode == value) return;
+            _devMode = value;
+            OnPropertyChanged(nameof(DevMode));
+            if (!_devMode)
+                DisableDevOnlyModules();
+            StateChanged?.Invoke();
+        }
+    }
+
+    /// <summary>Force-off modules marked DevOnly in <see cref="ModuleCatalog"/> when Dev Mode is disabled.</summary>
+    public void DisableDevOnlyModules()
+    {
+        if (DevMode) return;
+        if (KillAuraEnabled)
+            KillAuraEnabled = false;
+    }
+
+    private bool _discordRpcEnabled = true;
+    public bool DiscordRpcEnabled
+    {
+        get => _discordRpcEnabled;
+        set
+        {
+            if (_discordRpcEnabled != value)
+            {
+                _discordRpcEnabled = value;
+                OnPropertyChanged(nameof(DiscordRpcEnabled));
+                OnPropertyChanged(nameof(DiscordRpcStatusText));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    private string _discordRpcStatusText = "Ready";
+    public string DiscordRpcStatusText
+    {
+        get => _discordRpcStatusText;
+        internal set
+        {
+            if (_discordRpcStatusText != value)
+            {
+                _discordRpcStatusText = value;
+                OnPropertyChanged(nameof(DiscordRpcStatusText));
+            }
+        }
+    }
+
+    private ClickerActivity Activity => (ClickerActivity)Volatile.Read(ref _activity);
+
+    public bool IsArmed
+    {
+        get => Volatile.Read(ref _isArmed);
+        private set
+        {
+            if (IsArmed == value) return;
+            Volatile.Write(ref _isArmed, value);
+            OnPropertyChanged(nameof(IsArmed));
+            OnPropertyChanged(nameof(StatusText));
+            StateChanged?.Invoke();
+        }
+    }
+
+    public bool IsClicking => Activity != ClickerActivity.None;
+
+    public bool IsUsingLeftButton => Activity == ClickerActivity.Left;
+
+    private void NotifyClickingChanged()
+    {
+        OnPropertyChanged(nameof(IsClicking));
+        OnPropertyChanged(nameof(IsUsingLeftButton));
+        OnPropertyChanged(nameof(StatusText));
+        StateChanged?.Invoke();
+    }
+    
+    public float MinCPS
+    {
+        get => _minCPS;
+        set
+        {
+            if (value > 0 && value <= 25)
+            {
+                _minCPS = value;
+                OnPropertyChanged(nameof(MinCPS));
+                if (_minCPS > _maxCPS)
+                {
+                    _maxCPS = _minCPS;
+                    OnPropertyChanged(nameof(MaxCPS));
+                }
+                StateChanged?.Invoke();
+            }
+        }
+    }
+    
+    public float MaxCPS
+    {
+        get => _maxCPS;
+        set
+        {
+            if (value > 0 && value <= 25)
+            {
+                _maxCPS = value;
+                OnPropertyChanged(nameof(MaxCPS));
+                if (_maxCPS < _minCPS)
+                {
+                    _minCPS = _maxCPS;
+                    OnPropertyChanged(nameof(MinCPS));
+                }
+                StateChanged?.Invoke();
+            }
+        }
+    }
+    
+    public bool LeftClickEnabled
+    {
+        get => _leftClickEnabled;
+        set
+        {
+            _leftClickEnabled = value;
+            OnPropertyChanged(nameof(LeftClickEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+    
+    public bool RightClickEnabled
+    {
+        get => _rightClickEnabled;
+        set
+        {
+            _rightClickEnabled = value;
+            OnPropertyChanged(nameof(RightClickEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+    
+    public ClickRandomizationMode RandomizationMode
+    {
+        get => _randomizationMode;
+        set
+        {
+            if (_randomizationMode != value)
+            {
+                _randomizationMode = value;
+                OnPropertyChanged(nameof(RandomizationMode));
+                OnPropertyChanged(nameof(RandomizationModeIndex));
+                OnPropertyChanged(nameof(RandomizationModeText));
+                OnPropertyChanged(nameof(JitterEnabled));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    public int RandomizationModeIndex
+    {
+        get => (int)_randomizationMode;
+        set => RandomizationMode = (ClickRandomizationMode)Math.Clamp(value, 0, 2);
+    }
+
+    public string RandomizationModeText => _randomizationMode switch
+    {
+        ClickRandomizationMode.Basic => "Basic",
+        ClickRandomizationMode.Medium => "Medium",
+        ClickRandomizationMode.Advanced => "Advanced",
+        _ => "Medium"
+    };
+
+    public bool JitterEnabled
+    {
+        get => _randomizationMode != ClickRandomizationMode.Basic;
+        set
+        {
+            var targetMode = value
+                ? (_randomizationMode == ClickRandomizationMode.Basic ? ClickRandomizationMode.Medium : _randomizationMode)
+                : ClickRandomizationMode.Basic;
+            RandomizationMode = targetMode;
+        }
+    }
+    
+    public float RightMinCPS
+    {
+        get => _rightMinCPS;
+        set
+        {
+            if (value > 0 && value <= 25)
+            {
+                _rightMinCPS = value;
+                OnPropertyChanged(nameof(RightMinCPS));
+                if (_rightMinCPS > _rightMaxCPS)
+                {
+                    _rightMaxCPS = _rightMinCPS;
+                    OnPropertyChanged(nameof(RightMaxCPS));
+                }
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    public float RightMaxCPS
+    {
+        get => _rightMaxCPS;
+        set
+        {
+            if (value > 0 && value <= 25)
+            {
+                _rightMaxCPS = value;
+                OnPropertyChanged(nameof(RightMaxCPS));
+                if (_rightMaxCPS < _rightMinCPS)
+                {
+                    _rightMinCPS = _rightMaxCPS;
+                    OnPropertyChanged(nameof(RightMinCPS));
+                }
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    public bool RightClickOnlyBlock
+    {
+        get => _rightClickOnlyBlock;
+        set
+        {
+            _rightClickOnlyBlock = value;
+            OnPropertyChanged(nameof(RightClickOnlyBlock));
+            StateChanged?.Invoke();
+        }
+    }
+
+    public bool BreakBlocksEnabled
+    {
+        get => _breakBlocksEnabled;
+        set
+        {
+            _breakBlocksEnabled = value;
+            OnPropertyChanged(nameof(BreakBlocksEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+    
+    public bool IsMiningIntent
+    {
+        get => _isMiningIntent;
+        set
+        {
+            _isMiningIntent = value;
+            OnPropertyChanged(nameof(IsMiningIntent));
+            StateChanged?.Invoke();
+        }
+    }
+    
+    public string StatusText
+    {
+        get
+        {
+            if (IsClicking) return "Clicking";
+            if (IsArmed) return "Armed";
+            return "Disabled";
+        }
+    }
+    
+    public void ToggleArmed()
+    {
+        if (IsArmed)
+            Disarm();
+        else
+            Arm();
+    }
+    
+    public void Arm()
+    {
+        IsArmed = true;
+    }
+    
+    public void Disarm()
+    {
+        IsArmed = false;
+        StopClicking();
+    }
+    
+    public void StartClicking(bool leftButton)
+    {
+        lock (_stateLock)
+        {
+            if (Activity != ClickerActivity.None) return;
+
+            if (leftButton)
+            {
+                if (!IsArmed || !LeftClickEnabled) return;
+            }
+            else
+            {
+                // Right-click autoclick is intentionally independent from "Armed"
+                // so it can work when left autoclicker is disabled.
+                if (!RightClickEnabled) return;
+            }
+
+            Volatile.Write(ref _activity, (int)(leftButton ? ClickerActivity.Left : ClickerActivity.Right));
+            var cts = new CancellationTokenSource();
+            _clickCts = cts;
+            _clickTask = Task.Run(() => ClickLoop(cts.Token, leftButton));
+        }
+
+        NotifyClickingChanged();
+    }
+
+    public void StopClicking()
+    {
+        CancellationTokenSource? cts;
+        Task? task;
+        bool wasClicking;
+
+        lock (_stateLock)
+        {
+            wasClicking = Activity != ClickerActivity.None;
+            Volatile.Write(ref _activity, (int)ClickerActivity.None);
+            cts = _clickCts;
+            task = _clickTask;
+            _clickCts = null;
+            _clickTask = null;
+            // Cancel while the start path is still excluded so a new stream
+            // cannot begin before the old token observes the stop.
+            cts?.Cancel();
+        }
+
+        if (cts != null)
+            _ = DisposeCtsWhenDoneAsync(cts, task);
+
+        if (wasClicking)
+            NotifyClickingChanged();
+    }
+    
+    public void Stop()
+    {
+        StopClicking();
+        Disarm();
+        StopAimAssistLoop();
+        StopTriggerbotLoop();
+        StopPixelPartyAssistInputLoop();
+        _chestStealerController.Stop();
+        _refillController.Stop();
+    }
+
+    public void TriggerPanic()
+    {
+        _ = TriggerPanicAsync();
+    }
+
+    public async Task TriggerPanicAsync()
+    {
+        if (System.Windows.Application.Current?.Dispatcher is { } dispatcher && !dispatcher.CheckAccess())
+        {
+            dispatcher.Invoke(TriggerPanic);
+            return;
+        }
+
+        if (Interlocked.Exchange(ref _panicInProgress, 1) == 1)
+            return;
+
+        try
+        {
+            Disarm();
+            LeftClickEnabled = true;
+            RightClickEnabled = false;
+            JitterEnabled = false;
+            _leftTimingState.Reset();
+            _rightTimingState.Reset();
+            ClickInChests = false;
+            BreakBlocksEnabled = false;
+            IsMiningIntent = false;
+
+            AimAssistEnabled = false;
+            TriggerbotEnabled = false;
+            KillAuraEnabled = false;
+            SpeedBridgeEnabled = false;
+            GtbHelperEnabled = false;
+            PixelPartyAssistEnabled = false;
+            PixelPartyAutoLookEnabled = false;
+            PixelPartyAutoWalkEnabled = false;
+            NametagsEnabled = false;
+            NametagHideVanilla = false;
+            ClosestPlayerInfoEnabled = false;
+            FightStatusEnabled = false;
+            ChestEspEnabled = false;
+            ChestStealerEnabled = false;
+            RefillEnabled = false;
+            BlockEspEnabled = false;
+            BedPlatesEnabled = false;
+            ReachEnabled = false;
+            VelocityEnabled = false;
+            AutoTotemEnabled = false;
+            AutoRodEnabled = false;
+            ThrowpotEnabled = false;
+            AutoHealEnabled = false;
+            AutoToolEnabled = false;
+            AntiDebuffEnabled = false;
+            HitDelayFixEnabled = false;
+            FireballWarningEnabled = false;
+            FastPlaceEnabled = false;
+            NoHurtCamEnabled = false;
+            SprintEnabled = false;
+            TntTimerEnabled = false;
+            WTapEnabled = false;
+            JumpResetEnabled = false;
+            HitSelectEnabled = false;
+            TrajectoriesEnabled = false;
+            MurderMysteryEnabled = false;
+            BreakProgressEnabled = false;
+
+            ShowModuleList = false;
+            ShowLogo = false;
+            DiscordRpcEnabled = false;
+
+            if (System.Windows.Application.Current?.MainWindow is Aoko.MainWindow mainWindow)
+                mainWindow.EnterPanicStealthMode();
+
+            if (GameStateClient.Instance.IsConnected)
+                await Task.Delay(250).ConfigureAwait(false);
+
+            GameStateClient.Instance.Disconnect();
+
+            var app = System.Windows.Application.Current;
+            if (app != null)
+                app.Shutdown();
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[Panic] Unexpected panic error: {ex}");
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _panicInProgress, 0);
+        }
+    }
+
+    private void StartAimAssistLoop()
+    {
+        _aimAssistLoop.Start(AimAssistLoop);
+    }
+
+    private CancellationTokenSource? _pixelPartyAssistInputCts;
+    private Task? _pixelPartyAssistInputTask;
+    private bool _pixelPartyKeyW;
+    private bool _pixelPartyKeyA;
+    private bool _pixelPartyKeyD;
+    private bool _pixelPartyKeySpace;
+    private long _pixelPartyLastTargetMs;
+    private float _pixelPartyLastYawDelta;
+    private float _pixelPartyLastDist;
+    private const int PixelPartyAssistInputStateFreshMs = 120;
+
+    private bool ShouldRunPixelPartyAssistInputLoop()
+        => PixelPartyAssistEnabled && (PixelPartyAutoLookEnabled || PixelPartyAutoWalkEnabled);
+
+    private void SyncPixelPartyAssistInputLoop()
+    {
+        if (ShouldRunPixelPartyAssistInputLoop())
+            StartPixelPartyAssistInputLoop();
+        else
+            StopPixelPartyAssistInputLoop();
+    }
+
+    private void StartPixelPartyAssistInputLoop()
+    {
+        if (_pixelPartyAssistInputCts != null) return;
+        var cts = new CancellationTokenSource();
+        _pixelPartyAssistInputCts = cts;
+        _pixelPartyAssistInputTask = Task.Run(() => PixelPartyAssistInputLoop(cts.Token));
+    }
+
+    private void StopPixelPartyAssistInputLoop()
+    {
+        var cts = _pixelPartyAssistInputCts;
+        var task = _pixelPartyAssistInputTask;
+        _pixelPartyAssistInputCts = null;
+        _pixelPartyAssistInputTask = null;
+        if (cts == null) return;
+        cts.Cancel();
+        _ = DisposeCtsWhenDoneAsync(cts, task);
+        ReleasePixelPartyWalkKeys();
+    }
+
+    private void SendPixelPartyKey(int vk, bool down)
+    {
+        lock (_sendInputLock)
+        {
+            _pixelPartyKeyInput[0].Type = INPUT_KEYBOARD;
+            _pixelPartyKeyInput[0].U.Ki.WVk = (ushort)vk;
+            _pixelPartyKeyInput[0].U.Ki.DwFlags = down ? 0u : KEYEVENTF_KEYUP;
+            SendInputKeyboard(1, _pixelPartyKeyInput, KeyboardInputSize);
+        }
+    }
+
+    private void SetPixelPartyWalkKey(int vk, bool down, ref bool tracked)
+    {
+        if (down == tracked) return;
+        SendPixelPartyKey(vk, down);
+        tracked = down;
+    }
+
+    private void ReleasePixelPartyWalkKeys()
+    {
+        SetPixelPartyWalkKey(VK_W, false, ref _pixelPartyKeyW);
+        SetPixelPartyWalkKey(VK_A, false, ref _pixelPartyKeyA);
+        SetPixelPartyWalkKey(VK_D, false, ref _pixelPartyKeyD);
+        SetPixelPartyWalkKey(VK_SPACE, false, ref _pixelPartyKeySpace);
+    }
+
+    /// <summary>Yaw snap via mouse — multiple SendInput passes per tick for large deltas.</summary>
+    private void ApplyPixelPartySteer(float yawDeltaDeg, bool aggressive)
+    {
+        float remaining = yawDeltaDeg;
+        if (Math.Abs(remaining) < 0.35f)
+            return;
+
+        float gain = aggressive ? 6.5f : 5.0f;
+        int maxStep = aggressive ? 120 : 80;
+        int maxPasses = aggressive ? 10 : 7;
+
+        for (int pass = 0; pass < maxPasses && Math.Abs(remaining) > 0.4f; pass++)
+        {
+            int moveX = (int)Math.Round(remaining * gain);
+            if (moveX == 0)
+                moveX = Math.Sign(remaining);
+
+            moveX = Math.Clamp(moveX, -maxStep, maxStep);
+            _aimAssistMoveInput[0].Mi.Dx = moveX;
+            _aimAssistMoveInput[0].Mi.Dy = 0;
+            lock (_sendInputLock)
+            {
+                SendInput(1, _aimAssistMoveInput, MouseInputSize);
+            }
+
+            remaining -= moveX / gain;
+        }
+    }
+
+    private void StopAimAssistLoop()
+    {
+        _aimAssistMotionController.Reset();
+        _aimAssistLoop.Stop();
+    }
+
+    private void StartTriggerbotLoop()
+    {
+        _triggerbotLoop.Start(TriggerbotLoop);
+    }
+
+    private void StopTriggerbotLoop()
+    {
+        _triggerbotLoop.Stop();
+    }
+
+    private static async Task DisposeCtsWhenDoneAsync(CancellationTokenSource cts, Task? task)
+    {
+        if (task != null)
+        {
+            try
+            {
+                await task.ConfigureAwait(false);
+            }
+            catch
+            {
+            }
+        }
+
+        cts.Dispose();
+    }
+    
+    private bool _clickInChests = false;
+    private bool _aimAssistEnabled = false;
+    private float _aimAssistFov = 30.0f;
+    private float _aimAssistRange = 4.5f;
+    private int _aimAssistStrength = 40;
+    private bool _gtbHelperEnabled = false;
+    private string _gtbCurrentHint = "-";
+    private int _gtbMatchCount = 0;
+    private string _gtbMatchesPreview = "-";
+
+    public bool ClickInChests
+    {
+        get => _clickInChests;
+        set
+        {
+            _clickInChests = value;
+            OnPropertyChanged(nameof(ClickInChests));
+            StateChanged?.Invoke();
+        }
+    }
+
+    public bool AimAssistEnabled
+    {
+        get => _aimAssistEnabled;
+        set
+        {
+            _aimAssistEnabled = value;
+            OnPropertyChanged(nameof(AimAssistEnabled));
+            if (_aimAssistEnabled) StartAimAssistLoop();
+            else StopAimAssistLoop();
+            StateChanged?.Invoke();
+        }
+    }
+
+    public float AimAssistFov
+    {
+        get => _aimAssistFov;
+        set
+        {
+            float clamped = Math.Clamp(value, 1.0f, 180.0f);
+            if (Math.Abs(_aimAssistFov - clamped) > float.Epsilon)
+            {
+                _aimAssistFov = clamped;
+                OnPropertyChanged(nameof(AimAssistFov));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    public float AimAssistRange
+    {
+        get => _aimAssistRange;
+        set
+        {
+            float clamped = Math.Clamp(value, 1.0f, 12.0f);
+            if (Math.Abs(_aimAssistRange - clamped) > float.Epsilon)
+            {
+                _aimAssistRange = clamped;
+                OnPropertyChanged(nameof(AimAssistRange));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    public int AimAssistStrength
+    {
+        get => _aimAssistStrength;
+        set
+        {
+            int clamped = Math.Clamp(value, 1, 100);
+            if (_aimAssistStrength != clamped)
+            {
+                _aimAssistStrength = clamped;
+                OnPropertyChanged(nameof(AimAssistStrength));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    public bool GtbHelperEnabled
+    {
+        get => _gtbHelperEnabled;
+        set
+        {
+            _gtbHelperEnabled = value;
+            OnPropertyChanged(nameof(GtbHelperEnabled));
+            if (!value)
+            {
+                SetGtbState("", 0, "");
+            }
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _pixelPartyAssistEnabled = false;
+    public bool PixelPartyAssistEnabled
+    {
+        get => _pixelPartyAssistEnabled;
+        set
+        {
+            if (_pixelPartyAssistEnabled == value) return;
+            _pixelPartyAssistEnabled = value;
+            OnPropertyChanged(nameof(PixelPartyAssistEnabled));
+            SyncPixelPartyAssistInputLoop();
+            StateChanged?.Invoke();
+        }
+    }
+
+    private int _pixelPartyScanRadius = 28;
+    public int PixelPartyScanRadius
+    {
+        get => _pixelPartyScanRadius;
+        set
+        {
+            int clamped = Math.Clamp(value, 8, 48);
+            if (_pixelPartyScanRadius == clamped) return;
+            _pixelPartyScanRadius = clamped;
+            OnPropertyChanged(nameof(PixelPartyScanRadius));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _pixelPartyAutoLookEnabled = false;
+    public bool PixelPartyAutoLookEnabled
+    {
+        get => _pixelPartyAutoLookEnabled;
+        set
+        {
+            if (_pixelPartyAutoLookEnabled == value) return;
+            _pixelPartyAutoLookEnabled = value;
+            OnPropertyChanged(nameof(PixelPartyAutoLookEnabled));
+            SyncPixelPartyAssistInputLoop();
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _pixelPartyAutoWalkEnabled = false;
+    public bool PixelPartyAutoWalkEnabled
+    {
+        get => _pixelPartyAutoWalkEnabled;
+        set
+        {
+            if (_pixelPartyAutoWalkEnabled == value) return;
+            _pixelPartyAutoWalkEnabled = value;
+            OnPropertyChanged(nameof(PixelPartyAutoWalkEnabled));
+            SyncPixelPartyAssistInputLoop();
+            StateChanged?.Invoke();
+        }
+    }
+
+    public string GtbCurrentHint
+    {
+        get => _gtbCurrentHint;
+        private set
+        {
+            if (_gtbCurrentHint != value)
+            {
+                _gtbCurrentHint = value;
+                OnPropertyChanged(nameof(GtbCurrentHint));
+            }
+        }
+    }
+
+    public int GtbMatchCount
+    {
+        get => _gtbMatchCount;
+        private set
+        {
+            if (_gtbMatchCount != value)
+            {
+                _gtbMatchCount = value;
+                OnPropertyChanged(nameof(GtbMatchCount));
+            }
+        }
+    }
+
+    public string GtbMatchesPreview
+    {
+        get => _gtbMatchesPreview;
+        private set
+        {
+            if (_gtbMatchesPreview != value)
+            {
+                _gtbMatchesPreview = value;
+                OnPropertyChanged(nameof(GtbMatchesPreview));
+            }
+        }
+    }
+
+    private bool _nametagsEnabled = false;
+    public bool NametagsEnabled
+    {
+        get => _nametagsEnabled;
+        set
+        {
+            _nametagsEnabled = value;
+            OnPropertyChanged(nameof(NametagsEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _nickHiderEnabled;
+    public bool NickHiderEnabled
+    {
+        get => _nickHiderEnabled;
+        set
+        {
+            if (_nickHiderEnabled == value) return;
+            _nickHiderEnabled = value;
+            OnPropertyChanged(nameof(NickHiderEnabled));
+            OnPropertyChanged(nameof(IsNickHiderActive));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private string _nickHiderAlias = string.Empty;
+    public string NickHiderAlias
+    {
+        get => _nickHiderAlias;
+        set
+        {
+            string normalized = NickHiderConfig.NormalizeInput(value);
+            if (_nickHiderAlias == normalized) return;
+            _nickHiderAlias = normalized;
+            OnPropertyChanged(nameof(NickHiderAlias));
+            OnPropertyChanged(nameof(IsNickHiderActive));
+            StateChanged?.Invoke();
+        }
+    }
+
+    public bool IsNickHiderActive => NickHiderEnabled && !string.IsNullOrEmpty(NickHiderConfig.NormalizeAlias(NickHiderAlias));
+
+    private bool _nametagShowHealth = true;
+    public bool NametagShowHealth
+    {
+        get => _nametagShowHealth;
+        set
+        {
+            _nametagShowHealth = value;
+            OnPropertyChanged(nameof(NametagShowHealth));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _nametagShowArmor = true;
+    public bool NametagShowArmor
+    {
+        get => _nametagShowArmor;
+        set
+        {
+            _nametagShowArmor = value;
+            OnPropertyChanged(nameof(NametagShowArmor));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _nametagShowHeldItem = true;
+    public bool NametagShowHeldItem
+    {
+        get => _nametagShowHeldItem;
+        set
+        {
+            _nametagShowHeldItem = value;
+            OnPropertyChanged(nameof(NametagShowHeldItem));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _nametagHideVanilla = false;
+    public bool NametagHideVanilla
+    {
+        get => _nametagHideVanilla;
+        set
+        {
+            _nametagHideVanilla = value;
+            OnPropertyChanged(nameof(NametagHideVanilla));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private int _nametagRange = 4;
+    public int NametagRange
+    {
+        get => _nametagRange;
+        set
+        {
+            int clamped = Math.Clamp(value, 1, 8);
+            if (_nametagRange != clamped)
+            {
+                _nametagRange = clamped;
+                OnPropertyChanged(nameof(NametagRange));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    private bool _chestEspEnabled = false;
+    public bool ChestEspEnabled
+    {
+        get => _chestEspEnabled;
+        set
+        {
+            _chestEspEnabled = value;
+            OnPropertyChanged(nameof(ChestEspEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private int _chestEspRange = 4;
+    public int ChestEspRange
+    {
+        get => _chestEspRange;
+        set
+        {
+            int clamped = Math.Clamp(value, 1, 8);
+            if (_chestEspRange != clamped)
+            {
+                _chestEspRange = clamped;
+                OnPropertyChanged(nameof(ChestEspRange));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    private bool _chestStealerEnabled = false;
+    public bool ChestStealerEnabled
+    {
+        get => _chestStealerEnabled;
+        set
+        {
+            if (_chestStealerEnabled == value) return;
+            _chestStealerEnabled = value;
+            if (value)
+                _chestStealerController.Start();
+            else
+                _chestStealerController.Stop();
+            OnPropertyChanged(nameof(ChestStealerEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private int _chestStealerDelayMs = 120;
+    public int ChestStealerDelayMs
+    {
+        get => _chestStealerDelayMs;
+        set
+        {
+            int clamped = Math.Clamp(value, 50, 500);
+            if (_chestStealerDelayMs != clamped)
+            {
+                _chestStealerDelayMs = clamped;
+                OnPropertyChanged(nameof(ChestStealerDelayMs));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    private bool _chestStealerMenuCheck = true;
+    public bool ChestStealerMenuCheck
+    {
+        get => _chestStealerMenuCheck;
+        set
+        {
+            if (_chestStealerMenuCheck == value) return;
+            _chestStealerMenuCheck = value;
+            _chestStealerTitleCheck = value;
+            _chestStealerCustomItemsCheck = value;
+            _chestStealerPhysicalCheck = value;
+            OnPropertyChanged(nameof(ChestStealerMenuCheck));
+            OnPropertyChanged(nameof(ChestStealerTitleCheck));
+            OnPropertyChanged(nameof(ChestStealerCustomItemsCheck));
+            OnPropertyChanged(nameof(ChestStealerPhysicalCheck));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _chestStealerTitleCheck = true;
+    public bool ChestStealerTitleCheck
+    {
+        get => _chestStealerTitleCheck;
+        set
+        {
+            if (_chestStealerTitleCheck == value) return;
+            _chestStealerTitleCheck = value;
+            _chestStealerMenuCheck = _chestStealerTitleCheck || _chestStealerCustomItemsCheck || _chestStealerPhysicalCheck;
+            OnPropertyChanged(nameof(ChestStealerTitleCheck));
+            OnPropertyChanged(nameof(ChestStealerMenuCheck));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _chestStealerCustomItemsCheck = true;
+    public bool ChestStealerCustomItemsCheck
+    {
+        get => _chestStealerCustomItemsCheck;
+        set
+        {
+            if (_chestStealerCustomItemsCheck == value) return;
+            _chestStealerCustomItemsCheck = value;
+            _chestStealerMenuCheck = _chestStealerTitleCheck || _chestStealerCustomItemsCheck || _chestStealerPhysicalCheck;
+            OnPropertyChanged(nameof(ChestStealerCustomItemsCheck));
+            OnPropertyChanged(nameof(ChestStealerMenuCheck));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _chestStealerPhysicalCheck = true;
+    public bool ChestStealerPhysicalCheck
+    {
+        get => _chestStealerPhysicalCheck;
+        set
+        {
+            if (_chestStealerPhysicalCheck == value) return;
+            _chestStealerPhysicalCheck = value;
+            _chestStealerMenuCheck = _chestStealerTitleCheck || _chestStealerCustomItemsCheck || _chestStealerPhysicalCheck;
+            OnPropertyChanged(nameof(ChestStealerPhysicalCheck));
+            OnPropertyChanged(nameof(ChestStealerMenuCheck));
+            StateChanged?.Invoke();
+        }
+    }
+
+
+    private bool _refillEnabled = false;
+    public bool RefillEnabled
+    {
+        get => _refillEnabled;
+        set
+        {
+            if (_refillEnabled == value) return;
+            _refillEnabled = value;
+            if (value)
+                _refillController.Start();
+            else
+                _refillController.Stop();
+            OnPropertyChanged(nameof(RefillEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private int _refillDelayMs = 120;
+    public int RefillDelayMs
+    {
+        get => _refillDelayMs;
+        set
+        {
+            int clamped = Math.Clamp(value, 50, 500);
+            if (_refillDelayMs != clamped)
+            {
+                _refillDelayMs = clamped;
+                OnPropertyChanged(nameof(RefillDelayMs));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    // === Block ESP / X-ray ===
+
+    private bool _blockEspEnabled = false;
+    public bool BlockEspEnabled
+    {
+        get => _blockEspEnabled;
+        set
+        {
+            if (_blockEspEnabled == value) return;
+            _blockEspEnabled = value;
+            OnPropertyChanged(nameof(BlockEspEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _blockEspBoxes = true;
+    public bool BlockEspBoxes
+    {
+        get => _blockEspBoxes;
+        set
+        {
+            if (_blockEspBoxes == value) return;
+            _blockEspBoxes = value;
+            OnPropertyChanged(nameof(BlockEspBoxes));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _blockEspTracers = false;
+    public bool BlockEspTracers
+    {
+        get => _blockEspTracers;
+        set
+        {
+            if (_blockEspTracers == value) return;
+            _blockEspTracers = value;
+            OnPropertyChanged(nameof(BlockEspTracers));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _blockEspHud = true;
+    public bool BlockEspHud
+    {
+        get => _blockEspHud;
+        set
+        {
+            if (_blockEspHud == value) return;
+            _blockEspHud = value;
+            OnPropertyChanged(nameof(BlockEspHud));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private int _blockEspMaxCount = 64;
+    public int BlockEspMaxCount
+    {
+        get => _blockEspMaxCount;
+        set
+        {
+            int clamped = Math.Clamp(value, 1, 512);
+            if (_blockEspMaxCount != clamped)
+            {
+                _blockEspMaxCount = clamped;
+                OnPropertyChanged(nameof(BlockEspMaxCount));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    private int _blockEspRange = 4;
+    public int BlockEspRange
+    {
+        get => _blockEspRange;
+        set
+        {
+            int clamped = Math.Clamp(value, 1, 8);
+            if (_blockEspRange != clamped)
+            {
+                _blockEspRange = clamped;
+                OnPropertyChanged(nameof(BlockEspRange));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    private ObservableCollection<BlockEspTarget> _blockEspTargets = CreateDefaultBlockEspTargets();
+    public ObservableCollection<BlockEspTarget> BlockEspTargets
+    {
+        get => _blockEspTargets;
+        set
+        {
+            DetachBlockEspTargets(_blockEspTargets);
+            _blockEspTargets = value ?? new ObservableCollection<BlockEspTarget>();
+            AttachBlockEspTargets(_blockEspTargets);
+            OnPropertyChanged(nameof(BlockEspTargets));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private static ObservableCollection<BlockEspTarget> CreateDefaultBlockEspTargets()
+    {
+        var collection = new ObservableCollection<BlockEspTarget>(BlockEspPresets.BuildDefaultTargets());
+        return collection;
+    }
+
+    /// <summary>Subscribes to collection + per-item changes so edits re-push config and persist.</summary>
+    private void AttachBlockEspTargets(ObservableCollection<BlockEspTarget> targets)
+    {
+        targets.CollectionChanged += OnBlockEspTargetsChanged;
+        foreach (BlockEspTarget t in targets)
+            t.PropertyChanged += OnBlockEspTargetItemChanged;
+    }
+
+    private void DetachBlockEspTargets(ObservableCollection<BlockEspTarget> targets)
+    {
+        targets.CollectionChanged -= OnBlockEspTargetsChanged;
+        foreach (BlockEspTarget t in targets)
+            t.PropertyChanged -= OnBlockEspTargetItemChanged;
+    }
+
+    private void OnBlockEspTargetsChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        if (e.OldItems != null)
+            foreach (BlockEspTarget t in e.OldItems)
+                t.PropertyChanged -= OnBlockEspTargetItemChanged;
+        if (e.NewItems != null)
+            foreach (BlockEspTarget t in e.NewItems)
+                t.PropertyChanged += OnBlockEspTargetItemChanged;
+        OnPropertyChanged(nameof(BlockEspTargets));
+        StateChanged?.Invoke();
+    }
+
+    private void OnBlockEspTargetItemChanged(object? sender, PropertyChangedEventArgs e)
+        => StateChanged?.Invoke();
+
+    /// <summary>Encodes the enabled targets as the delimited wire string sent to the bridge.</summary>
+    public string BlockEspBlocksSerialized => BlockEspConfig.Serialize(_blockEspTargets);
+
+    // === BedPlates (block types around beds) ===
+
+    private bool _bedPlatesEnabled;
+    public bool BedPlatesEnabled
+    {
+        get => _bedPlatesEnabled;
+        set
+        {
+            if (_bedPlatesEnabled == value) return;
+            _bedPlatesEnabled = value;
+            OnPropertyChanged(nameof(BedPlatesEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _bedPlatesShowDistance = true;
+    public bool BedPlatesShowDistance
+    {
+        get => _bedPlatesShowDistance;
+        set
+        {
+            if (_bedPlatesShowDistance == value) return;
+            _bedPlatesShowDistance = value;
+            OnPropertyChanged(nameof(BedPlatesShowDistance));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private int _bedPlatesRange = 4;
+    public int BedPlatesRange
+    {
+        get => _bedPlatesRange;
+        set
+        {
+            int clamped = Math.Clamp(value, 1, 8);
+            if (_bedPlatesRange == clamped) return;
+            _bedPlatesRange = clamped;
+            OnPropertyChanged(nameof(BedPlatesRange));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _showModuleList = true;
+    public bool ShowModuleList
+    {
+        get => _showModuleList;
+        set
+        {
+            _showModuleList = value;
+            OnPropertyChanged(nameof(ShowModuleList));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _reachEnabled = false;
+    public bool ReachEnabled
+    {
+        get => _reachEnabled;
+        set
+        {
+            _reachEnabled = value;
+            OnPropertyChanged(nameof(ReachEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private float _reachMin = 3.0f;
+    public float ReachMin
+    {
+        get => _reachMin;
+        set
+        {
+            float clamped = Math.Clamp(value, 3.0f, 6.0f);
+            if (Math.Abs(_reachMin - clamped) > float.Epsilon)
+            {
+                _reachMin = clamped;
+                OnPropertyChanged(nameof(ReachMin));
+                if (_reachMin > _reachMax)
+                {
+                    _reachMax = _reachMin;
+                    OnPropertyChanged(nameof(ReachMax));
+                }
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    private float _reachMax = 3.0f;
+    public float ReachMax
+    {
+        get => _reachMax;
+        set
+        {
+            float clamped = Math.Clamp(value, 3.0f, 6.0f);
+            if (Math.Abs(_reachMax - clamped) > float.Epsilon)
+            {
+                _reachMax = clamped;
+                OnPropertyChanged(nameof(ReachMax));
+                if (_reachMax < _reachMin)
+                {
+                    _reachMin = _reachMax;
+                    OnPropertyChanged(nameof(ReachMin));
+                }
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    private int _reachChance = 100;
+    public int ReachChance
+    {
+        get => _reachChance;
+        set
+        {
+            int clamped = Math.Clamp(value, 0, 100);
+            if (_reachChance != clamped)
+            {
+                _reachChance = clamped;
+                OnPropertyChanged(nameof(ReachChance));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    private int _reachChanceMode = 0;
+    public int ReachChanceMode
+    {
+        get => _reachChanceMode;
+        set
+        {
+            int clamped = Math.Clamp(value, 0, 1);
+            if (_reachChanceMode != clamped)
+            {
+                _reachChanceMode = clamped;
+                OnPropertyChanged(nameof(ReachChanceMode));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    private bool _reachOnlyWhileSprinting = false;
+    public bool ReachOnlyWhileSprinting
+    {
+        get => _reachOnlyWhileSprinting;
+        set
+        {
+            if (_reachOnlyWhileSprinting != value)
+            {
+                _reachOnlyWhileSprinting = value;
+                OnPropertyChanged(nameof(ReachOnlyWhileSprinting));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    private bool _reachDisableInWater = false;
+    public bool ReachDisableInWater
+    {
+        get => _reachDisableInWater;
+        set
+        {
+            if (_reachDisableInWater != value)
+            {
+                _reachDisableInWater = value;
+                OnPropertyChanged(nameof(ReachDisableInWater));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    private bool _reachVerticalCheck = false;
+    public bool ReachVerticalCheck
+    {
+        get => _reachVerticalCheck;
+        set
+        {
+            if (_reachVerticalCheck != value)
+            {
+                _reachVerticalCheck = value;
+                OnPropertyChanged(nameof(ReachVerticalCheck));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    private bool _velocityEnabled = false;
+    public bool VelocityEnabled
+    {
+        get => _velocityEnabled;
+        set
+        {
+            _velocityEnabled = value;
+            OnPropertyChanged(nameof(VelocityEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private int _velocityHorizontal = 100;
+    public int VelocityHorizontal
+    {
+        get => _velocityHorizontal;
+        set
+        {
+            int clamped = Math.Clamp(value, 1, 100);
+            if (_velocityHorizontal != clamped)
+            {
+                _velocityHorizontal = clamped;
+                OnPropertyChanged(nameof(VelocityHorizontal));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    private int _velocityVertical = 100;
+    public int VelocityVertical
+    {
+        get => _velocityVertical;
+        set
+        {
+            int clamped = Math.Clamp(value, 1, 100);
+            if (_velocityVertical != clamped)
+            {
+                _velocityVertical = clamped;
+                OnPropertyChanged(nameof(VelocityVertical));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    private int _velocityChance = 100;
+    public int VelocityChance
+    {
+        get => _velocityChance;
+        set
+        {
+            int clamped = Math.Clamp(value, 1, 100);
+            if (_velocityChance != clamped)
+            {
+                _velocityChance = clamped;
+                OnPropertyChanged(nameof(VelocityChance));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    private bool _autoTotemEnabled = false;
+    public bool AutoTotemEnabled
+    {
+        get => _autoTotemEnabled;
+        set
+        {
+            _autoTotemEnabled = value;
+            OnPropertyChanged(nameof(AutoTotemEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private int _autoTotemMode = 0;
+    public int AutoTotemMode
+    {
+        get => _autoTotemMode;
+        set
+        {
+            int clamped = Math.Clamp(value, 0, 1);
+            if (_autoTotemMode != clamped)
+            {
+                _autoTotemMode = clamped;
+                OnPropertyChanged(nameof(AutoTotemMode));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    private int _autoTotemHealth = 10;
+    public int AutoTotemHealth
+    {
+        get => _autoTotemHealth;
+        set
+        {
+            int clamped = Math.Clamp(value, 0, 36);
+            if (_autoTotemHealth != clamped)
+            {
+                _autoTotemHealth = clamped;
+                OnPropertyChanged(nameof(AutoTotemHealth));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    private bool _autoTotemElytra = true;
+    public bool AutoTotemElytra
+    {
+        get => _autoTotemElytra;
+        set
+        {
+            _autoTotemElytra = value;
+            OnPropertyChanged(nameof(AutoTotemElytra));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private int _autoTotemDelay = 0;
+    public int AutoTotemDelay
+    {
+        get => _autoTotemDelay;
+        set
+        {
+            int clamped = Math.Clamp(value, 0, 20);
+            if (_autoTotemDelay != clamped)
+            {
+                _autoTotemDelay = clamped;
+                OnPropertyChanged(nameof(AutoTotemDelay));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    private int _autoTotemBehaviorMode = 0; // 0 = Ghost (inventory only), 1 = Anarchy
+    public int AutoTotemBehaviorMode
+    {
+        get => _autoTotemBehaviorMode;
+        set
+        {
+            int clamped = Math.Clamp(value, 0, 1);
+            if (_autoTotemBehaviorMode != clamped)
+            {
+                _autoTotemBehaviorMode = clamped;
+                OnPropertyChanged(nameof(AutoTotemBehaviorMode));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    private bool _autoRodEnabled = false;
+    public bool AutoRodEnabled
+    {
+        get => _autoRodEnabled;
+        set
+        {
+            if (_autoRodEnabled == value) return;
+            _autoRodEnabled = value;
+            OnPropertyChanged(nameof(AutoRodEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private int _autoRodSlotMode = 0;
+    public int AutoRodSlotMode
+    {
+        get => _autoRodSlotMode;
+        set
+        {
+            int clamped = Math.Clamp(value, 0, 9);
+            if (_autoRodSlotMode == clamped) return;
+            _autoRodSlotMode = clamped;
+            OnPropertyChanged(nameof(AutoRodSlotMode));
+            OnPropertyChanged(nameof(AutoRodUsesForcedSlot));
+            StateChanged?.Invoke();
+        }
+    }
+
+    public bool AutoRodUsesForcedSlot => AutoRodSlotMode > 0;
+
+    private bool _autoRodVerifyForcedSlot = true;
+    public bool AutoRodVerifyForcedSlot
+    {
+        get => _autoRodVerifyForcedSlot;
+        set
+        {
+            if (_autoRodVerifyForcedSlot == value) return;
+            _autoRodVerifyForcedSlot = value;
+            OnPropertyChanged(nameof(AutoRodVerifyForcedSlot));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private int _autoRodExtensionTicks = 4;
+    public int AutoRodExtensionTicks
+    {
+        get => _autoRodExtensionTicks;
+        set
+        {
+            int clamped = Math.Clamp(value, 1, 40);
+            if (_autoRodExtensionTicks == clamped) return;
+            _autoRodExtensionTicks = clamped;
+            OnPropertyChanged(nameof(AutoRodExtensionTicks));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _autoRodHoldToExtend;
+    public bool AutoRodHoldToExtend
+    {
+        get => _autoRodHoldToExtend;
+        set
+        {
+            if (_autoRodHoldToExtend == value) return;
+            _autoRodHoldToExtend = value;
+            OnPropertyChanged(nameof(AutoRodHoldToExtend));
+            OnPropertyChanged(nameof(AutoRodUsesFixedExtension));
+            StateChanged?.Invoke();
+        }
+    }
+
+    public bool AutoRodUsesFixedExtension => !AutoRodHoldToExtend;
+
+    public int AutoRodActionKey
+    {
+        get => InputHooks.AutoRodActionKey;
+        set
+        {
+            if (InputHooks.SetAutoRodActionKey(value))
+                OnPropertyChanged(nameof(AutoRodActionKey));
+        }
+    }
+
+    private bool _throwpotEnabled = false;
+    public bool ThrowpotEnabled
+    {
+        get => _throwpotEnabled;
+        set
+        {
+            if (_throwpotEnabled == value) return;
+            _throwpotEnabled = value;
+            OnPropertyChanged(nameof(ThrowpotEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    public int ThrowpotActionKey
+    {
+        get => InputHooks.ThrowpotActionKey;
+        set
+        {
+            if (InputHooks.SetThrowpotActionKey(value))
+                OnPropertyChanged(nameof(ThrowpotActionKey));
+        }
+    }
+
+    private bool _autoHealEnabled = false;
+    public bool AutoHealEnabled
+    {
+        get => _autoHealEnabled;
+        set
+        {
+            if (_autoHealEnabled == value) return;
+            _autoHealEnabled = value;
+            OnPropertyChanged(nameof(AutoHealEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private int _autoHealHealth = 17;
+    public int AutoHealHealth
+    {
+        get => _autoHealHealth;
+        set
+        {
+            int clamped = Math.Clamp(value, 1, 20);
+            if (_autoHealHealth != clamped)
+            {
+                _autoHealHealth = clamped;
+                OnPropertyChanged(nameof(AutoHealHealth));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    private int _autoHealDelayMs = 500;
+    public int AutoHealDelayMs
+    {
+        get => _autoHealDelayMs;
+        set
+        {
+            int clamped = Math.Clamp(value, 50, 2000);
+            if (_autoHealDelayMs != clamped)
+            {
+                _autoHealDelayMs = clamped;
+                OnPropertyChanged(nameof(AutoHealDelayMs));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    private bool _autoToolEnabled = false;
+    public bool AutoToolEnabled
+    {
+        get => _autoToolEnabled;
+        set
+        {
+            if (_autoToolEnabled == value) return;
+            _autoToolEnabled = value;
+            OnPropertyChanged(nameof(AutoToolEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _autoToolSwapWeapon = true;
+    public bool AutoToolSwapWeapon
+    {
+        get => _autoToolSwapWeapon;
+        set
+        {
+            if (_autoToolSwapWeapon == value) return;
+            _autoToolSwapWeapon = value;
+            OnPropertyChanged(nameof(AutoToolSwapWeapon));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _autoToolInstantSwap = true;
+    public bool AutoToolInstantSwap
+    {
+        get => _autoToolInstantSwap;
+        set
+        {
+            if (_autoToolInstantSwap == value) return;
+            _autoToolInstantSwap = value;
+            OnPropertyChanged(nameof(AutoToolInstantSwap));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private int _autoToolSwapToDelay = 50;
+    public int AutoToolSwapToDelay
+    {
+        get => _autoToolSwapToDelay;
+        set
+        {
+            int clamped = Math.Clamp(value, 0, 500);
+            if (_autoToolSwapToDelay == clamped) return;
+            _autoToolSwapToDelay = clamped;
+            OnPropertyChanged(nameof(AutoToolSwapToDelay));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _autoToolSwapBack = false;
+    public bool AutoToolSwapBack
+    {
+        get => _autoToolSwapBack;
+        set
+        {
+            if (_autoToolSwapBack == value) return;
+            _autoToolSwapBack = value;
+            OnPropertyChanged(nameof(AutoToolSwapBack));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private int _autoToolSwapBackDelay = 350;
+    public int AutoToolSwapBackDelay
+    {
+        get => _autoToolSwapBackDelay;
+        set
+        {
+            int clamped = Math.Clamp(value, 0, 1000);
+            if (_autoToolSwapBackDelay == clamped) return;
+            _autoToolSwapBackDelay = clamped;
+            OnPropertyChanged(nameof(AutoToolSwapBackDelay));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _autoToolRequireMouseDown = true;
+    public bool AutoToolRequireMouseDown
+    {
+        get => _autoToolRequireMouseDown;
+        set
+        {
+            if (_autoToolRequireMouseDown == value) return;
+            _autoToolRequireMouseDown = value;
+            OnPropertyChanged(nameof(AutoToolRequireMouseDown));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _autoToolOnlySneaking = false;
+    public bool AutoToolOnlySneaking
+    {
+        get => _autoToolOnlySneaking;
+        set
+        {
+            if (_autoToolOnlySneaking == value) return;
+            _autoToolOnlySneaking = value;
+            OnPropertyChanged(nameof(AutoToolOnlySneaking));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _autoToolBedwarsMode = true;
+    public bool AutoToolBedwarsMode
+    {
+        get => _autoToolBedwarsMode;
+        set
+        {
+            if (_autoToolBedwarsMode == value) return;
+            _autoToolBedwarsMode = value;
+            OnPropertyChanged(nameof(AutoToolBedwarsMode));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _antiDebuffEnabled = false;
+    public bool AntiDebuffEnabled
+    {
+        get => _antiDebuffEnabled;
+        set
+        {
+            _antiDebuffEnabled = value;
+            OnPropertyChanged(nameof(AntiDebuffEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _hitDelayFixEnabled = false;
+    public bool HitDelayFixEnabled
+    {
+        get => _hitDelayFixEnabled;
+        set
+        {
+            _hitDelayFixEnabled = value;
+            OnPropertyChanged(nameof(HitDelayFixEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _fireballWarningEnabled = false;
+    public bool FireballWarningEnabled
+    {
+        get => _fireballWarningEnabled;
+        set
+        {
+            if (_fireballWarningEnabled == value) return;
+            _fireballWarningEnabled = value;
+            OnPropertyChanged(nameof(FireballWarningEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _fireballWarningBox = true;
+    public bool FireballWarningBox
+    {
+        get => _fireballWarningBox;
+        set
+        {
+            if (_fireballWarningBox == value) return;
+            _fireballWarningBox = value;
+            OnPropertyChanged(nameof(FireballWarningBox));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _fireballWarningArrow = true;
+    public bool FireballWarningArrow
+    {
+        get => _fireballWarningArrow;
+        set
+        {
+            if (_fireballWarningArrow == value) return;
+            _fireballWarningArrow = value;
+            OnPropertyChanged(nameof(FireballWarningArrow));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _fireballWarningSound = true;
+    public bool FireballWarningSound
+    {
+        get => _fireballWarningSound;
+        set
+        {
+            if (_fireballWarningSound == value) return;
+            _fireballWarningSound = value;
+            OnPropertyChanged(nameof(FireballWarningSound));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _closestPlayerInfoEnabled = false;
+    public bool ClosestPlayerInfoEnabled
+    {
+        get => _closestPlayerInfoEnabled;
+        set
+        {
+            _closestPlayerInfoEnabled = value;
+            OnPropertyChanged(nameof(ClosestPlayerInfoEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _fightStatusEnabled = false;
+    public bool FightStatusEnabled
+    {
+        get => _fightStatusEnabled;
+        set
+        {
+            if (_fightStatusEnabled == value) return;
+            _fightStatusEnabled = value;
+            OnPropertyChanged(nameof(FightStatusEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _fastPlaceEnabled = false;
+    public bool FastPlaceEnabled
+    {
+        get => _fastPlaceEnabled;
+        set
+        {
+            if (_fastPlaceEnabled == value) return;
+            _fastPlaceEnabled = value;
+            OnPropertyChanged(nameof(FastPlaceEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _noHurtCamEnabled = false;
+    public bool NoHurtCamEnabled
+    {
+        get => _noHurtCamEnabled;
+        set
+        {
+            if (_noHurtCamEnabled == value) return;
+            _noHurtCamEnabled = value;
+            OnPropertyChanged(nameof(NoHurtCamEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _sprintEnabled = false;
+    public bool SprintEnabled
+    {
+        get => _sprintEnabled;
+        set
+        {
+            if (_sprintEnabled == value) return;
+            _sprintEnabled = value;
+            OnPropertyChanged(nameof(SprintEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _tntTimerEnabled = false;
+    public bool TntTimerEnabled
+    {
+        get => _tntTimerEnabled;
+        set
+        {
+            if (_tntTimerEnabled == value) return;
+            _tntTimerEnabled = value;
+            OnPropertyChanged(nameof(TntTimerEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _wTapEnabled = false;
+    public bool WTapEnabled
+    {
+        get => _wTapEnabled;
+        set
+        {
+            if (_wTapEnabled == value) return;
+            _wTapEnabled = value;
+            OnPropertyChanged(nameof(WTapEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _jumpResetEnabled = false;
+    public bool JumpResetEnabled
+    {
+        get => _jumpResetEnabled;
+        set
+        {
+            if (_jumpResetEnabled == value) return;
+            _jumpResetEnabled = value;
+            OnPropertyChanged(nameof(JumpResetEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _hitSelectEnabled = false;
+    public bool HitSelectEnabled
+    {
+        get => _hitSelectEnabled;
+        set
+        {
+            if (_hitSelectEnabled == value) return;
+            _hitSelectEnabled = value;
+            OnPropertyChanged(nameof(HitSelectEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _trajectoriesEnabled = false;
+    public bool TrajectoriesEnabled
+    {
+        get => _trajectoriesEnabled;
+        set
+        {
+            if (_trajectoriesEnabled == value) return;
+            _trajectoriesEnabled = value;
+            OnPropertyChanged(nameof(TrajectoriesEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _murderMysteryEnabled = false;
+    public bool MurderMysteryEnabled
+    {
+        get => _murderMysteryEnabled;
+        set
+        {
+            if (_murderMysteryEnabled == value) return;
+            _murderMysteryEnabled = value;
+            OnPropertyChanged(nameof(MurderMysteryEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _breakProgressEnabled = false;
+    public bool BreakProgressEnabled
+    {
+        get => _breakProgressEnabled;
+        set
+        {
+            if (_breakProgressEnabled == value) return;
+            _breakProgressEnabled = value;
+            OnPropertyChanged(nameof(BreakProgressEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private int _jumpResetChance = 80;
+    public int JumpResetChance
+    {
+        get => _jumpResetChance;
+        set
+        {
+            int clamped = Math.Clamp(value, 0, 100);
+            if (_jumpResetChance == clamped) return;
+            _jumpResetChance = clamped;
+            OnPropertyChanged(nameof(JumpResetChance));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _triggerbotEnabled = false;
+    public bool TriggerbotEnabled
+    {
+        get => _triggerbotEnabled;
+        set
+        {
+            _triggerbotEnabled = value;
+            OnPropertyChanged(nameof(TriggerbotEnabled));
+            if (_triggerbotEnabled) StartTriggerbotLoop();
+            else StopTriggerbotLoop();
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _killAuraEnabled = false;
+    public bool KillAuraEnabled
+    {
+        get => _killAuraEnabled;
+        set
+        {
+            if (_killAuraEnabled == value) return;
+            _killAuraEnabled = value;
+            OnPropertyChanged(nameof(KillAuraEnabled));
+            OnPropertyChanged(nameof(KillAuraPacketRateControlsEnabled));
+            OnPropertyChanged(nameof(KillAuraCpsControlsEnabled));
+            OnPropertyChanged(nameof(KillAuraClickSilentNoteVisible));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private float _killAuraRange = 2.9f;
+    public float KillAuraRange
+    {
+        get => _killAuraRange;
+        set
+        {
+            float clamped = Math.Clamp(value, 2.5f, 4.0f);
+            if (Math.Abs(_killAuraRange - clamped) < 0.001f) return;
+            _killAuraRange = clamped;
+            OnPropertyChanged(nameof(KillAuraRange));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private float _killAuraAimRange = 3.5f;
+    public float KillAuraAimRange
+    {
+        get => _killAuraAimRange;
+        set
+        {
+            float clamped = Math.Clamp(value, 3.0f, 6.0f);
+            if (Math.Abs(_killAuraAimRange - clamped) < 0.001f) return;
+            _killAuraAimRange = clamped;
+            OnPropertyChanged(nameof(KillAuraAimRange));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private float _killAuraMinTurnSpeed = 10.0f;
+    public float KillAuraMinTurnSpeed
+    {
+        get => _killAuraMinTurnSpeed;
+        set
+        {
+            float clamped = Math.Clamp(value, 4.0f, 40.0f);
+            if (Math.Abs(_killAuraMinTurnSpeed - clamped) < 0.001f) return;
+            _killAuraMinTurnSpeed = clamped;
+            if (_killAuraMinTurnSpeed > _killAuraMaxTurnSpeed)
+                _killAuraMaxTurnSpeed = _killAuraMinTurnSpeed;
+            OnPropertyChanged(nameof(KillAuraMinTurnSpeed));
+            OnPropertyChanged(nameof(KillAuraMaxTurnSpeed));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private float _killAuraMaxTurnSpeed = 20.0f;
+    public float KillAuraMaxTurnSpeed
+    {
+        get => _killAuraMaxTurnSpeed;
+        set
+        {
+            float clamped = Math.Clamp(value, 4.0f, 40.0f);
+            if (Math.Abs(_killAuraMaxTurnSpeed - clamped) < 0.001f) return;
+            _killAuraMaxTurnSpeed = clamped;
+            if (_killAuraMinTurnSpeed > _killAuraMaxTurnSpeed)
+                _killAuraMinTurnSpeed = _killAuraMaxTurnSpeed;
+            OnPropertyChanged(nameof(KillAuraMinTurnSpeed));
+            OnPropertyChanged(nameof(KillAuraMaxTurnSpeed));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private string _killAuraTargetMode = "distance";
+    public string KillAuraTargetMode
+    {
+        get => _killAuraTargetMode;
+        set
+        {
+            string normalized = string.Equals(value, "health", StringComparison.OrdinalIgnoreCase) ? "health" : "distance";
+            if (_killAuraTargetMode == normalized) return;
+            _killAuraTargetMode = normalized;
+            OnPropertyChanged(nameof(KillAuraTargetMode));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private int _killAuraSwitchDelayMs = 350;
+    public int KillAuraSwitchDelayMs
+    {
+        get => _killAuraSwitchDelayMs;
+        set
+        {
+            int clamped = Math.Clamp(value, 0, 2000);
+            if (_killAuraSwitchDelayMs == clamped) return;
+            _killAuraSwitchDelayMs = clamped;
+            OnPropertyChanged(nameof(KillAuraSwitchDelayMs));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private int _killAuraRandomization = 18;
+    public int KillAuraRandomization
+    {
+        get => _killAuraRandomization;
+        set
+        {
+            int clamped = Math.Clamp(value, 0, 100);
+            if (_killAuraRandomization == clamped) return;
+            _killAuraRandomization = clamped;
+            OnPropertyChanged(nameof(KillAuraRandomization));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private string _killAuraClickMode = "cooldown";
+    public string KillAuraClickMode
+    {
+        get => _killAuraClickMode;
+        set
+        {
+            string normalized = NormalizeKillAuraClickMode(value);
+            if (_killAuraClickMode == normalized) return;
+            _killAuraClickMode = normalized;
+            OnPropertyChanged(nameof(KillAuraClickMode));
+            OnPropertyChanged(nameof(KillAuraUsePacketRate));
+            OnPropertyChanged(nameof(KillAuraPacketRateControlsEnabled));
+            OnPropertyChanged(nameof(KillAuraClickSilentNoteVisible));
+            StateChanged?.Invoke();
+        }
+    }
+
+    internal static string NormalizeKillAuraClickMode(string? value)
+    {
+        if (string.Equals(value, "click", StringComparison.OrdinalIgnoreCase))
+            return "click";
+        if (string.Equals(value, "packet", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(value, "cps", StringComparison.OrdinalIgnoreCase))
+            return "packet";
+        return "cooldown";
+    }
+
+    /// <summary>True when attack pacing uses Min/Max packet rate (packet or click modes).</summary>
+    public bool KillAuraUsePacketRate =>
+        string.Equals(_killAuraClickMode, "packet", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(_killAuraClickMode, "click", StringComparison.OrdinalIgnoreCase);
+
+    public bool KillAuraPacketRateControlsEnabled =>
+        KillAuraUsePacketRate;
+
+    /// <summary>OS click aims with the camera — incompatible with packet-silent rotations.</summary>
+    public bool KillAuraClickSilentNoteVisible =>
+        string.Equals(_killAuraClickMode, "click", StringComparison.OrdinalIgnoreCase);
+
+    // Legacy name kept for bindings that still reference KillAuraUseCps during migration.
+    public bool KillAuraUseCps => KillAuraUsePacketRate;
+    public bool KillAuraCpsControlsEnabled => KillAuraPacketRateControlsEnabled;
+
+    private float _killAuraMinCps = 10.0f;
+    public float KillAuraMinCps
+    {
+        get => _killAuraMinCps;
+        set
+        {
+            float clamped = Math.Clamp(value, 8.0f, 20.0f);
+            if (Math.Abs(_killAuraMinCps - clamped) < 0.001f) return;
+            _killAuraMinCps = clamped;
+            if (_killAuraMinCps > _killAuraMaxCps)
+                _killAuraMaxCps = _killAuraMinCps;
+            OnPropertyChanged(nameof(KillAuraMinCps));
+            OnPropertyChanged(nameof(KillAuraMaxCps));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private float _killAuraMaxCps = 14.0f;
+    public float KillAuraMaxCps
+    {
+        get => _killAuraMaxCps;
+        set
+        {
+            float clamped = Math.Clamp(value, 8.0f, 20.0f);
+            if (Math.Abs(_killAuraMaxCps - clamped) < 0.001f) return;
+            _killAuraMaxCps = clamped;
+            if (_killAuraMinCps > _killAuraMaxCps)
+                _killAuraMinCps = _killAuraMaxCps;
+            OnPropertyChanged(nameof(KillAuraMinCps));
+            OnPropertyChanged(nameof(KillAuraMaxCps));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private int _killAuraFov = 120;
+    public int KillAuraFov
+    {
+        get => _killAuraFov;
+        set
+        {
+            int clamped = Math.Clamp(value, 30, 360);
+            if (_killAuraFov == clamped) return;
+            _killAuraFov = clamped;
+            OnPropertyChanged(nameof(KillAuraFov));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private string _killAuraRotMode = "legit";
+    public string KillAuraRotMode
+    {
+        get => _killAuraRotMode;
+        set
+        {
+            string normalized = value?.Trim().ToLowerInvariant() switch
+            {
+                "legit" => "legit",
+                "lock" => "lock",
+                _ => "silent"
+            };
+            if (_killAuraRotMode == normalized) return;
+            _killAuraRotMode = normalized;
+            OnPropertyChanged(nameof(KillAuraRotMode));
+            OnPropertyChanged(nameof(KillAuraClickSilentNoteVisible));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _killAuraRequirePress = false;
+    public bool KillAuraRequirePress
+    {
+        get => _killAuraRequirePress;
+        set
+        {
+            if (_killAuraRequirePress == value) return;
+            _killAuraRequirePress = value;
+            OnPropertyChanged(nameof(KillAuraRequirePress));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _killAuraWeaponsOnly = true;
+    public bool KillAuraWeaponsOnly
+    {
+        get => _killAuraWeaponsOnly;
+        set
+        {
+            if (_killAuraWeaponsOnly == value) return;
+            _killAuraWeaponsOnly = value;
+            OnPropertyChanged(nameof(KillAuraWeaponsOnly));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _speedBridgeEnabled = false;
+    public bool SpeedBridgeEnabled
+    {
+        get => _speedBridgeEnabled;
+        set
+        {
+            if (_speedBridgeEnabled == value) return;
+            _speedBridgeEnabled = value;
+            OnPropertyChanged(nameof(SpeedBridgeEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _speedBridgeBlockOnly = true;
+    public bool SpeedBridgeBlockOnly
+    {
+        get => _speedBridgeBlockOnly;
+        set
+        {
+            if (_speedBridgeBlockOnly == value) return;
+            _speedBridgeBlockOnly = value;
+            OnPropertyChanged(nameof(SpeedBridgeBlockOnly));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private int _speedBridgeDelayMs = 85;
+    public int SpeedBridgeDelayMs
+    {
+        get => _speedBridgeDelayMs;
+        set
+        {
+            int clamped = Math.Clamp(value, 20, 250);
+            if (_speedBridgeDelayMs == clamped) return;
+            _speedBridgeDelayMs = clamped;
+            OnPropertyChanged(nameof(SpeedBridgeDelayMs));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _speedBridgeHoldingShiftOnly = true;
+    public bool SpeedBridgeHoldingShiftOnly
+    {
+        get => _speedBridgeHoldingShiftOnly;
+        set
+        {
+            if (_speedBridgeHoldingShiftOnly == value) return;
+            _speedBridgeHoldingShiftOnly = value;
+            OnPropertyChanged(nameof(SpeedBridgeHoldingShiftOnly));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _speedBridgeLookingDownOnly = true;
+    public bool SpeedBridgeLookingDownOnly
+    {
+        get => _speedBridgeLookingDownOnly;
+        set
+        {
+            if (_speedBridgeLookingDownOnly == value) return;
+            _speedBridgeLookingDownOnly = value;
+            OnPropertyChanged(nameof(SpeedBridgeLookingDownOnly));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _triggerbotOnlyCrosshair = true;
+    public bool TriggerbotOnlyCrosshair
+    {
+        get => _triggerbotOnlyCrosshair;
+        set
+        {
+            _triggerbotOnlyCrosshair = value;
+            OnPropertyChanged(nameof(TriggerbotOnlyCrosshair));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _triggerbotOnlyIfCanAttack = true;
+    public bool TriggerbotOnlyIfCanAttack
+    {
+        get => _triggerbotOnlyIfCanAttack;
+        set
+        {
+            _triggerbotOnlyIfCanAttack = value;
+            OnPropertyChanged(nameof(TriggerbotOnlyIfCanAttack));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private int _triggerbotCooldownThreshold = 92;
+    public int TriggerbotCooldownThreshold
+    {
+        get => _triggerbotCooldownThreshold;
+        set
+        {
+            int clamped = Math.Clamp(value, 1, 100);
+            if (_triggerbotCooldownThreshold != clamped)
+            {
+                _triggerbotCooldownThreshold = clamped;
+                OnPropertyChanged(nameof(TriggerbotCooldownThreshold));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    private int _triggerbotHitChance = 100;
+    public int TriggerbotHitChance
+    {
+        get => _triggerbotHitChance;
+        set
+        {
+            int clamped = Math.Clamp(value, 1, 100);
+            if (_triggerbotHitChance != clamped)
+            {
+                _triggerbotHitChance = clamped;
+                OnPropertyChanged(nameof(TriggerbotHitChance));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    private bool _triggerbotRequireClick = true;
+    public bool TriggerbotRequireClick
+    {
+        get => _triggerbotRequireClick;
+        set
+        {
+            _triggerbotRequireClick = value;
+            OnPropertyChanged(nameof(TriggerbotRequireClick));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private HudLayout _hudLayout = new HudLayout();
+    public HudLayout HudLayout
+    {
+        get => _hudLayout;
+        set
+        {
+            if (_hudLayout != value)
+            {
+                _hudLayout = value;
+                OnPropertyChanged(nameof(HudLayout));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    private bool _hudEditorActive = false;
+    public bool HudEditorActive
+    {
+        get => _hudEditorActive;
+        set
+        {
+            if (_hudEditorActive != value)
+            {
+                _hudEditorActive = value;
+                OnPropertyChanged(nameof(HudEditorActive));
+                StateChanged?.Invoke();
+            }
+        }
+    }
+
+    public void UpdateGtbFromActionBar(string actionBarText)
+    {
+        if (!GtbHelperEnabled)
+        {
+            SetGtbState("", 0, "");
+            return;
+        }
+
+        GtbWordSolver.TryLearnSolvedWord(actionBarText);
+        var (mask, matches) = GtbWordSolver.Solve(actionBarText, maxResults: 200);
+        if (string.IsNullOrWhiteSpace(mask))
+        {
+            SetGtbState("", 0, "");
+            return;
+        }
+
+        string preview = matches.Count == 0
+            ? "No matches"
+            : string.Join(", ", matches.Select(m => m));
+        SetGtbState(mask, matches.Count, preview);
+    }
+
+    private void SetGtbState(string hint, int count, string preview)
+    {
+        GtbCurrentHint = string.IsNullOrWhiteSpace(hint) ? "-" : hint;
+        GtbMatchCount = count;
+        GtbMatchesPreview = string.IsNullOrWhiteSpace(preview) ? "-" : preview;
+    }
+    
+    private async Task AimAssistLoop(CancellationToken token)
+    {
+        try
+        {
+            while (!token.IsCancellationRequested)
+            {
+                bool supportedVersion = GameStateClient.Instance.SupportsModule("aimassist");
+                bool shouldRun =
+                    AimAssistEnabled &&
+                    supportedVersion &&
+                    GameStateClient.Instance.IsConnected &&
+                    WindowDetection.IsMinecraftActive();
+
+                if (!shouldRun)
+                {
+                    _aimAssistMotionController.Reset();
+                    await Task.Delay(8, token).ConfigureAwait(false);
+                    continue;
+                }
+
+                var state = GameStateClient.Instance.CurrentState;
+                if (state.GuiOpen && WindowDetection.IsCursorVisible())
+                {
+                    _aimAssistMotionController.Reset();
+                    await Task.Delay(16, token).ConfigureAwait(false);
+                    continue;
+                }
+
+                long nowMs = Environment.TickCount64;
+                long stateAgeMs;
+                if (state.StateMs > 0)
+                {
+                    long bridgeMs = unchecked((long)state.StateMs);
+                    stateAgeMs = nowMs - bridgeMs;
+                }
+                else
+                {
+                    stateAgeMs = (long)(DateTime.Now - state.LastUpdate).TotalMilliseconds;
+                }
+                if (stateAgeMs < 0) stateAgeMs = 0;
+                if (stateAgeMs > AimAssistStateFreshMs)
+                {
+                    _aimAssistMotionController.Reset();
+                    await Task.Delay(8, token).ConfigureAwait(false);
+                    continue;
+                }
+
+                bool leftHeld = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+                bool autoLeftClicking = IsUsingLeftButton;
+                if (leftHeld || autoLeftClicking)
+                    TryApplyAimAssist(state);
+                else
+                    _aimAssistMotionController.Reset();
+
+                await Task.Delay(8, token).ConfigureAwait(false);
+            }
+        }
+        catch (TaskCanceledException) { }
+    }
+
+    private async Task PixelPartyAssistInputLoop(CancellationToken token)
+    {
+        try
+        {
+            while (!token.IsCancellationRequested)
+            {
+                bool moduleOk = PixelPartyAssistEnabled
+                    && GameStateClient.Instance.SupportsModule("pixelpartyassist")
+                    && GameStateClient.Instance.SupportsStateField("pixelpartyyawdelta")
+                    && GameStateClient.Instance.IsConnected
+                    && WindowDetection.IsMinecraftActive();
+
+                bool walkEnabled = moduleOk && PixelPartyAutoWalkEnabled;
+                // Auto-walk steers with mouse only (no A/D); enable look when walk or look is on.
+                bool steerEnabled = moduleOk && (PixelPartyAutoLookEnabled || walkEnabled);
+
+                if (!steerEnabled && !walkEnabled)
+                {
+                    ReleasePixelPartyWalkKeys();
+                    _pixelPartyLastTargetMs = 0;
+                    await Task.Delay(16, token).ConfigureAwait(false);
+                    continue;
+                }
+
+                var state = GameStateClient.Instance.CurrentState;
+                if (state.GuiOpen && WindowDetection.IsCursorVisible())
+                {
+                    ReleasePixelPartyWalkKeys();
+                    _pixelPartyLastTargetMs = 0;
+                    await Task.Delay(16, token).ConfigureAwait(false);
+                    continue;
+                }
+
+                long nowMs = Environment.TickCount64;
+                long stateAgeMs;
+                if (state.StateMs > 0)
+                {
+                    long bridgeMs = unchecked((long)state.StateMs);
+                    stateAgeMs = nowMs - bridgeMs;
+                }
+                else
+                {
+                    stateAgeMs = (long)(DateTime.Now - state.LastUpdate).TotalMilliseconds;
+                }
+                if (stateAgeMs < 0) stateAgeMs = 0;
+                if (stateAgeMs > PixelPartyAssistInputStateFreshMs)
+                {
+                    ReleasePixelPartyWalkKeys();
+                    _pixelPartyLastTargetMs = 0;
+                    await Task.Delay(8, token).ConfigureAwait(false);
+                    continue;
+                }
+
+                bool targetFound = state.PixelPartyTargetFound;
+                float dist = state.PixelPartyTargetDist;
+                float yawDelta = state.PixelPartyYawDelta;
+
+                if (targetFound)
+                {
+                    _pixelPartyLastTargetMs = nowMs;
+                    _pixelPartyLastYawDelta = yawDelta;
+                    _pixelPartyLastDist = dist;
+                }
+                else if (_pixelPartyLastTargetMs != 0 &&
+                         (nowMs - _pixelPartyLastTargetMs) <= PixelPartyTargetGraceMs)
+                {
+                    // Target briefly lost (typically mid-jump): coast on last known values
+                    // so keys/steering stay engaged and movement doesn't stutter.
+                    targetFound = true;
+                    yawDelta = _pixelPartyLastYawDelta;
+                    dist = _pixelPartyLastDist;
+                }
+
+                bool precisionRange = targetFound && dist < PixelPartyPrecisionDist;
+                bool canWalk = targetFound && dist > PixelPartyMinWalkDist;
+
+                if (steerEnabled && targetFound)
+                    ApplyPixelPartySteer(yawDelta, walkEnabled);
+
+                if (walkEnabled)
+                {
+                    if (!canWalk)
+                    {
+                        ReleasePixelPartyWalkKeys();
+                    }
+                    else
+                    {
+                        SetPixelPartyWalkKey(VK_A, false, ref _pixelPartyKeyA);
+                        SetPixelPartyWalkKey(VK_D, false, ref _pixelPartyKeyD);
+
+                        float yawAbs = Math.Abs(yawDelta);
+                        float alignMax = precisionRange ? PixelPartyPrecisionAlignMaxDeg : PixelPartyWalkAlignMaxDeg;
+                        bool alignedForward = yawAbs < alignMax;
+                        // Close range: walk onto the block even when not perfectly aligned.
+                        bool walkForward = alignedForward
+                            || (precisionRange && dist < 2.2f && yawAbs < 75f);
+                        SetPixelPartyWalkKey(VK_W, walkForward, ref _pixelPartyKeyW);
+
+                        bool jumpDown = walkForward
+                            && !precisionRange
+                            && dist >= PixelPartyJumpMinDist
+                            && ((Environment.TickCount64 / PixelPartyJumpPulseHalfMs) % 2) == 0;
+                        SetPixelPartyWalkKey(VK_SPACE, jumpDown, ref _pixelPartyKeySpace);
+                    }
+                }
+                else
+                {
+                    ReleasePixelPartyWalkKeys();
+                }
+
+                int loopDelayMs = (steerEnabled || walkEnabled) && targetFound ? 4 : 8;
+                await Task.Delay(loopDelayMs, token).ConfigureAwait(false);
+            }
+        }
+        catch (TaskCanceledException)
+        {
+            ReleasePixelPartyWalkKeys();
+        }
+    }
+
+    private async Task TriggerbotLoop(CancellationToken token)
+    {
+        bool hadTarget = false;
+        long targetReadyAt = 0;
+        long lastTriggerbotClickAt = 0;
+
+        try
+        {
+            while (!token.IsCancellationRequested)
+            {
+                bool supportedVersion = GameStateClient.Instance.SupportsModule("triggerbot");
+                bool shouldRun =
+                    TriggerbotEnabled &&
+                    supportedVersion &&
+                    GameStateClient.Instance.IsConnected &&
+                    WindowDetection.IsMinecraftActive() &&
+                    !WindowDetection.IsCursorVisible();
+
+                if (!shouldRun)
+                {
+                    hadTarget = false;
+                    await Task.Delay(25, token).ConfigureAwait(false);
+                    continue;
+                }
+
+                var state = GameStateClient.Instance.CurrentState;
+                long nowMs = Environment.TickCount64;
+                long stateAgeMs;
+                if (state.StateMs > 0)
+                {
+                    long bridgeMs = unchecked((long)state.StateMs);
+                    stateAgeMs = nowMs - bridgeMs;
+                }
+                else
+                {
+                    stateAgeMs = (long)(DateTime.Now - state.LastUpdate).TotalMilliseconds;
+                }
+                if (stateAgeMs < 0) stateAgeMs = 0;
+                bool staleState = stateAgeMs > TriggerbotStateFreshMs;
+                if (staleState)
+                {
+                    hadTarget = false;
+                    await Task.Delay(8, token).ConfigureAwait(false);
+                    continue;
+                }
+
+                if (state.GuiOpen && WindowDetection.IsCursorVisible())
+                {
+                    hadTarget = false;
+                    await Task.Delay(20, token).ConfigureAwait(false);
+                    continue;
+                }
+
+                if (BreakBlocksEnabled && (state.LookingAtBlock || state.BreakingBlock) && !state.LookingAtEntity && !state.LookingAtEntityLatched)
+                {
+                    hadTarget = false;
+                    await Task.Delay(12, token).ConfigureAwait(false);
+                    continue;
+                }
+
+                bool leftHeld = InputHooks.IsPhysicalLeftButtonDown;
+                if (TriggerbotRequireClick && !leftHeld)
+                {
+                    hadTarget = false;
+                    await Task.Delay(8, token).ConfigureAwait(false);
+                    continue;
+                }
+
+                bool crosshairOnEntity = state.LookingAtEntity || state.LookingAtEntityLatched || IsCrosshairEntityFallback(state);
+                bool canAttackTarget = CanAttackTargetNow(state);
+                bool hasTarget =
+                    (!TriggerbotOnlyCrosshair || crosshairOnEntity) &&
+                    (!TriggerbotOnlyIfCanAttack || canAttackTarget);
+
+                if (!hasTarget)
+                {
+                    hadTarget = false;
+                    await Task.Delay(8, token).ConfigureAwait(false);
+                    continue;
+                }
+
+                if (!hadTarget)
+                {
+                    hadTarget = true;
+                    float cooldownThreshold = TriggerbotCooldownThreshold / 100.0f;
+                    float thresholdFactor = 1.10f - Math.Clamp(cooldownThreshold, 0.10f, 1.00f);
+                    float baseIntervalMs = 40.0f + (thresholdFactor * 110.0f);
+                    double reactionFactor = 0.7 + (Random.Shared.NextDouble() * 1.1);
+                    int reactionMs = (int)Math.Clamp(baseIntervalMs * reactionFactor, 45.0f, 220.0f);
+                    targetReadyAt = nowMs + reactionMs;
+                }
+
+                float serverCooldown = Math.Clamp(state.AttackCooldown, 0.0f, 1.0f);
+                float cooldownPerTick = NormalizeCooldownPerTick(state.AttackCooldownPerTick);
+                float localCooldown = lastTriggerbotClickAt == 0
+                    ? 1.0f
+                    : Math.Clamp(((nowMs - lastTriggerbotClickAt) / 50.0f) * cooldownPerTick, 0.0f, 1.0f);
+                float cooldownBase = Math.Min(serverCooldown, localCooldown);
+                float predictedCooldown = cooldownBase;
+                if (targetReadyAt > nowMs)
+                {
+                    double msAhead = targetReadyAt - nowMs;
+                    float localAhead = Math.Clamp(localCooldown + (float)(msAhead / 50.0) * cooldownPerTick, 0.0f, 1.0f);
+                    predictedCooldown = Math.Min(serverCooldown, localAhead);
+                }
+
+                float threshold = TriggerbotCooldownThreshold / 100.0f;
+                bool cooldownReady = serverCooldown >= threshold && predictedCooldown >= threshold;
+                long minIntervalMs = (long)Math.Ceiling((threshold / Math.Max(0.01f, cooldownPerTick)) * 50.0f);
+                bool intervalReady = lastTriggerbotClickAt == 0 || (nowMs - lastTriggerbotClickAt) >= minIntervalMs;
+                long fullCooldownMs = (long)Math.Ceiling(50.0f / Math.Max(0.01f, cooldownPerTick));
+                bool hardCapReady = lastTriggerbotClickAt == 0 || (nowMs - lastTriggerbotClickAt) >= fullCooldownMs;
+
+                if (cooldownReady && intervalReady && hardCapReady && nowMs >= targetReadyAt)
+                {
+                    bool didClick = false;
+                    if (Random.Shared.Next(1, 101) <= TriggerbotHitChance)
+                    {
+                        PerformClick(true);
+                        didClick = true;
+                    }
+
+                    if (didClick)
+                    {
+                        lastTriggerbotClickAt = nowMs;
+                        int postClickDelay = Random.Shared.Next(18, 46);
+                        if (Random.Shared.NextDouble() < 0.10)
+                            postClickDelay += Random.Shared.Next(20, 65);
+                        targetReadyAt = nowMs + postClickDelay;
+                    }
+                    else
+                    {
+                        targetReadyAt = nowMs + Random.Shared.Next(18, 34);
+                    }
+                }
+
+                await Task.Delay(4, token).ConfigureAwait(false);
+            }
+        }
+        catch (TaskCanceledException) { }
+    }
+
+    private bool IsCrosshairEntityFallback(GameState state)
+    {
+        if (state.Entities.Count == 0) return false;
+        var rect = WindowDetection.GetMinecraftWindowRect();
+        if (!rect.HasValue) return false;
+
+        int width = state.ViewportWidth > 0
+            ? state.ViewportWidth
+            : rect.Value.Right - rect.Value.Left;
+        int height = state.ViewportHeight > 0
+            ? state.ViewportHeight
+            : rect.Value.Bottom - rect.Value.Top;
+        if (width <= 0 || height <= 0) return false;
+
+        double cx = width * 0.5;
+        double cy = height * 0.5;
+        const double radiusSq = 24.0 * 24.0;
+
+        foreach (var entity in state.Entities)
+        {
+            if (entity.Hp <= 0.1f) continue;
+            if (entity.Sx < 0 || entity.Sx > width || entity.Sy < 0 || entity.Sy > height) continue;
+            double dx = entity.Sx - cx;
+            double dy = entity.Sy - cy;
+            if ((dx * dx + dy * dy) <= radiusSq)
+                return true;
+        }
+
+        return false;
+    }
+
+    private bool CanAttackTargetNow(GameState state)
+    {
+        if (state.Entities.Count == 0) return false;
+
+        if (state.LookingAtEntity || state.LookingAtEntityLatched) return true;
+        if (!IsCrosshairEntityFallback(state)) return false;
+
+        var rect = WindowDetection.GetMinecraftWindowRect();
+        if (!rect.HasValue) return false;
+
+        int width = state.ViewportWidth > 0
+            ? state.ViewportWidth
+            : rect.Value.Right - rect.Value.Left;
+        int height = state.ViewportHeight > 0
+            ? state.ViewportHeight
+            : rect.Value.Bottom - rect.Value.Top;
+        if (width <= 0 || height <= 0) return false;
+
+        double cx = width * 0.5;
+        double cy = height * 0.5;
+        const double radiusSq = 30.0 * 30.0;
+
+        double bestDist = double.MaxValue;
+        bool foundInCrosshair = false;
+
+        foreach (var entity in state.Entities)
+        {
+            if (entity.Hp <= 0.1f) continue;
+            if (entity.Dist <= 0.01 || entity.Dist > 3.8) continue;
+            if (entity.Sx < 0 || entity.Sx > width || entity.Sy < 0 || entity.Sy > height) continue;
+
+            double dx = entity.Sx - cx;
+            double dy = entity.Sy - cy;
+            double distSq = dx * dx + dy * dy;
+            if (distSq > radiusSq) continue;
+
+            foundInCrosshair = true;
+            if (entity.Dist < bestDist)
+                bestDist = entity.Dist;
+        }
+
+        if (!foundInCrosshair) return false;
+        return bestDist <= 3.8;
+    }
+
+    private static float NormalizeCooldownPerTick(float raw)
+    {
+        if (!float.IsFinite(raw) || raw <= 0.0f) return 0.08f;
+        float normalized;
+        if (raw > 1.0f)
+        {
+            float asTicks = 1.0f / raw;
+            float asAttackSpeed = raw / 20.0f;
+            normalized = Math.Min(asTicks, asAttackSpeed);
+        }
+        else
+        {
+            normalized = raw;
+        }
+        return Math.Clamp(normalized, 0.025f, 0.25f);
+    }
+
+    private static bool IsAlwaysBlockedGuiScreen(string screen)
+    {
+        return screen.Contains("GuiInventory", StringComparison.OrdinalIgnoreCase) ||
+               screen.Contains("InventoryScreen", StringComparison.OrdinalIgnoreCase) ||
+               screen.Contains("class_490", StringComparison.OrdinalIgnoreCase) ||
+               screen.Contains("GuiCrafting", StringComparison.OrdinalIgnoreCase) ||
+               screen.Contains("CraftingScreen", StringComparison.OrdinalIgnoreCase) ||
+               screen.Contains("class_479", StringComparison.OrdinalIgnoreCase) ||
+               screen.Contains("GuiFurnace", StringComparison.OrdinalIgnoreCase) ||
+               screen.Contains("FurnaceScreen", StringComparison.OrdinalIgnoreCase) ||
+               screen.Contains("class_3871", StringComparison.OrdinalIgnoreCase) ||
+               screen.Contains("AbstractFurnace", StringComparison.OrdinalIgnoreCase) ||
+               screen.Contains("GuiRepair", StringComparison.OrdinalIgnoreCase) ||
+               screen.Contains("AnvilScreen", StringComparison.OrdinalIgnoreCase) ||
+               screen.Contains("class_471", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Click in Chests only applies to a real chest. When any of the Chest Stealer menu checks
+    /// (title / custom items / physical chest) is enabled, the bridge must report the open
+    /// container as a physical chest; shops, kit selectors and other server menus that reuse the
+    /// chest GUI are rejected. With every check off, any chest-like GUI is allowed as before.
+    /// </summary>
+    internal static bool IsChestClickAllowed(GameState state, bool menuCheckEnabled)
+    {
+        if (!menuCheckEnabled)
+            return true;
+
+        return state.ChestStealerState is { Physical: true };
+    }
+
+    private static bool IsChestGuiScreen(string screen)
+    {
+        return screen.Contains("GuiChest", StringComparison.OrdinalIgnoreCase) ||
+               screen.Contains("ContainerScreen", StringComparison.OrdinalIgnoreCase) ||
+               screen.Contains("class_481", StringComparison.OrdinalIgnoreCase) ||
+               screen.Contains("GuiContainer", StringComparison.OrdinalIgnoreCase) ||
+               screen.Contains("HopperScreen", StringComparison.OrdinalIgnoreCase) ||
+               screen.Contains("class_488", StringComparison.OrdinalIgnoreCase) ||
+               screen.Contains("ShulkerBox", StringComparison.OrdinalIgnoreCase) ||
+               screen.Contains("class_495", StringComparison.OrdinalIgnoreCase) ||
+               screen.Contains("HandledScreen", StringComparison.OrdinalIgnoreCase) ||
+               screen.Contains("class_465", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private async Task ClickLoop(CancellationToken token, bool leftButton)
+    {
+        long nextClickDeadline = 0;
+        
+        while (!token.IsCancellationRequested)
+        {
+            if (!WindowDetection.IsMinecraftActive())
+            {
+                await Task.Delay(100, token).ConfigureAwait(false);
+                continue;
+            }
+
+            // Menu & Inventory Safety Checks
+            if (GameStateClient.Instance.IsConnected)
+            {
+                var state = GameStateClient.Instance.CurrentState;
+                if (state.GuiOpen)
+                {
+                    string screen = state.ScreenName;
+                    bool alwaysBlock = IsAlwaysBlockedGuiScreen(screen);
+                    bool isChest = IsChestGuiScreen(screen);
+
+                    bool shouldBlock = false;
+
+                    // Universal Ghost UI Check:
+                    // If the bridge reports a GUI is open, but the system cursor is HIDDEN,
+                    // it implies we are actually in-game (Crosshair mode) and the GUI state is 'ghosted'.
+                    if (WindowDetection.IsCursorVisible())
+                    {
+                        if (alwaysBlock)
+                        {
+                            shouldBlock = true;
+                        }
+                        else if (isChest)
+                        {
+                            // Block in chests UNLESS "Click In Chests" is enabled AND the open
+                            // container passes the shared Chest Stealer menu checks.
+                            if (!ClickInChests || !IsChestClickAllowed(state, ChestStealerMenuCheck))
+                                shouldBlock = true;
+                        }
+                        else
+                        {
+                            // Menu (Escape, Settings, Chat, etc.)
+                            // Always block in menus if cursor is visible
+                            shouldBlock = true;
+                        }
+                    }
+
+                    if (shouldBlock)
+                    {
+                        await Task.Delay(100, token).ConfigureAwait(false);
+                        continue;
+                    }
+                }
+            }
+            else
+            {
+                // Fallback if not connected: Cursor check
+                if (WindowDetection.IsCursorVisible())
+                {
+                     await Task.Delay(100, token).ConfigureAwait(false);
+                     continue;
+                }
+            }
+            
+            // Right Click Logic: "Only hold block" check
+            if (!leftButton && RightClickOnlyBlock)
+            {
+                // When injected, require confirmed block holding; fail-open only when not injected at all.
+                if (GameStateClient.Instance.IsInjected && (!GameStateClient.Instance.IsConnected || !GameStateClient.Instance.CurrentState.HoldingBlock))
+                {
+                    await Task.Delay(100, token).ConfigureAwait(false);
+                    continue;
+                }
+            }
+            
+            // Break Blocks Logic: 
+            if (leftButton && BreakBlocksEnabled)
+            {
+                if (GameStateClient.Instance.IsConnected)
+                {
+                    var state = GameStateClient.Instance.CurrentState;
+                    bool allowChestClicks =
+                        state.GuiOpen &&
+                        WindowDetection.IsCursorVisible() &&
+                        ClickInChests &&
+                        IsChestGuiScreen(state.ScreenName) &&
+                        IsChestClickAllowed(state, ChestStealerMenuCheck);
+
+                    if (allowChestClicks)
+                    {
+                        // Chest GUI clicks should never be treated as block-mining intent.
+                        IsMiningIntent = false;
+                    }
+                    else if ((state.LookingAtBlock || state.BreakingBlock) && !state.LookingAtEntity && !state.LookingAtEntityLatched)
+                    {
+                        await Task.Delay(25, token).ConfigureAwait(false);
+                        continue;
+                    }
+                }
+            }
+            
+            // Hit Select: skip left clicks while the crosshair target is still inside its
+            // hurt window, where the server ignores the hit. Bridges that do not report
+            // lookingAtEntityHurtTime leave it at 0, so this fails open.
+            if (leftButton && HitSelectEnabled && GameStateClient.Instance.IsConnected)
+            {
+                var state = GameStateClient.Instance.CurrentState;
+                if (ShouldHitSelectSkip(state.LookingAtEntity, state.LookingAtEntityHurtTime))
+                {
+                    await Task.Delay(10, token).ConfigureAwait(false);
+                    continue;
+                }
+            }
+
+            float minCps = leftButton ? MinCPS : RightMinCPS;
+            float maxCps = leftButton ? MaxCPS : RightMaxCPS;
+            if (minCps > maxCps) minCps = maxCps;
+            
+            // Calculate CPS and target interval according to configured RandomizationMode
+            float cps;
+            double targetInterval;
+
+            switch (RandomizationMode)
+            {
+                case ClickRandomizationMode.Basic:
+                {
+                    cps = minCps + (float)Random.Shared.NextDouble() * (maxCps - minCps);
+                    targetInterval = 1000.0 / Math.Max(0.1f, cps);
+                    break;
+                }
+                case ClickRandomizationMode.Medium:
+                {
+                    float midCps = (minCps + maxCps) / 2.0f;
+                    float range = (maxCps - minCps) / 4.0f; 
+                    cps = GaussianRandom(midCps, range);
+                    cps = Math.Clamp(cps, minCps, maxCps);
+                    targetInterval = 1000.0 / Math.Max(0.1f, cps);
+                    break;
+                }
+                case ClickRandomizationMode.Advanced:
+                default:
+                {
+                    var timingState = leftButton ? _leftTimingState : _rightTimingState;
+                    targetInterval = timingState.CalculateNextDelay(minCps, maxCps);
+                    cps = (float)(1000.0 / Math.Max(1.0, targetInterval));
+                    break;
+                }
+            }
+
+            // Perform click
+            if (token.IsCancellationRequested)
+                break;
+            StatsTracker.Instance.RecordClick(cps, leftButton);
+            PerformClick(leftButton);
+
+            ClickSchedule schedule = ClickDeadlineScheduler.ScheduleNext(
+                nextClickDeadline,
+                Stopwatch.GetTimestamp(),
+                targetInterval,
+                Stopwatch.Frequency);
+            nextClickDeadline = schedule.DeadlineTimestamp;
+            
+            try
+            {
+                await Task.Delay(schedule.DelayMilliseconds, token).ConfigureAwait(false);
+            }
+            catch (TaskCanceledException)
+            {
+                break;
+            }
+        }
+    }
+    
+    /// <summary>
+    /// Target hurtTime counts down 10..0 after each damaging hit. Clicks that land
+    /// while it is above this value hit the target's invulnerability window.
+    /// One tick of slack covers the round trip to the server.
+    /// </summary>
+    internal const int HitSelectHurtTimeThreshold = 1;
+
+    internal static bool ShouldHitSelectSkip(bool lookingAtEntity, int targetHurtTime)
+        => lookingAtEntity && targetHurtTime > HitSelectHurtTimeThreshold;
+
+    private void PerformClick(bool leftButton)
+    {
+        INPUT[] inputs = leftButton ? _leftClickInputs : _rightClickInputs;
+        lock (_sendInputLock)
+        {
+            SendInput(2, inputs, MouseInputSize);
+        }
+    }
+
+    private void TryApplyAimAssist(GameState state)
+    {
+        var rect = WindowDetection.GetMinecraftWindowRect();
+        int width = state.ViewportWidth;
+        int height = state.ViewportHeight;
+        if (width <= 0 || height <= 0)
+        {
+            if (!rect.HasValue)
+            {
+                _aimAssistMotionController.Reset();
+                return;
+            }
+
+            width = rect.Value.Right - rect.Value.Left;
+            height = rect.Value.Bottom - rect.Value.Top;
+        }
+
+        AimAssistMotionResult move = _aimAssistMotionController.Update(
+            state.Entities,
+            width,
+            height,
+            state.Fov,
+            AimAssistFov,
+            AimAssistRange,
+            AimAssistStrength,
+            state.LookingAtEntity);
+        if (!move.HasTarget || move.Suppressed || (move.MoveX == 0 && move.MoveY == 0))
+            return;
+
+        _aimAssistMoveInput[0].Mi.Dx = move.MoveX;
+        _aimAssistMoveInput[0].Mi.Dy = move.MoveY;
+        lock (_sendInputLock)
+        {
+            SendInput(1, _aimAssistMoveInput, MouseInputSize);
+        }
+    }
+     
+    private float GaussianRandom(float mean, float stddev)
+    {
+        // Box-Muller transform
+        double u1 = 1.0 - Random.Shared.NextDouble();
+        double u2 = 1.0 - Random.Shared.NextDouble();
+        double z = Math.Sqrt(-2.0 * Math.Log(u1)) * Math.Cos(2.0 * Math.PI * u2);
+        return (float)(mean + z * stddev);
+    }
+    
+    private void OnPropertyChanged(string name)
+    {
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+    }
+}

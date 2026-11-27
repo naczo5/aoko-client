@@ -1,0 +1,5 @@
+[toolchain]
+# Matches zed-industries/zed's pin, which the vendored GPUI revision expects.
+channel = "1.100.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

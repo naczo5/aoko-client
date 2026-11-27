@@ -1,0 +1,36 @@
+[package]
+name = "aoko-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Automation state machines, scheduling and app coordination. Fully headless and clock-injectable."
+
+[features]
+# Exposes `aoko_core::testing` (virtual clock, manual scheduler) to a dependent
+# crate's tests. The module is always compiled for this crate's own tests.
+testing = []
+
+[dependencies]
+aoko-protocol = { workspace = true }
+aoko-platform = { workspace = true }
+arc-swap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+crossbeam-channel = { workspace = true }
+parking_lot = { workspace = true }
+rand = { workspace = true }
+
+[[bench]]
+# Hand-rolled timing loop, no framework: `harness = false` so `cargo bench` runs
+# `main`. Two cases do not justify pulling in criterion.
+name = "loops"
+harness = false
+
+[dev-dependencies]
+rand_chacha = { workspace = true }
+tempfile = { workspace = true }
+

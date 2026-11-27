@@ -1,0 +1,205 @@
+name: rust
+
+# Gates for the Rust workspace. The toolchain is pinned by rust-toolchain.toml
+# (1.100.0, rustfmt + clippy), which matches the revision the vendored GPUI
+# expects, so no step here selects a version.
+#
+# Every command in this file has been run by hand against this tree; see section
+# 10 of MIGRATION_ARCHITECTURE.md for what each gate means and which exceptions
+# are permitted. The one thing CI deliberately does not do is assert timings:
+# shared runners are too noisy for that, so performance work is measured out of
+# band and CI only compiles the benchmarks.
+
+on:
+  push:
+    branches: [rust, main]
+  pull_request:
+
+concurrency:
+  group: rust-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # A clean, reproducible build is the point of a gate; incremental artifacts
+  # would make a green run depend on a cache hit.
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  linux:
+    name: linux gates
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: cache cargo and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      # gpui_linux links X11, Wayland, fontconfig/freetype, EGL and Vulkan, and
+      # the workspace probes them through pkg-config.
+      - name: system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libx11-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev \
+            libfontconfig1-dev libfreetype6-dev \
+            libegl1-mesa-dev libvulkan-dev \
+            libssl-dev
+
+      - name: toolchain
+        run: rustup show
+
+      - name: formatting
+        run: cargo fmt --all -- --check
+
+      - name: lints
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # Broken intra-doc links are warnings by default; this gate is what makes
+      # them fatal.
+      - name: documentation
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace
+
+      - name: tests
+        run: cargo test --workspace
+
+  windows-suite:
+    name: windows suite under wine
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: cache cargo and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-mingw-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mingw-cargo-
+
+      - name: system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config gcc-mingw-w64-x86-64 wine
+
+      # Resolve the launcher rather than hard-coding it.
+      #
+      # `wine64` on Ubuntu noble installs only /usr/lib/wine/wine64 and nothing on
+      # PATH, and invoking that binary directly fails with "could not exec the wine
+      # loader" because it expects the wrapper to set its loader path. The `wine`
+      # package provides /usr/bin/wine, so prefer it and fail loudly if it is absent
+      # instead of falling back to a launcher that does not work.
+      - name: resolve the wine launcher
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          launcher="$(command -v wine || true)"
+          if [ -z "$launcher" ]; then
+            launcher="$(command -v wine64 || true)"
+          fi
+          if [ -z "$launcher" ]; then
+            echo "no wine launcher on PATH; install the wine package, not just wine64"
+            exit 1
+          fi
+          ln -sf "$launcher" "$RUNNER_TEMP/bin/wine"
+          echo "using $launcher"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      # First run of wine creates its prefix; doing it explicitly keeps that work out
+      # of the test output, where it would look like a failure.
+      - name: initialise the wine prefix
+        run: |
+          export WINEDEBUG=-all
+          wineboot -u || true
+          wine --version
+
+      # Building is not enough: without the runner variable cargo
+      # cross-compiles and executes nothing, so a suite that ran no tests would
+      # report a pass.
+      - name: toolchain and target
+        run: |
+          rustup show
+          rustup target add x86_64-pc-windows-gnu
+
+      - name: platform suite
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUNNER: wine
+        run: cargo test -p aoko-platform --target x86_64-pc-windows-gnu
+
+  capture:
+    name: headless capture smoke
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: cache cargo and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-capture-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-capture-cargo-
+
+      - name: system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libx11-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev \
+            libfontconfig1-dev libfreetype6-dev \
+            libegl1-mesa-dev libvulkan-dev \
+            libssl-dev \
+            mesa-vulkan-drivers
+
+      # The harness renders through the headless path, so it needs a software
+      # Vulkan driver rather than a display. Verified locally with DISPLAY and
+      # WAYLAND_DISPLAY unset: nine PNGs, no window.
+      - name: render nine screens
+        run: |
+          cargo run -p aoko-app --features capture -- \
+            --capture-screenshots "$RUNNER_TEMP/capture"
+          count=$(find "$RUNNER_TEMP/capture" -name '*.png' | wc -l)
+          test "$count" -eq 9 || { echo "expected 9 screens, got $count"; exit 1; }
+
+      # The same nine screens in a handful of the eighteen built-in palettes, so a
+      # theme can be reviewed without a local build. The list is a shell loop rather
+      # than a job matrix on purpose: the job's name is what the branch protection
+      # and the PR's checks list are keyed on, and a matrix would rename it once per
+      # theme. Six palettes is enough to see the range — the default, three dark
+      # neutrals, and two with a strong accent.
+      - name: render the same screens in six palettes
+        run: |
+          for theme in "Slate" "Ink" "Steel" "Nord" "Cherry" "Aubergine"; do
+            out="$RUNNER_TEMP/themes/$theme"
+            mkdir -p "$out"
+            cargo run -p aoko-app --features capture -- \
+              --capture-screenshots "$out" --theme "$theme"
+            count=$(find "$out" -name '*.png' | wc -l)
+            test "$count" -eq 9 || { echo "expected 9 screens for $theme, got $count"; exit 1; }
+          done
+
+      - name: upload screenshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: screens
+          path: |
+            ${{ runner.temp }}/capture/*.png
+            ${{ runner.temp }}/themes/**/*.png
+          if-no-files-found: error

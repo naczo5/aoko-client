@@ -45,6 +45,27 @@ inline JNIEnv* Get(JavaVM* jvm) {
     return nullptr;
 }
 
+// Attach this thread under an explicit JVM name and record the env in the TLS slot,
+// so DetachThisThread() owns the teardown of a named attachment too and there is only
+// one detach path per thread. Returns the env when the thread is already attached.
+inline JNIEnv* AttachThisThread(JavaVM* jvm, const char* name) {
+    if (!jvm) return nullptr;
+    DWORD slot = detail::TlsSlot();
+    if (slot == TLS_OUT_OF_INDEXES) return nullptr;
+
+    JNIEnv* env = static_cast<JNIEnv*>(TlsGetValue(slot));
+    if (env) return env;
+
+    JavaVMAttachArgs args = {};
+    args.version = JNI_VERSION_1_8;
+    args.name = const_cast<char*>(name);
+    args.group = nullptr;
+    if (jvm->AttachCurrentThread(reinterpret_cast<void**>(&env), &args) != JNI_OK || !env)
+        return nullptr;
+    TlsSetValue(slot, env);
+    return env;
+}
+
 // Call at the end of a worker thread's lifetime (NOT the render thread — the JVM
 // owns that attachment).  Clears the TLS slot so Get() re-attaches if the thread
 // is somehow reused.

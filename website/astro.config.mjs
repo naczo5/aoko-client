@@ -58,6 +58,14 @@ export default defineConfig({
           ],
         },
         {
+          label: 'External GUI',
+          items: [
+            { label: 'Module search', slug: 'gui/module-search' },
+            { label: 'Accounts', slug: 'gui/accounts' },
+            { label: 'Servers', slug: 'gui/servers' },
+          ],
+        },
+        {
           label: 'Modules',
           items: [
             {

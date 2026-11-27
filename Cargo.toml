@@ -1,0 +1,102 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/aoko-protocol",
+    "crates/aoko-platform",
+    "crates/aoko-core",
+    "crates/aoko-app",
+]
+
+[workspace.package]
+version = "13.0.0"
+edition = "2021"
+rust-version = "1.100.0"
+license = "GPL-3.0-only"
+repository = "https://github.com/naczo5/aoko-client"
+
+[workspace.dependencies]
+# Pinned to a concrete zed revision: GPUI's API moves fast and its toolchain
+# pin (rust-toolchain.toml) is stable 1.100.0. Never float this to `main`.
+gpui = { git = "https://github.com/zed-industries/zed", rev = "552644414c580ed540f027f6439881ea5c88d02a", default-features = false, features = [
+    "font-kit",
+    "wayland",
+    "x11",
+    "windows-manifest",
+] }
+
+# `gpui::Application` has no bare constructor at this revision; it needs an
+# explicit platform. `gpui_platform::application()` / `headless()` supply it.
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "552644414c580ed540f027f6439881ea5c88d02a", default-features = false, features = [
+    "wayland",
+    "x11",
+] }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+# `Window::render_to_image` and `HeadlessAppContext::capture_screenshot` both
+# return `image::RgbaImage`. Pinned to the version gpui already resolves
+# transitively (0.25.10 in Cargo.lock) so feature unification keeps one copy;
+# otherwise the returned type is not the type you can save.
+image = { version = "0.25", features = ["png"] }
+
+# The whole workspace logs through `tracing` but nothing installs a subscriber,
+# so every classification and `debug!` we produce lands nowhere. This is the
+# dependency that makes it visible; it returns to the manifest with the code that
+# consumes it, exactly as recorded when the unused declarations were removed.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing = "0.1"
+
+# Pre-declared so parallel crate owners never have to edit this file. A crate
+# opts in with `dep = { workspace = true }`; only the workspace owner adds a new
+# entry here. Versions are exercised by `cargo check --workspace`.
+arc-swap = "1"            # cheap snapshot publication for coalesced telemetry
+crossbeam-channel = "0.5" # bounded channels for coalesced callbacks
+parking_lot = "0.12"      # short critical sections without poisoning
+rand = "0.8"              # production RNG; tests inject their own
+rand_chacha = "0.3"       # deterministic, seedable RNG for tests
+tempfile = "3"            # scratch dirs for persistence tests (dev-dependency)
+
+# Windows platform implementation.
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Pipes",
+    "Win32_System_IO",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_Storage_FileSystem",
+] }
+
+# Linux platform implementation.
+x11rb = "0.13"
+libc = "0.2"
+
+aoko-protocol = { path = "crates/aoko-protocol" }
+aoko-platform = { path = "crates/aoko-platform" }
+aoko-core = { path = "crates/aoko-core" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+
+# GPUI is unusably slow to debug at opt-level 0, but the rest of the
+# workspace should stay fast to compile during iteration.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.bench]
+lto = "thin"
+codegen-units = 1

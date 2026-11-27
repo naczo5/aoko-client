@@ -116,6 +116,14 @@ static void TestCapabilitiesPayloads()
     ExpectTrue(modern.find("\"keybindautorod\"") != std::string::npos, "modern should advertise Auto Rod keybind setting");
     ExpectTrue(legacy.find("\"inworld\"") != std::string::npos, "legacy should advertise in-world state");
     ExpectTrue(modern.find("\"inworld\"") != std::string::npos, "modern should advertise in-world state");
+    // Aim assist reads the camera FOV and the viewport it projects in; both bridges must
+    // keep advertising them, or the host falls back to a 70 degree / OS window guess.
+    ExpectTrue(legacy.find("\"fov\"") != std::string::npos, "legacy should advertise fov state");
+    ExpectTrue(modern.find("\"fov\"") != std::string::npos, "modern should advertise fov state");
+    ExpectTrue(legacy.find("\"viewportwidth\"") != std::string::npos, "legacy should advertise viewport width state");
+    ExpectTrue(modern.find("\"viewportwidth\"") != std::string::npos, "modern should advertise viewport width state");
+    ExpectTrue(legacy.find("\"viewportheight\"") != std::string::npos, "legacy should advertise viewport height state");
+    ExpectTrue(modern.find("\"viewportheight\"") != std::string::npos, "modern should advertise viewport height state");
     ExpectTrue(legacy.find("\"state\":[") != std::string::npos, "legacy should include state array");
     ExpectTrue(modern.find("\"state\":[") != std::string::npos, "modern should include state array");
 }

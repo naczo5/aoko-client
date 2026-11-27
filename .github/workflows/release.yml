@@ -51,11 +51,6 @@ jobs:
           ref: ${{ github.event_name == 'push' && github.ref || (inputs.channel == 'beta' && 'dev' || 'main') }}
           fetch-depth: 0
 
-      - name: Set up .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: 8.0.x
-
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -128,21 +123,24 @@ jobs:
         shell: cmd
         run: .\build_dll.bat
 
-      - name: Run C# tests
-        run: dotnet test .\Aoko.Tests\Aoko.Tests.csproj -c Release
-
       - name: Build and publish release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $params = @{ Version = $env:RELEASE_VERSION }
-          if ($env:RELEASE_CHANNEL -eq 'beta') { $params.Beta = $true }
-          if ($env:RELEASE_DRAFT -eq 'true') { $params.Draft = $true }
-          if (-not [string]::IsNullOrWhiteSpace($env:RELEASE_NOTES_FILE)) {
-              $params.NotesFile = $env:RELEASE_NOTES_FILE
-          }
-          .\scripts\New-GitHubRelease.ps1 @params
+          throw @"
+          Rust release packaging is not implemented yet, so this job stops here instead of
+          publishing an artifact nothing built.
+
+          What this job used to do, and where it went: build_exe.bat published the C# host,
+          build_release.bat packaged that publish output, and scripts/New-GitHubRelease.ps1
+          zipped and released it. All three went with Aoko/ in 42d4072. Note also that
+          McInjector/build.bat still copies its DLLs into ..\Aoko\bin\..., so the native step
+          above leaves them in McInjector/.
+
+          See MIGRATION_ARCHITECTURE.md §9 trade-off 3. Until a Rust packaging step replaces
+          this, a release tag must not be pushed.
+          "@
 
       - name: Refresh docs and Scoop manifest
         if: env.RELEASE_DRAFT != 'true'

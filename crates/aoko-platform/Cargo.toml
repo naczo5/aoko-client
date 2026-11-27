@@ -1,0 +1,30 @@
+[package]
+name = "aoko-platform"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "OS abstraction layer: process/window inspection, input, native bridge injection, Discord IPC."
+
+[dependencies]
+aoko-protocol = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+    "Win32_UI_Shell",
+] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { workspace = true, features = ["xtest"] }
+libc = { workspace = true }
+crossbeam-channel = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+

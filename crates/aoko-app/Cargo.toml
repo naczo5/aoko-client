@@ -1,0 +1,46 @@
+[package]
+name = "aoko-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "GPUI desktop application for the Aoko host."
+
+[[bin]]
+name = "aoko"
+path = "src/main.rs"
+
+[lib]
+name = "aoko_app"
+path = "src/lib.rs"
+
+[features]
+default = []
+# Screenshot harness. `Window::render_to_image` and
+# `gpui_platform::current_headless_renderer` are both `test-support`-gated at the
+# pinned revision, and `test-support` drags in proptest/postage/futures-concurrency
+# (`crates/gpui/Cargo.toml:21-31`). Keeping it behind this feature keeps the
+# shipped binary lean: CI captures with `--features capture`, users never link it.
+capture = ["dep:image", "gpui/test-support", "gpui_platform/test-support"]
+
+[dependencies]
+gpui = { workspace = true }
+gpui_platform = { workspace = true }
+image = { workspace = true, optional = true }
+# The views read module state, the profile and the search index straight out of
+# `aoko-core`, and the wire types out of `aoko-protocol`.
+aoko-protocol = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+aoko-platform = { workspace = true }
+aoko-core = { workspace = true }
+
+[dev-dependencies]
+# `TestAppContext` and the TestPlatform window live behind `gpui/test-support`
+# (`crates/gpui/src/app.rs:37`). `cfg(test)` does not apply to a dependency, so a
+# widget test in this crate has to ask for the feature on the dev graph; `cargo build`
+# does not pull dev-dependencies, so the shipped binary stays lean.
+gpui = { workspace = true, features = ["test-support"] }
+gpui_platform = { workspace = true, features = ["test-support"] }
