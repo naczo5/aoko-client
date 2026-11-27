@@ -1,5 +1,10 @@
 # Phase 2 UI inventory: WPF surface → GPUI (`aoko-app`)
 
+> The managed tree this document inventories (`Aoko/`, `Aoko.Tests/`) was deleted at
+> sign-off; see `MIGRATION_ARCHITECTURE.md` §9 trade-off 3. Every `Aoko/...` path below is
+> therefore a historical citation: the evidence lives in `git log`, and the fixtures it
+> refers to are frozen under `crates/aoko-protocol/tests/fixtures/managed/`.
+
 Inventory for the UI layer of the C#/WPF → Rust/GPUI migration. This document does not design the
 Rust code; it enumerates what exists, what it is built out of, and where the pinned GPUI revision
 does not give an equivalent.
