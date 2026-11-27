@@ -54,6 +54,7 @@ use gpui::{
 
 use aoko_core::app::AppController;
 use aoko_core::search;
+use aoko_platform::{WindowInfo, WindowInspector};
 use aoko_protocol::block_esp::{self, BlockEspTargetData};
 
 use crate::components;
@@ -204,6 +205,41 @@ pub struct Shell {
     /// as long as it holds it, which is the same rule [`Shell::search_gate`] reads. `None` until
     /// the first frame, because the handle needs a context the constructors do not have.
     window_focus: Option<FocusHandle>,
+    /// The loader's state machine: `InjectButton_Click` and the status line it paints
+    /// (`MainWindow.xaml.cs:1431-1503`).
+    ///
+    /// The *transient* half only — idle, detecting, connecting, and a refusal. Whether injection
+    /// has actually landed is the controller's answer, read on every frame by
+    /// [`InjectionView::resolve`] through [`Shell::injection_view`] and never stored here: a
+    /// second `connected` flag is the defect this branch keeps deleting.
+    injection: InjectionStatus,
+    /// The windows the last detection found, in the platform's own order.
+    ///
+    /// Every row here satisfies at least one half of the injection gate, so the panel's list is
+    /// the enumeration filtered by the same rules the press applies — never a title list of its
+    /// own. Empty until the first press.
+    injection_targets: Vec<WindowInfo>,
+    /// Which of [`Shell::injection_targets`] the press acts on.
+    injection_selected: Option<usize>,
+    /// Whether the loader is still what the window paints.
+    ///
+    /// The managed two-state swap (`MainWindow.xaml:306`/`:344`, `MainWindow.xaml.cs:469-492`),
+    /// latched the way `MainWindow.xaml.cs:524-528` latches it: leaving the loader for the control
+    /// panel happens once, on the first connection, and a later disconnect does not bring the
+    /// loader back.
+    ///
+    /// A session with no window surface starts *in* control mode, because the loader's whole job
+    /// is choosing a window: with nothing to enumerate there is no state it could reach. That is
+    /// also what every unit test and the capture harness get, which is what keeps the nine
+    /// screenshots painting the tabs.
+    loader_visible: bool,
+    /// The platform's window surface, `None` when this session cannot inspect windows.
+    ///
+    /// Built by [`Shell::from_system`] from `aoko_platform::default_services`, and `None` under
+    /// `cfg(test)` and `capture` — the same rule the rest of the startup path keeps, so a test
+    /// never opens a display connection. [`Shell::set_windows`] is the seam a test drives the
+    /// loader through.
+    windows: Option<Arc<dyn WindowInspector>>,
     /// The new-config name box's text (`NewConfigNameBox`, `MainWindow.xaml:1552`).
     config_name: String,
     /// Whether the session can hand a folder to the file manager
@@ -334,6 +370,20 @@ impl Shell {
         // not look like it can reveal the folder.
         shell.open_configs_folder = capabilities.open_path;
         shell.runtime = Runtime::new(Arc::new(AppController::new(capabilities)));
+
+        // The loader's window list comes from the platform, and this is the only session that may
+        // touch it: `default_services()` builds the real inspector, so a test or a capture run
+        // keeps `None` and opens no display connection (see [`Shell::windows`]).
+        //
+        // The loader is what a shipped window paints until the bridge answers
+        // (`MainWindow.xaml.cs:469-492`). A session with no window surface starts *in* the control
+        // panel instead, because the loader's whole job is choosing a window it cannot enumerate —
+        // and that is exactly what keeps the nine captured screens painting tabs.
+        let services = aoko_platform::default_services();
+        let windows: Arc<dyn WindowInspector> = services.windows.into();
+        shell.set_windows(Some(windows));
+        shell.loader_visible = true;
+
         // Before the link dials: the `config` frame is built from the controller's profile,
         // and the profile `start` loaded above went into the controller this line replaces.
         // Pushing first means the first frame the bridge sees already carries the saved
@@ -451,6 +501,13 @@ impl Shell {
             fields: FormFields::default(),
             block_add: None,
             search_query: None,
+            // No window surface and no loader: a test or a capture starts in control mode; see
+            // the field docs. `from_system` fills both in.
+            injection: InjectionStatus::NotInjected,
+            injection_targets: Vec::new(),
+            injection_selected: None,
+            loader_visible: false,
+            windows: None,
             // Seeded without reading the file: `from_system` only resolves the path, and `at`
             // touches nothing. The reads are `palettes()`/`resolve()`, the write is
             // `save_draft()`, and no constructor calls any of them — which is what keeps a unit
@@ -966,6 +1023,274 @@ impl Shell {
     pub fn apply_color(&mut self, bind: &'static str, color: Rgb, cx: &mut Context<Self>) {
         let canonical = color.to_hex();
         self.write_color_text(bind, &canonical, cx);
+    }
+
+    // === The loader (`LoaderPanel`, `MainWindow.xaml:306-340`) ===
+
+    /// Replaces the window surface, which is the seam a test drives the loader through.
+    ///
+    /// `None` is what `cfg(test)` and `capture` builds get, and it is also what a platform without
+    /// window inspection gets; see [`Shell::windows`].
+    pub fn set_windows(&mut self, windows: Option<Arc<dyn WindowInspector>>) {
+        self.windows = windows;
+    }
+
+    /// Whether the window is still painting the loader rather than the control panel.
+    #[must_use]
+    pub fn loader_visible(&self) -> bool {
+        self.loader_visible
+    }
+
+    /// The targets the last detection found, in the platform's order.
+    #[must_use]
+    pub fn injection_targets(&self) -> &[WindowInfo] {
+        &self.injection_targets
+    }
+
+    /// Which target the press acts on.
+    #[must_use]
+    pub fn injection_selection(&self) -> Option<usize> {
+        self.injection_selected
+    }
+
+    /// What the panel paints, resolved from the machine and the controller's link.
+    #[must_use]
+    pub fn injection_view(&self) -> InjectionView {
+        InjectionView::resolve(self.injection, self.runtime.ingest_status().connected)
+    }
+
+    /// The Inject press (`InjectButton_Click`, `MainWindow.xaml.cs:1431-1467`).
+    ///
+    /// The managed order: the button goes busy and says "Detecting", the targets are enumerated,
+    /// a single one is taken without asking (`:1449-1452`), and more than one waits for a choice.
+    /// Then [`Shell::attach`] runs.
+    ///
+    /// A press while the machine is busy is ignored rather than queued. `components::button` has
+    /// no disabled state at the pin, so the button's copy ("Detecting...", "...", "Connected") is
+    /// the whole affordance and this early return is what makes it truthful.
+    pub fn inject(&mut self, cx: &mut Context<Self>) {
+        if self.injection.is_busy() {
+            return;
+        }
+
+        self.injection = InjectionStatus::Detecting;
+        cx.notify();
+
+        let Some(windows) = self.windows.clone() else {
+            self.injection = InjectionStatus::Refused(Refusal::NoWindowSense);
+            cx.notify();
+            return;
+        };
+
+        // An enumeration that fails is "no target". There is no message channel from the
+        // platform to this panel, so it is not distinguishable from an empty list here.
+        let mut targets: Vec<WindowInfo> = windows
+            .enumerate()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(target_is_candidate)
+            .collect();
+        aoko_platform::sort_windows(&mut targets);
+        self.injection_targets = targets;
+
+        if self.injection_targets.is_empty() {
+            self.injection_selected = None;
+            self.injection = InjectionStatus::Refused(Refusal::NoWindow);
+            cx.notify();
+            return;
+        }
+
+        // One target needs no choice; more than one stays in `Detecting` with the list on screen,
+        // which is where the managed panel stands behind its open picker.
+        if self.injection_targets.len() == 1 {
+            self.injection_selected = Some(0);
+        }
+
+        match self
+            .injection_selected
+            .filter(|index| *index < self.injection_targets.len())
+        {
+            Some(index) => self.attach(index, cx),
+            None => cx.notify(),
+        }
+    }
+
+    /// A press on one window row: it becomes the target and is gated at once.
+    ///
+    /// The gate is the press's gate, so a row that cannot be injected says which rule refused it
+    /// now rather than failing later.
+    pub fn select_injection_target(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index >= self.injection_targets.len() {
+            return;
+        }
+        self.injection_selected = Some(index);
+        self.attach(index, cx);
+    }
+
+    /// Gates one target and starts the attach, or records which rule refused it.
+    ///
+    /// The port's attach is the bridge reader. `aoko_platform` has the native injector managed's
+    /// `InjectAsync` calls — `NativeBridgeInjector::inject(pid, library)` — but nothing in this
+    /// crate resolves a bridge library path, so calling it would mean inventing one. The half that
+    /// does exist is dialling the bridge, and the controller reports when it answers; the
+    /// injector's missing path is reported rather than stubbed with a wrong file name.
+    fn attach(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(target) = self.injection_targets.get(index) else {
+            return;
+        };
+
+        match injection_target_gate(target) {
+            Err(refusal) => self.injection = InjectionStatus::Refused(refusal),
+            Ok(()) => {
+                self.dial();
+                self.injection = InjectionStatus::Connecting;
+            }
+        }
+        cx.notify();
+    }
+
+    /// Starts the bridge reader for an accepted target — the `Connecting` transition's only real
+    /// effect.
+    ///
+    /// Split out because the two builds must do different things here, and the difference is not
+    /// cosmetic. The shipped arm is `Runtime::connect_bridge`, which spawns the reader and dials
+    /// the loopback port. A test must never dial: `crate::ingest`'s header pins that every test
+    /// attaches a memory duplex instead, and a bridge genuinely listening on the machine running
+    /// the suite would flip the controller's `connected` under an assertion. So the test build
+    /// counts the call, which is what lets a press prove it got past the gate without a socket.
+    ///
+    /// This is not a stub on the shipped path: `cfg(not(test))` is the only arm the binary
+    /// compiles, and the platform's own injector is unreachable from here anyway — see
+    /// [`Shell::attach`] and the note about the missing bridge-library path.
+    fn dial(&mut self) {
+        #[cfg(test)]
+        DIALS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        #[cfg(not(test))]
+        self.runtime.connect_bridge();
+    }
+
+    /// The loader panel, `LoaderPanel` (`MainWindow.xaml:306-340`), in its own document order.
+    ///
+    /// Geometry is the markup's: heading 16 bold with 10 below, versions 11 dim with 10, the
+    /// `DarkButton` at height 35 with 8, the autodetect sentence at 10 with 10, the status line at
+    /// 12 (accent once connected, `MainWindow.xaml.cs:1528-1529`). The progress bar (`:334-338`)
+    /// is deliberately absent: it tracks `GameStateClient.InjectionProgress`, and this port's
+    /// attach has no progress to report — it is one dial on the worker thread.
+    ///
+    /// The window list is the port's replacement for `WindowPickerDialog`
+    /// (`MainWindow.xaml.cs:1470-1486`): managed opened a modal when more than one client was
+    /// running, and the port lists the same targets inside the panel. Recorded as a deviation;
+    /// the rows come from the enumeration and a press on one feeds the same gate as the button.
+    fn render_loader(&self, theme: &Theme, entity: &Entity<Self>) -> AnyElement {
+        let view = self.injection_view();
+        let handle = entity.clone();
+        let inject = components::button(
+            "loader-inject",
+            theme,
+            ButtonVariant::Dark,
+            view.button,
+            move |_, _window, cx| {
+                handle.update(cx, |shell, cx| shell.inject(cx));
+            },
+        );
+
+        let mut targets = div().flex().flex_col().items_center().gap(px(2.0));
+        for (index, target) in self.injection_targets.iter().enumerate() {
+            let selected = self.injection_selected == Some(index);
+            let handle = entity.clone();
+            targets = targets.child(
+                div()
+                    .id(crate::reuse::indexed("loader-target", index))
+                    .debug_selector(move || format!("loader-target-{index}"))
+                    .px(px(4.0))
+                    .py(px(2.0))
+                    .text_size(px(11.0))
+                    .text_color(if selected {
+                        theme.accent
+                    } else {
+                        theme.dim_text
+                    })
+                    .cursor_pointer()
+                    .on_mouse_down(MouseButton::Left, move |_, _window, cx| {
+                        handle.update(cx, |shell, cx| shell.select_injection_target(index, cx));
+                    })
+                    .child(SharedString::from(target.display_label())),
+            );
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h(px(0.0))
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .text_size(px(16.0))
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(theme.text)
+                    .mb(px(10.0))
+                    .child(copy::LOADER_HEADING),
+            )
+            .child(
+                div()
+                    .max_w(px(520.0))
+                    .text_size(px(11.0))
+                    .text_color(theme.dim_text)
+                    .text_center()
+                    .mb(px(10.0))
+                    .child(copy::LOADER_SUPPORTED_VERSIONS),
+            )
+            // Named so a test can press it: `components::button` carries the id but no debug
+            // selector, and the press is the panel's only control worth addressing.
+            .child(
+                div()
+                    .mb(px(8.0))
+                    .debug_selector(|| "loader-inject".to_owned())
+                    .child(inject),
+            )
+            .child(
+                div()
+                    .max_w(px(520.0))
+                    .text_size(px(10.0))
+                    .text_color(theme.dim_text)
+                    .text_center()
+                    .mb(px(10.0))
+                    .child(copy::LOADER_AUTODETECT),
+            )
+            .child(
+                div()
+                    .debug_selector(|| "loader-status".to_owned())
+                    .text_size(px(12.0))
+                    .text_color(if view.accent {
+                        theme.accent
+                    } else {
+                        theme.dim_text
+                    })
+                    .text_center()
+                    .child(SharedString::from(view.status)),
+            )
+            .child(div().mt(px(8.0)).child(targets))
+            .into_any_element()
+    }
+
+    /// The managed two-state swap's latch (`MainWindow.xaml.cs:469-492`), run once per frame.
+    ///
+    /// Managed left the loader on the tick the bridge answered (`:524-528`) — the same tick it
+    /// wrote `Status: Connected & Injected` into the panel it was about to hide. The port runs the
+    /// latch at the *end* of the frame for that reason: the frame that first observes the
+    /// connection is the loader's last, painting the connected state managed also set, and the
+    /// next frame is the control panel. Latching at the start instead would make the terminal
+    /// state unreachable, which is a state the managed panel really draws (`:1528`).
+    ///
+    /// The latch is one-way: a later disconnect does not bring the loader back, which is what
+    /// `:524-528` pins. `connected` is read from the controller and never stored; the field this
+    /// flips is the latch, not the fact.
+    fn latch_control_mode(&mut self) {
+        if self.loader_visible && self.runtime.ingest_status().connected {
+            self.loader_visible = false;
+        }
     }
 
     /// One palette-editor row: the caption, the swatch, and the hex box beside it.
@@ -2588,35 +2913,55 @@ impl Render for Shell {
         let now = self.runtime.now_ms();
         self.search.prune_pulse(now);
 
-        let body = match copy::TABS.get(self.tab).map(|tab| tab.body) {
-            // The Stats tab draws `views::stats_view`, which reads the runtime's tracker.
-            Some(TabBody::Stats) => {
-                let handle = cx.entity();
-                crate::views::stats_view::render(
-                    &self.runtime.stats(),
+        // The managed swap (`MainWindow.xaml:306`/`:344`, `MainWindow.xaml.cs:469-492`) is latched
+        // at the *end* of the frame, not here — see [`Shell::latch_control_mode`]: the frame that
+        // first sees the connection is still the loader, painting its terminal state.
+        //
+        // The tab body is built only in control mode. The loader paints neither the rail nor a
+        // tab, so assembling them first would be work thrown away on every loader frame.
+        let content = if self.loader_visible {
+            self.render_loader(theme, &entity)
+        } else {
+            let body = match copy::TABS.get(self.tab).map(|tab| tab.body) {
+                // The Stats tab draws `views::stats_view`, which reads the runtime's tracker.
+                Some(TabBody::Stats) => {
+                    let handle = cx.entity();
+                    crate::views::stats_view::render(
+                        &self.runtime.stats(),
+                        theme,
+                        self.tab,
+                        move |_, window, cx| {
+                            handle.update(cx, |shell, cx| shell.reset_stats(window, cx));
+                        },
+                    )
+                }
+                Some(TabBody::Cards(cards)) => self.render_cards(cards, theme, motion, &entity),
+                Some(TabBody::Accounts) => crate::views::accounts_view::render(
+                    &self.accounts,
+                    &self.fields,
                     theme,
+                    &entity,
                     self.tab,
-                    move |_, window, cx| {
-                        handle.update(cx, |shell, cx| shell.reset_stats(window, cx));
-                    },
-                )
-            }
-            Some(TabBody::Cards(cards)) => self.render_cards(cards, theme, motion, &entity),
-            Some(TabBody::Accounts) => crate::views::accounts_view::render(
-                &self.accounts,
-                &self.fields,
-                theme,
-                &entity,
-                self.tab,
-            ),
-            Some(TabBody::Servers) => crate::views::servers_view::render(
-                &self.servers,
-                &self.fields,
-                theme,
-                &entity,
-                self.tab,
-            ),
-            None => div().flex_1().into_any_element(),
+                ),
+                Some(TabBody::Servers) => crate::views::servers_view::render(
+                    &self.servers,
+                    &self.fields,
+                    theme,
+                    &entity,
+                    self.tab,
+                ),
+                None => div().flex_1().into_any_element(),
+            };
+
+            div()
+                .flex()
+                .flex_row()
+                .flex_1()
+                .min_h(px(0.0))
+                .gap(px(metrics::rail::GAP))
+                .child(self.render_rail(theme, &entity, &chip))
+                .child(div().flex().flex_1().min_w(px(0.0)).child(body))
+                .into_any_element()
         };
 
         let mut root = div()
@@ -2655,16 +3000,7 @@ impl Render for Shell {
                 }
             })
             .child(self.render_title_bar(theme, &entity, &title))
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .flex_1()
-                    .min_h(px(0.0))
-                    .gap(px(metrics::rail::GAP))
-                    .child(self.render_rail(theme, &entity, &chip))
-                    .child(div().flex().flex_1().min_w(px(0.0)).child(body)),
-            );
+            .child(content);
 
         // The overlay sits above the rail and the body and below the resize strips: a strip
         // the scrim swallowed would be a resize a user cannot perform, which is why this is
@@ -2686,6 +3022,9 @@ impl Render for Shell {
         for handle in resize_strips() {
             root = root.child(self.render_resize_handle(&handle, &entity));
         }
+
+        // Last, so this frame is the loader's and the next is the control panel.
+        self.latch_control_mode();
 
         root.into_any_element()
     }
@@ -3948,6 +4287,177 @@ const COLOR_FIELDS: [&str; 4] = [
     "PaletteAccentBox",
     "PaletteTextBox",
 ];
+
+/// How many times a press reached the dial — how a test proves the press got past the gate without
+/// opening a socket. See [`Shell::dial`].
+///
+/// Test-only, and a module static rather than a `Shell` field so the shipped struct carries nothing
+/// only a test could read. Tests take a delta rather than an absolute, because the suite runs
+/// tests in parallel.
+#[cfg(test)]
+static DIALS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The loader panel's state machine.
+///
+/// The managed states are the ones `MainWindow.xaml.cs` can actually draw: the panel starts at
+/// `Status: Not Injected` (`:1464` restores it after a cancelled picker), goes to
+/// `Status: Detecting Java clients...` (`:1438`), then `Status: Connecting...` (`:1490`), and
+/// either reaches `Status: Connected & Injected` (`:1528`) or reports a failure (`:1539`).
+///
+/// `Connected` is deliberately **not** a variant here: whether injection landed is the
+/// controller's answer, read every frame by [`InjectionView::resolve`], and a variant for it
+/// would be the second copy this branch keeps deleting. What is left is the transient half the
+/// controller has no opinion about — the press's own progress, and the port's refusals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InjectionStatus {
+    /// `Status: Not Injected` — at rest, before any press and after a refused one.
+    #[default]
+    NotInjected,
+    /// `Status: Detecting Java clients...` — enumerating, and while a target is being chosen.
+    Detecting,
+    /// `Status: Connecting...` — the gate passed and the bridge reader is dialling.
+    Connecting,
+    /// A press the platform's rules refused before anything was attempted.
+    Refused(Refusal),
+}
+
+impl InjectionStatus {
+    /// Whether a press is in flight, which is what makes a second press a no-op.
+    #[must_use]
+    pub fn is_busy(self) -> bool {
+        matches!(self, Self::Detecting | Self::Connecting)
+    }
+}
+
+/// Which rule refused an Inject press.
+///
+/// The two gate rules are port-only: managed's `InjectButton_Click` trusted the discovery list
+/// and had no gate to fail (`MainWindow.xaml.cs:1431-1467`), so there is no XAML line to cite for
+/// their wording. They are named here, with the two platform cases, so the copy owner can adopt
+/// them into `views/copy.rs` the way [`copy::LOADER_STATUS_PREFIX`] is already written there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    /// The session cannot inspect windows, so a target cannot be confirmed at all.
+    NoWindowSense,
+    /// The enumeration found no window that could be injected into.
+    NoWindow,
+    /// [`aoko_platform::is_game_window`] said no.
+    NotGameTitle,
+    /// [`WindowInfo::is_jvm`] said no.
+    NotJavaProcess,
+}
+
+impl Refusal {
+    /// The sentence after [`copy::LOADER_STATUS_PREFIX`], naming the rule that refused.
+    #[must_use]
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::NoWindowSense => {
+                "this session cannot inspect windows, so a target cannot be confirmed"
+            }
+            Self::NoWindow => "no Java client window was found",
+            Self::NotGameTitle => "the window's title does not name the game",
+            Self::NotJavaProcess => "the window's process is not a Java launcher",
+        }
+    }
+}
+
+/// What the loader panel paints for one state, resolved from the machine and the link.
+///
+/// One function for the whole mapping, so the widget holds no condition of its own and a test can
+/// assert every row of it without a window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InjectionView {
+    /// The status line, `Status: …`.
+    pub status: String,
+    /// The Inject button's label.
+    pub button: &'static str,
+    /// Whether the button takes a press.
+    pub enabled: bool,
+    /// Whether the status line is the accent one (`MainWindow.xaml.cs:1528-1529`) or the dim one.
+    pub accent: bool,
+}
+
+impl InjectionView {
+    /// `UpdateGameStateUI` (`MainWindow.xaml.cs:1510-1547`) as a value.
+    ///
+    /// The link state wins over the machine: a connected controller paints the accent
+    /// "Connected & Injected" and "Connected" on the button whatever the last press left behind,
+    /// which is the managed order and the one-owner rule in one line.
+    ///
+    /// One managed behaviour is deliberately not reproduced. `:1543-1547` re-enables the button on
+    /// any game-state tick where the bridge is disconnected and the client is not injected, so a
+    /// button disabled for a press in flight flips back under the user's cursor as soon as a tick
+    /// lands. The port keeps `Detecting`/`Connecting` disabled until the press resolves; the test
+    /// `a_press_in_flight_is_not_re_enabled_by_a_tick` pins that.
+    #[must_use]
+    pub fn resolve(state: InjectionStatus, connected: bool) -> Self {
+        if connected {
+            return Self {
+                status: copy::LOADER_STATUS_CONNECTED.to_owned(),
+                button: copy::LOADER_INJECT_CONNECTED,
+                enabled: false,
+                accent: true,
+            };
+        }
+
+        let (status, button, enabled) = match state {
+            InjectionStatus::NotInjected => (
+                copy::LOADER_STATUS_NOT_INJECTED.to_owned(),
+                copy::LOADER_INJECT,
+                true,
+            ),
+            InjectionStatus::Detecting => (
+                copy::LOADER_STATUS_DETECTING.to_owned(),
+                copy::LOADER_INJECT_DETECTING,
+                false,
+            ),
+            InjectionStatus::Connecting => (
+                copy::LOADER_STATUS_CONNECTING.to_owned(),
+                copy::LOADER_INJECT_CONNECTING,
+                false,
+            ),
+            InjectionStatus::Refused(refusal) => (
+                format!("{}{}", copy::LOADER_STATUS_PREFIX, refusal.message()),
+                copy::LOADER_INJECT,
+                true,
+            ),
+        };
+
+        Self {
+            status,
+            button,
+            enabled,
+            accent: false,
+        }
+    }
+}
+
+/// Whether one enumerated window belongs in the loader's list.
+///
+/// Managed's discovery lists Java processes (`InjectionTargetDiscovery.ListTargets`); this lists a
+/// window that satisfies *either* half of the injection gate, so every row is a plausible target
+/// and the press can name the half that is missing. A window that satisfies neither is not a
+/// target at all and is not offered.
+fn target_is_candidate(info: &WindowInfo) -> bool {
+    info.is_jvm() || aoko_platform::is_game_window(info)
+}
+
+/// The injection gate over one window: the pair [`crate::runtime::game_is_foreground`] composes
+/// for the focused window, applied to the window the user chose.
+///
+/// Title first, then the launcher — the order `game_is_foreground` reads them in — so the two
+/// shapes refuse for the same reason when both halves fail. The rules themselves are the
+/// platform's (`is_game_window`, `is_jvm`); this composes, it does not re-implement.
+fn injection_target_gate(info: &WindowInfo) -> Result<(), Refusal> {
+    if !aoko_platform::is_game_window(info) {
+        return Err(Refusal::NotGameTitle);
+    }
+    if !info.is_jvm() {
+        return Err(Refusal::NotJavaProcess);
+    }
+    Ok(())
+}
 
 /// Whether a control was already painted as part of the card's header.
 ///
@@ -7468,5 +7978,446 @@ mod tests {
             "and wrote nothing: the refusal is the whole of it"
         );
         assert_eq!(box_text.as_deref(), Some("123456"), "the box included");
+    }
+
+    // === the loader (`LoaderPanel`, `MainWindow.xaml:306-340`) =========================
+
+    /// A window surface that answers from a fixed list and never touches the OS.
+    ///
+    /// The same stand-in `runtime`'s suite uses, for the same reason: a loader test that enumerated
+    /// this machine would assert the machine. `cursor_visible` keeps the trait's default, because
+    /// it is not part of the Inject gate — see [`Refusal`].
+    struct FakeWindows {
+        windows: Vec<WindowInfo>,
+    }
+
+    impl WindowInspector for FakeWindows {
+        fn enumerate(&self) -> Result<Vec<WindowInfo>, aoko_platform::PlatformError> {
+            Ok(self.windows.clone())
+        }
+
+        fn foreground(&self) -> Result<Option<WindowInfo>, aoko_platform::PlatformError> {
+            Ok(self.windows.first().cloned())
+        }
+
+        fn client_bounds(
+            &self,
+            _handle: aoko_platform::WindowHandle,
+        ) -> Result<aoko_platform::Rect, aoko_platform::PlatformError> {
+            Ok(aoko_platform::Rect::default())
+        }
+    }
+
+    fn window_surface(windows: Vec<WindowInfo>) -> Arc<dyn WindowInspector> {
+        Arc::new(FakeWindows { windows })
+    }
+
+    /// One top-level window over `WindowInfo`'s public fields.
+    fn window(title: &str, process: &str) -> WindowInfo {
+        WindowInfo {
+            handle: aoko_platform::WindowHandle(0x51),
+            title: title.to_string(),
+            class_name: Some("LWJGL".to_string()),
+            pid: Some(4242),
+            process_name: Some(process.to_string()),
+            bounds: aoko_platform::Rect::default(),
+        }
+    }
+
+    /// The client: a game title in a Java process, so both halves of the gate pass.
+    fn game_window() -> WindowInfo {
+        window("Minecraft 1.8.9", "javaw.exe")
+    }
+
+    /// A Java process whose title is not the game — a mod workspace, the case `is_game_window`'s
+    /// own doc calls out.
+    fn editor_window() -> WindowInfo {
+        window("Minecraft mod workspace", "javaw.exe")
+    }
+
+    /// A game title in a process that is not a launcher.
+    fn plain_process_window() -> WindowInfo {
+        window("Minecraft", "code.exe")
+    }
+
+    fn dials() -> usize {
+        DIALS.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The status line a refusal paints, composed the way [`InjectionView::resolve`] composes it.
+    fn refusal_line(refusal: Refusal) -> String {
+        format!("{}{}", copy::LOADER_STATUS_PREFIX, refusal.message())
+    }
+
+    /// A shell with no window surface still names a status; it just cannot reach a target.
+    ///
+    /// This is the shipped shape of a test or capture build (`cfg(test)`, `cfg(feature =
+    /// "capture")`), and it is why the nine screenshots keep painting tabs: the loader's whole job
+    /// is choosing a window, so a session with nothing to enumerate starts in the control panel.
+    #[test]
+    fn a_session_with_no_window_surface_starts_in_the_control_panel() {
+        let shell = Shell::new(Theme::slate());
+
+        assert!(
+            !shell.loader_visible(),
+            "no window surface means control mode"
+        );
+        assert!(shell.injection_targets().is_empty());
+        assert_eq!(shell.injection_selection(), None);
+
+        let view = shell.injection_view();
+        assert_eq!(view.status, copy::LOADER_STATUS_NOT_INJECTED);
+        assert_eq!(view.button, copy::LOADER_INJECT);
+        assert!(view.enabled, "nothing has been attempted yet");
+        assert!(!view.accent, "the accent line is the connected one");
+    }
+
+    /// The first of the machine's refusals: nothing can inspect windows, so nothing is attempted.
+    #[gpui::test]
+    fn a_press_with_no_window_surface_names_that_rule(cx: &mut gpui::TestAppContext) {
+        let handle = cx.update(|cx| cx.new(|_| Shell::new(Theme::slate())));
+
+        cx.update(|cx| handle.update(cx, |shell, cx| shell.inject(cx)));
+
+        let (view, targets) = cx.read(|cx| {
+            let shell = handle.read(cx);
+            (shell.injection_view(), shell.injection_targets().len())
+        });
+        assert_eq!(view.status, refusal_line(Refusal::NoWindowSense));
+        assert!(
+            view.status.contains("cannot inspect windows"),
+            "the line names the missing condition, which is what the user has to act on: {}",
+            view.status
+        );
+        assert!(
+            view.enabled,
+            "the press is repeatable; nothing is in flight"
+        );
+        assert_eq!(targets, 0, "no enumeration happened, so there is no list");
+    }
+
+    /// An enumeration with no candidate is a different refusal from a session that cannot look.
+    #[gpui::test]
+    fn an_enumeration_with_no_client_names_the_empty_list(cx: &mut gpui::TestAppContext) {
+        let handle = cx.update(|cx| cx.new(|_| Shell::new(Theme::slate())));
+        cx.update(|cx| {
+            handle.update(cx, |shell, _| {
+                shell.set_windows(Some(window_surface(vec![window("Firefox", "firefox")])));
+            })
+        });
+
+        cx.update(|cx| handle.update(cx, |shell, cx| shell.inject(cx)));
+
+        let view = cx.read(|cx| handle.read(cx).injection_view());
+        assert_eq!(view.status, refusal_line(Refusal::NoWindow));
+        assert!(view.enabled, "an empty list is a state to retry from");
+    }
+
+    /// One game window is taken without asking, which is `:1449-1452`.
+    ///
+    /// The dial is the transition's only effect, and the test build counts it instead of opening
+    /// the loopback socket; see [`Shell::dial`].
+    #[gpui::test]
+    fn one_game_window_is_taken_without_a_choice_and_dials(cx: &mut gpui::TestAppContext) {
+        let handle = cx.update(|cx| cx.new(|_| Shell::new(Theme::slate())));
+        cx.update(|cx| {
+            handle.update(cx, |shell, _| {
+                shell.set_windows(Some(window_surface(vec![game_window()])));
+            })
+        });
+
+        let before = dials();
+        cx.update(|cx| handle.update(cx, |shell, cx| shell.inject(cx)));
+
+        let (view, selection, targets) = cx.read(|cx| {
+            let shell = handle.read(cx);
+            (
+                shell.injection_view(),
+                shell.injection_selection(),
+                shell.injection_targets().len(),
+            )
+        });
+        assert_eq!(selection, Some(0), "the only target is the chosen one");
+        assert_eq!(targets, 1);
+        assert_eq!(view.status, copy::LOADER_STATUS_CONNECTING);
+        assert_eq!(view.button, copy::LOADER_INJECT_CONNECTING);
+        assert!(!view.enabled, "a press in flight is not pressable again");
+        assert_eq!(
+            dials(),
+            before + 1,
+            "the accepted press dialled exactly once"
+        );
+    }
+
+    /// More than one client waits for a choice, which is `:1470-1486` without the modal.
+    ///
+    /// The list is the platform's enumeration filtered by the gate, in `sort_windows` order (JVM
+    /// first, then by title), so a candidate that fails the gate is still *offered* — that is what
+    /// lets the row press name the missing half instead of hiding the window.
+    #[gpui::test]
+    fn several_clients_are_listed_in_the_platforms_order_and_wait(cx: &mut gpui::TestAppContext) {
+        let handle = cx.update(|cx| cx.new(|_| Shell::new(Theme::slate())));
+        cx.update(|cx| {
+            handle.update(cx, |shell, _| {
+                shell.set_windows(Some(window_surface(vec![
+                    plain_process_window(),
+                    editor_window(),
+                    game_window(),
+                    window("Firefox", "firefox"),
+                ])));
+            })
+        });
+
+        cx.update(|cx| handle.update(cx, |shell, cx| shell.inject(cx)));
+
+        let (view, selection, titles) = cx.read(|cx| {
+            let shell = handle.read(cx);
+            (
+                shell.injection_view(),
+                shell.injection_selection(),
+                shell
+                    .injection_targets()
+                    .iter()
+                    .map(|target| target.title.clone())
+                    .collect::<Vec<_>>(),
+            )
+        });
+
+        assert_eq!(
+            titles,
+            ["Minecraft 1.8.9", "Minecraft mod workspace", "Minecraft"],
+            "the two JVM entries first, by title, then the rest — `sort_windows`'s order, and no \
+             title list of the panel's own"
+        );
+        assert_eq!(selection, None, "the user has to choose");
+        assert_eq!(view.status, copy::LOADER_STATUS_DETECTING);
+        assert!(!view.enabled, "the list is what the press waits on now");
+    }
+
+    /// A row press and the button press run the same gate, so the two cannot disagree.
+    ///
+    /// The pair this asserts is the point: the *same* window, through both entries, yields the same
+    /// refusal and dials nothing. Row order is the platform's, so the indices are found by title.
+    #[gpui::test]
+    fn a_row_press_and_the_button_press_refuse_for_the_same_reason(cx: &mut gpui::TestAppContext) {
+        // Through the row: two candidates, so the machine waits for a choice.
+        let list = cx.update(|cx| cx.new(|_| Shell::new(Theme::slate())));
+        cx.update(|cx| {
+            list.update(cx, |shell, _| {
+                shell.set_windows(Some(window_surface(vec![editor_window(), game_window()])));
+            })
+        });
+        cx.update(|cx| list.update(cx, |shell, cx| shell.inject(cx)));
+
+        let before = dials();
+        let editor = cx.read(|cx| {
+            list.read(cx)
+                .injection_targets()
+                .iter()
+                .position(|target| target.title == "Minecraft mod workspace")
+                .expect("the workspace is offered")
+        });
+        cx.update(|cx| list.update(cx, |shell, cx| shell.select_injection_target(editor, cx)));
+        let by_row = cx.read(|cx| list.read(cx).injection_view()).status;
+
+        // Through the button: the same window alone, so the press takes it without asking.
+        let single = cx.update(|cx| cx.new(|_| Shell::new(Theme::slate())));
+        cx.update(|cx| {
+            single.update(cx, |shell, _| {
+                shell.set_windows(Some(window_surface(vec![editor_window()])));
+            })
+        });
+        cx.update(|cx| single.update(cx, |shell, cx| shell.inject(cx)));
+        let by_press = cx.read(|cx| single.read(cx).injection_view()).status;
+
+        assert_eq!(by_row, refusal_line(Refusal::NotGameTitle));
+        assert_eq!(
+            by_press, by_row,
+            "one gate: the row press and the button press refuse in the same words"
+        );
+        assert!(by_row.contains("title does not name the game"), "{by_row}");
+        assert_eq!(dials(), before, "a refused target never dials");
+    }
+
+    /// The gate's other half: a game title in a process that is not a launcher.
+    #[gpui::test]
+    fn a_game_title_outside_a_java_process_names_the_launcher(cx: &mut gpui::TestAppContext) {
+        let handle = cx.update(|cx| cx.new(|_| Shell::new(Theme::slate())));
+        cx.update(|cx| {
+            handle.update(cx, |shell, _| {
+                shell.set_windows(Some(window_surface(vec![plain_process_window()])));
+            })
+        });
+
+        let before = dials();
+        cx.update(|cx| handle.update(cx, |shell, cx| shell.inject(cx)));
+
+        let view = cx.read(|cx| handle.read(cx).injection_view());
+        assert_eq!(view.status, refusal_line(Refusal::NotJavaProcess));
+        assert!(
+            view.status.contains("not a Java launcher"),
+            "the title rule passed and the process rule is what refused: {}",
+            view.status
+        );
+        assert_eq!(dials(), before);
+    }
+
+    /// `UpdateGameStateUI`'s re-enable wart is not ported: a press in flight stays disabled.
+    ///
+    /// Managed re-enabled the button on any tick where the bridge was disconnected and the client
+    /// not injected (`MainWindow.xaml.cs:1543-1547`), so a button disabled for a press flipped back
+    /// under the user's cursor. The port keeps `Detecting` and `Connecting` disabled until the
+    /// press resolves; a disconnected tick changes nothing.
+    #[test]
+    fn a_press_in_flight_is_not_re_enabled_by_a_tick() {
+        for state in [InjectionStatus::Detecting, InjectionStatus::Connecting] {
+            assert!(
+                !InjectionView::resolve(state, false).enabled,
+                "{state:?} is in flight and must not be pressable"
+            );
+        }
+
+        assert!(
+            InjectionView::resolve(InjectionStatus::NotInjected, false).enabled,
+            "and an idle panel is pressable, or the wart would have been ported too far"
+        );
+        assert!(
+            !InjectionView::resolve(InjectionStatus::Detecting, true).enabled,
+            "a connected link wins over the machine, whichever state it left behind"
+        );
+    }
+
+    /// The connected line is the controller's answer, not a state the panel stores.
+    ///
+    /// `InjectionStatus` has no `Connected` variant on purpose: the link is read every frame, so a
+    /// connected panel is a *mapping* of `Connecting` plus a live store, and nothing has to
+    /// remember to change it back when the bridge drops.
+    #[gpui::test]
+    fn a_connected_link_is_the_terminal_state_of_every_press(cx: &mut gpui::TestAppContext) {
+        let handle = cx.update(|cx| cx.new(|_| Shell::new(Theme::slate())));
+        cx.update(|cx| {
+            handle.update(cx, |shell, _| {
+                shell.set_windows(Some(window_surface(vec![game_window()])));
+            })
+        });
+        cx.update(|cx| handle.update(cx, |shell, cx| shell.inject(cx)));
+
+        let store = cx.read(|cx| handle.read(cx).runtime.controller().store().clone());
+        store.set_connected(true);
+
+        let view = cx.read(|cx| handle.read(cx).injection_view());
+        assert_eq!(view.status, copy::LOADER_STATUS_CONNECTED);
+        assert_eq!(view.button, copy::LOADER_INJECT_CONNECTED);
+        assert!(view.accent, "the accent line is the connected one");
+        assert!(!view.enabled, "there is nothing left to press");
+    }
+
+    /// The managed swap is a one-way latch: first connection only, and never back.
+    ///
+    /// `latch_control_mode` runs at the end of a frame so the frame that first sees the connection
+    /// is still the loader's; this drives the latch itself, which needs no window.
+    #[test]
+    fn the_loader_latches_to_the_control_panel_once_and_never_returns() {
+        let mut shell = Shell::new(Theme::slate());
+        shell.loader_visible = true;
+
+        shell.latch_control_mode();
+        assert!(
+            shell.loader_visible(),
+            "no connection yet, so the loader stays"
+        );
+
+        let store = shell.runtime.controller().store().clone();
+        store.set_connected(true);
+        shell.latch_control_mode();
+        assert!(
+            !shell.loader_visible(),
+            "the first connection swaps the panel"
+        );
+
+        store.set_connected(false);
+        shell.latch_control_mode();
+        assert!(
+            !shell.loader_visible(),
+            "a later disconnect does not bring the loader back"
+        );
+    }
+
+    /// The panel is mounted, and it is what the window paints in loader mode.
+    ///
+    /// Glyphs are not readable at the pin, so this asserts what the frame carries: the panel's own
+    /// selectors are present and the control panel's cards are not. The terminal frame is also
+    /// pinned — the swap happens at the *end* of the frame that first sees the connection, because
+    /// latching at the start would make `Status: Connected & Injected`, a state managed really
+    /// draws, unreachable.
+    #[gpui::test]
+    fn the_loader_paints_instead_of_the_tabs_and_swaps_after_the_connected_frame(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::Modifiers;
+
+        let root = scratch_root();
+        let (shell, _handle, mut visual) = shell_in_window(cx, &root);
+        cx.update(|cx| {
+            shell.update(cx, |shell, _| {
+                shell.loader_visible = true;
+                shell.set_windows(Some(window_surface(vec![game_window()])));
+            })
+        });
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        assert!(
+            visual.debug_bounds("loader-status").is_some(),
+            "the panel's status line is in the frame"
+        );
+        assert!(
+            visual.debug_bounds("loader-inject").is_some(),
+            "and so is the Inject button"
+        );
+        assert!(
+            visual.debug_bounds("keybind-AutoClickerCard").is_none(),
+            "the control panel's cards are not: the loader replaces the tabs"
+        );
+
+        let before = dials();
+        let press = visual
+            .debug_bounds("loader-inject")
+            .expect("the button paints");
+        visual.simulate_click(press.center(), Modifiers::default());
+        assert_eq!(dials(), before + 1, "the press reached the dial");
+        assert_eq!(
+            cx.read(|cx| shell.read(cx).injection_view().status),
+            copy::LOADER_STATUS_CONNECTING,
+            "and the panel says so"
+        );
+
+        // The bridge answers: this frame is still the loader, painting its terminal state.
+        let store = cx.read(|cx| shell.read(cx).runtime.controller().store().clone());
+        store.set_connected(true);
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            visual.debug_bounds("loader-status").is_some(),
+            "the frame that sees the connection is the loader's last"
+        );
+        assert!(
+            !cx.read(|cx| shell.read(cx).loader_visible()),
+            "and the latch closes at the end of that frame"
+        );
+
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            visual.debug_bounds("loader-status").is_none(),
+            "the next frame is the control panel"
+        );
+        assert!(
+            visual.debug_bounds("keybind-AutoClickerCard").is_some(),
+            "with the cards back"
+        );
     }
 }
