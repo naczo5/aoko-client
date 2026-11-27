@@ -170,6 +170,19 @@ fn classify_inject(
     }
 }
 
+/// Opens an absolute URL in the browser: the platform's [`aoko_platform::open_url`], injected.
+///
+/// A field for the same reason [`InjectBridge`] is one, one degree stronger: `open_url` spawns the
+/// desktop's launcher, so a test that called it would open a browser on whatever machine runs the
+/// suite, and the assertion would be about the session rather than about the press. `None` is a
+/// shell that opens nothing — every test starts there, and [`Shell::from_system`] is the only
+/// caller that fills it.
+///
+/// The URL is the argument rather than baked in, so the single call site stays visible in the test
+/// that counts it: [`aoko_core::services::update::RELEASES_URL`], which is the releases page the
+/// managed check ended at (`MainWindow.xaml.cs:1885`).
+pub type OpenUrl = dyn Fn(&str) -> Result<(), aoko_platform::PlatformError>;
+
 /// The root view.
 pub struct Shell {
     theme: Theme,
@@ -368,6 +381,11 @@ pub struct Shell {
     /// (`CapabilityReport::open_path`). False until [`Shell::from_system`] probes it,
     /// so the button cannot claim a capability this build has not checked.
     open_configs_folder: bool,
+    /// The URL opener behind the rail's version line (`MainWindow.xaml.cs:1885`).
+    ///
+    /// `None` until [`Shell::from_system`] installs the platform's, which is what keeps the suite
+    /// from spawning a launcher; [`Shell::set_url_opener`] is the seam the press test uses.
+    url_opener: Option<Arc<OpenUrl>>,
     /// Decision 3's client setting: whether animated sites run. Kept in
     /// `client-prefs.json` rather than `Profile`, which is a bridge wire type.
     animations: bool,
@@ -525,6 +543,13 @@ impl Shell {
                 .map_err(|error| classify_inject(error, version, &directory))
         })));
 
+        // The rail's version line opens the releases page — the outcome managed's check existed
+        // for: it fetched a manifest to learn whether a newer tag existed and then handed the
+        // `html_url` to `Process.Start` (`MainWindow.xaml.cs:1885`). With no fetcher in this tree
+        // there is no update status to paint, but the page it led to is one press away. Installed
+        // here so the shipped binary is the only build that can launch anything.
+        shell.set_url_opener(Some(Arc::new(aoko_platform::open_url)));
+
         // Before the link dials: the `config` frame is built from the controller's profile,
         // and the profile `start` loaded above went into the controller this line replaces.
         // Pushing first means the first frame the bridge sees already carries the saved
@@ -601,6 +626,14 @@ impl Shell {
         self.open_configs_folder = supported;
     }
 
+    /// Installs the URL opener, as the startup path installs the platform's.
+    ///
+    /// Tests hand in a recorder instead, for the reason [`OpenUrl`] documents: the real one
+    /// launches the desktop's browser, which no assertion can read and no suite should open.
+    pub fn set_url_opener(&mut self, opener: Option<Arc<OpenUrl>>) {
+        self.url_opener = opener;
+    }
+
     /// Attaches a preferences file, as the startup path does. Tests use it to prove
     /// a flipped animation setting reaches the disk.
     pub fn set_prefs(&mut self, prefs: crate::views::prefs::PrefsFile) {
@@ -670,6 +703,7 @@ impl Shell {
             window_focus: None,
             config_name: String::new(),
             open_configs_folder: false,
+            url_opener: None,
             // Under `cfg(test)` and `capture` nothing has changed the process gate, so
             // the row shows what the leaf widgets are already doing.
             animations: motion::animations_enabled(),
@@ -3803,18 +3837,33 @@ impl Shell {
             rail = rail.child(self.render_rail_item(index, tab.name, theme, entity));
         }
 
-        // `CurrentVersionText` (`MainWindow.xaml:278`), above the footer. Only the version line is
-        // here: the status half (`UpdateStatusText`, `:272`) needs the check, and the check needs a
-        // `ReleaseFetcher`, which no crate implements — see the report on this round.
-        rail = rail.child(
+        // `CurrentVersionText` (`MainWindow.xaml:278`), above the footer, and the rail's one update
+        // control. Managed's status half (`UpdateStatusText`, `:272`) belonged to a check this tree
+        // cannot run, so what is left is the press that check existed to offer: the releases page.
+        //
+        // The line is the control rather than a button beside it, because there is no copy for a
+        // button label that would not restate the version, and managed's own sentence for the state
+        // whose press opened the page is the `click to view` tail — that tail is the affordance, so
+        // it belongs on the thing that is pressed.
+        rail = rail.child({
+            let handle = entity.clone();
             div()
+                .id("rail-update")
                 .debug_selector(|| String::from("rail-version"))
                 .px(px(12.0))
                 .py(px(2.0))
                 .text_size(px(metrics::text::CAPTION))
                 .text_color(theme.dim_text)
-                .child(SharedString::from(Self::version_line())),
-        );
+                .cursor_pointer()
+                .tooltip(components::tooltip(theme, copy::UPDATE_TOOLTIP))
+                .on_click(move |_, _window, cx| {
+                    handle.update(cx, |shell, cx| {
+                        shell.open_release_page();
+                        cx.notify();
+                    });
+                })
+                .child(SharedString::from(Self::version_line()))
+        });
 
         rail.child(
             div()
@@ -3829,9 +3878,14 @@ impl Shell {
     ///
     /// The version is the running build's, from [`aoko_core::services::update::current_version`] —
     /// the module's port of `Assembly.GetName().Version?.ToString(3)` — and never a literal here, so
-    /// a release bump changes this line and nothing else. The sentence is [`copy::UPDATE_CURRENT`]'s;
-    /// the `{version}` placeholder is filled with `str::replace`, the convention this crate keeps for
-    /// a template in copy.
+    /// a release bump changes this line and nothing else. The `{version}` placeholder is filled with
+    /// `str::replace`, the convention this crate keeps for a template in copy.
+    ///
+    /// The sentence is [`copy::UPDATE_CURRENT_VIEW`]'s: managed drew the plain `Current vX.Y` in the
+    /// two states whose press did nothing (checking, already current) and this tail only where the
+    /// press opened the release page (`MainWindow.xaml.cs:1907`, `:1912`, `:1915`). With no fetcher
+    /// the port is permanently in that last state, so the tail is the honest one — it is the only
+    /// affordance saying a press does something.
     ///
     /// Computed once: the value cannot change while the process lives, and the rail paints every
     /// frame — a `format!` here would be one allocation per frame in the section-6 budget, which is
@@ -3839,9 +3893,24 @@ impl Shell {
     fn version_line() -> &'static str {
         static LINE: OnceLock<String> = OnceLock::new();
         LINE.get_or_init(|| {
-            copy::UPDATE_CURRENT
+            copy::UPDATE_CURRENT_VIEW
                 .replace("{version}", &aoko_core::services::update::current_version())
         })
+    }
+
+    /// The version line's press: the releases page, `Process.Start` (`MainWindow.xaml.cs:1885`).
+    ///
+    /// A launcher that refuses is logged rather than painted: the rail has no status area, no copy
+    /// owns a sentence for it, and the one refusal that actually happens — no `xdg-open` on `PATH` —
+    /// is a session condition `probe_capabilities` reports for the folder button already. Inventing
+    /// a line here would be the same class of mistake as an inert control, from the other side.
+    fn open_release_page(&mut self) {
+        let Some(open) = self.url_opener.clone() else {
+            return;
+        };
+        if let Err(error) = open(aoko_core::services::update::RELEASES_URL) {
+            tracing::warn!("could not open the releases page: {}", error.user_facing());
+        }
     }
 
     fn render_rail_item(
@@ -8359,10 +8428,11 @@ mod tests {
 
     /// The rail paints the running build's version, and the module's reader is what says which.
     ///
-    /// `CurrentVersionText` (`MainWindow.xaml:278`) is `Current vX.Y`; the value is
+    /// `CurrentVersionText` (`MainWindow.xaml:278`); the value is
     /// [`aoko_core::services::update::current_version`]'s — the port of
     /// `Assembly.GetName().Version?.ToString(3)` — so a release bump moves this line and no version
-    /// literal exists in this file.
+    /// literal exists in this file. The sentence is the `click to view` one, because the line is
+    /// also the update control and that tail is what says so.
     #[gpui::test]
     fn the_rail_paints_the_running_builds_version(cx: &mut gpui::TestAppContext) {
         let root = scratch_root();
@@ -8376,11 +8446,52 @@ mod tests {
         );
 
         let current = aoko_core::services::update::current_version();
-        let expected = copy::UPDATE_CURRENT.replace("{version}", &current);
+        let expected = copy::UPDATE_CURRENT_VIEW.replace("{version}", &current);
         assert_eq!(
             Shell::version_line(),
             expected.as_str(),
             "the copy owner's sentence with the build's own version in its slot"
+        );
+    }
+
+    /// The version line is the rail's update control: one press, one releases page.
+    ///
+    /// The opener is injected, so what this asserts is the call site rather than a browser: the
+    /// shipped `aoko_platform::open_url` launches the desktop's launcher and no assertion can read
+    /// it. The URL is the releases page the managed check ended at (`MainWindow.xaml.cs:1885`) — the
+    /// check itself has no fetcher in this tree, which is why the press is the whole of the surface.
+    #[gpui::test]
+    fn the_version_lines_press_opens_the_releases_page(cx: &mut gpui::TestAppContext) {
+        let root = scratch_root();
+        let (shell, _handle, mut visual) = shell_in_window(cx, &root);
+
+        let opened: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorder = opened.clone();
+        cx.update(|cx| {
+            shell.update(cx, |shell, _| {
+                shell.set_url_opener(Some(Arc::new(move |url: &str| {
+                    recorder
+                        .lock()
+                        .expect("the press recorder")
+                        .push(url.to_owned());
+                    Ok::<(), aoko_platform::PlatformError>(())
+                })));
+            })
+        });
+
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let bounds = visual
+            .debug_bounds("rail-version")
+            .expect("the version line paints");
+        visual.simulate_click(bounds.center(), Modifiers::default());
+
+        assert_eq!(
+            opened.lock().expect("the press recorder").clone(),
+            vec![aoko_core::services::update::RELEASES_URL.to_owned()],
+            "one press, one URL: the page the managed check existed to offer"
         );
     }
 
