@@ -140,10 +140,37 @@ mod tests {
     /// reused), and this number comes from a run rather than from arithmetic. If a later change
     /// moves it again, the measurement wins and the delta gets its own sentence.
     ///
+    /// Moved from 973 to 985, measured in CI at `db5a0c7`. The window is wider than a
+    /// recent-changes list suggests: `a83bf3a` is the commit that pinned 973, and everything after
+    /// it — sixty commits — is inside this delta. Three changes in it reach the Combat tree, which
+    /// is the frame this measures:
+    ///
+    /// - `6817745` put eight `Note` controls back into Combat cards. Eight, not nine: the tab's
+    ///   ninth note was already there.
+    /// - `9f9dee8` added the rail's version line: one `div()` with a `debug_selector` string.
+    /// - `705e936` made that line the update control, which is an `on_click` — an `Rc` plus a
+    ///   listener-vector growth (`div.rs:616-619`) — and a `tooltip`, which is another `Rc`
+    ///   (`div.rs:722-731`).
+    ///
+    /// The twelve are recorded as measured rather than divided between those three, and the reason
+    /// is the model above: at the two allocations per `div()` it assumes — before the four it adds
+    /// for `into_any_element()` — the eight notes alone predict sixteen, so any per-unit split would
+    /// be arithmetic dressed up as evidence. The model is the thing that has drifted, not the count
+    /// — it also left three of the previous bump unexplained — and re-deriving it is a measurement
+    /// job, best done by bisecting this window with the test below rather than by reading `render`.
+    ///
+    /// Two things are worth stating instead of a split. `25c457d`'s keybind tooltip should not
+    /// appear here at all: a capture is an entity, an entity's own render happens when the frame is
+    /// painted, and this pin counts `Shell::render` and nothing drawn after it. And the tabs that
+    /// changed most in this window are not in this number — the palette card's live line
+    /// (`18a0b17`) is on Settings and the Accounts tooltips (`d0aec27`) on Accounts;
+    /// `every_tab_stays_within_the_same_budget` is where those would show, and it is green at the
+    /// same `TAB_BUDGET`, so that budget does not move either.
+    ///
     /// Treat this as a budget: if a change to the UI legitimately moves it, update the
     /// constant in the same commit and say why. If it moves on its own, something in
     /// `render` started allocating.
-    const SHELL_FRAME_ALLOCATIONS: usize = 973;
+    const SHELL_FRAME_ALLOCATIONS: usize = 985;
 
     fn warm_shell() -> (VisualTestContext, Entity<Shell>) {
         let cx = TestAppContext::single();
