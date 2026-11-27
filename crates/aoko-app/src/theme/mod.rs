@@ -21,8 +21,8 @@ use gpui::{Fill, Hsla, Rgba};
 ///
 /// Tokens are stored as bytes rather than as GPUI's float [`Rgba`] so a palette
 /// can be diffed against the C# hex table exactly, and so a derived tint is
-/// reproducible bit for bit: the C# maths is integer channel maths with
-/// `Math.Round`, not float blending.
+/// reproducible bit for bit: the C# maths is `Math.Round` over a `double` amount,
+/// not float blending.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Color {
     pub r: u8,
@@ -113,34 +113,78 @@ impl Color {
         format!("#{:02X}{:02X}{:02X}", self.r, self.g, self.b)
     }
 
+    /// `#RGB` or `#RRGGBB`, with or without the leading `#`, and nothing else.
+    ///
+    /// Port of `TryParseHex` (`MainWindow.xaml.cs:1227-1253`), which expands three digits and
+    /// then insists on six. The 8-digit `#AARRGGBB` form [`Color::parse_hex`] accepts for the
+    /// overlay literals is **invalid** to it, so a palette role written that way takes its
+    /// fallback exactly as `ParseHexOr` gives it (`RegisterPalette`, `:1009-1017`) instead of
+    /// painting a translucent colour the managed app never shows. One leading `#` is stripped
+    /// for the reason [`Color::parse_hex`] gives.
+    ///
+    /// This is the palette-entry rule and it is implemented once: [`Color::parse_hex`] does
+    /// the parsing, and the digit count is the only extra check. A stored palette
+    /// ([`Theme::from_custom`]) and the editor's hex boxes (`views::palette_store::parse_entry`,
+    /// which delegates here) therefore accept exactly the same text.
+    #[must_use]
+    pub fn parse_rgb_hex(text: &str) -> Option<Self> {
+        let trimmed = text.trim();
+        let digits = trimmed.strip_prefix('#').unwrap_or(trimmed);
+        match digits.chars().count() {
+            3 | 6 => Self::parse_hex(trimmed),
+            _ => None,
+        }
+    }
+
     /// Per-channel linear interpolation, `t = 0` returning `self`.
     ///
-    /// Port of `MainWindow.Blend` (`:1268-1273`). `Math.Round` rounds halves to
-    /// even in .NET, so this does too; half-away-from-zero would drift by one
-    /// channel value on roughly one palette role in nine.
+    /// Port of `MainWindow.Blend` (`:1268-1273`), which takes a **`double`**:
+    /// `Math.Round(x + (y - x) * t)`, then `Color.FromRgb`. The amount is therefore
+    /// `impl Into<f64>` and the arithmetic runs in `f64`, because the amount's precision
+    /// is what decides a tie. A decimal literal written here (`0.28`) infers as `f64` and
+    /// is bit for bit the value the C# holds; an `f32` amount is a *different* real
+    /// number, one that can land on the other side of a half — `0.55f32` is
+    /// `0.5500000119`, which takes `#7A8290`'s red channel of `182.5` to 183 where the
+    /// C# takes it to 182 ([`Theme::search_subtle_text`]'s tint). So a ported amount is a
+    /// literal or an `f64` constant and never an `f32`; the `f32` form exists for animated
+    /// progress (the switch's eased `t`), which has no managed counterpart to match.
+    ///
+    /// `Math.Round` rounds halves to even in .NET, so this does too. The result is
+    /// opaque, as `Color.FromRgb` is: alpha is not interpolated, and a translucent input
+    /// does not make a translucent output. No palette role is translucent in the managed
+    /// data (`TryParseHex` has no alpha digits), so every ported call is unaffected.
     #[must_use]
-    pub fn blend(self, other: Self, t: f32) -> Self {
-        let t = f64::from(t.clamp(0.0, 1.0));
-        let mix = |x: u8, y: u8| round_ties_even(f64::from(x) + (f64::from(y) - f64::from(x)) * t);
+    pub fn blend(self, other: Self, t: impl Into<f64>) -> Self {
+        let amount: f64 = t.into();
+        let amount = amount.clamp(0.0, 1.0);
+        let mix = |x: u8, y: u8| {
+            round_ties_even(f64::from(x) + (f64::from(y) - f64::from(x)) * amount)
+        };
         Self {
             r: mix(self.r, other.r),
             g: mix(self.g, other.g),
             b: mix(self.b, other.b),
-            a: mix(self.a, other.a),
+            a: 0xFF,
         }
     }
 
-    /// Moves each channel towards 255. Port of `MainWindow.Lighten`
-    /// (`:1262-1265`), including the 0..1 clamp.
+    /// Moves each channel towards 255. Port of `MainWindow.Lighten` (`:1260-1265`),
+    /// including the 0..1 clamp, the `double` amount and the opaque result.
+    ///
+    /// The amount's precision decides ties here too: Pastel's panel blue is 30, and
+    /// `225 × 0.06` is exactly `13.5`, so `RegisterPalette` derives `#26212C` (44, even)
+    /// from the `double` — `f64::from(0.06f32)` gives `#26212B` instead. See
+    /// [`Color::blend`] for why the parameter is `impl Into<f64>`.
     #[must_use]
-    pub fn lighten(self, amount: f32) -> Self {
-        let amount = f64::from(amount.clamp(0.0, 1.0));
+    pub fn lighten(self, amount: impl Into<f64>) -> Self {
+        let amount: f64 = amount.into();
+        let amount = amount.clamp(0.0, 1.0);
         let lift = |v: u8| round_ties_even(f64::from(v) + (255.0 - f64::from(v)) * amount);
         Self {
             r: lift(self.r),
             g: lift(self.g),
             b: lift(self.b),
-            a: self.a,
+            a: 0xFF,
         }
     }
 
@@ -168,7 +212,12 @@ impl Color {
     }
 }
 
-/// `Math.Round` on a double: ties go to even, then the result is clamped into a byte.
+/// `Math.Round` on a double, then the C#'s `(byte)` cast.
+///
+/// `Math.Round` returns a `double`; the managed code casts it, which truncates, but the
+/// value is already integral so the cast is exact. Interpolation of two bytes cannot
+/// leave `0..=255`, so the clamp only has a value to give for `NaN` (a `NaN` amount
+/// clamps to `NaN` in both languages and casts to 0).
 fn round_ties_even(value: f64) -> u8 {
     let rounded = value.round_ties_even().clamp(0.0, 255.0);
     rounded as u8
@@ -345,6 +394,13 @@ impl Theme {
     /// absent or invalid ones exactly as `MainWindow.RegisterPalette` does
     /// (`MainWindow.xaml.cs:1005-1032`).
     ///
+    /// "Invalid" is [`Color::parse_rgb_hex`], i.e. `ParseHexOr`'s `TryParseHex`: the role must
+    /// be three or six hex digits after one optional `#`. The 8-digit `#AARRGGBB` form is not
+    /// one of the accepted spellings, because a managed palette has no alpha and refuses that
+    /// text — so a hand-edited role carrying an alpha channel takes its derived fallback here
+    /// for the same reason it takes one there, and the theme can never hold a translucent role
+    /// the managed window could not paint.
+    ///
     /// This takes the nine strings rather than `aoko_protocol::profile::CustomPalette`
     /// even though the crate depends on `aoko-protocol` (for the shell's state and the
     /// views). The palette is the one piece of protocol data this layer must not need:
@@ -353,7 +409,7 @@ impl Theme {
     /// no profile in hand. The caller maps its fields in through [`CustomRoles`].
     #[must_use]
     pub fn from_custom(name: &str, roles: CustomRoles<'_>) -> Theme {
-        let parse = |text: &str, fallback: Color| Color::parse_hex(text).unwrap_or(fallback);
+        let parse = |text: &str, fallback: Color| Color::parse_rgb_hex(text).unwrap_or(fallback);
         // RegisterPalette's fallback chain, in order: each role may default from an
         // earlier one, so these are evaluated top to bottom.
         let background = parse(roles.background, Color::rgb(0, 0, 0));
@@ -690,13 +746,44 @@ mod tests {
         assert_eq!(a.blend(b, 1.0), b);
         assert_eq!(a.blend(b, 0.5), Color::from_hex(0x808080));
 
-        // 160.5 is a tie; .NET's Math.Round takes it to 160, not 161.
+        // Black and white are fixed points of themselves, and the amount's own ends are
+        // exact in either direction.
+        assert_eq!(a.blend(a, 0.5), a);
+        assert_eq!(b.blend(b, 0.5), b);
+        assert_eq!(b.blend(a, 0.0), b);
+        assert_eq!(b.blend(a, 1.0), a);
+
+        // `Math.Round`'s half-to-even rule, on channels where it decides the answer:
+        // 0.5 -> 0, 1.5 -> 2 and 2.5 -> 2, so a plain `round()` (half away from zero)
+        // fails two of these three.
+        assert_eq!(Color::rgb(0, 0, 0).blend(Color::rgb(1, 1, 1), 0.5).r, 0);
+        assert_eq!(Color::rgb(0, 0, 0).blend(Color::rgb(3, 3, 3), 0.5).r, 2);
+        assert_eq!(Color::rgb(1, 1, 1).blend(Color::rgb(2, 2, 2), 0.5).r, 2);
+        assert_eq!(Color::rgb(0, 0, 0).blend(Color::rgb(5, 5, 5), 0.5).r, 2);
+        // 127.5 is the tie that does round up, because 128 is the even one.
+        assert_eq!(a.blend(b, 0.5).r, 128);
+
+        // 110 × 0.35 is exactly 160.5 in `double`, so 122 + 160.5 is a tie and .NET's
+        // `Math.Round` takes it to 160, not 161.
         let dim = Color::from_hex(0x7A8290);
         let text = Color::from_hex(0xE8EAEE);
         assert_eq!(dim.blend(text, 0.35).r, 160);
         // Out-of-range t is clamped, not wrapped.
         assert_eq!(a.blend(b, 2.0), b);
         assert_eq!(a.blend(b, -1.0), a);
+
+        // The amount is the C# `double`, and an `f32` is a different real number: 110 ×
+        // 0.55 rounds to exactly 60.5 in `double` (a tie, so 182), while 110 × 0.55f32 is
+        // 60.50000131, which rounds up to 183. This pair is why the parameter is
+        // `impl Into<f64>` and why a ported amount is never written as an `f32`.
+        assert_eq!(dim.blend(text, 0.55).to_hex(), "#B6BBC4");
+        assert_eq!(dim.blend(text, 0.55_f32).to_hex(), "#B7BBC4");
+
+        // `Color.FromRgb` has no alpha channel to carry, so the result is opaque whatever
+        // the inputs were.
+        let clear = Color::rgba(0x00, 0x00, 0x00, 0x40);
+        let solid = Color::rgba(0xFF, 0xFF, 0xFF, 0x80);
+        assert_eq!(clear.blend(solid, 0.5).a, 0xFF);
     }
 
     #[test]
@@ -711,6 +798,32 @@ mod tests {
         assert_eq!(panel.lighten(0.06).r, 32); // 32.22
         assert_eq!(panel.lighten(0.10).r, 42); // 41.70
         assert_eq!(panel.lighten(0.16).r, 56); // 55.92
+
+        // 255 is already white: 255 + 0 × amount, at both ends and in the middle.
+        let white = Color::from_hex(0xFFFFFF);
+        assert_eq!(white.lighten(0.0), white);
+        assert_eq!(white.lighten(0.5), white);
+        assert_eq!(white.lighten(1.0), white);
+        // And 0 is black at amount 0 only, with 0.5 landing on the 127.5 tie that goes to
+        // the even 128 rather than 127.
+        let black = Color::from_hex(0x000000);
+        assert_eq!(black.lighten(0.0), black);
+        assert_eq!(black.lighten(0.5), Color::from_hex(0x808080));
+        // 1 + 254 × 0.5 = 128 exactly, which is not a tie at all.
+        let near_black = Color::from_hex(0x010101);
+        assert_eq!(near_black.lighten(0.5), Color::from_hex(0x808080));
+
+        // A tie on a real palette role: Pastel's panel blue is 30, so 225 × 0.06 is
+        // exactly 13.5 and 225 × 0.10 is exactly 22.5 — both `RegisterPalette` amounts,
+        // both half-to-even, and both moved by one by the `f32` spellings.
+        let pastel = Color::from_hex(0x18131E);
+        assert_eq!(pastel.lighten(0.06).b, 44); // 43.5 -> 44
+        assert_eq!(pastel.lighten(0.10).b, 52); // 52.5 -> 52
+        assert_eq!(pastel.lighten(0.06_f32).b, 43);
+        assert_eq!(pastel.lighten(0.10_f32).b, 53);
+
+        // Opaque, like the `Color.FromRgb` the C# returns.
+        assert_eq!(Color::rgba(0x12, 0x14, 0x1A, 0x40).lighten(0.06).a, 0xFF);
     }
 
     #[test]
@@ -720,11 +833,17 @@ mod tests {
         // Blend(#E8EAEE, #C7625A, 0.28)
         assert_eq!(slate.search_match().to_hex(), "#DFC4C5");
         assert_eq!(slate.search_match_pill(), slate.accent.with_alpha(0x2E));
-        // Blend(#7A8290, #E8EAEE, 0.35) and 0.55. 110×0.55 is 60.500000000000005 in
-        // binary floating point, so the .NET `Math.Round` here is 183, not the 182 a
-        // hand computation lands on. The tie-to-even rule only bites at exact halves.
+        // Blend(#7A8290, #E8EAEE, 0.35): 110 × 0.35 rounds to exactly 60.5, a tie, so
+        // 122 + 60.5 goes to 160 (even) and the green and blue channels follow.
         assert_eq!(slate.search_placeholder().to_hex(), "#A0A6B1");
-        assert_eq!(slate.search_subtle_text().to_hex(), "#B7BBC4");
+        // Blend(#7A8290, #E8EAEE, 0.55): the same 60.5 tie, i.e. 182 — 0xB6, not the
+        // 0xB7 an `f32` amount produces. The f32 spelling is 0.5500000119, which is
+        // 182.50000131 before rounding.
+        assert_eq!(slate.search_subtle_text().to_hex(), "#B6BBC4");
+        // A palette where the tie that bites is the placeholder's: Digital Horizon's dim
+        // green is 127, 110 × 0.35 is again 60.5, and 127 + 60.5 goes to the even 166.
+        let horizon = Theme::by_name("Digital Horizon");
+        assert_eq!(horizon.search_placeholder().to_hex(), "#B1A6C3");
     }
 
     #[test]
@@ -828,16 +947,108 @@ mod tests {
         assert_eq!(theme.name, "Mine");
     }
 
+    /// The palette-entry form: `TryParseHex`'s three or six digits, and never the alpha one.
+    ///
+    /// The difference from [`Color::parse_hex`] is the digit count and nothing else, which is
+    /// why the pair is asserted here: the permissive form is what the overlay literals use, and
+    /// a palette role spelled with an alpha channel is text the managed `ParseHexOr` refuses.
+    #[test]
+    fn the_palette_entry_parser_refuses_the_argb_form() {
+        let peach = Color::from_hex(0xC7625A);
+        let teal = Color::from_hex(0xAA_BB_CC);
+
+        assert_eq!(Color::parse_rgb_hex("#C7625A"), Some(peach));
+        assert_eq!(Color::parse_rgb_hex("c7625a"), Some(peach));
+        assert_eq!(Color::parse_rgb_hex("  #abc  "), Some(teal));
+
+        // `TryParseHex` has no alpha digits: eight of them is not a palette entry, opaque
+        // `#FFAABBCC` included.
+        assert_eq!(Color::parse_rgb_hex("#9C020711"), None);
+        assert_eq!(Color::parse_rgb_hex("9C020711"), None);
+        assert_eq!(Color::parse_rgb_hex("#FFAABBCC"), None);
+        // One `#`, three or six digits, and nothing else.
+        assert_eq!(Color::parse_rgb_hex("##C7625A"), None);
+        assert_eq!(Color::parse_rgb_hex("#12345"), None);
+        assert_eq!(Color::parse_rgb_hex("#abcd"), None);
+        assert_eq!(Color::parse_rgb_hex("#"), None);
+        assert_eq!(Color::parse_rgb_hex(""), None);
+
+        // Where the two agree, and where the permissive one goes further.
+        for text in ["#C7625A", "abc", "  #0A0B0F "] {
+            assert_eq!(Color::parse_rgb_hex(text), Color::parse_hex(text));
+        }
+        let scrim = Color::rgba(0x02, 0x07, 0x11, 0x9C);
+        assert_eq!(Color::parse_hex("#9C020711"), Some(scrim));
+    }
+
+    /// An `#AARRGGBB` role is invalid to `RegisterPalette`, so it takes its fallback.
+    ///
+    /// `ParseHexOr` (`MainWindow.xaml.cs:1009-1017`, `:1254-1255`) is the whole story: a role
+    /// that is not three or six digits is *absent* as far as the theme is concerned, so the
+    /// fallback chain decides the colour — the background for a refused `panel`, the derived
+    /// blend for a refused `dim_text`, `Colors.Gray` for a refused `accent`. Reading the alpha
+    /// instead would paint a translucent role the managed window never shows.
+    #[test]
+    fn from_custom_refuses_the_argb_form_like_try_parse_hex() {
+        let theme = Theme::from_custom(
+            "Alpha",
+            CustomRoles {
+                background: "#010203",
+                panel: "#80050607",             // ARGB -> the background
+                slider_background: "#400A0B0C", // ARGB -> Lighten(background, 0.06)
+                slider_foreground: "#0A0B0C",   // six digits -> taken
+                accent: "#80FF8800",            // ARGB -> Colors.Gray
+                text: "#FFFFFF",
+                dim_text: "#80112233",    // ARGB -> Blend(text, background, 0.45)
+                tab_selected: "#400A0B0C", // ARGB -> Lighten(background, 0.10)
+                tab_hover: "#400A0B0C",    // ARGB -> Lighten(background, 0.04)
+            },
+        );
+
+        let background = Color::from_hex(0x010203);
+        assert_eq!(theme.panel, background, "an ARGB panel is the background");
+        assert_eq!(theme.slider_background, background.lighten(0.06));
+        assert_eq!(
+            theme.slider_foreground,
+            Color::from_hex(0x0A0B0C),
+            "six digits are still a colour"
+        );
+        assert_eq!(theme.accent, Color::from_hex(0x808080), "Colors.Gray");
+        assert_eq!(
+            theme.dim_text,
+            Color::from_hex(0xFFFFFF).blend(background, 0.45)
+        );
+        assert_eq!(theme.tab_selected, background.lighten(0.10));
+        assert_eq!(theme.tab_hover, background.lighten(0.04));
+        // And no role can come out of it translucent, which is the defect this closes.
+        for (role, color) in [
+            ("background", theme.background),
+            ("panel", theme.panel),
+            ("slider background", theme.slider_background),
+            ("slider foreground", theme.slider_foreground),
+            ("accent", theme.accent),
+            ("text", theme.text),
+            ("dim text", theme.dim_text),
+            ("tab selected", theme.tab_selected),
+            ("tab hover", theme.tab_hover),
+        ] {
+            assert_eq!(color.a, 0xFF, "the {role} role is translucent");
+        }
+    }
+
     // Ports of `Aoko.Tests/PaletteContrastTests.cs`, run against all 18 palettes
     // rather than only the live one: the claims are palette-independent in .NET
     // and must stay that way here.
     #[test]
     fn chip_labels_pass_aa_on_their_tint_layers() {
+        // The amounts come from their one home rather than being repeated here, so this is a
+        // claim about the layer [`crate::components::chip`] actually flattens — the C#
+        // `TabChipTint` at 0.16 over the panel, and the critical tone's 0.20.
         for theme in builtins() {
             for (tone, opacity) in [
-                (theme.accent, 0.16_f32),
-                (fixed::CRITICAL, 0.20),
-                (fixed::WARN, 0.16),
+                (theme.accent, metrics::wash::CHIP_TINT),
+                (fixed::CRITICAL, metrics::wash::CHIP_TINT_CRITICAL),
+                (fixed::WARN, metrics::wash::CHIP_TINT_WARN),
             ] {
                 let tint = theme.panel.blend(tone, opacity);
                 let ratio = theme.text.contrast_ratio(tint);

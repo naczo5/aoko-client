@@ -3,6 +3,12 @@
 //! Every number here is quoted from the C# source, with the line that names it,
 //! so a reviewer can check a dimension instead of trusting it. Colour tokens live
 //! in [`super`]; this module is sizes, radii and text scale only.
+//!
+//! The exceptions to the `f32` lengths are the two opacity families,
+//! [`overlay::ROW_HOVER_WASH`] and [`wash`]: they are `f64` because the managed code writes
+//! them as `double` literals and [`super::Color::blend`] rounds a half to even. `0.14` as an
+//! `f32` is `0.14000000059604645`, which takes Blossom's row-wash green to 49 where the
+//! managed window paints 48; the `f64` is the value every derived tint is checked against.
 
 /// Body text and the query field are the two sizes the C# sets explicitly.
 pub mod text {
@@ -182,19 +188,19 @@ pub mod overlay {
     pub const ROW_INSET_Y: f32 = 1.0;
     /// Row washes, as opacities of `TextBrush` over the card
     /// (`CommandSearchOverlay.xaml:281-300`). Selected is hover plus an accent rule.
-    pub const ROW_HOVER_WASH: f32 = 0.08;
-    pub const ROW_SELECTED_WASH: f32 = 0.14;
+    pub const ROW_HOVER_WASH: f64 = 0.08;
+    pub const ROW_SELECTED_WASH: f64 = 0.14;
 }
 
 /// Card washes shared by every list-style surface (`TabCardWash`, and the
 /// contrast test's 0.06 / 0.12 pair, `Aoko.Tests/PaletteContrastTests.cs:96-100`).
 pub mod wash {
-    pub const HOVER: f32 = 0.06;
-    pub const SELECTED: f32 = 0.12;
+    pub const HOVER: f64 = 0.06;
+    pub const SELECTED: f64 = 0.12;
     /// `TabChipTint` opacity (`TabStyles.xaml:208`) and the two status tones.
-    pub const CHIP_TINT: f32 = 0.16;
-    pub const CHIP_TINT_CRITICAL: f32 = 0.20;
-    pub const CHIP_TINT_WARN: f32 = 0.16;
+    pub const CHIP_TINT: f64 = 0.16;
+    pub const CHIP_TINT_CRITICAL: f64 = 0.20;
+    pub const CHIP_TINT_WARN: f64 = 0.16;
 }
 
 /// The saved-palette card and the editor's colour row.

@@ -36,8 +36,12 @@ impl ChipTone {
 
     /// The tint layer's opacity, from `TabStyles.xaml:208` and the contrast test's
     /// 0.20 for the critical tone.
+    ///
+    /// `f64` because [`crate::theme::metrics::wash`] holds the managed `double`s: the blend
+    /// that flattens the layer rounds a half to even, and an `f32` amount lands on the wrong
+    /// side of one.
     #[must_use]
-    pub fn tint_opacity(self) -> f32 {
+    pub fn tint_opacity(self) -> f64 {
         match self {
             Self::Neutral | Self::Accent => metrics::wash::CHIP_TINT,
             Self::Critical => metrics::wash::CHIP_TINT_CRITICAL,

@@ -696,14 +696,15 @@ fn same_name(left: &str, right: &str) -> bool {
 }
 
 /// `TryParseHex` (`MainWindow.xaml.cs:1227-1253`) for a palette entry: `#RGB`, `#RRGGBB`,
-/// either form without the `#`, any case.
+/// either form without the `#`, any case, and nothing else.
 ///
-/// The rule itself is [`Color::parse_hex`] — one implementation in the workspace, so a change
-/// to the tolerance cannot land on one path only. What is kept here is the single difference
-/// the palette box needs, and it reads as one: the 8-digit ARGB form is **refused**, because
-/// a palette file stores opaque `#RRGGBB` only and `TryParseHex` refuses anything that is not
-/// six digits once the shorthand is expanded. The guard is digit-shaped on purpose — the
-/// alpha in `#FFAABBCC` is opaque and it is still not a palette entry.
+/// The rule itself is [`Color::parse_rgb_hex`] and lives there, so the text a box accepts,
+/// the text [`Theme::from_custom`] accepts out of the stored file and the text the swatch
+/// accepts are one implementation — a change to the tolerance cannot land on one path only.
+/// The 8-digit ARGB form is **refused** because a palette file stores opaque `#RRGGBB` only
+/// and `TryParseHex` refuses anything that is not six digits once the shorthand is expanded;
+/// the guard is digit-shaped on purpose, since the alpha in `#FFAABBCC` is opaque and it is
+/// still not a palette entry.
 ///
 /// Public because a consumer outside this store has to accept exactly what
 /// [`PaletteStore::save_draft`] accepts. The colour swatch in the shell's
@@ -713,13 +714,7 @@ fn same_name(left: &str, right: &str) -> bool {
 /// defect where a swatch paints a colour the press rejects.
 #[must_use]
 pub fn parse_entry(text: &str) -> Option<Color> {
-    let trimmed = text.trim();
-    let body = trimmed.strip_prefix('#').unwrap_or(trimmed);
-    if body.chars().count() == 8 {
-        return None;
-    }
-
-    Color::parse_hex(trimmed)
+    Color::parse_rgb_hex(text)
 }
 
 /// A stored palette's nine roles, borrowed for [`Theme::from_custom`].
@@ -819,6 +814,38 @@ mod tests {
             "the managed key shape (`CustomPalette.cs:41-44`): {text}"
         );
         assert_eq!(store.palettes(), vec![*palette]);
+    }
+
+    /// The five derived roles are the managed `double` maths, ties included.
+    ///
+    /// `AddCustomPaletteButton_Click` (`MainWindow.xaml.cs:1128-1143`) derives them from the
+    /// four typed colours, and `RegisterPalette` (`:1013-1016`) re-derives the same five when a
+    /// stored palette has lost one — so a wrong step here is both a save and an apply that
+    /// disagree with the managed app. A panel whose channels land on a half is where the two
+    /// can differ: the amounts are `double`s, so `225 × 0.06` is exactly 13.5 and
+    /// `Math.Round` takes 43.5 to the even 44, while the same amount widened from an `f32`
+    /// gives 43. The expectations are literals rather than `panel.lighten(..)` on both
+    /// sides, so a rounding change fails here instead of agreeing with itself.
+    #[test]
+    fn the_derived_roles_are_the_managed_double_maths() {
+        let draft = PaletteDraft {
+            name: "Pastel-ish".to_owned(),
+            background: "#0D0A10".to_owned(),
+            panel: "#18131E".to_owned(),
+            accent: "#F39BB2".to_owned(),
+            text: "#FBF3F6".to_owned(),
+        };
+
+        let palette = draft.build("Pastel-ish").expect("four valid hexes");
+
+        assert_eq!(palette.slider_background, "#26212C", "225 × 0.06 = 13.5");
+        assert_eq!(palette.slider_foreground, "#3D3942", "225 × 0.16 = 36");
+        assert_eq!(palette.tab_selected, "#2F2B34", "225 × 0.10 = 22.5");
+        assert_eq!(palette.tab_hover, "#211C27", "225 × 0.04 = 9");
+        // `230 × 0.45` is exactly 103.5, so 246 - 103.5 = 142.5 goes to the even 142.
+        assert_eq!(palette.dim_text, "#908A8E");
+        assert_eq!(palette.background, "#0D0A10", "kept as typed");
+        assert_eq!(palette.panel, "#18131E");
     }
 
     #[test]
@@ -963,11 +990,17 @@ mod tests {
         );
     }
 
-    /// The property is *agreement*: the rule lives once in `theme`, and this box differs from
-    /// it on exactly one thing, the alpha form a palette entry must not carry.
+    /// The property is *agreement*: the rule lives once in `theme`, so this box and the strict
+    /// parser cannot disagree at all — and the strict parser differs from the permissive
+    /// `parse_hex` on exactly one thing, the alpha form a palette entry must not carry.
     #[test]
     fn the_entry_parser_agrees_with_the_theme_parser_except_on_argb() {
         for text in ["#abc", "#AABBCC", "abc", "  #AABBCC  "] {
+            assert_eq!(
+                parse_entry(text),
+                Color::parse_rgb_hex(text),
+                "{text:?} is the same function, not a copy of it"
+            );
             assert_eq!(
                 parse_entry(text),
                 Color::parse_hex(text),
@@ -990,7 +1023,7 @@ mod tests {
         assert_eq!(
             Color::parse_hex("#FF1A2B3C"),
             Some(Color::rgba(0x1A, 0x2B, 0x3C, 0xFF)),
-            "which the theme parser does accept — the guard is the whole difference"
+            "which the permissive parser accepts — the digit count is the whole difference"
         );
     }
 
