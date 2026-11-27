@@ -73,7 +73,6 @@ use std::time::{Duration, Instant};
 
 use aoko_core::app::{AppController, StateSnapshot};
 use aoko_core::chest_stealer::FRESH_STATE_MS;
-use aoko_core::clicker::toggles;
 use aoko_core::loops::{ClickSink, ClickerLoopConfigs, ClickerLoops, LoopRuntime, LoopSense};
 use aoko_core::{Clock, Sleeper, SplitMix64, SystemClock, ThreadSleeper};
 use aoko_platform::{
@@ -973,7 +972,8 @@ impl Runtime {
     /// as off.
     #[must_use]
     pub fn module_enabled(&self, module_id: &str) -> bool {
-        flag_for(module_id).is_some_and(|flag| self.controller.is_module_enabled(flag))
+        module_catalog::flag_for_id(module_id)
+            .is_some_and(|flag| self.controller.is_module_enabled(flag))
     }
 
     /// Sets one module's switch, by catalog id (case-insensitive).
@@ -985,7 +985,7 @@ impl Runtime {
     /// A module that drives a loop starts or stops the supervisor, which is the only
     /// place work begins in this crate.
     pub fn set_module_enabled(&mut self, module_id: &str, enabled: bool) {
-        if let Some(flag) = flag_for(module_id) {
+        if let Some(flag) = module_catalog::flag_for_id(module_id) {
             self.controller.set_module_enabled(flag, enabled);
             self.reconcile_loops();
         }
@@ -997,7 +997,7 @@ impl Runtime {
     /// The return value is what makes `cx.notify()` honest: a click on a row that has no
     /// state to change does not repaint the window.
     pub fn flip_module(&mut self, module_id: &str) -> bool {
-        let Some(flag) = flag_for(module_id) else {
+        let Some(flag) = module_catalog::flag_for_id(module_id) else {
             return false;
         };
         let enabled = !self.controller.is_module_enabled(flag);
@@ -1033,20 +1033,6 @@ impl Runtime {
             .filter(|entry| self.controller.is_module_enabled(entry.enabled_flag))
             .count()
     }
-}
-
-/// The controller flag behind a module id.
-///
-/// `None` for an id the catalog does not have, and for the entries whose flag is
-/// [`EnabledFlag::Never`] — `panic` is the only one — because those have no stored
-/// boolean to read or write.
-fn flag_for(module_id: &str) -> Option<EnabledFlag> {
-    let canonical = toggles::canonical_id(module_id)?;
-    module_catalog::ALL
-        .iter()
-        .find(|entry| entry.id == canonical)
-        .map(|entry| entry.enabled_flag)
-        .filter(|flag| *flag != EnabledFlag::Never)
 }
 
 /// The loop a catalog flag drives, `None` for a module that is only a setting.
