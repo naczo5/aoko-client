@@ -5802,9 +5802,9 @@ mod tests {
                 .find(|card| card.id == id)
                 .unwrap_or_else(|| panic!("{id} is a card in the table"));
             assert!(
-                card.controls.iter().any(|control| matches!(
+                card.controls.iter().copied().any(|control| matches!(
                     control,
-                    Control::Button { label: carried, .. } if *carried == label
+                    Control::Button { label: carried, .. } if carried == label
                 )),
                 "{id} carries a {label:?} button, so the wire is not stale"
             );
