@@ -18,6 +18,13 @@
 //!
 //! `Profile::AutoSaveConfigName` is `"config"` (`Profile.cs:371`); the store's
 //! `list_profiles` excludes it from the user-facing list.
+//!
+//! One rule departs from managed, and only where managed lost data: a `config` slot that
+//! does not parse is moved aside as `config.json.corrupt-<stamp>` and named in the status
+//! line, instead of starting defaults that the exit save then writes over it. The slot has
+//! no row in the config list, so it is the one file the user cannot see and cannot rescue.
+//! A named config that will not parse is left where it is — it is in the list, and deleting
+//! or overwriting it is a press.
 
 use std::fs;
 use std::io::ErrorKind;
@@ -28,6 +35,14 @@ use aoko_protocol::profile::{load_profile_from_json, to_profile_json, Profile};
 
 /// The internal auto-save slot (`ProfileManager.AutoSaveConfigName`, `Profile.cs:371`).
 pub const AUTO_SAVE_NAME: &str = "config";
+
+/// Ceiling on a profile file's size, the same one
+/// [`crate::views::file_store`] puts on `accounts.json` and `servers.json`.
+///
+/// A real profile is a few kilobytes. Without a ceiling
+/// [`ProfileStore::read_profile`] materialises whatever is on disk, so a runaway or
+/// foreign file could size an allocation this app could not have produced.
+const MAXIMUM_PROFILE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// The Settings card's status line, one message at a time.
 ///
@@ -126,6 +141,21 @@ impl Profiles {
             // A first launch has no auto-save slot: not an error, and no status line,
             // because there is nothing the user could do about it.
             ReadOutcome::Absent => Profile::default(),
+            // A slot that exists and does not parse is the one read whose bytes would be lost by
+            // carrying on: the slot has no row in the list, so the exit save would write the
+            // defaults over settings the user cannot see and could not have recovered. The copy is
+            // moved aside and the status line names it, which is the rule
+            // [`crate::views::file_store`] already applies to a corrupt accounts or servers file.
+            ReadOutcome::Unparsable => {
+                let message = match profiles.quarantine(AUTO_SAVE_NAME) {
+                    Some(kept) => crate::views::store_recovery::message(&kept),
+                    // The rename itself failed, so the bytes are still where they were and the
+                    // sentence keeps saying so rather than claiming a copy was kept.
+                    None => format!("Could not parse profile '{AUTO_SAVE_NAME}'."),
+                };
+                profiles.set_status(message);
+                Profile::default()
+            }
             ReadOutcome::Failed(error) => {
                 profiles.set_status(error);
                 Profile::default()
@@ -251,9 +281,13 @@ impl Profiles {
                 self.set_status(format!("Loaded config '{name}'."));
                 Ok(*profile)
             }
-            ReadOutcome::Absent | ReadOutcome::Failed(_) => {
-                // The managed line is the same for a missing file and a bad one
-                // (`LoadConfigButton_Click`, `MainWindow.xaml.cs:820-826`).
+            // Absent, unparsable and unreadable are one answer here, which is the managed
+            // `LoadConfigButton_Click` line for both of its failures
+            // (`MainWindow.xaml.cs:820-826`). A named config that will not parse is left where it
+            // is rather than quarantined: it is in the list, the user can see it, and deleting or
+            // overwriting it is a press — the auto-save slot is the one read that has no row and
+            // therefore no other way to keep its bytes (see [`Profiles::with_store`]).
+            ReadOutcome::Absent | ReadOutcome::Unparsable | ReadOutcome::Failed(_) => {
                 let message = format!("Failed to load config '{name}'.");
                 self.set_status(message.clone());
                 self.refresh();
@@ -480,6 +514,17 @@ impl Profiles {
             return ReadOutcome::Absent;
         };
 
+        // A file this app could not have written is not a profile: the ceiling is checked on the
+        // metadata, so a runaway file cannot size an allocation, and it is the same rule and the
+        // same number [`crate::views::file_store`] applies to the two data files.
+        let too_large = self
+            .path(name)
+            .and_then(|path| fs::metadata(path).ok())
+            .is_some_and(|metadata| metadata.len() > MAXIMUM_PROFILE_BYTES);
+        if too_large {
+            return ReadOutcome::Unparsable;
+        }
+
         let text = match store.read_profile(name) {
             Ok(text) => text,
             Err(PlatformError::NotFound { .. }) => return ReadOutcome::Absent,
@@ -488,11 +533,21 @@ impl Profiles {
 
         match load_profile_from_json(&text) {
             Some(profile) => ReadOutcome::Loaded(Box::new(profile)),
-            // Managed's sentence is `Failed to load config '{name}'.` (`MainWindow.xaml.cs:824`).
-            // The port says "parse profile" because what failed here is a JSON document that did
-            // not deserialize; a config that would not load has already been reported above.
-            None => ReadOutcome::Failed(format!("Could not parse profile '{name}'.")),
+            None => ReadOutcome::Unparsable,
         }
+    }
+
+    /// Moves an unparsable profile aside and answers where it went.
+    ///
+    /// The name comes from [`crate::views::file_store::quarantine`], so a copy of a profile and a
+    /// copy of a data file are stamped and marked the same way and
+    /// [`crate::views::store_recovery`] can name either. `None` when there is no store, when the
+    /// name is not a file name, or when the rename failed — in which case the bytes are still where
+    /// they were.
+    fn quarantine(&self, name: &str) -> Option<String> {
+        let path = self.path(name)?;
+        crate::views::file_store::quarantine(&path)
+            .map(|kept| kept.to_string_lossy().into_owned())
     }
 
     fn write(&self, name: &str, profile: &Profile) -> Result<(), String> {
@@ -501,6 +556,12 @@ impl Profiles {
         };
 
         let json = to_profile_json(profile);
+        // `to_profile_json` answers with an empty string when serde fails, and writing that would
+        // replace a config that loads with a file that does not: the next read would find nothing
+        // and the next save would write the defaults over it. A refusal keeps the old file.
+        if json.trim().is_empty() {
+            return Err("the profile could not be serialized".to_owned());
+        }
         store
             .write_profile(name, &json)
             .map_err(|error| error.user_facing())
@@ -528,15 +589,22 @@ pub fn display_name(raw: &str) -> String {
 
 /// What reading a profile produced.
 ///
-/// Absent and Failed are kept apart because the managed code treats them
+/// Absent, Unparsable and Failed are kept apart because the three are treated
 /// differently: a missing `config` slot at startup is silent (`Profile.cs:484-489`),
-/// while a missing *named* file reports `Failed to load config`.
+/// while a missing *named* file reports `Failed to load config`. Only an unparsable
+/// document has bytes worth keeping, which is what the quarantine rule keys on.
 #[derive(Debug, Clone, PartialEq)]
 enum ReadOutcome {
     /// Boxed: `Profile` is ~900 bytes and `Clippy` is right that the variant
     /// would otherwise dominate every `ReadOutcome`.
     Loaded(Box<Profile>),
+    /// No such file.
     Absent,
+    /// The file is there, but its bytes are not a profile: too large to be one this
+    /// app wrote, or JSON that does not fit the schema.
+    Unparsable,
+    /// The file exists and could not be read for an environmental reason, with the
+    /// classified reason ready to paint.
     Failed(String),
 }
 
@@ -915,5 +983,86 @@ mod tests {
             "'config' is a reserved name. Choose another."
         );
         assert!(store_at(&root).profile_exists(AUTO_SAVE_NAME));
+    }
+
+    /// An auto-save slot that will not parse keeps its bytes instead of being overwritten by the
+    /// exit save, and the status line names the copy.
+    ///
+    /// The slot has no row in the config list, so before this the only trace of the user's
+    /// settings was a sentence; the next save wrote the defaults over them.
+    #[test]
+    fn a_corrupt_auto_save_slot_is_moved_aside_rather_than_replaced_by_defaults() {
+        let root = scratch();
+        let store = store_at(&root);
+        store.initialize().expect("initialize");
+        let slot = store.profile_path(AUTO_SAVE_NAME).expect("path");
+        std::fs::write(&slot, "{ this is not a profile").expect("corrupting the slot");
+
+        let (profiles, profile) = Profiles::with_store(store_at(&root));
+
+        assert_eq!(profile, Profile::default(), "this run starts from defaults");
+        assert!(
+            !slot.exists(),
+            "the unreadable slot is no longer there to be overwritten"
+        );
+        let message = profiles.status().message.clone();
+        assert!(
+            message.starts_with("config.json could not be read."),
+            "{message}"
+        );
+        assert!(message.contains("config.json.corrupt-"), "{message}");
+        // The copy is a sibling named the way `store_recovery::find_quarantined` matches, and it
+        // is not a `*.json` file, so it stays out of the config list.
+        let kept: Vec<String> = std::fs::read_dir(store.profiles_dir())
+            .expect("list the profile directory")
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("config.json.corrupt-"))
+            .collect();
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert!(profiles.configs().is_empty());
+    }
+
+    /// A named config that will not parse is left where it is: it is in the list, so the user can
+    /// delete or overwrite it, and the load reports the managed failure line.
+    #[test]
+    fn a_corrupt_named_config_is_reported_and_left_in_place() {
+        let root = scratch();
+        let store = store_at(&root);
+        store.initialize().expect("initialize");
+        let path = store.profile_path("PvP").expect("path");
+        std::fs::write(&path, "[1, 2, 3]").expect("corrupting the config");
+
+        let (mut profiles, _) = Profiles::with_store(store_at(&root));
+        assert_eq!(profiles.configs(), ["PvP".to_owned()], "it still lists");
+
+        assert_eq!(
+            profiles.load_named("PvP").unwrap_err(),
+            "Failed to load config 'PvP'."
+        );
+        assert!(path.is_file(), "the user's bytes stay where they put them");
+    }
+
+    /// A file far too large to be a profile is not read into memory: it is unparsable.
+    #[test]
+    fn a_profile_over_the_size_ceiling_is_quarantined_rather_than_read() {
+        let root = scratch();
+        let store = store_at(&root);
+        store.initialize().expect("initialize");
+        let path = store.profile_path(AUTO_SAVE_NAME).expect("path");
+        // Sparse rather than eight mebibytes of bytes: the metadata is what the ceiling reads.
+        std::fs::File::create(&path)
+            .expect("create")
+            .set_len(MAXIMUM_PROFILE_BYTES + 1)
+            .expect("extend");
+
+        let (profiles, profile) = Profiles::with_store(store_at(&root));
+
+        assert_eq!(profile, Profile::default());
+        let message = profiles.status().message.clone();
+        assert!(
+            message.starts_with("config.json could not be read."),
+            "{message}"
+        );
     }
 }

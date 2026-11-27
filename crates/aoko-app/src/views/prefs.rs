@@ -80,12 +80,16 @@ impl PrefsFile {
     }
 
     /// Writes the file, creating the directory when it is the first run.
+    ///
+    /// The bytes go through a sibling temporary that is renamed over the file, the same swap
+    /// `accounts.json`, `servers.json` and the profiles use. A plain write truncates first, so a
+    /// crash or a full disk half way through would leave a file [`PrefsFile::load`] has to reject —
+    /// which the user sees as "Could not read client preferences" on the next launch and an
+    /// animation setting that fell back to the default.
     pub fn save(&self, prefs: ClientPrefs) -> Result<(), String> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-        }
         let text = format!("{{\"animations\": {}}}", prefs.animations);
-        fs::write(&self.path, text).map_err(|error| error.to_string())
+        crate::views::file_store::write_atomically(&self.path, &text)
+            .map_err(|error| error.to_string())
     }
 }
 

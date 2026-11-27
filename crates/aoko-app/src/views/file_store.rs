@@ -568,7 +568,11 @@ fn read_json_file<T>(path: &Path, parse: fn(&str) -> Option<Vec<T>>) -> ReadOutc
 /// `accounts.json.corrupt-20240501-120000`: the shape `find_quarantined` matches and the
 /// notice can name. A rename that fails leaves the file exactly where it was, which is the
 /// managed fallback too (`:359-363`): the store starts empty either way.
-fn quarantine(path: &Path) -> Option<PathBuf> {
+///
+/// Shared with [`crate::views::profiles`], which quarantines an auto-save slot that will not
+/// parse: one implementation of the name, so a copy of either file is stamped the same way and
+/// [`crate::views::store_recovery`] can describe both.
+pub(crate) fn quarantine(path: &Path) -> Option<PathBuf> {
     let name = path.file_name()?;
     let mut quarantined = name.to_os_string();
     quarantined.push(QUARANTINE_MARKER);
@@ -584,7 +588,10 @@ fn quarantine(path: &Path) -> Option<PathBuf> {
 /// a failure half way leaves the old one untouched (`AccountStore.cs:301-335`). Rust's
 /// `fs::rename` replaces an existing destination on both platforms, so the managed
 /// `File.Replace`-then-`File.Move` fallback (`:312-327`) has nothing left to do here.
-fn write_atomically(path: &Path, contents: &str) -> io::Result<()> {
+///
+/// Shared with [`crate::views::prefs`], whose `client-prefs.json` is written the same way: one
+/// implementation of the swap, so a full disk can truncate none of the three files.
+pub(crate) fn write_atomically(path: &Path, contents: &str) -> io::Result<()> {
     // `<app data>/Aoko` appears with the first save (the managed `AccountStore` created it in
     // its constructor, `AccountStore.cs:65-67`); an empty parent is the working directory,
     // which needs no creating.
