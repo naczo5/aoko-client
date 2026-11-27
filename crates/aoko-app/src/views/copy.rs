@@ -1477,14 +1477,15 @@ pub const LOADER_STATUS_CONNECTED: &str = "Status: Connected & Injected";
 /// Managed's tail is `GameStateClient.StatusMessage`, whose values are capitalised sentences
 /// with a full stop (`"Already connected/injected"` `:259`, `"ERROR: Injection failed. Check
 /// logs."` `:369`, `"Disconnected from agent."` `:615`, `"Reconnecting to agent..."` `:637`),
-/// plus a progress form at `:235`. Six lines are written to paint behind this prefix: the four
-/// refusal rules below, which are the port's own and paint today, and the two reasons below
-/// them, which are managed's dial failure and its disconnect and paint once the machine can
-/// leave `Connecting`. The rest of the `StatusMessage` values still have no line — a
-/// conflict found at inject (`:304`), a missing bridge library (`:355`), a wrong-PID check
-/// (`:395`), a failed connectivity check (`:411`), `"Already connected/injected"` (`:259`), the
-/// progress form (`:235`) and the reconnect line (`:637`) — because the port cannot enter those
-/// states, and a sentence for a state it cannot enter is the defect rather than the gap.
+/// plus a progress form at `:235`. Seven lines are written to paint behind this prefix: the four
+/// refusal rules below, which are the port's own and paint today, and the three reasons below
+/// them — the dial failure, the disconnect, and the bridge library that is not on disk, which is
+/// managed's `"ERROR: {dllName} not found."` (`:355`) with the resolved path added. The rest of
+/// the `StatusMessage` values still have no line — a port conflict found at inject (`:304`), a
+/// wrong-PID check (`:395`), a failed connectivity check (`:411`),
+/// `"Already connected/injected"` (`:259`), the progress form (`:235`) and the reconnect line
+/// (`:637`) — because the port cannot enter those states, and a sentence for a state it cannot
+/// enter is the defect rather than the gap.
 pub const LOADER_STATUS_PREFIX: &str = "Status: ";
 
 // New copy, and the only block on this panel that is: managed's `InjectButton_Click`
@@ -1548,6 +1549,25 @@ pub const LOADER_REASON_CONNECT_FAILED: &str = "Could not connect to agent on po
 /// because the port attempts no reconnect: a line for a state the machine cannot enter is the
 /// thing this panel's audit went after.
 pub const LOADER_REASON_DISCONNECTED: &str = "Disconnected from agent.";
+
+/// The bridge library the selected version names is not on disk
+/// (`aoko-platform/src/bridge.rs:112-122` builds the error this replaces).
+///
+/// New copy, and one managed sentence it deliberately does not reuse: managed checked
+/// `if (!File.Exists(dllPath))` and painted `$"ERROR: {dllName} not found."`
+/// (`GameStateClient.cs:353-359`, the line at `:355`) — the file's name, no directory, and nothing
+/// a user could act on. The port's own error is worse in the other direction:
+/// `PlatformError::user_facing` wraps its detail in a `Not found: ` marker (`error.rs:69`) and
+/// `missing_library` appends `(version 26.3 selects bridge_261.dll); the host must ship it beside
+/// its own executable, which is what the managed build did` (`bridge.rs:117-119`) — an enum tag and
+/// the version-selection reasoning, neither of which belongs on the panel. So this line keeps the
+/// resolved path, which is the one fact a user needs, and the instruction that the file ships
+/// beside the executable; it drops the marker, the selection rule and the history.
+///
+/// `{path}` is that resolved absolute path, filled with `str::replace` like
+/// [`LOADER_REASON_CONNECT_FAILED`]. One sentence on purpose: the path alone can be most of a line.
+pub const LOADER_REASON_BRIDGE_LIBRARY_MISSING: &str =
+    "Bridge library {path} is missing; aoko ships it beside its own executable.";
 
 // ── The colour picker dialog ────────────────────────────────────────────────────
 //
@@ -2037,17 +2057,21 @@ mod tests {
         assert!(previews.contains(&"Snowy Sky"));
     }
 
-    /// The two dial outcomes are prefix tails, and the failure one is a one-placeholder template.
+    /// The loader's reason sentences are prefix tails with one placeholder each at most.
     ///
     /// The names are a contract with the shell's state machine, and the shape is a contract with
-    /// [`LOADER_STATUS_PREFIX`]: a `Status:` on either would paint `Status: Status: …`, and a
-    /// second brace would leave a placeholder in the sentence. The fill site passes the port
-    /// through `str::replace`, so this pins the template rather than a filled sentence.
+    /// [`LOADER_STATUS_PREFIX`]: a `Status:` on any of them would paint `Status: Status: …`, and a
+    /// stray brace would leave a placeholder in the sentence. Each fill site passes its value
+    /// through `str::replace`, so this pins the templates rather than filled sentences.
     #[test]
-    fn the_loader_reasons_are_prefix_tails_with_one_port_placeholder() {
+    fn the_loader_reasons_are_prefix_tails_with_one_placeholder_each() {
         for (name, reason) in [
             ("LOADER_REASON_CONNECT_FAILED", LOADER_REASON_CONNECT_FAILED),
             ("LOADER_REASON_DISCONNECTED", LOADER_REASON_DISCONNECTED),
+            (
+                "LOADER_REASON_BRIDGE_LIBRARY_MISSING",
+                LOADER_REASON_BRIDGE_LIBRARY_MISSING,
+            ),
         ] {
             assert!(
                 !reason.contains("Status:"),
@@ -2073,6 +2097,18 @@ mod tests {
         assert!(
             !LOADER_REASON_DISCONNECTED.contains('{'),
             "the disconnect sentence takes no data"
+        );
+        assert_eq!(
+            LOADER_REASON_BRIDGE_LIBRARY_MISSING
+                .matches("{path}")
+                .count(),
+            1,
+            "the missing-library sentence names the path exactly once"
+        );
+        assert_eq!(
+            LOADER_REASON_BRIDGE_LIBRARY_MISSING.matches('{').count(),
+            1,
+            "one placeholder here too"
         );
     }
 }
