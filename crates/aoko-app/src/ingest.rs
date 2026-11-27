@@ -97,7 +97,7 @@
 //!
 //! * **A bounded read.** The socket carries `READ_TICK`, so a quiet link returns the thread and the
 //!   stop flag is read a few times a second instead of only when a frame arrives.
-//! * **A way out of a blocked read.** [`Ingest`]'s drop shuts the socket down through a duplicate
+//! * **A way out of a blocked read.** `Ingest`'s drop shuts the socket down through a duplicate
 //!   of the handle it dialled, so a reader that is *inside* `recv_line` returns end of stream
 //!   instead of keeping the connection. Before that duplicate, every re-dial detached a reader
 //!   that was still attached - a second live socket, and a thread still publishing into the store

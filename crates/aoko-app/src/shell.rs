@@ -867,7 +867,7 @@ impl Shell {
     ///
     /// **The exit save only.** The close hook, [`Shell::close`] and the panic press are the three
     /// callers, and they are the three the process can leave from: a queued write would be dropped
-    /// with it. Every other save this view makes is [`Shell::queue_profile`], which is the same
+    /// with it. Every other save this view makes is `Shell::queue_profile`, which is the same
     /// snapshot handed to the background writer.
     pub fn save_profile(&mut self) -> Result<(), String> {
         let mut profile = self.controller().profile_for_save(&self.profile);
@@ -886,7 +886,7 @@ impl Shell {
     /// and they used to run [`Shell::save_profile`] — the one synchronous write — inside the click
     /// handler, so the frame the press was made in waited on a create, a flush and a rename of
     /// `config.json`. The bytes go to the background writer `Profiles::save_named` already uses and
-    /// the sentence lands in `Profiles::poll`, which [`Shell::poll_stores`] runs every frame.
+    /// the sentence lands in `Profiles::poll`, which `Shell::poll_stores` runs every frame.
     ///
     /// The snapshot is the exit save's, for the reason [`Shell::save_profile`] gives: the switches
     /// are the controller's and the theme is this view's. `Ok` means queued; a store that will not
@@ -1135,14 +1135,14 @@ impl Shell {
     /// Every widget in this crate carries its own copy of the theme — a `TextInput` paints its
     /// caret, border and placeholder from the one it was built with, and a `KeybindCapture` paints
     /// its label from the same — so a palette press has to reach the entities as well as the field
-    /// this view paints from. It used to clear only [`Shell::fields`], which left the four colour
+    /// this view paints from. It used to clear only `Shell::fields`, which left the four colour
     /// boxes, the Block ESP add box, the palette name box, the overlay's query box and every capture
     /// button on the old palette until the process restarted.
     ///
     /// The two halves are handled differently on purpose:
     ///
-    /// * **[`Shell::fields`] are dropped.** Each is seeded from a state machine every render
-    ///   ([`Shell::ensure_form_fields`], [`Shell::sync_form_fields`]), so recreating one loses
+    /// * **`Shell::fields` are dropped.** Each is seeded from a state machine every render
+    ///   (`Shell::ensure_form_fields`, `Shell::sync_form_fields`), so recreating one loses
     ///   nothing.
     /// * **Everything else is pushed the new theme.** The Block ESP box, the palette name box and
     ///   the query box hold text only the entity owns, and a capture holds focus and a listening
@@ -1315,7 +1315,7 @@ impl Shell {
     /// Creates the Block ESP add box, once.
     ///
     /// Called at the top of [`Render::render`] for the same reason as
-    /// [`Shell::ensure_form_fields`]: an entity needs a context and [`Shell::new`] has none. The
+    /// `Shell::ensure_form_fields`: an entity needs a context and [`Shell::new`] has none. The
     /// box is not in [`FormFields`] because nothing else owns its text — [`Shell::add_block_target`]
     /// reads it straight off the entity, so there is no second copy to fall out of step.
     fn ensure_block_add(&mut self, cx: &mut Context<Self>) {
@@ -1425,7 +1425,7 @@ impl Shell {
     ///
     /// The profile is queued, not written: a preview press is a press, and a rename of the config
     /// slot inside the click handler was the frame this path used to spend. See
-    /// [`Shell::queue_profile`].
+    /// `Shell::queue_profile`.
     pub fn apply_palette(&mut self, name: &str, cx: &mut Context<Self>) {
         self.palette.apply(name);
         let theme = self.palette.theme();
@@ -2702,7 +2702,7 @@ impl Shell {
     /// matches the profile.
     ///
     /// Called from `render` before the tree is assembled, which is where
-    /// [`Shell::ensure_form_fields`] creates its entities too: an entity needs a context and
+    /// `Shell::ensure_form_fields` creates its entities too: an entity needs a context and
     /// [`Shell::new`] has none. One pass over 40 targets whose only work is a key comparison,
     /// so a frame that changed nothing builds nothing.
     ///
@@ -3729,7 +3729,7 @@ impl Shell {
     /// to it; a failure to save is reported in the card rather than dropped.
     ///
     /// The write is queued, so `Ok` is "the bytes are on their way", not "the file has them": the
-    /// call clears nothing, and [`Shell::poll_stores`] is what copies `PrefsFile::status` into
+    /// call clears nothing, and `Shell::poll_stores` is what copies `PrefsFile::status` into
     /// `prefs_status` — a success empties the line there once the rename is behind it, and a
     /// failure paints the reason. Clearing on `Ok` here is the defect that would leave a stale
     /// failure on screen, or none at all for a write that never landed.
@@ -4481,7 +4481,7 @@ impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Before the tree is assembled: a queued write that finished since the last frame has a
         // sentence for the card that paints it, and settling it here is what puts that sentence in
-        // *this* frame rather than the next one. See [`Shell::poll_stores`].
+        // *this* frame rather than the next one. See `Shell::poll_stores`.
         if self.poll_stores() {
             cx.notify();
         }
@@ -5789,10 +5789,10 @@ impl Shell {
                 // not a fixed rest state. The port painted the literal, so the Triggerbot card said
                 // "Available" on a 1.8.9 bridge — where the module is dead — while the overlay's
                 // injected row said UNAVAILABLE for the same module.
-                .child(if self.runtime.module_supported(*module) {
+                .child(if self.runtime.module_supported(module) {
                     *text
                 } else {
-                    copy::unavailable_text(*module)
+                    copy::unavailable_text(module)
                 })
                 .into_any_element(),
 
@@ -5997,6 +5997,7 @@ impl Shell {
                 display_name: id.replace('_', " "),
                 color_hex: block_esp::DEFAULT_COLOR_HEX.to_owned(),
                 enabled: true,
+                ..BlockEspTargetData::default()
             }),
         }
 

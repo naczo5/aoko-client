@@ -397,7 +397,7 @@ pub struct Runtime {
     ///
     /// A virtual-key code rather than a [`Key`], because a mouse button is a managed pseudo-key
     /// with no [`Key`] spelling: `0x01`..`0x06` is `VK_LBUTTON`..`VK_XBUTTON2`
-    /// ([`mouse_virtual_key`]), which is the code the capture stores and the code a mouse bind
+    /// (`mouse_virtual_key`), which is the code the capture stores and the code a mouse bind
     /// holds, so one latch covers both families — the keyboard's codes start at `0x08`
     /// (`VK_BACK`), so the two cannot collide.
     ///
@@ -762,7 +762,7 @@ impl Runtime {
     /// A press is a keystroke *or* a mouse button. The managed mouse hook reported
     /// `VK_LBUTTON`..`VK_XBUTTON2` and the capture stores those same five codes, so a mouse bind
     /// lives in `Profile::module_keys` beside every keystroke bind and takes the same two steps
-    /// here — [`mouse_virtual_key`] gives the code, and the latch and the lookup do not care which
+    /// here — `mouse_virtual_key` gives the code, and the latch and the lookup do not care which
     /// family it came from. Dropping the button events left those binds storable and dead.
     ///
     /// Five properties are load-bearing, and each one is a way this can be wrong:
@@ -773,7 +773,7 @@ impl Runtime {
     ///   second. The managed host repeated, because it had no latch either; a module that
     ///   flickers is the bug a user reports, not the behaviour to match.
     /// * **The comparison is a virtual key**, through [`Key::virtual_key`] for a keystroke and
-    ///   [`mouse_virtual_key`] for a button, because a [`Key`] is a spelling: the Windows hook
+    ///   `mouse_virtual_key` for a button, because a [`Key`] is a spelling: the Windows hook
     ///   says `Key::Other(0x41)`, evdev says `Key::Char('a')` and a capture stores `0x41`.
     ///   Comparing the values made a letter bind fire on neither observer.
     /// * **The managed guard comes first.** `ShouldBlockModuleKeybinds` (`:340-352`) blocks

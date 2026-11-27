@@ -35,7 +35,7 @@
 //! writes nothing, so the label and the profile behind it cannot disagree.
 //!
 //! [`virtual_key`] is the inverse: the key name GPUI reports for a pressed key, mapped back
-//! to the Windows vk the profile stores — and the same for [`MOUSE_KEYS`]' labels, which no
+//! to the Windows vk the profile stores — and the same for `MOUSE_KEYS`' labels, which no
 //! backend sends as a key but a capture does report. Its key names are the ones the backends
 //! produce (`gpui_windows/src/events.rs:1593-1646`, `parse_immutable`, and
 //! `gpui_linux/src/linux/platform.rs:1473-1585` on Linux: lower-case letters, digits and
@@ -71,6 +71,14 @@ const NAMED_KEYS: [(i32, &str); 18] = [
     (0xA6, "BrowserBack"),
     (0xA7, "BrowserForward"),
 ];
+
+/// The three names GPUI reports for the keys `NAMED_KEYS` labels `Apps`, `BrowserBack`
+/// and `BrowserForward`, `(gpui name, virtual key)`.
+///
+/// A capture receives GPUI's key name, not the label this file prints. Without these
+/// aliases those three keys could be shown as bound and never be bound: [`virtual_key`]
+/// answered `None` and the capture reported the press as unbindable.
+const KEY_ALIASES: [(&str, i32); 3] = [("menu", 0x5D), ("back", 0xA6), ("forward", 0xA7)];
 
 /// The `VK_OEM_*` keys, `(virtual key, character)`, printed as the character they type.
 ///
@@ -113,7 +121,7 @@ pub fn action_label(vk: i32) -> String {
 /// The mouse pseudo-keys, `(virtual key, label)`: the managed `VK_LBUTTON`..`VK_XBUTTON2`
 /// (`Aoko/Core/InputHooks.cs:40-44`), which is what a capture reports for a mouse press.
 ///
-/// One table for both directions, like [`NAMED_KEYS`]: [`format_virtual_key`] prints the label
+/// One table for both directions, like `NAMED_KEYS`: [`format_virtual_key`] prints the label
 /// and [`virtual_key`] reads it back, so a stored `0x01` cannot be labelled one way and parsed
 /// another. These five are the only entries no keyboard can produce; the press that produces them
 /// is [`crate::components::keybind_capture`]'s, and reading them back here is what makes
@@ -128,9 +136,9 @@ const MOUSE_KEYS: [(i32, &str); 5] = [
 
 /// `FormatVirtualKey` (`MainWindow.xaml.cs:2157-2173`), with the `Key` name table replaced.
 ///
-/// The mouse pseudo-keys (`0x01`, `0x02`, `0x04`-`0x06`) are [`MOUSE_KEYS`], the managed naming
+/// The mouse pseudo-keys (`0x01`, `0x02`, `0x04`-`0x06`) are `MOUSE_KEYS`, the managed naming
 /// for the five buttons a global hook reports as keys; the rest are the managed rule for function
-/// keys, digits, letters and the backtick key, plus [`NAMED_KEYS`] and [`OEM_KEYS`] for the codes
+/// keys, digits, letters and the backtick key, plus `NAMED_KEYS` and `OEM_KEYS` for the codes
 /// a capture can store. A code in none of those prints as `VK 0x..`, which [`virtual_key`]
 /// parses, so the label is stable and reversible where the managed enum name is not
 /// available.
@@ -181,7 +189,7 @@ pub fn format_virtual_key(vk: i32) -> String {
 ///   cannot, and that is recorded as a gap rather than papered over with a key name the
 ///   platform never sends.
 /// * **The mouse pseudo-keys are labels like any other.** `Mouse Left` .. `Mouse X2` are
-///   [`MOUSE_KEYS`], reported by a press rather than a keystroke; they parse here for the same
+///   `MOUSE_KEYS`, reported by a press rather than a keystroke; they parse here for the same
 ///   reason the keyboard's names do, so a stored code and the label that shows it cannot
 ///   disagree.
 /// * **A code with no name reads back as itself.** `VK 0x..` is parsed here, so a stored
@@ -207,6 +215,14 @@ pub fn virtual_key(key: &str) -> Option<i32> {
     if let Some((code, _)) = MOUSE_KEYS
         .iter()
         .find(|(_, label)| label.eq_ignore_ascii_case(key))
+    {
+        return Some(*code);
+    }
+
+    // Then the names GPUI reports for the three keys labelled above.
+    if let Some((_, code)) = KEY_ALIASES
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(key))
     {
         return Some(*code);
     }

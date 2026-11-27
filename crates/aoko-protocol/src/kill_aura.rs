@@ -9,6 +9,29 @@
 //!
 //! * `min_cps`/`max_cps` and `min_turn_speed`/`max_turn_speed` keep their pair ordered.
 //! * `liquid_bounce_body_point_min`/`max` do the same.
+//!
+//! # Reading a `killAuraSettings` object
+//!
+//! Two rules keep the object recoverable, the same two [`crate::profile`] applies to the
+//! document around it:
+//!
+//! * **A bad field costs one field.** Every known key is decoded on its own, so a value of the
+//!   wrong type falls back to that field's default and the other sixty-one still load. What the
+//!   reader skipped is named on [`KillAuraSettings::problems`], because serde has one channel
+//!   per value and a skipped field is not an error.
+//! * **Keys this build does not know survive.** They are kept on
+//!   [`KillAuraSettings::unknown_keys`] and written back verbatim, so an object a newer build
+//!   wrote is not pruned by saving it here. The nine read-only flags the managed host wrote
+//!   beside the data fields are the exception: they are derived from those fields, so they are
+//!   dropped rather than carried stale (see `DERIVED_KEYS`).
+
+use std::collections::BTreeMap;
+
+use serde::de::DeserializeOwned;
+use serde::Deserialize;
+use serde_json::Value;
+
+use crate::profile::ProfileProblem;
 
 /// Kill Aura configuration.
 #[derive(Debug, Clone, PartialEq)]
@@ -75,6 +98,23 @@ pub struct KillAuraSettings {
     liquid_bounce_horizontal_search: f32,
     liquid_bounce_body_point_min: f32,
     liquid_bounce_body_point_max: f32,
+
+    /// Keys inside `killAuraSettings` that this build does not know, written back by the
+    /// [`Serialize`](serde::Serialize) impl.
+    ///
+    /// A newer build, or a hand edit, can add a key to the object. It has no field here, so it
+    /// travels from the file it was read from to the next save instead of being pruned — the
+    /// rule [`crate::profile::Profile::unknown_keys`] follows one level up. The nine derived
+    /// flags are not among them; see `DERIVED_KEYS`.
+    pub unknown_keys: BTreeMap<String, Value>,
+
+    /// Fields the object this value was read from had to skip, named by their key in it.
+    ///
+    /// A value of the wrong type costs its own field — which keeps its default — and nothing
+    /// else, so the rest of the object still loads. The report is not serialised: the field it
+    /// belonged to is at its default by the time this is set, and it is here so that a caller
+    /// can say what the load cost instead of the skip passing unreported.
+    problems: Vec<ProfileProblem>,
 }
 
 /// Allowed `CpsMode` values in upstream order.
@@ -169,6 +209,8 @@ impl Default for KillAuraSettings {
             liquid_bounce_horizontal_search: 0.5,
             liquid_bounce_body_point_min: 0.1,
             liquid_bounce_body_point_max: 0.9,
+            unknown_keys: BTreeMap::new(),
+            problems: Vec::new(),
         }
     }
 }
@@ -229,9 +271,9 @@ macro_rules! clamped_property {
     };
 }
 
-/// Generates the getter/setter pair for one canonical mode string.
-use serde::ser::SerializeStruct as _;
+use serde::ser::SerializeMap as _;
 
+/// Generates the getter/setter pair for one canonical mode string.
 macro_rules! mode_accessors {
     ($get:ident, $set:ident, $field:ident, $allowed:expr) => {
         #[must_use]
@@ -601,142 +643,244 @@ impl KillAuraSettings {
         self.weapons_only
     }
 
-    /// Copies every field from `source`, running each setter so clamps and
-    /// cascades fire exactly as they do when the UI edits one property at a time.
+    /// Fields the object this value was read from had to skip, in the order the decoder met
+    /// them.
+    ///
+    /// Empty for a value built here or read from an object this build wrote. A caller that
+    /// reports a load names these beside the document's own problems
+    /// ([`crate::profile::ProfileLoad::problems`]), so a malformed setting is a field at its
+    /// default the user was told about rather than a silent one.
+    #[must_use]
+    pub fn problems(&self) -> &[ProfileProblem] {
+        &self.problems
+    }
+
+    /// Copies every field from `source`, unknown keys and the report included.
+    ///
+    /// A whole-value copy rather than a second run through the setters: `source` already went
+    /// through them when it was built or read, so its ordered pairs and clamped values are
+    /// exactly what those setters would produce again.
     pub fn copy_from(&mut self, source: &Self) {
         *self = source.clone();
     }
 }
 
-/// Deserialisation shim: every field optional, so a profile written by an older
-/// build still loads. Each present value is routed through its setter, which is
-/// where the clamps and cascades live.
-#[derive(Debug, Default, serde::Deserialize)]
+/// Deserialisation shim: every field optional, so an object written by an older build still
+/// loads. Each present value is routed through its setter, which is where the clamps and
+/// cascades live.
+///
+/// Built key by key by [`KillAuraSettingsWire::from_fields`], which is what keeps one malformed
+/// value to one field instead of costing the whole object.
 struct KillAuraSettingsWire {
-    #[serde(rename = "cpsMode", default)]
     cps_mode: Option<String>,
-    #[serde(rename = "mode", default)]
     mode: Option<String>,
-    #[serde(rename = "sort", default)]
     sort: Option<String>,
-    #[serde(rename = "autoBlock", default)]
     auto_block: Option<String>,
-    #[serde(rename = "attackTick", default)]
     attack_tick: Option<i32>,
-    #[serde(rename = "autoBlockRequirePress", default)]
     auto_block_require_press: Option<bool>,
-    #[serde(rename = "autoBlockCps", default)]
     auto_block_cps: Option<f32>,
-    #[serde(rename = "autoBlockRange", default)]
     auto_block_range: Option<f32>,
-    #[serde(rename = "swingRange", default)]
     swing_range: Option<f32>,
-    #[serde(rename = "attackRange", default)]
     attack_range: Option<f32>,
-    #[serde(rename = "fov", default)]
     fov: Option<i32>,
-    #[serde(rename = "minCps", default)]
     min_cps: Option<i32>,
-    #[serde(rename = "maxCps", default)]
     max_cps: Option<i32>,
-    #[serde(rename = "switchDelay", default)]
     switch_delay: Option<i32>,
-    #[serde(rename = "rotations", default)]
     rotations: Option<String>,
-    #[serde(rename = "deadZoneSize", default)]
     dead_zone_size: Option<f32>,
-    #[serde(rename = "maxTurnSpeed", default)]
     max_turn_speed: Option<f32>,
-    #[serde(rename = "minTurnSpeed", default)]
     min_turn_speed: Option<f32>,
-    #[serde(rename = "acceleration", default)]
     acceleration: Option<f32>,
-    #[serde(rename = "deceleration", default)]
     deceleration: Option<f32>,
-    #[serde(rename = "useOvershoot", default)]
     use_overshoot: Option<bool>,
-    #[serde(rename = "overshootStrength", default)]
     overshoot_strength: Option<f32>,
-    #[serde(rename = "overshootRecovery", default)]
     overshoot_recovery: Option<f32>,
-    #[serde(rename = "noiseStrength", default)]
     noise_strength: Option<f32>,
-    #[serde(rename = "visualizeAim", default)]
     visualize_aim: Option<bool>,
-    #[serde(rename = "smoothBack", default)]
     smooth_back: Option<bool>,
-    #[serde(rename = "moveFix", default)]
     move_fix: Option<String>,
-    #[serde(rename = "smoothing", default)]
     smoothing: Option<i32>,
-    #[serde(rename = "ravenSmoothing", default)]
     raven_smoothing: Option<i32>,
-    #[serde(rename = "ravenPredictTicks", default)]
     raven_predict_ticks: Option<i32>,
-    #[serde(rename = "ravenYawRandom", default)]
     raven_yaw_random: Option<i32>,
-    #[serde(rename = "grokMaxSkew", default)]
     grok_max_skew: Option<f32>,
-    #[serde(rename = "angleStep", default)]
     angle_step: Option<i32>,
-    #[serde(rename = "throughWalls", default)]
     through_walls: Option<bool>,
-    #[serde(rename = "requirePress", default)]
     require_press: Option<bool>,
-    #[serde(rename = "allowMining", default)]
     allow_mining: Option<bool>,
-    #[serde(rename = "weaponsOnly", default)]
     weapons_only: Option<bool>,
-    #[serde(rename = "allowTools", default)]
     allow_tools: Option<bool>,
-    #[serde(rename = "inventoryCheck", default)]
     inventory_check: Option<bool>,
-    #[serde(rename = "botCheck", default)]
     bot_check: Option<bool>,
-    #[serde(rename = "players", default)]
     players: Option<bool>,
-    #[serde(rename = "bosses", default)]
     bosses: Option<bool>,
-    #[serde(rename = "mobs", default)]
     mobs: Option<bool>,
-    #[serde(rename = "animals", default)]
     animals: Option<bool>,
-    #[serde(rename = "golems", default)]
     golems: Option<bool>,
-    #[serde(rename = "silverfish", default)]
     silverfish: Option<bool>,
-    #[serde(rename = "teams", default)]
     teams: Option<bool>,
-    #[serde(rename = "showTarget", default)]
     show_target: Option<String>,
-    #[serde(rename = "debugLog", default)]
     debug_log: Option<String>,
-    #[serde(rename = "randomize", default)]
     randomize: Option<bool>,
-    #[serde(rename = "randomizeRange", default)]
     randomize_range: Option<f32>,
-    #[serde(rename = "yRandomizeStrength", default)]
     y_randomize_strength: Option<f32>,
-    #[serde(rename = "liquidBounceHorizontalSpeed", default)]
     liquid_bounce_horizontal_speed: Option<f32>,
-    #[serde(rename = "liquidBounceVerticalSpeed", default)]
     liquid_bounce_vertical_speed: Option<f32>,
-    #[serde(rename = "liquidBounceSmoothFactor", default)]
     liquid_bounce_smooth_factor: Option<f32>,
-    #[serde(rename = "liquidBouncePredict", default)]
     liquid_bounce_predict: Option<bool>,
-    #[serde(rename = "liquidBouncePredictSize", default)]
     liquid_bounce_predict_size: Option<f32>,
-    #[serde(rename = "liquidBounceRandomize", default)]
     liquid_bounce_randomize: Option<bool>,
-    #[serde(rename = "liquidBounceRandomizeRange", default)]
     liquid_bounce_randomize_range: Option<f32>,
-    #[serde(rename = "liquidBounceHorizontalSearch", default)]
     liquid_bounce_horizontal_search: Option<f32>,
-    #[serde(rename = "liquidBounceBodyPointMin", default)]
     liquid_bounce_body_point_min: Option<f32>,
-    #[serde(rename = "liquidBounceBodyPointMax", default)]
     liquid_bounce_body_point_max: Option<f32>,
+}
+
+impl KillAuraSettingsWire {
+    /// Reads every key this schema knows, taking each one out of `fields`.
+    ///
+    /// What no `take` claims is left behind as the object's unknown keys, and a value that does
+    /// not fit its field is reported and skipped, so the rest of the object still loads.
+    fn from_fields(fields: &mut KillAuraFields) -> Self {
+        Self {
+            cps_mode: fields.take("cpsMode"),
+            mode: fields.take("mode"),
+            sort: fields.take("sort"),
+            auto_block: fields.take("autoBlock"),
+            attack_tick: fields.take("attackTick"),
+            auto_block_require_press: fields.take("autoBlockRequirePress"),
+            auto_block_cps: fields.take("autoBlockCps"),
+            auto_block_range: fields.take("autoBlockRange"),
+            swing_range: fields.take("swingRange"),
+            attack_range: fields.take("attackRange"),
+            fov: fields.take("fov"),
+            min_cps: fields.take("minCps"),
+            max_cps: fields.take("maxCps"),
+            switch_delay: fields.take("switchDelay"),
+            rotations: fields.take("rotations"),
+            dead_zone_size: fields.take("deadZoneSize"),
+            max_turn_speed: fields.take("maxTurnSpeed"),
+            min_turn_speed: fields.take("minTurnSpeed"),
+            acceleration: fields.take("acceleration"),
+            deceleration: fields.take("deceleration"),
+            use_overshoot: fields.take("useOvershoot"),
+            overshoot_strength: fields.take("overshootStrength"),
+            overshoot_recovery: fields.take("overshootRecovery"),
+            noise_strength: fields.take("noiseStrength"),
+            visualize_aim: fields.take("visualizeAim"),
+            smooth_back: fields.take("smoothBack"),
+            move_fix: fields.take("moveFix"),
+            smoothing: fields.take("smoothing"),
+            raven_smoothing: fields.take("ravenSmoothing"),
+            raven_predict_ticks: fields.take("ravenPredictTicks"),
+            raven_yaw_random: fields.take("ravenYawRandom"),
+            grok_max_skew: fields.take("grokMaxSkew"),
+            angle_step: fields.take("angleStep"),
+            through_walls: fields.take("throughWalls"),
+            require_press: fields.take("requirePress"),
+            allow_mining: fields.take("allowMining"),
+            weapons_only: fields.take("weaponsOnly"),
+            allow_tools: fields.take("allowTools"),
+            inventory_check: fields.take("inventoryCheck"),
+            bot_check: fields.take("botCheck"),
+            players: fields.take("players"),
+            bosses: fields.take("bosses"),
+            mobs: fields.take("mobs"),
+            animals: fields.take("animals"),
+            golems: fields.take("golems"),
+            silverfish: fields.take("silverfish"),
+            teams: fields.take("teams"),
+            show_target: fields.take("showTarget"),
+            debug_log: fields.take("debugLog"),
+            randomize: fields.take("randomize"),
+            randomize_range: fields.take("randomizeRange"),
+            y_randomize_strength: fields.take("yRandomizeStrength"),
+            liquid_bounce_horizontal_speed: fields.take("liquidBounceHorizontalSpeed"),
+            liquid_bounce_vertical_speed: fields.take("liquidBounceVerticalSpeed"),
+            liquid_bounce_smooth_factor: fields.take("liquidBounceSmoothFactor"),
+            liquid_bounce_predict: fields.take("liquidBouncePredict"),
+            liquid_bounce_predict_size: fields.take("liquidBouncePredictSize"),
+            liquid_bounce_randomize: fields.take("liquidBounceRandomize"),
+            liquid_bounce_randomize_range: fields.take("liquidBounceRandomizeRange"),
+            liquid_bounce_horizontal_search: fields.take("liquidBounceHorizontalSearch"),
+            liquid_bounce_body_point_min: fields.take("liquidBounceBodyPointMin"),
+            liquid_bounce_body_point_max: fields.take("liquidBounceBodyPointMax"),
+        }
+    }
+}
+
+/// The read-only properties the managed host wrote beside the data fields
+/// (`Aoko/Core/KillAuraSettings.cs:143-151`).
+///
+/// Each one is a function of those fields: `IsLiquidBounce` of `Rotations`, `AllowToolsEnabled`
+/// of `WeaponsOnly`. The managed getter recomputes it on every read and this crate's accessors
+/// do the same, so a value read out of a file can only disagree with the fields beside it. They
+/// are dropped instead of being kept as unknown keys, because writing one back would state an
+/// answer for fields the user has changed since — the rule
+/// [`crate::profile::SCHEMA_VERSION_KEY`] follows one level up.
+const DERIVED_KEYS: [&str; 9] = [
+    "isLiquidBounce",
+    "isHypixelRotation",
+    "isGrokRotation",
+    "isSwapAutoBlock",
+    "overshootControlsEnabled",
+    "randomizeControlsEnabled",
+    "predictControlsEnabled",
+    "liquidRandomizeControlsEnabled",
+    "allowToolsEnabled",
+];
+
+/// The parts of a `killAuraSettings` object that were not decoded, and the fields that did not
+/// fit.
+///
+/// The same shape as `profile::ProfileFields`, one level down: every known key is taken out of
+/// `remaining` as it is read, so what is left when the settings are built is exactly the part of
+/// the object this schema does not know, and a malformed value is reported and skipped rather
+/// than costing the object it sits in.
+struct KillAuraFields {
+    remaining: serde_json::Map<String, Value>,
+    problems: Vec<ProfileProblem>,
+}
+
+impl KillAuraFields {
+    fn new(root: &serde_json::Map<String, Value>) -> Self {
+        Self {
+            remaining: root.clone(),
+            problems: Vec::new(),
+        }
+    }
+
+    /// The value of `key`, or `None` when it is absent or does not fit `T`.
+    ///
+    /// `null` reads as absent rather than as a value of the wrong type, which is what the
+    /// managed serialiser wrote for an unset property.
+    fn take<T: DeserializeOwned>(&mut self, key: &str) -> Option<T> {
+        let value = self.remaining.remove(key)?;
+        if value.is_null() {
+            return None;
+        }
+        match serde_json::from_value(value) {
+            Ok(decoded) => Some(decoded),
+            Err(error) => {
+                self.problems.push(ProfileProblem {
+                    key: key.to_owned(),
+                    message: error.to_string(),
+                });
+                None
+            }
+        }
+    }
+
+    /// The keys no `take` claimed, which are the ones this build does not know.
+    ///
+    /// [`DERIVED_KEYS`] is removed first rather than kept: those flags are recomputed from the
+    /// data fields, so the copy in a file can only be a stale answer.
+    fn unknown(&mut self) -> BTreeMap<String, Value> {
+        for key in DERIVED_KEYS {
+            self.remaining.remove(key);
+        }
+        std::mem::take(&mut self.remaining).into_iter().collect()
+    }
 }
 
 impl From<KillAuraSettingsWire> for KillAuraSettings {
@@ -932,13 +1076,24 @@ impl From<KillAuraSettingsWire> for KillAuraSettings {
     }
 }
 
-impl<'de> serde::Deserialize<'de> for KillAuraSettings {
+impl<'de> Deserialize<'de> for KillAuraSettings {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        let wire = KillAuraSettingsWire::deserialize(deserializer)?;
-        Ok(KillAuraSettings::from(wire))
+        let root = Value::deserialize(deserializer)?;
+        let Some(object) = root.as_object() else {
+            return Err(serde::de::Error::custom(
+                "a killAuraSettings value is an object",
+            ));
+        };
+
+        let mut fields = KillAuraFields::new(object);
+        let wire = KillAuraSettingsWire::from_fields(&mut fields);
+        let mut settings = KillAuraSettings::from(wire);
+        settings.unknown_keys = fields.unknown();
+        settings.problems = std::mem::take(&mut fields.problems);
+        Ok(settings)
     }
 }
 
@@ -947,96 +1102,156 @@ impl serde::Serialize for KillAuraSettings {
     where
         S: serde::Serializer,
     {
-        // The data fields only. The managed host also emits nine read-only
-        // derived flags (`isLiquidBounce`, `allowToolsEnabled`, ...); they are
-        // recomputed on load, so dropping them cannot lose user state.
-        let mut state = serializer.serialize_struct("KillAuraSettings", 62)?;
-        state.serialize_field("cpsMode", self.cps_mode())?;
-        state.serialize_field("mode", self.mode())?;
-        state.serialize_field("sort", self.sort())?;
-        state.serialize_field("autoBlock", self.auto_block())?;
-        state.serialize_field("attackTick", &self.attack_tick())?;
-        state.serialize_field("autoBlockRequirePress", &self.auto_block_require_press())?;
-        state.serialize_field("autoBlockCps", &self.auto_block_cps())?;
-        state.serialize_field("autoBlockRange", &self.auto_block_range())?;
-        state.serialize_field("swingRange", &self.swing_range())?;
-        state.serialize_field("attackRange", &self.attack_range())?;
-        state.serialize_field("fov", &self.fov())?;
-        state.serialize_field("minCps", &self.min_cps())?;
-        state.serialize_field("maxCps", &self.max_cps())?;
-        state.serialize_field("switchDelay", &self.switch_delay())?;
-        state.serialize_field("rotations", self.rotations())?;
-        state.serialize_field("deadZoneSize", &self.dead_zone_size())?;
-        state.serialize_field("maxTurnSpeed", &self.max_turn_speed())?;
-        state.serialize_field("minTurnSpeed", &self.min_turn_speed())?;
-        state.serialize_field("acceleration", &self.acceleration())?;
-        state.serialize_field("deceleration", &self.deceleration())?;
-        state.serialize_field("useOvershoot", &self.use_overshoot())?;
-        state.serialize_field("overshootStrength", &self.overshoot_strength())?;
-        state.serialize_field("overshootRecovery", &self.overshoot_recovery())?;
-        state.serialize_field("noiseStrength", &self.noise_strength())?;
-        state.serialize_field("visualizeAim", &self.visualize_aim())?;
-        state.serialize_field("smoothBack", &self.smooth_back())?;
-        state.serialize_field("moveFix", self.move_fix())?;
-        state.serialize_field("smoothing", &self.smoothing())?;
-        state.serialize_field("ravenSmoothing", &self.raven_smoothing())?;
-        state.serialize_field("ravenPredictTicks", &self.raven_predict_ticks())?;
-        state.serialize_field("ravenYawRandom", &self.raven_yaw_random())?;
-        state.serialize_field("grokMaxSkew", &self.grok_max_skew())?;
-        state.serialize_field("angleStep", &self.angle_step())?;
-        state.serialize_field("throughWalls", &self.through_walls())?;
-        state.serialize_field("requirePress", &self.require_press())?;
-        state.serialize_field("allowMining", &self.allow_mining())?;
-        state.serialize_field("weaponsOnly", &self.weapons_only())?;
-        state.serialize_field("allowTools", &self.allow_tools())?;
-        state.serialize_field("inventoryCheck", &self.inventory_check())?;
-        state.serialize_field("botCheck", &self.bot_check())?;
-        state.serialize_field("players", &self.players())?;
-        state.serialize_field("bosses", &self.bosses())?;
-        state.serialize_field("mobs", &self.mobs())?;
-        state.serialize_field("animals", &self.animals())?;
-        state.serialize_field("golems", &self.golems())?;
-        state.serialize_field("silverfish", &self.silverfish())?;
-        state.serialize_field("teams", &self.teams())?;
-        state.serialize_field("showTarget", self.show_target())?;
-        state.serialize_field("debugLog", self.debug_log())?;
-        state.serialize_field("randomize", &self.randomize())?;
-        state.serialize_field("randomizeRange", &self.randomize_range())?;
-        state.serialize_field("yRandomizeStrength", &self.y_randomize_strength())?;
-        state.serialize_field(
+        // The data fields, then the keys this build does not know. The managed host also wrote
+        // nine read-only derived flags (`isLiquidBounce`, `allowToolsEnabled`, ...); they are
+        // recomputed from these fields, so they are dropped on the way in (`DERIVED_KEYS`) and
+        // never written here — a copy would state an answer for fields the user has changed
+        // since. A map rather than a struct, because the unknown keys bring their own names.
+        let mut map = serializer.serialize_map(Some(62 + self.unknown_keys.len()))?;
+        map.serialize_entry("cpsMode", self.cps_mode())?;
+        map.serialize_entry("mode", self.mode())?;
+        map.serialize_entry("sort", self.sort())?;
+        map.serialize_entry("autoBlock", self.auto_block())?;
+        map.serialize_entry("attackTick", &self.attack_tick())?;
+        map.serialize_entry("autoBlockRequirePress", &self.auto_block_require_press())?;
+        map.serialize_entry("autoBlockCps", &self.auto_block_cps())?;
+        map.serialize_entry("autoBlockRange", &self.auto_block_range())?;
+        map.serialize_entry("swingRange", &self.swing_range())?;
+        map.serialize_entry("attackRange", &self.attack_range())?;
+        map.serialize_entry("fov", &self.fov())?;
+        map.serialize_entry("minCps", &self.min_cps())?;
+        map.serialize_entry("maxCps", &self.max_cps())?;
+        map.serialize_entry("switchDelay", &self.switch_delay())?;
+        map.serialize_entry("rotations", self.rotations())?;
+        map.serialize_entry("deadZoneSize", &self.dead_zone_size())?;
+        map.serialize_entry("maxTurnSpeed", &self.max_turn_speed())?;
+        map.serialize_entry("minTurnSpeed", &self.min_turn_speed())?;
+        map.serialize_entry("acceleration", &self.acceleration())?;
+        map.serialize_entry("deceleration", &self.deceleration())?;
+        map.serialize_entry("useOvershoot", &self.use_overshoot())?;
+        map.serialize_entry("overshootStrength", &self.overshoot_strength())?;
+        map.serialize_entry("overshootRecovery", &self.overshoot_recovery())?;
+        map.serialize_entry("noiseStrength", &self.noise_strength())?;
+        map.serialize_entry("visualizeAim", &self.visualize_aim())?;
+        map.serialize_entry("smoothBack", &self.smooth_back())?;
+        map.serialize_entry("moveFix", self.move_fix())?;
+        map.serialize_entry("smoothing", &self.smoothing())?;
+        map.serialize_entry("ravenSmoothing", &self.raven_smoothing())?;
+        map.serialize_entry("ravenPredictTicks", &self.raven_predict_ticks())?;
+        map.serialize_entry("ravenYawRandom", &self.raven_yaw_random())?;
+        map.serialize_entry("grokMaxSkew", &self.grok_max_skew())?;
+        map.serialize_entry("angleStep", &self.angle_step())?;
+        map.serialize_entry("throughWalls", &self.through_walls())?;
+        map.serialize_entry("requirePress", &self.require_press())?;
+        map.serialize_entry("allowMining", &self.allow_mining())?;
+        map.serialize_entry("weaponsOnly", &self.weapons_only())?;
+        map.serialize_entry("allowTools", &self.allow_tools())?;
+        map.serialize_entry("inventoryCheck", &self.inventory_check())?;
+        map.serialize_entry("botCheck", &self.bot_check())?;
+        map.serialize_entry("players", &self.players())?;
+        map.serialize_entry("bosses", &self.bosses())?;
+        map.serialize_entry("mobs", &self.mobs())?;
+        map.serialize_entry("animals", &self.animals())?;
+        map.serialize_entry("golems", &self.golems())?;
+        map.serialize_entry("silverfish", &self.silverfish())?;
+        map.serialize_entry("teams", &self.teams())?;
+        map.serialize_entry("showTarget", self.show_target())?;
+        map.serialize_entry("debugLog", self.debug_log())?;
+        map.serialize_entry("randomize", &self.randomize())?;
+        map.serialize_entry("randomizeRange", &self.randomize_range())?;
+        map.serialize_entry("yRandomizeStrength", &self.y_randomize_strength())?;
+        map.serialize_entry(
             "liquidBounceHorizontalSpeed",
             &self.liquid_bounce_horizontal_speed(),
         )?;
-        state.serialize_field(
+        map.serialize_entry(
             "liquidBounceVerticalSpeed",
             &self.liquid_bounce_vertical_speed(),
         )?;
-        state.serialize_field(
+        map.serialize_entry(
             "liquidBounceSmoothFactor",
             &self.liquid_bounce_smooth_factor(),
         )?;
-        state.serialize_field("liquidBouncePredict", &self.liquid_bounce_predict())?;
-        state.serialize_field(
+        map.serialize_entry("liquidBouncePredict", &self.liquid_bounce_predict())?;
+        map.serialize_entry(
             "liquidBouncePredictSize",
             &self.liquid_bounce_predict_size(),
         )?;
-        state.serialize_field("liquidBounceRandomize", &self.liquid_bounce_randomize())?;
-        state.serialize_field(
+        map.serialize_entry("liquidBounceRandomize", &self.liquid_bounce_randomize())?;
+        map.serialize_entry(
             "liquidBounceRandomizeRange",
             &self.liquid_bounce_randomize_range(),
         )?;
-        state.serialize_field(
+        map.serialize_entry(
             "liquidBounceHorizontalSearch",
             &self.liquid_bounce_horizontal_search(),
         )?;
-        state.serialize_field(
+        map.serialize_entry(
             "liquidBounceBodyPointMin",
             &self.liquid_bounce_body_point_min(),
         )?;
-        state.serialize_field(
+        map.serialize_entry(
             "liquidBounceBodyPointMax",
             &self.liquid_bounce_body_point_max(),
         )?;
-        state.end()
+        for (key, value) in &self.unknown_keys {
+            map.serialize_entry(key, value)?;
+        }
+        map.end()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// One value of the wrong type costs its own field, and the reader names it instead of
+    /// losing the other sixty-one.
+    #[test]
+    fn one_wrong_typed_field_costs_one_field() {
+        let text = r#"{"minCps":"9","maxCps":18}"#;
+        let settings: KillAuraSettings = serde_json::from_str(text).expect("deserialise");
+
+        assert_eq!(settings.max_cps(), 18, "the field that fits still loads");
+        assert_eq!(
+            settings.min_cps(),
+            KillAuraSettings::default().min_cps(),
+            "the field that does not keeps its default"
+        );
+        assert_eq!(settings.problems().len(), 1, "{:?}", settings.problems());
+        assert_eq!(settings.problems()[0].key, "minCps");
+    }
+
+    /// A key this build does not know inside the object survives a load and the save after it.
+    #[test]
+    fn an_unknown_key_survives_the_round_trip() {
+        let text = r#"{"maxCps":18,"futureToggle":true}"#;
+        let read: KillAuraSettings = serde_json::from_str(text).expect("deserialise");
+        assert!(read.problems().is_empty(), "{:?}", read.problems());
+        assert_eq!(
+            read.unknown_keys.get("futureToggle"),
+            Some(&Value::Bool(true))
+        );
+
+        let saved = serde_json::to_value(&read).expect("serialise");
+        assert_eq!(saved["futureToggle"], Value::Bool(true));
+        assert_eq!(saved["maxCps"], json!(18));
+
+        let again: KillAuraSettings = serde_json::from_value(saved).expect("deserialise");
+        assert_eq!(again.unknown_keys, read.unknown_keys);
+    }
+
+    /// The nine read-only flags the managed host wrote are recomputed from the data fields, so
+    /// a stale copy is dropped instead of being carried into the next save.
+    #[test]
+    fn the_derived_flags_are_dropped_rather_than_kept() {
+        let text = r#"{"rotations":"none","isLiquidBounce":true}"#;
+        let read: KillAuraSettings = serde_json::from_str(text).expect("deserialise");
+
+        assert!(!read.is_liquid_bounce(), "the data field decides");
+        for key in DERIVED_KEYS {
+            assert!(!read.unknown_keys.contains_key(key), "{key}");
+        }
     }
 }

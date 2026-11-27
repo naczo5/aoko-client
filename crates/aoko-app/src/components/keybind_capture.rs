@@ -39,7 +39,7 @@
 //!   swallowed in silence, which is a button that looks broken: the press did nothing and
 //!   nothing on screen said why. The capture still waits for a key it can store — the
 //!   managed behaviour, where the hook only ever sent vk codes — and the button now reads the
-//!   caller's own prefix followed by `[Not a bindable key]` until the next press.
+//!   caller's own prefix followed by [`copy::KEYBIND_NOT_BINDABLE`] until the next press.
 //!
 //! # The button is the component's, not a second one
 //!
@@ -104,15 +104,6 @@ impl Captured {
 
 type CaptureHandler = Arc<dyn Fn(Captured, &mut Window, &mut App)>;
 
-/// What a capture reads when the press it just received has no virtual key to store.
-///
-/// No managed sentence exists for this: the low-level hook only ever sent vk codes, so a name it
-/// could not map never arrived and the managed app never had to say anything. The string lives
-/// here rather than with the callers because it is this state machine's own outcome. It is kept
-/// as short as the pending copy it replaces — every button is fixed-width and clips its label —
-/// so it reads whole on both the 140 px and the 210 px button.
-const NOT_BINDABLE: &str = "[Not a bindable key]";
-
 /// The managed virtual key of one mouse button, `VK_LBUTTON`..`VK_XBUTTON2`
 /// (`Aoko/Core/InputHooks.cs:40-44`, `:429-448`).
 ///
@@ -130,7 +121,7 @@ fn mouse_virtual_key(button: MouseButton) -> i32 {
 }
 
 /// The refusal label for a button whose pending copy is `pending`: the same prefix the caller
-/// writes (`Bind` / `Action`) and [`NOT_BINDABLE`] after it.
+/// writes (`Bind` / `Action`) and [`copy::KEYBIND_NOT_BINDABLE`] after it.
 ///
 /// The prefix is taken from the pending label rather than being a fourth argument, so the two
 /// halves of one button's copy cannot drift apart. A label with no `": "` in it is used whole,
@@ -139,7 +130,7 @@ fn refusal_label(pending: &str) -> String {
     let prefix = pending
         .split_once(": ")
         .map_or(pending, |(prefix, _)| prefix);
-    format!("{prefix}: {NOT_BINDABLE}")
+    format!("{prefix}: {}", copy::KEYBIND_NOT_BINDABLE)
 }
 
 /// A button that captures one keystroke when pressed.

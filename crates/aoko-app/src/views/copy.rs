@@ -1226,6 +1226,20 @@ pub const STATS_SAMPLES_SUFFIX: &str = " samples";
 /// lives. The button it labels is the 140 px header one (`MainWindow.xaml:359`).
 pub const KEYBIND_PENDING: &str = "Bind: [Press key or mouse...]";
 
+/// What a keybind button reads after a press that has no virtual key to store.
+///
+/// No managed sentence exists for this: the low-level hook only ever sent vk codes, so a name it
+/// could not map never reached the app and the managed button had nothing to say. The capture
+/// keeps listening for a key it *can* store — the managed behaviour — so this replaces the
+/// pending copy for one press rather than ending anything.
+///
+/// It is kept as short as [`KEYBIND_PENDING`] because every button is fixed-width and clips its
+/// label, so it reads whole on the 140 px header button and the 210 px action-bind one. Which
+/// prefix it follows is the control's own business:
+/// [`crate::components::keybind_capture`] takes it from the pending label it was given, so `Bind`
+/// and `Action` cannot drift from their own copy.
+pub const KEYBIND_NOT_BINDABLE: &str = "[Not a bindable key]";
+
 /// Every keybind button's tooltip, `MainWindow.xaml:1005` and the thirty-seven other
 /// `KeybindButton_Click` buttons — it is on all of them, so it is one constant rather than a
 /// per-card string.

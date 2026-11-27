@@ -26,6 +26,13 @@
 //! A named config that will not parse is left where it is — it is in the list, and deleting
 //! or overwriting it is a press.
 //!
+//! The second departure is a report rather than a rule: a document that loads *partly*. Managed's
+//! `LoadProfile` was all-or-nothing, so one malformed value cost the whole file; the tolerant
+//! reader keeps the fields it could read, names the ones it skipped in
+//! [`aoko_protocol::profile::ProfileLoad::problems`], and `problems_line` puts that on the same
+//! status line — `Could not load config: …` — so a setting back at its default is said out loud
+//! rather than passing as the user's own choice.
+//!
 //! # A press queues its write; the exit save does not
 //!
 //! `TrySaveCurrentAs` and `CreateConfigButton_Click` used to write inside the click handler: a
@@ -54,7 +61,7 @@ use std::sync::Arc;
 
 use aoko_platform::PlatformError;
 use aoko_platform::ProfileStore;
-use aoko_protocol::profile::{load_profile_from_json, to_profile_json, Profile};
+use aoko_protocol::profile::{load_profile, to_profile_json, Profile, ProfileProblem};
 
 use crate::views::file_store::{
     flush_all_writes, flush_writes, reply, settled, submit, Reply, WriteKind,
@@ -232,7 +239,14 @@ impl Profiles {
         }
 
         let profile = match profiles.read(AUTO_SAVE_NAME) {
-            ReadOutcome::Loaded(profile) => *profile,
+            ReadOutcome::Loaded(profile, problems) => {
+                // A slot that loaded with fields the decoder had to skip says so before the
+                // migration sentence: the skipped settings are the louder news.
+                if !problems.is_empty() {
+                    profiles.set_status(problems_line(&problems));
+                }
+                *profile
+            }
             // A first launch has no auto-save slot: not an error, and no status line,
             // because there is nothing the user could do about it.
             ReadOutcome::Absent => Profile::default(),
@@ -430,14 +444,22 @@ impl Profiles {
     /// writes of that path first: pressing Save and then Load is a round trip, and it would be a
     /// lie to answer it from the bytes the save is about to replace. With nothing in flight the
     /// wait touches nothing.
+    ///
+    /// A document that loaded with fields the reader had to skip answers the profile it could read
+    /// and names what it lost (`problems_line`) in place of the `Loaded config` sentence: the
+    /// settings that did load are in use, so the press did land.
     pub fn load_named(&mut self, name: &str) -> Result<Profile, String> {
         if let Some(path) = self.path(name) {
             flush_writes(&path);
         }
 
         match self.read(name) {
-            ReadOutcome::Loaded(profile) => {
-                self.set_status(format!("Loaded config '{name}'."));
+            ReadOutcome::Loaded(profile, problems) => {
+                if problems.is_empty() {
+                    self.set_status(format!("Loaded config '{name}'."));
+                } else {
+                    self.set_status(problems_line(&problems));
+                }
                 Ok(*profile)
             }
             // Absent, unparsable and unreadable are one answer here, which is the managed
@@ -617,6 +639,10 @@ impl Profiles {
             // that vanished between the list and the press has no message worth quoting.
             let message = format!("Could not delete '{display}': it no longer exists");
             self.set_status(message.clone());
+            // The file went behind the store's back, so the row the list still carries is a row
+            // the disk no longer has: re-read before answering, or the press leaves a config the
+            // user is told does not exist sitting in the list until something else refreshes it.
+            self.refresh();
             return Err(message);
         }
 
@@ -726,10 +752,18 @@ impl Profiles {
             Err(error) => return ReadOutcome::Failed(error.user_facing()),
         };
 
-        match load_profile_from_json(&text) {
-            Some(profile) => ReadOutcome::Loaded(Box::new(profile)),
-            None => ReadOutcome::Unparsable,
-        }
+        let load = load_profile(&text);
+        let Some(profile) = load.profile else {
+            return ReadOutcome::Unparsable;
+        };
+
+        // The document's own problems, then the ones the object inside it reported: a malformed
+        // `killAuraSettings` value is skipped by the same rule as a malformed top-level field,
+        // and it decodes as one field of the document, so its report would otherwise reach
+        // nobody.
+        let mut problems = load.problems;
+        problems.extend(profile.kill_aura_settings.problems().iter().cloned());
+        ReadOutcome::Loaded(Box::new(profile), problems)
     }
 
     /// Moves an unparsable profile aside and answers where it went.
@@ -892,11 +926,15 @@ fn deleted_line(name: &str) -> String {
 /// differently: a missing `config` slot at startup is silent (`Profile.cs:484-489`),
 /// while a missing *named* file reports `Failed to load config`. Only an unparsable
 /// document has bytes worth keeping, which is what the quarantine rule keys on.
+///
+/// A loaded profile carries the fields the tolerant decoder had to skip, which is what
+/// [`problems_line`] turns into the status line: the settings that did load are in use, so the
+/// read is neither a failure nor silent.
 #[derive(Debug, Clone, PartialEq)]
 enum ReadOutcome {
     /// Boxed: `Profile` is ~900 bytes and `Clippy` is right that the variant
     /// would otherwise dominate every `ReadOutcome`.
-    Loaded(Box<Profile>),
+    Loaded(Box<Profile>, Vec<ProfileProblem>),
     /// No such file.
     Absent,
     /// The file is there, but its bytes are not a profile: too large to be one this
@@ -905,6 +943,28 @@ enum ReadOutcome {
     /// The file exists and could not be read for an environmental reason, with the
     /// classified reason ready to paint.
     Failed(String),
+}
+
+/// `Could not load config: …` for a document that loaded with fields the decoder had to skip.
+///
+/// New copy, and the sentence [`ReadOutcome::Loaded`]'s report exists for: the managed
+/// `LoadProfile` was all-or-nothing (`Aoko/Core/Profile.cs:484-506`, one `catch` around the whole
+/// deserialise), so a malformed value either lost the file or, once the reader became tolerant,
+/// cost a setting with nothing said. This says it, in the `Could not …: reason` shape the card's
+/// other failures use, and closes with what the user still has. Only the first problem is spelt
+/// out and the rest are counted: this is a report on one line, not a dialog.
+fn problems_line(problems: &[ProfileProblem]) -> String {
+    let Some(first) = problems.first() else {
+        return String::new();
+    };
+
+    match problems.len() {
+        1 => format!("Could not load config: {first}. The rest of the config is in use."),
+        count => format!(
+            "Could not load config: {first} (and {} more). The rest of the config is in use.",
+            count - 1
+        ),
+    }
 }
 
 /// A row for the config list, for the click handler to name in a status message.
@@ -925,6 +985,7 @@ pub fn profiles_directory() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aoko_protocol::profile::load_profile_from_json;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1367,6 +1428,57 @@ mod tests {
             .collect();
         assert_eq!(kept.len(), 1, "{kept:?}");
         assert!(profiles.configs().is_empty());
+    }
+
+    /// A field the tolerant decoder had to skip is a sentence on the card, and the fields that
+    /// did fit are in use: the read is neither a failure nor silent.
+    #[test]
+    fn a_skipped_field_is_reported_at_startup() {
+        let root = scratch();
+        let store = store_at(&root);
+        store.initialize().expect("initialize");
+        let slot = store.profile_path(AUTO_SAVE_NAME).expect("path");
+        std::fs::write(
+            &slot,
+            r#"{"minCPS":"9","maxCPS":16,"killAuraSettings":{"maxCps":"nope"}}"#,
+        )
+        .expect("writing a malformed field");
+
+        let (profiles, profile) = Profiles::with_store(store_at(&root));
+
+        assert_eq!(profile.max_cps, 16.0, "the fields that fit are in use");
+        let message = profiles.status().message.clone();
+        assert!(message.starts_with("Could not load config: "), "{message}");
+        assert!(message.contains("minCPS"), "{message}");
+        assert!(
+            message.ends_with("The rest of the config is in use."),
+            "{message}"
+        );
+        assert!(
+            slot.is_file(),
+            "a file with one bad field is not moved aside"
+        );
+    }
+
+    /// The named load reports the same skip instead of claiming the file loaded whole, and still
+    /// answers the profile it could read.
+    #[test]
+    fn a_skipped_field_is_reported_on_a_named_load() {
+        let root = scratch();
+        let store = store_at(&root);
+        store.initialize().expect("initialize");
+        let path = store.profile_path("PvP").expect("path");
+        std::fs::write(&path, r#"{"minCPS":"9","maxCPS":16}"#).expect("malformed field");
+
+        let (mut profiles, _) = Profiles::with_store(store_at(&root));
+        let loaded = profiles
+            .load_named("PvP")
+            .expect("the document still loads");
+
+        assert_eq!(loaded.max_cps, 16.0);
+        let message = profiles.status().message.clone();
+        assert!(message.starts_with("Could not load config: "), "{message}");
+        assert!(message.contains("minCPS"), "{message}");
     }
 
     /// A named config that will not parse is left where it is: it is in the list, so the user can

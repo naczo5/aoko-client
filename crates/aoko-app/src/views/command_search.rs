@@ -968,9 +968,13 @@ mod tests {
         // A four-byte character is cut on the same boundary, and the message is still valid text.
         let mut state = open_with(None, false, &facts);
         state.set_query(&"😀".repeat(30), false, &facts);
-        assert!(state
-            .empty_message()
-            .contains(&format!("\"{}\"", "😀".repeat(24))));
+        assert_eq!(
+            state.empty_message(),
+            format!(
+                "No module matches \"{}...\". Try \"esp\", \"aim\", or a tab name.",
+                "😀".repeat(24)
+            )
+        );
     }
 
     #[test]

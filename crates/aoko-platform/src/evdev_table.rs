@@ -188,7 +188,7 @@ pub fn key_from_code(code: u16) -> Key {
 
 /// [`Key`] to `linux/input-event-codes.h`, for the uinput synthesizer.
 ///
-/// The OEM punctuation answers `None`: [`code_for_char`] is the letters-and-digits map, and
+/// The OEM punctuation answers `None`: the letters-and-digits map is `code_for_char`, and
 /// the only codes this names are the ones the virtual device declares.
 pub fn code_for_key(key: Key) -> Option<u16> {
     let code = match key {

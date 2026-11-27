@@ -180,12 +180,14 @@ fn profile_block_esp_serializes_round_trip() {
             display_name: "Gold Ore".to_owned(),
             color_hex: "FFD700".to_owned(),
             enabled: true,
+            ..BlockEspTargetData::default()
         },
         BlockEspTargetData {
             registry_id: "minecraft:iron_ore".to_owned(),
             display_name: "Iron Ore".to_owned(),
             color_hex: "D8AF93".to_owned(),
             enabled: false,
+            ..BlockEspTargetData::default()
         },
     ];
 
@@ -228,6 +230,7 @@ fn target_data_converts_through_normalisation() {
         display_name: "Gold Ore".to_owned(),
         color_hex: "#ffd700".to_owned(),
         enabled: false,
+        ..BlockEspTargetData::default()
     };
 
     let target = data.to_target();

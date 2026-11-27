@@ -250,6 +250,10 @@ pub fn focus_query(field: &Entity<TextInput>, seed: &str, window: &mut Window, c
 /// `!ClientAreaAnimation` early return (`CommandSearchOverlay.xaml.cs:143-147`), and only an
 /// enabled gate mounts the two animations. [`card_pulse_ring`] takes its own copy so the
 /// ring cannot outlive the setting independently of the entrance.
+/// One call per card: the three presses a row or the scrim can report are the card's
+/// own shape, so they stay in the signature rather than in a bundle that only exists
+/// to satisfy the argument count.
+#[allow(clippy::too_many_arguments)]
 pub fn overlay<'a>(
     theme: &Theme,
     state: &CommandSearchState,

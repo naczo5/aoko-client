@@ -636,6 +636,7 @@ mod tests {
             display_name: "Any".to_owned(),
             color_hex: "00FF88".to_owned(),
             enabled,
+            ..BlockEspTargetData::default()
         };
 
         let mut profile = Profile::default();

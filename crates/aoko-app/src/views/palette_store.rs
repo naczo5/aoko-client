@@ -527,7 +527,7 @@ impl PaletteStore {
         self.cached
             .iter()
             .map(|palette| {
-                let theme = Theme::from_custom(&palette.name, roles_of(&palette));
+                let theme = Theme::from_custom(&palette.name, roles_of(palette));
                 PaletteRow {
                     name: theme.name,
                     background: theme.background,
