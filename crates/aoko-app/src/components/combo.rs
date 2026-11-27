@@ -20,10 +20,11 @@ pub fn combo(
     id: impl Into<gpui::ElementId>,
     theme: &Theme,
     label: impl Into<SharedString>,
+    debug_selector: Option<&'static str>,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let accent = theme.accent;
-    div()
+    let mut trigger = div()
         .id(id)
         .flex()
         .flex_row()
@@ -47,8 +48,15 @@ pub fn combo(
                 .text_size(px(metrics::text::ESC))
                 .child(crate::components::glyph::CHEVRON_DOWN),
         )
-        .on_click(on_click)
-        .into_any_element()
+        .on_click(on_click);
+
+    // On the trigger that already exists, never a wrapper: the shell's frame budget counts
+    // paint nodes, and a selector is not one. It is a no-op outside a debug build.
+    if let Some(selector) = debug_selector {
+        trigger = trigger.debug_selector(move || selector.to_owned());
+    }
+
+    trigger.into_any_element()
 }
 
 /// How many rows a `MaxHeight="200"` list shows, given the row height.

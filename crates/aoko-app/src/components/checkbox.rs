@@ -14,11 +14,12 @@ pub fn checkbox(
     theme: &Theme,
     is_on: bool,
     label: impl Into<SharedString>,
+    debug_selector: Option<&'static str>,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let text = theme.text;
 
-    div()
+    let mut row = div()
         .id(id)
         .flex()
         .items_center()
@@ -31,8 +32,16 @@ pub fn checkbox(
                 .text_color(text)
                 .child(label.into()),
         )
-        .on_click(on_click)
-        .into_any_element()
+        .on_click(on_click);
+
+    // On the node that already exists, never a wrapper: a wrapper is a paint node, and the
+    // shell's frame budget counts those. `debug_selector` is a no-op outside a debug build,
+    // so production pays nothing either.
+    if let Some(selector) = debug_selector {
+        row = row.debug_selector(move || selector.to_owned());
+    }
+
+    row.into_any_element()
 }
 
 /// The 14×14 box on its own, for a row whose label is a sibling instead of the checkbox's

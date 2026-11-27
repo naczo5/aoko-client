@@ -638,6 +638,7 @@ pub fn render(
                     theme,
                     state.lunar_accounts(),
                     copy::LUNAR_ACCOUNTS,
+                    None,
                     {
                         let handle = entity.clone();
                         move |_, _, cx| {

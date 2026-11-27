@@ -4689,9 +4689,16 @@ impl Shell {
                 let value = self.value(bind, 0.0) > 0.5;
                 let id = crate::reuse::stitched(card.id, "-", bind);
                 let handle = entity.clone();
-                let boxed = components::checkbox(id, theme, value, *label, move |_, _, cx| {
-                    handle.update(cx, |shell, cx| shell.set_checked(bind, !value, cx));
-                });
+                let boxed = components::checkbox(
+                    id,
+                    theme,
+                    value,
+                    *label,
+                    check_debug_selector(bind),
+                    move |_, _, cx| {
+                        handle.update(cx, |shell, cx| shell.set_checked(bind, !value, cx));
+                    },
+                );
 
                 let mut row = div().flex().flex_col().gap(px(2.0)).child(boxed);
                 if !tooltip.is_empty() {
@@ -4799,6 +4806,7 @@ impl Shell {
                             // `selected` already names a config; the label is a view of
                             // it, so it is memoised rather than copied twice a frame.
                             crate::reuse::text("config-selection", current),
+                            combo_debug_selector(bind),
                             move |_, _, cx| {
                                 handle.update(cx, |shell, cx| shell.select_next_config(cx));
                             },
@@ -4810,6 +4818,7 @@ impl Shell {
                             crate::reuse::stitched(card.id, "-combo-", bind),
                             theme,
                             SharedString::from(""),
+                            combo_debug_selector(bind),
                             |_, _, _| {},
                         ));
                     }
@@ -4843,6 +4852,7 @@ impl Shell {
                     crate::reuse::stitched(card.id, "-combo-", bind),
                     theme,
                     SharedString::from(current),
+                    combo_debug_selector(bind),
                     move |_, _, cx| {
                         if options_empty {
                             return;
@@ -4876,6 +4886,7 @@ impl Shell {
                     theme,
                     on,
                     *label,
+                    None,
                     move |_, _, cx| handle.update(cx, |shell, cx| shell.toggle_animations(cx)),
                 );
 
@@ -5421,6 +5432,31 @@ fn switch_debug_selector(bind: &'static str) -> Option<&'static str> {
         "AutoTotemElytra" => Some("switch-AutoTotemElytra"),
         "ShowLogo" => Some("switch-ShowLogo"),
         "DevMode" => Some("switch-DevMode"),
+        _ => None,
+    }
+}
+
+/// The debug selector for the `Check` rows the click tests target.
+///
+/// Same rule as [`switch_debug_selector`]: name only what a test clicks, not all 57 checkboxes.
+/// `BreakBlocksEnabled` is the one whose key is also a switch, and `PixelPartyAutoLookEnabled` is
+/// its counter-case, the sub-setting that stays on the profile. The selector goes on
+/// `components::checkbox`'s own root, so naming one costs a paint node nothing.
+fn check_debug_selector(bind: &'static str) -> Option<&'static str> {
+    match bind {
+        "BreakBlocksEnabled" => Some("check-BreakBlocksEnabled"),
+        "PixelPartyAutoLookEnabled" => Some("check-PixelPartyAutoLookEnabled"),
+        _ => None,
+    }
+}
+
+/// The debug selector for the `Combo` rows the click tests target.
+///
+/// Same rule as [`switch_debug_selector`]: one combo, the one a test presses. The trigger has no
+/// list to open — a press selects the next option — so the bounds are the whole interaction.
+fn combo_debug_selector(bind: &'static str) -> Option<&'static str> {
+    match bind {
+        "KillAuraSettings.CpsMode" => Some("combo-KillAuraSettings.CpsMode"),
         _ => None,
     }
 }
