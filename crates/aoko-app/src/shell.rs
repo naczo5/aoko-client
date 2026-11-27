@@ -2381,7 +2381,11 @@ impl Shell {
     /// them through it — so the button is one call to the owner and then a repaint. That is
     /// what makes the reset observable: the next frame composes from the cleared tracker
     /// rather than from a copy the view kept.
-    pub fn reset_stats(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+    ///
+    /// No `Window`: the two entry points are the card's button and the Stats tab's own reset, and
+    /// neither has anything to do with a window here — the view's callback receives one and lets it
+    /// go. Taking it and ignoring it would be the unused parameter this method used to carry.
+    pub fn reset_stats(&mut self, cx: &mut Context<Self>) {
         if self.runtime.reset_stats() {
             cx.notify();
         }
@@ -2751,17 +2755,6 @@ impl Shell {
         let reset = self.runtime.controller().profile();
         self.adopt_profile(reset);
         self.close(cx);
-    }
-
-    /// The Stats card's Reset Stats (`ResetStatsButton_Click`, `MainWindow.xaml.cs:1976-1979`).
-    ///
-    /// One call in managed (`StatsTracker.Instance.Reset()`) and one here: the tracker is
-    /// [`Runtime::reset_stats`]'s, so the press cannot clear a second copy of the numbers. The
-    /// repaint follows a real clear, because a press on an empty tracker changes nothing.
-    pub fn reset_stats(&mut self, cx: &mut Context<Self>) {
-        if self.runtime.reset_stats() {
-            cx.notify();
-        }
     }
 
     /// The window's close: save the profile, then quit.
@@ -3525,8 +3518,8 @@ impl Render for Shell {
                         &self.runtime.stats(),
                         theme,
                         self.tab,
-                        move |_, window, cx| {
-                            handle.update(cx, |shell, cx| shell.reset_stats(window, cx));
+                        move |_, _window, cx| {
+                            handle.update(cx, |shell, cx| shell.reset_stats(cx));
                         },
                     )
                 }
