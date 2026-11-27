@@ -1146,6 +1146,15 @@ pub const STATS_SAMPLES_SUFFIX: &str = " samples";
 /// lives. The button it labels is the 140 px header one (`MainWindow.xaml:359`).
 pub const KEYBIND_PENDING: &str = "Bind: [Press key or mouse...]";
 
+/// Every keybind button's tooltip, `MainWindow.xaml:1005` and the thirty-seven other
+/// `KeybindButton_Click` buttons — it is on all of them, so it is one constant rather than a
+/// per-card string.
+///
+/// It is the only place the managed app says that Escape unbinds, and the port implements that
+/// (`views::keybind_text`, the capture handler) without ever mentioning it: a user who binds a key
+/// by mistake has to guess. Wired in `shell.rs`'s keybind control, which is not this file's.
+pub const KEYBIND_TOOLTIP: &str = "Click, then press a key (Esc = unbind)";
+
 /// The same copy for an action bind (`MainWindow.xaml.cs:2135-2140`).
 ///
 /// `Action: [Press key or mouse...]` is the pending half of
@@ -1270,6 +1279,26 @@ pub const SEARCH_LEGEND_F2: &str = "f2";
 pub const SEARCH_LEGEND_TOGGLE: &str = " toggle";
 /// The chip an unreachable row carries instead of a switch, `:387`.
 pub const SEARCH_ROW_UNAVAILABLE: &str = "UNAVAILABLE";
+
+/// The query box's accessible name, `CommandSearchOverlay.xaml:227`.
+///
+/// Managed had no placeholder: the words lived in `AutomationProperties.Name`, so a sighted user
+/// saw an empty box. The port paints them as the field's placeholder, which is the one place a
+/// user sees the field's purpose before typing — a deviation in where the sentence appears, not
+/// in the sentence.
+pub const SEARCH_QUERY_NAME: &str = "Search modules and settings";
+
+/// The query box's help text, `:228`, painted as the field's tooltip.
+///
+/// Managed attached it to `AutomationProperties.HelpText`, so a screen reader read it and a mouse
+/// user did not; the port shows the same sentence on hover.
+pub const SEARCH_QUERY_HINT: &str = "Type to filter. Up and down move the selection. Enter jumps to the selected row. F2 toggles it; Ctrl+Space does the same unless a CJK IME claims the chord.";
+
+/// The close chip's tooltip, `:238`.
+///
+/// The chip is the only affordance in the port that names the Escape key; managed's `ToolTip` is
+/// where that sentence lived.
+pub const SEARCH_CLOSE_TOOLTIP: &str = "Close (Esc)";
 
 /// A title with no managed source, kept flagged rather than deleted.
 ///

@@ -47,6 +47,20 @@ pub mod copy {
     /// and the box takes either. Folded into the box's hint for the same reason as
     /// [`NAME_LABEL`].
     pub const ADDRESS_LABEL: &str = "Host or host:port";
+    /// `:368`, the name box's tooltip.
+    ///
+    /// Managed had a caption above the box (`:365`) and this sentence on hover; the port folds the
+    /// caption into the hint (see [`NAME_LABEL`]), so the tooltip is the sentence that tells the
+    /// user the label is optional and the address is what gets used. Wired in `shell.rs`'s
+    /// `ensure_form_fields`, which is not this file's.
+    pub const NAME_HINT: &str = "Optional label. The address is used when this is empty.";
+    /// `:219`, the direct-connect box's placeholder.
+    ///
+    /// Distinct from the add form's caption: this one names a concrete example. Nothing paints it
+    /// yet — `shell.rs`'s direct-connect field has no placeholder — so it is the one entry in this
+    /// module with no reader.
+    pub const DIRECT_PLACEHOLDER: &str =
+        "Server address, for example play.example.net or play.example.net:25566";
     /// `:333`, the empty state's title.
     pub const EMPTY_TITLE: &str = "No saved servers";
     /// `:334`, the empty state's body.

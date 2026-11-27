@@ -97,7 +97,7 @@ use gpui::{
 use crate::assets::MONO_FAMILY;
 use crate::components::field::FieldVariant;
 use crate::components::text_input::TextInput;
-use crate::components::{field, glyph, highlight_text, scroll, switch::switch_static};
+use crate::components::{self, field, glyph, highlight_text, scroll, switch::switch_static};
 use crate::theme::motion::{self, Motion};
 use crate::theme::{fixed, metrics, Theme};
 use crate::views::command_search::{self, CommandSearchState, Row};
@@ -293,19 +293,28 @@ fn query_row(
     input: Option<&Entity<TextInput>>,
 ) -> AnyElement {
     let placeholder = if state.placeholder_visible() {
-        "Search modules and settings"
+        copy::SEARCH_QUERY_NAME
     } else {
         ""
     };
 
+    // The hint is managed's `AutomationProperties.HelpText` (`:228`) shown on hover instead. The
+    // field itself is an entity the shell creates, so the tooltip goes on the wrapper that holds
+    // it — hover reaches a parent as well as the child under the cursor.
+    let hint = || components::tooltip(theme, copy::SEARCH_QUERY_HINT);
+
     let field_area = match input {
         Some(input) => div()
+            .id("command-search-query-hint")
             .flex_1()
             .debug_selector(|| String::from("command-search-query-field"))
+            .tooltip(hint())
             .child(input.clone())
             .into_any_element(),
         None => div()
+            .id("command-search-query-hint")
             .flex_1()
+            .tooltip(hint())
             .child(field(
                 "command-search-query",
                 theme,
@@ -329,6 +338,7 @@ fn query_row(
             // `EscChipStyle`: 4 px radius, slider-background fill, slider-foreground edge
             // that turns accent on hover, 10 px monospace cap.
             div()
+                .id("command-search-close-chip")
                 .ml(px(10.0))
                 .rounded(px(metrics::radius::CHIP))
                 .border_1()
@@ -340,6 +350,7 @@ fn query_row(
                 .font_family(MONO_FAMILY)
                 .text_color(theme.search_subtle_text())
                 .hover(move |style| style.border_color(theme.accent))
+                .tooltip(components::tooltip(theme, copy::SEARCH_CLOSE_TOOLTIP))
                 .child(glyph::ESC),
         )
         .into_any_element()
