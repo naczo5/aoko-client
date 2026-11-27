@@ -1641,7 +1641,7 @@ mod tests {
                 profile
                     .hud_layout
                     .as_ref()
-                    .and_then(|layout| layout.get(element_id::MODULE_LIST).copied())
+                    .and_then(|layout| layout.get(element_id::MODULE_LIST).cloned())
                     .is_some_and(|element| (element.x - 0.42).abs() < 1e-12)
             });
             if moved {

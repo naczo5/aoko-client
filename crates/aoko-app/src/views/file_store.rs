@@ -1687,9 +1687,9 @@ mod tests {
         let path = root.join("queued.json");
         fs::write(&path, "{}").expect("a file to remove");
 
-        let reply = reply();
-        submit(path.clone(), WriteKind::Delete, Arc::clone(&reply));
-        assert!(answer(&reply).error.is_none());
+        let first = reply();
+        submit(path.clone(), WriteKind::Delete, Arc::clone(&first));
+        assert!(answer(&first).error.is_none());
         assert!(!path.exists(), "the confirmation removed it");
 
         let again = reply();

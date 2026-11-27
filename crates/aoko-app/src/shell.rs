@@ -1149,7 +1149,7 @@ impl Shell {
     ///   state across frames — recreating any of them would drop an edit in progress or the
     ///   keyboard. `TextInput::set_theme` and `KeybindCapture::set_theme` are those pushes.
     pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
-        self.theme = theme;
+        self.theme = theme.clone();
 
         // The recreated half.
         self.fields.clear();

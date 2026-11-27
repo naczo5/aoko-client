@@ -1666,7 +1666,7 @@ mod tests {
     fn with_fake(sources: &[ServerRowSource]) -> (ServersState, Arc<FakePings>) {
         let fake = Arc::new(FakePings::default());
         let mut state = ready();
-        let backend: Arc<dyn PingBackend> = Arc::clone(&fake);
+        let backend: Arc<dyn PingBackend> = fake.clone();
         state.set_ping_backend(backend);
         state.load(sources, None, None, NOW_MS);
         (state, fake)

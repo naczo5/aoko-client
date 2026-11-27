@@ -1031,7 +1031,7 @@ mod tests {
         );
         assert_eq!(
             store.palettes(),
-            vec![*palette],
+            vec![(*palette).clone()],
             "the cached list carries the row the press built, before the file does"
         );
 
