@@ -1133,11 +1133,19 @@ pub const SETTINGS: &[Card] = &[
 /// Ported from `MainWindow.NormalizeModuleListStyle` (`:1275-1291`). The preview
 /// rows in the markup all read `Autoclicker` except the last, which shows the live
 /// sample line `autoclicker 12-16`.
+///
+/// **Nothing reads this, and that is not an oversight to fix by naming it somewhere.** The markup
+/// draws seven preview rows, one per style (`:1216-1270`), so a user can see each style before
+/// choosing it; the port paints only the live sample row ([`MODULE_LIST_PREVIEW_SAMPLE`]). Each
+/// preview row is a `Border` with its own background, borderbrush and corner radius and no theme
+/// role behind them, so painting the seven is design work — recorded as a named gap — not wiring.
 pub const MODULE_LIST_STYLES: [&str; 7] = [
     "Classic", "Modern", "Minimal", "Outlined", "Glass", "Bold", "Default",
 ];
 
 /// The sample row every preview but the last one shows.
+///
+/// Unreferenced for the same reason as [`MODULE_LIST_STYLES`]: the rows it labels are not painted.
 pub const MODULE_LIST_PREVIEW_NAME: &str = "Autoclicker";
 
 /// The live sample row in the markup.
