@@ -177,6 +177,11 @@ impl BlockEspRow {
                     .min_w(px(0.0))
                     .text_size(px(metrics::block_esp::NAME_TEXT))
                     .text_color(theme.text)
+                    // One line, ellipsised: a display name ("Waxed Weathered Cut Copper Stairs")
+                    // is wider than the swatch and the cap leave room for, and text that wraps in
+                    // a pixel row grows the row while text that is merely clipped runs under the
+                    // swatch.
+                    .truncate()
                     .child(self.display_name.clone()),
             )
             .child(

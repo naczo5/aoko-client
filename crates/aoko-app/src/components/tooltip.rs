@@ -38,6 +38,15 @@ use gpui::{
 use crate::theme::motion::{self, Motion};
 use crate::theme::Theme;
 
+/// The widest a tooltip may paint, in logical pixels — zed's own `max_w_72` (18 rem at the
+/// 16 px root), which is the reference this surface follows.
+///
+/// The managed tooltips were WPF popups, which could leave the window; a GPUI tooltip is laid out
+/// at its natural width and only *shifted* when it crosses the window edge
+/// (`crates/gpui/src/window.rs:4261`, `prepaint_tooltip`), so a sentence-length hint painted off
+/// the edge and was clipped. The cap turns that into a wrapped block.
+const MAX_WIDTH: f32 = 288.0;
+
 /// The tooltip surface: panel fill, 1 px edge, 11 px caption.
 pub struct Tooltip {
     text: SharedString,
@@ -62,8 +71,12 @@ impl Tooltip {
             .bg(self.theme.panel)
             .px(px(6.0))
             .py(px(3.0))
+            .max_w(px(MAX_WIDTH))
             .text_size(px(11.0))
             .text_color(self.theme.text)
+            // Wrapped, not one line: an unwrapped hint is measured at its own width and clipped at
+            // the window edge, which is the one place a tooltip is useless.
+            .whitespace_normal()
             .child(self.text.clone())
     }
 }

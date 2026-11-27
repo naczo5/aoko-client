@@ -129,20 +129,13 @@ pub fn rgb_to_hsv(rgb: Rgb) -> Hsv {
 
 /// `TryParseHex`: `#RGB`, `#RRGGBB`, with or without the hash, any case.
 ///
-/// The rule is [`Color::parse_hex`], so this module expands nothing of its own and a change
-/// to the tolerance cannot land on the picker's path alone. What stays here is the refusal of
-/// the 8-digit ARGB form: the hex field writes back `#RRGGBB`, and `TryParseHex` refuses
-/// anything that is not six digits once the shorthand is expanded, so `#FFAABBCC` is not an
-/// entry this box accepts however opaque its alpha is.
+/// The rule is [`Color::parse_rgb_hex`], the theme side's owner of it: it accepts exactly the
+/// shorthand and the six-digit form and refuses everything else, so `#FFAABBCC` — the 8-digit ARGB
+/// spelling this box never writes back — is refused there rather than by a second digit count here.
+/// A change to the tolerance therefore cannot land on the picker's path alone.
 #[must_use]
 pub fn parse_hex(text: &str) -> Option<Rgb> {
-    let trimmed = text.trim();
-    let body = trimmed.strip_prefix('#').unwrap_or(trimmed);
-    if body.chars().count() == 8 {
-        return None;
-    }
-
-    Color::parse_hex(trimmed).map(Rgb::from)
+    Color::parse_rgb_hex(text).map(Rgb::from)
 }
 
 /// The outcome of pressing OK or Cancel.
@@ -467,11 +460,19 @@ mod tests {
     }
 
     #[test]
-    fn the_hex_box_agrees_with_the_theme_parser_except_on_argb() {
-        for text in ["#abc", "#AABBCC", "abc", "  #BB377D  "] {
+    fn the_hex_box_is_the_theme_parsers_rule() {
+        for text in [
+            "#abc",
+            "#AABBCC",
+            "abc",
+            "  #BB377D  ",
+            "##abc",
+            "#12345",
+            "#FF1A2B3C",
+        ] {
             assert_eq!(
                 parse_hex(text),
-                Color::parse_hex(text).map(Rgb::from),
+                Color::parse_rgb_hex(text).map(Rgb::from),
                 "{text:?} must parse the same through both"
             );
         }
@@ -479,15 +480,10 @@ mod tests {
         assert_eq!(parse_hex("#abc"), Some(Rgb::new(0xAA, 0xBB, 0xCC)));
         assert_eq!(parse_hex("#AABBCC"), Some(Rgb::new(0xAA, 0xBB, 0xCC)));
         assert_eq!(parse_hex("##abc"), None, "the second # is a typo here too");
-
         assert_eq!(
             parse_hex("#FF1A2B3C"),
             None,
-            "the one difference: this box writes back #RRGGBB and has no alpha"
-        );
-        assert!(
-            Color::parse_hex("#FF1A2B3C").is_some(),
-            "which the theme parser does accept — the guard is the whole difference"
+            "the 8-digit ARGB form is not an entry this box writes back, and the shared rule refuses it"
         );
     }
 

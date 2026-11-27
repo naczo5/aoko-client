@@ -2,36 +2,51 @@
 //!
 //! This is the managed `InputHooks.StartKeyCapture` / `OnKeyCaptured` pair
 //! (`Aoko/Core/InputHooks.cs:241-251`, `:364-369`) with a widget around it: a press
-//! starts listening, the next key press ends the capture and reports its virtual key,
-//! and Escape reports `0`, because `InputHooks_OnKeyCaptured` writes
-//! `finalVk = (vkCode == 0x1B) ? 0 : vkCode` — *"ESC unbinds"* (`MainWindow.xaml.cs:2042`).
-//! A capture that ends without a key (focus moved away, or [`KeybindCapture::cancel`])
-//! reports [`Captured::Abandoned`], which is the one outcome the managed code cannot
-//! express: a low-level hook never loses focus.
+//! starts listening, the next press ends the capture and reports its key — a keystroke, or
+//! for a mouse bind a second click on the same button — and Escape reports `0`, because
+//! `InputHooks_OnKeyCaptured` writes `finalVk = (vkCode == 0x1B) ? 0 : vkCode` — *"ESC
+//! unbinds"* (`MainWindow.xaml.cs:2042`). A capture that ends without a key (focus moved
+//! away, or [`KeybindCapture::cancel`]) reports [`Captured::Abandoned`], which is the one
+//! outcome the managed code cannot express: a low-level hook never loses focus.
 //!
 //! # What this can and cannot capture
 //!
-//! * **Keyboard only.** The managed capture passed `allowMouse: true` and the hook
-//!   reported `VK_LBUTTON`..`VK_XBUTTON2` (`0x01`-`0x06`). A mouse press here is the press
-//!   that *starts* the capture, and there is no second mouse press to report without
-//!   guessing which click the user meant, so mouse binds stay unproducible and the
-//!   formatter keeps naming them.
+//! * **A mouse button is one of the managed pseudo-keys.** The managed capture passed
+//!   `allowMouse: true` and its mouse hook reported `VK_LBUTTON`..`VK_XBUTTON2`
+//!   (`Aoko/Core/InputHooks.cs:40-44`, `:429-448`), which is `0x01`, `0x02`, `0x04`, `0x05`
+//!   and `0x06` — the five codes [`crate::views::keybind_text`] already names
+//!   (`Mouse Left` … `Mouse X2`). A press on this button maps the same way:
+//!   [`MouseButton::Left`] is `0x01`, `Right` `0x02`, `Middle` `0x04`, and the two side
+//!   buttons `Navigate(Back)`/`Navigate(Forward)` are `0x05`/`0x06`.
+//! * **The press that starts a capture is a gesture, not a key.** It is the one press that
+//!   cannot also be reported, or the button could never start listening to a left click it
+//!   would then have to call `Mouse Left`. So a mouse bind takes a *second* press, and
+//!   [`KeybindCapture::handle_press`] is where the two meanings are separated: idle starts
+//!   listening, listening reports the button. A press therefore does exactly one thing, which
+//!   is what keeps it from starting and finishing the same capture. A double click is one
+//!   gesture too, so its second click is neither a start nor a bind.
+//!
+//!   The managed hook captured only the middle and the two side buttons, because a left or
+//!   right click still had to reach the game; here the press lands on this control, so all
+//!   five are bindable and the starting press is the one excluded instead.
 //! * **Modifier keys are not capturable**, and that is the platform rather than a choice:
 //!   the Linux backends drop a modifier press before it becomes a `Keystroke`
 //!   (`gpui_linux/src/linux/x11/client.rs:1163-1165`), so no event arrives to report.
 //!   [`crate::views::keybind_text::virtual_key`] documents the same gap from the other
 //!   side.
-//! * **An unmapped key name is swallowed and the capture continues.** A name with no
-//!   virtual key (dead keys, media keys, `fn`) would otherwise end the capture with
-//!   nothing to store; waiting for a mappable key is closer to the managed behaviour,
-//!   where the hook only ever sent vk codes.
+//! * **A press with no virtual key keeps listening and says so.** A bare modifier, a media
+//!   key or `fn` has a name but no code to store, so it cannot end the capture. It used to be
+//!   swallowed in silence, which is a button that looks broken: the press did nothing and
+//!   nothing on screen said why. The capture still waits for a key it can store — the
+//!   managed behaviour, where the hook only ever sent vk codes — and the button now reads the
+//!   caller's own prefix followed by `[Not a bindable key]` until the next press.
 //!
 //! # The button is the component's, not a second one
 //!
 //! `components::button_sized` draws the box and the label; this type only wraps it with a
-//! focus handle, the key listener and the press that starts a capture. The width is the
-//! caller's: 140 for a card header's keybind button (`MainWindow.xaml:359`), 210 for an
-//! action bind (`:525`, `:542`).
+//! focus handle, the key listener and the mouse-press handling that both starts a capture and
+//! reports a button as one. The width is the caller's: 140 for a card header's keybind button
+//! (`MainWindow.xaml:359`), 210 for an action bind (`:525`, `:542`).
 //!
 //! # Mounting
 //!
@@ -56,8 +71,8 @@ use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::{
-    div, App, Context, ElementId, FocusHandle, KeyDownEvent, MouseButton, Render, SharedString,
-    Subscription, Window,
+    div, App, Context, ElementId, FocusHandle, KeyDownEvent, MouseButton, NavigationDirection,
+    Render, SharedString, Subscription, Window,
 };
 
 use crate::components::{button_sized, tooltip, ButtonVariant};
@@ -89,6 +104,44 @@ impl Captured {
 
 type CaptureHandler = Arc<dyn Fn(Captured, &mut Window, &mut App)>;
 
+/// What a capture reads when the press it just received has no virtual key to store.
+///
+/// No managed sentence exists for this: the low-level hook only ever sent vk codes, so a name it
+/// could not map never arrived and the managed app never had to say anything. The string lives
+/// here rather than with the callers because it is this state machine's own outcome. It is kept
+/// as short as the pending copy it replaces — every button is fixed-width and clips its label —
+/// so it reads whole on both the 140 px and the 210 px button.
+const NOT_BINDABLE: &str = "[Not a bindable key]";
+
+/// The managed virtual key of one mouse button, `VK_LBUTTON`..`VK_XBUTTON2`
+/// (`Aoko/Core/InputHooks.cs:40-44`, `:429-448`).
+///
+/// The codes are not contiguous — `0x03` is the managed `Cancel` and names no button — which is
+/// why [`crate::views::keybind_text::format_virtual_key`] names these five one by one instead of
+/// computing them.
+fn mouse_virtual_key(button: MouseButton) -> i32 {
+    match button {
+        MouseButton::Left => 0x01,
+        MouseButton::Right => 0x02,
+        MouseButton::Middle => 0x04,
+        MouseButton::Navigate(NavigationDirection::Back) => 0x05,
+        MouseButton::Navigate(NavigationDirection::Forward) => 0x06,
+    }
+}
+
+/// The refusal label for a button whose pending copy is `pending`: the same prefix the caller
+/// writes (`Bind` / `Action`) and [`NOT_BINDABLE`] after it.
+///
+/// The prefix is taken from the pending label rather than being a fourth argument, so the two
+/// halves of one button's copy cannot drift apart. A label with no `": "` in it is used whole,
+/// which is the only honest answer for copy this function was not written against.
+fn refusal_label(pending: &str) -> String {
+    let prefix = pending
+        .split_once(": ")
+        .map_or(pending, |(prefix, _)| prefix);
+    format!("{prefix}: {NOT_BINDABLE}")
+}
+
 /// A button that captures one keystroke when pressed.
 pub struct KeybindCapture {
     theme: Theme,
@@ -97,7 +150,12 @@ pub struct KeybindCapture {
     width: f32,
     rest: SharedString,
     pending: SharedString,
+    /// [`refusal_label`] of `pending`: what the button reads after a press it cannot map.
+    refused: SharedString,
     capturing: bool,
+    /// Whether the press just received had no virtual key, so the pending label would leave the
+    /// user guessing why nothing happened. Cleared when the capture ends or restarts.
+    last_refused: bool,
     handler: Option<CaptureHandler>,
     /// The blur listener, replaced on every `start`. It is not dropped when a capture
     /// finishes: dropping a subscription from inside its own callback would be the
@@ -120,17 +178,29 @@ impl KeybindCapture {
         rest: impl Into<SharedString>,
         pending: impl Into<SharedString>,
     ) -> Self {
+        let pending = pending.into();
         Self {
             theme,
             focus: cx.focus_handle(),
             name: name.into(),
             width,
             rest: rest.into(),
-            pending: pending.into(),
+            refused: SharedString::from(refusal_label(&pending)),
+            pending,
             capturing: false,
+            last_refused: false,
             handler: None,
             blur: None,
         }
+    }
+
+    /// Repaints the button in a new palette.
+    ///
+    /// The entity owns its own copy of the theme, taken when the shell built it, so a palette
+    /// applied while the window is up reaches this button only through here.
+    pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
+        self.theme = theme;
+        cx.notify();
     }
 
     /// Where a finished capture is reported.
@@ -159,13 +229,24 @@ impl KeybindCapture {
     }
 
     /// The label this button draws right now.
+    ///
+    /// Three states, not two: at rest the stored binding, while listening the caller's pending
+    /// copy, and after a press with no virtual key the refusal that says why nothing was stored.
     #[must_use]
     pub fn label(&self) -> &SharedString {
-        if self.capturing {
-            &self.pending
-        } else {
+        if !self.capturing {
             &self.rest
+        } else if self.last_refused {
+            &self.refused
+        } else {
+            &self.pending
         }
+    }
+
+    /// Whether the last press could not be mapped to a virtual key.
+    #[must_use]
+    pub fn is_refused(&self) -> bool {
+        self.last_refused
     }
 
     /// Starts listening, and focuses the button so keys reach it.
@@ -175,6 +256,7 @@ impl KeybindCapture {
         }
 
         self.capturing = true;
+        self.last_refused = false;
         window.focus(&self.focus, cx);
         // Registered after the focus move, so the listener exists for the blur that ends
         // this capture rather than for the one that preceded it.
@@ -188,11 +270,39 @@ impl KeybindCapture {
         self.finish(Captured::Abandoned, window, cx);
     }
 
+    /// Handles one mouse press, which either starts a capture or is the capture's input.
+    ///
+    /// The press that starts listening is a gesture and is not reported; a press that arrives
+    /// while the button is listening is the binding, so it reports the pseudo-key of the button
+    /// it was made with (`0x01`-`0x06`) and ends the capture. One press is one of the two, never
+    /// both, so a click can neither bind itself by starting a capture nor start a second one.
+    ///
+    /// `click_count` is the event's, and the second or later click of one gesture is not a bind:
+    /// a control people habitually double-click would otherwise leave the capture holding
+    /// `Mouse Left`, which nobody asked for. A mouse bind is a click, then a separate click.
+    pub fn handle_press(
+        &mut self,
+        button: MouseButton,
+        click_count: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if click_count > 1 {
+            return;
+        }
+
+        if self.capturing {
+            self.finish(Captured::Key(mouse_virtual_key(button)), window, cx);
+        } else {
+            self.start(window, cx);
+        }
+    }
+
     /// Handles one key press. Returns whether the key was consumed.
     ///
-    /// Consumed means the capture owned the key: it either finished on it or swallowed a
-    /// name it cannot map, so a letter typed while capturing cannot fall through to a
-    /// shortcut behind the button.
+    /// Consumed means the capture owned the key: it either finished on it or refused a name it
+    /// cannot map, so a letter typed while capturing cannot fall through to a shortcut behind
+    /// the button.
     pub fn handle_key(
         &mut self,
         event: &KeyDownEvent,
@@ -212,6 +322,17 @@ impl KeybindCapture {
 
         if let Some(vk) = keybind_text::virtual_key(key) {
             self.finish(Captured::Key(vk), window, cx);
+            return true;
+        }
+
+        // A name with no virtual key — a bare modifier, a media key, `fn` — has nothing to
+        // store, so the capture keeps waiting instead of ending on an empty value. Saying so is
+        // the difference between "waiting for the next key" and "this button is broken": it was
+        // silent, which is a press that visibly did nothing. `last_refused` is a gate as well as
+        // a label, so an auto-repeating refused key notifies once rather than every frame.
+        if !self.last_refused {
+            self.last_refused = true;
+            cx.notify();
         }
         true
     }
@@ -222,6 +343,7 @@ impl KeybindCapture {
         }
 
         self.capturing = false;
+        self.last_refused = false;
         if let Some(handler) = self.handler.clone() {
             handler(result, window, cx);
         }
@@ -234,10 +356,9 @@ impl Render for KeybindCapture {
         let label = self.label().clone();
         let width = self.width;
         let name = self.name.clone();
-        let focus = self.focus.clone();
 
-        let press = cx.entity();
         let keys = cx.entity();
+        let press = cx.entity();
         let selector = name.clone();
 
         div()
@@ -253,9 +374,13 @@ impl Render for KeybindCapture {
             // Attached here rather than by each caller so all 40 bindings get it from one place.
             .tooltip(tooltip(&theme, copy::KEYBIND_TOOLTIP))
             .debug_selector(move || format!("{selector}-capture"))
-            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                window.focus(&focus, cx);
-                press.update(cx, |capture, cx| capture.start(window, cx));
+            // Any button, one listener: the handler reads which one from the event and decides
+            // which of the two meanings the press has — start listening, or be the captured
+            // button — so one press cannot be both.
+            .on_any_mouse_down(move |event, window, cx| {
+                press.update(cx, |capture, cx| {
+                    capture.handle_press(event.button, event.click_count, window, cx);
+                });
                 cx.stop_propagation();
             })
             .on_key_down(move |event, window, cx| {
@@ -309,8 +434,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use gpui::{
-        AnyWindowHandle, Entity, Keystroke, Modifiers, TestAppContext, VisualTestContext,
-        WindowOptions,
+        AnyWindowHandle, Entity, Keystroke, Modifiers, MouseDownEvent, TestAppContext,
+        VisualTestContext, WindowOptions,
     };
 
     use super::*;
@@ -350,14 +475,42 @@ mod tests {
             self.results.lock().expect("results lock").clone()
         }
 
+        /// The label the button paints, which is how a refusal reaches the user.
+        fn label(&self) -> String {
+            self.visual
+                .cx
+                .read(|cx| self.capture.read(cx).label().to_string())
+        }
+
         /// A press on the rendered button, which is what starts a capture.
         fn press(&mut self) {
+            self.press_button(MouseButton::Left);
+        }
+
+        /// One mouse-down on the rendered button with `button`: the press that starts a
+        /// capture for a left press, or the captured input for any press while listening.
+        fn press_button(&mut self, button: MouseButton) {
             let bounds = self
                 .visual
                 .debug_bounds("test-bind-capture")
                 .expect("the capture button records its bounds in a debug build");
             self.visual
-                .simulate_click(bounds.center(), Modifiers::default());
+                .simulate_mouse_down(bounds.center(), button, Modifiers::default());
+        }
+
+        /// The second `MouseDown` of a double click: same point, `click_count` 2.
+        fn second_click(&mut self) {
+            let bounds = self
+                .visual
+                .debug_bounds("test-bind-capture")
+                .expect("the capture button records its bounds in a debug build");
+            self.visual.simulate_event(MouseDownEvent {
+                position: bounds.center(),
+                modifiers: Modifiers::default(),
+                button: MouseButton::Left,
+                click_count: 2,
+                first_mouse: false,
+            });
         }
 
         fn key(&mut self, name: &'static str) {
@@ -478,6 +631,113 @@ mod tests {
     }
 
     #[gpui::test]
+    fn the_press_that_starts_a_capture_is_not_a_binding(cx: &mut TestAppContext) {
+        let mut probe = probe(cx);
+
+        probe.press();
+
+        assert!(probe.capturing(), "the press started a capture");
+        assert!(
+            probe.results().is_empty(),
+            "the press that starts listening is the gesture, not a key: reporting it would bind \
+             Mouse Left on the way in and leave nothing listening"
+        );
+    }
+
+    #[gpui::test]
+    fn a_press_while_listening_binds_the_button_it_was_made_with(cx: &mut TestAppContext) {
+        let mut probe = probe(cx);
+        probe.press();
+
+        probe.press_button(MouseButton::Middle);
+
+        assert_eq!(
+            probe.results(),
+            [Captured::Key(0x04)],
+            "VK_MBUTTON, which the profile stores and the label reads as `Mouse Middle`"
+        );
+        assert!(!probe.capturing(), "one press ends the capture");
+    }
+
+    #[gpui::test]
+    fn a_left_press_while_listening_binds_mouse_left(cx: &mut TestAppContext) {
+        // The second left press is the binding; only the first one is the gesture. Without
+        // that split a left button could never be bound, and with the split reversed the
+        // starting press would bind itself.
+        let mut probe = probe(cx);
+        probe.press();
+        probe.press_button(MouseButton::Left);
+
+        assert_eq!(probe.results(), [Captured::Key(0x01)]);
+        assert!(!probe.capturing());
+    }
+
+    #[gpui::test]
+    fn the_second_click_of_a_double_click_is_not_a_bind(cx: &mut TestAppContext) {
+        // The button is the kind of control people double-click. Both clicks are one gesture, so
+        // the second one must not read as "bind Mouse Left" — a capture that ended by accident
+        // also stops listening, so the key the user meant would go nowhere.
+        let mut probe = probe(cx);
+        probe.press();
+
+        probe.second_click();
+
+        assert!(probe.results().is_empty(), "one gesture is not two presses");
+        assert!(probe.capturing(), "the capture is still listening");
+
+        probe.press_button(MouseButton::Right);
+        assert_eq!(
+            probe.results(),
+            [Captured::Key(0x02)],
+            "and a separate press still binds"
+        );
+    }
+
+    #[gpui::test]
+    fn a_press_with_no_virtual_key_says_so_and_keeps_listening(cx: &mut TestAppContext) {
+        let mut probe = probe(cx);
+        probe.press();
+
+        // Both a bare modifier and a name outside the vocabulary: neither has a code to store,
+        // and both used to leave the capture listening with nothing on screen to say why the
+        // press did nothing.
+        for name in ["shift", "f25"] {
+            probe.key(name);
+
+            assert!(probe.results().is_empty(), "{name} has no key to store");
+            assert!(
+                probe.capturing(),
+                "the capture waits for a key it can store, as the managed hook did"
+            );
+            assert!(
+                probe
+                    .visual
+                    .cx
+                    .read(|cx| probe.capture.read(cx).is_refused()),
+                "{name} is recorded as refused"
+            );
+            assert_eq!(
+                probe.label(),
+                "Bind: [Not a bindable key]",
+                "{name} says why the press did nothing"
+            );
+        }
+
+        probe.key("f1");
+
+        assert_eq!(
+            probe.results(),
+            [Captured::Key(0x70)],
+            "the next mappable key still ends the capture"
+        );
+        assert_eq!(
+            probe.label(),
+            "Bind: Unbound",
+            "and the button reads the profile again"
+        );
+    }
+
+    #[gpui::test]
     fn losing_focus_abandons_the_capture(cx: &mut TestAppContext) {
         let mut probe = probe(cx);
         probe.press();
@@ -511,6 +771,44 @@ mod tests {
             probe.results().is_empty(),
             "an unfocused button must not report the window's keys"
         );
+    }
+
+    #[test]
+    fn the_mouse_buttons_are_the_managed_pseudo_keys() {
+        // The managed `VK_LBUTTON`..`VK_XBUTTON2`, which is what its mouse hook reported
+        // (`InputHooks.cs:40-44`), and the codes the label already names. The two properties
+        // that matter are both asserted: the code the profile stores, and that the label reads
+        // it back as a mouse button rather than as `VK 0x1`.
+        for (button, vk, label) in [
+            (MouseButton::Left, 0x01, "Mouse Left"),
+            (MouseButton::Right, 0x02, "Mouse Right"),
+            (MouseButton::Middle, 0x04, "Mouse Middle"),
+            (
+                MouseButton::Navigate(NavigationDirection::Back),
+                0x05,
+                "Mouse X1",
+            ),
+            (
+                MouseButton::Navigate(NavigationDirection::Forward),
+                0x06,
+                "Mouse X2",
+            ),
+        ] {
+            assert_eq!(mouse_virtual_key(button), vk, "{button:?}");
+            assert_eq!(keybind_text::format_virtual_key(vk), label, "{button:?}");
+        }
+    }
+
+    #[test]
+    fn a_refusal_keeps_the_prefix_of_the_label_it_replaces() {
+        // The button has one voice: the refusal reads as the control that refused, whether that
+        // is a card header's `Bind: ` or an action row's `Action: `.
+        let module = refusal_label("Bind: [Press key or mouse...]");
+        let action = refusal_label("Action: [Press key or mouse...]");
+
+        assert_eq!(module, "Bind: [Not a bindable key]");
+        assert_eq!(action, "Action: [Not a bindable key]");
+        assert_eq!(refusal_label("Unbound"), "Unbound: [Not a bindable key]");
     }
 
     #[test]

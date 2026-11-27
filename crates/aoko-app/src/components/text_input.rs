@@ -80,8 +80,11 @@
 //! `FieldVariant::Query` is the overlay's line: no fill, no edge, no padding, 18 px text and
 //! the search card's own placeholder colour. The caret is drawn by splitting the display text
 //! at the caret and putting a 1 px accent line between the halves, so it needs no text
-//! measurement.
+//! measurement. That split — and, for a masked field, the whole mask with it — is kept between
+//! frames and rebuilt only when the value or the caret moves, because every frame of every field
+//! asks for it and most of them changed nothing.
 
+use std::borrow::Cow;
 use std::ops::Range;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -100,6 +103,15 @@ use super::field::FieldVariant;
 /// The mask character. One per character, so a token's length is still visible while
 /// its content is not — the same shape as a `PasswordBox`.
 const MASK: char = '•';
+
+/// The most characters one insertion may add.
+///
+/// A single-line field holds a token, a name or a query, so nothing legitimate comes near this;
+/// a clipboard, on the other hand, can be megabytes, and whatever lands here is copied by the
+/// mask, by the owner's `on_change` and — for a token field — into the profile. A paste past the
+/// bound is clipped rather than refused, so the part a user meant still arrives. Typing is
+/// nowhere near it.
+const MAX_INSERT_CHARS: usize = 4096;
 
 /// The change callback: new value, plus the window and app the owner needs to reach
 /// its own entity. Boxed behind an `Arc` because the entity and its events both hold it.
@@ -167,11 +179,12 @@ impl TextEdit {
     }
 
     pub fn insert_str(&mut self, text: &str) {
+        let text = Self::accepted(text);
         if text.is_empty() {
             return;
         }
         let at = self.byte_index(self.caret);
-        self.text.insert_str(at, text);
+        self.text.insert_str(at, &text);
         self.caret += text.chars().count();
     }
 
@@ -202,11 +215,12 @@ impl TextEdit {
     /// Replaces a character range with `text`, which is what the input handler does for
     /// paste and IME. The caret ends after the inserted text.
     pub fn replace_range(&mut self, range: Range<usize>, text: &str) {
+        let text = Self::accepted(text);
         let start_char = range.start.min(self.char_len());
         let end_char = range.end.clamp(start_char, self.char_len());
         let start = self.byte_index(start_char);
         let end = self.byte_index(end_char);
-        self.text.replace_range(start..end, text);
+        self.text.replace_range(start..end, &text);
         self.caret = start_char + text.chars().count();
     }
 
@@ -272,6 +286,29 @@ impl TextEdit {
             .char_indices()
             .nth(char_index)
             .map_or(self.text.len(), |(index, _)| index)
+    }
+
+    /// The part of `text` one insertion accepts.
+    ///
+    /// Two rules, and both of them are what "single line" means here. Control characters are
+    /// dropped: the key path already refuses them, but a paste and an IME commit arrive as one
+    /// string through the field's [`EntityInputHandler`], and a line break in a `flex_row` field
+    /// wraps the row and moves everything beside it — WPF's single-line `TextBox` dropped them
+    /// for the same reason. The insertion is then clipped to [`MAX_INSERT_CHARS`], because a
+    /// clipboard is not bounded. A character typed one at a time borrows its input, so the common
+    /// path allocates nothing.
+    fn accepted(text: &str) -> Cow<'_, str> {
+        let clipped: Cow<'_, str> = if text.chars().count() > MAX_INSERT_CHARS {
+            Cow::Owned(text.chars().take(MAX_INSERT_CHARS).collect())
+        } else {
+            Cow::Borrowed(text)
+        };
+
+        if clipped.chars().any(char::is_control) {
+            Cow::Owned(clipped.chars().filter(|ch| !ch.is_control()).collect())
+        } else {
+            clipped
+        }
     }
 }
 
@@ -342,6 +379,10 @@ pub struct TextInput {
     variant: FieldVariant,
     id: ElementId,
     focus: FocusHandle,
+    /// The drawn value in the two halves the caret sits between, kept from the paint that built
+    /// it. [`TextInput::edit_mut`] drops it, so it can only describe the value and caret it was
+    /// built from.
+    split: Option<(SharedString, SharedString)>,
     on_change: Option<ChangeHandler>,
 }
 
@@ -358,6 +399,7 @@ impl TextInput {
             variant: FieldVariant::Panel,
             id: ElementId::Name(SharedString::from(format!("text-input-{id}"))),
             focus: cx.focus_handle(),
+            split: None,
             on_change: None,
         }
     }
@@ -374,6 +416,7 @@ impl TextInput {
     #[must_use]
     pub fn masked(mut self, masked: bool) -> Self {
         self.masked = masked;
+        self.split = None;
         self
     }
 
@@ -406,8 +449,45 @@ impl TextInput {
     /// Writes a value in from the owner, e.g. when a dialog opens. Does not fire
     /// `on_change`.
     pub fn set_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
-        self.edit.set_text(text);
+        self.edit_mut().set_text(text);
         cx.notify();
+    }
+
+    /// Repaints the field in a new palette.
+    ///
+    /// The entity owns its own copy of the theme, taken when the owner created it, so a palette
+    /// applied while the window is up reaches this field only through here.
+    pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
+        self.theme = theme;
+        cx.notify();
+    }
+
+    /// The editing model, for the paths that change it.
+    ///
+    /// Every mutation takes it this way rather than reaching for the field, because the drawn
+    /// split is dropped here: an edit that forgot to invalidate it would paint the previous value
+    /// with this one's caret, which is worse than the work the cache saves.
+    fn edit_mut(&mut self) -> &mut TextEdit {
+        self.split = None;
+        &mut self.edit
+    }
+
+    /// The display value in the two halves the caret sits between.
+    ///
+    /// The paint asks for this every frame, so it is cached: a field that changed nothing — a
+    /// hover, an animation, a frame drawn for a sibling — reuses the halves instead of splitting
+    /// the value again and rebuilding the whole mask with it. Handing them on then costs two
+    /// `SharedString` clones, which for the short values these fields hold is a copy of the
+    /// handles and not a rebuild of the text.
+    fn cached_split(&mut self) -> (SharedString, SharedString) {
+        if let Some((before, after)) = &self.split {
+            return (before.clone(), after.clone());
+        }
+
+        let (before, after) = self.edit.split_at_caret(self.masked);
+        let halves = (SharedString::from(before), SharedString::from(after));
+        self.split = Some(halves.clone());
+        halves
     }
 
     /// One keystroke. Returns whether it was ours.
@@ -428,17 +508,17 @@ impl TextInput {
         }
 
         let outcome = match keystroke.key.as_str() {
-            "backspace" => bool_outcome(self.edit.backspace()),
-            "delete" => bool_outcome(self.edit.delete()),
-            "left" => caret_outcome(self.edit.move_left()),
-            "right" => caret_outcome(self.edit.move_right()),
-            "home" => caret_outcome(self.edit.go_home()),
-            "end" => caret_outcome(self.edit.go_end()),
+            "backspace" => bool_outcome(self.edit_mut().backspace()),
+            "delete" => bool_outcome(self.edit_mut().delete()),
+            "left" => caret_outcome(self.edit_mut().move_left()),
+            "right" => caret_outcome(self.edit_mut().move_right()),
+            "home" => caret_outcome(self.edit_mut().go_home()),
+            "end" => caret_outcome(self.edit_mut().go_end()),
             // Tab, Enter and Escape stay with the dialog: focus movement and submit.
             "tab" | "enter" | "escape" => Outcome::Ignored,
             _ => match keystroke.key_char.as_deref() {
                 Some(text) if !text.is_empty() && !text.chars().any(char::is_control) => {
-                    self.edit.insert_str(text);
+                    self.edit_mut().insert_str(text);
                     Outcome::Text
                 }
                 _ => Outcome::Ignored,
@@ -464,6 +544,9 @@ impl TextInput {
     }
 
     /// The display split, for the caller that wants to read it in tests.
+    ///
+    /// Recomputed rather than read from the paint cache, which belongs to the frame being drawn
+    /// and needs `&mut` to fill; the two agree by construction, since the cache is the same call.
     #[must_use]
     pub fn split_display(&self) -> (String, String) {
         self.edit.split_at_caret(self.masked)
@@ -491,7 +574,7 @@ impl Render for TextInput {
         let theme = self.theme.clone();
         let focused = self.focus.is_focused(window);
 
-        let (before, after) = self.edit.split_at_caret(self.masked);
+        let (before, after) = self.cached_split();
         let empty = self.edit.is_empty();
         let caret_colour = theme.accent;
         let text_colour = theme.text;
@@ -576,7 +659,7 @@ impl Render for TextInput {
             } else {
                 div()
                     .text_color(text_colour)
-                    .child(SharedString::from(before))
+                    .child(before)
                     .into_any_element()
             })
             .child(if focused {
@@ -596,7 +679,7 @@ impl Render for TextInput {
             } else {
                 div()
                     .text_color(text_colour)
-                    .child(SharedString::from(after))
+                    .child(after)
                     .into_any_element()
             })
             // Registers the IME/paste handler for this frame. It has to run during
@@ -680,7 +763,7 @@ impl EntityInputHandler for TextInput {
             ),
             None => (self.edit.caret(), self.edit.caret()),
         };
-        self.edit.replace_range(start..end, text);
+        self.edit_mut().replace_range(start..end, text);
         window.notify_text_input_changed(&self.focus);
         cx.notify();
         if let Some(handler) = self.on_change.clone() {
@@ -877,6 +960,94 @@ mod tests {
         }
         let (before, after) = edit.split_at_caret(false);
         assert_eq!((before.as_str(), after.as_str()), ("", "hello"));
+    }
+
+    #[test]
+    fn a_paste_that_carries_line_breaks_stays_one_line() {
+        // The key path refuses control characters, and the paste/IME path is the same field:
+        // a line break would wrap the row and push every sibling down. WPF's single-line
+        // `TextBox` dropped them for the same reason.
+        let mut edit = TextEdit::new("");
+        edit.insert_str("one\ntwo\tthree\rmore");
+        assert_eq!(edit.text(), "onetwothreemore");
+        assert_eq!(edit.caret(), 15, "the caret counts what actually landed");
+
+        edit.replace_range(0..2, "\nX");
+        assert_eq!(edit.text(), "Xetwothreemore");
+    }
+
+    #[test]
+    fn an_oversized_insertion_is_clipped_to_what_a_field_holds() {
+        let huge = "a".repeat(MAX_INSERT_CHARS + 10);
+
+        let mut edit = TextEdit::new("");
+        edit.insert_str(&huge);
+        assert_eq!(edit.char_len(), MAX_INSERT_CHARS);
+
+        // A paste replaces a range and the clip applies to the insertion, not to the value.
+        let mut edit = TextEdit::new("keep");
+        edit.replace_range(0..0, &huge);
+        assert_eq!(edit.char_len(), MAX_INSERT_CHARS + 4);
+        assert!(edit.text().ends_with("keep"));
+    }
+
+    /// The paint cache is only worth its weight if it cannot go stale, so every path that changes
+    /// the value or moves the caret is checked against a split computed from scratch.
+    #[test]
+    fn the_painted_split_never_disagrees_with_a_fresh_one() {
+        use gpui::{Keystroke, TestAppContext};
+
+        let mut cx = TestAppContext::single();
+        let (form, window) = form_window(&mut cx, "cache", true);
+        focus_field(&window, &form, &mut cx);
+        let handle: gpui::AnyWindowHandle = window.into();
+        let field = cx.read(|cx| form.read(cx).field.clone());
+
+        let check = |cx: &mut TestAppContext, what: &str| {
+            let (cached, fresh) = cx.update(|cx| {
+                field.update(cx, |field, _| {
+                    let cached = field.cached_split();
+                    let fresh = field.edit.split_at_caret(field.masked);
+                    (cached, fresh)
+                })
+            });
+            assert_eq!(
+                (cached.0.as_str(), cached.1.as_str()),
+                (fresh.0.as_str(), fresh.1.as_str()),
+                "the painted halves after {what}"
+            );
+        };
+
+        check(&mut cx, "an empty field");
+        for key in ["a", "b", "c"] {
+            cx.dispatch_keystroke(handle, Keystroke::parse(key).expect("keystroke"));
+            check(&mut cx, "a typed character");
+        }
+        cx.dispatch_keystroke(handle, Keystroke::parse("left").expect("keystroke"));
+        check(&mut cx, "a caret move");
+        cx.dispatch_keystroke(handle, Keystroke::parse("backspace").expect("keystroke"));
+        check(&mut cx, "a deletion");
+
+        cx.update_window(handle, |_, window, cx| {
+            field.update(cx, |field, cx| {
+                field.replace_text_in_range(None, "pasted into the value", window, cx);
+            });
+        })
+        .expect("paste");
+        check(&mut cx, "a paste");
+
+        cx.update_window(handle, |_, _, cx| {
+            field.update(cx, |field, cx| field.set_text("reset", cx));
+        })
+        .expect("programmatic write");
+        check(&mut cx, "a programmatic write");
+
+        let (before, after) = cx.update(|cx| field.update(cx, |field, _| field.cached_split()));
+        assert_eq!(
+            (before.as_str(), after.as_str()),
+            ("•••••", ""),
+            "and the masked halves are the ones the frame paints, not the value"
+        );
     }
 
     /// The end-to-end path that makes the field usable on X11: a real keystroke through

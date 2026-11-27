@@ -51,6 +51,9 @@ pub const RESULTS_VERTICAL_MARGIN: f32 = 12.0;
 pub const RESULTS_AREA_MIN_HEIGHT: f32 = 100.0;
 /// One result row.
 pub const ROW_HEIGHT: f32 = 48.0;
+/// How much of the query the empty-state message quotes: managed's `trimmed[..24]`, counted in
+/// characters, with `...` after it (`Aoko/Views/CommandSearchOverlay.xaml.cs:315-322`).
+pub const EMPTY_MESSAGE_QUERY_CAP: usize = 24;
 /// Scrim fade-in.
 pub const OPEN_SCRIM_MS: u32 = 180;
 /// Card fade-in, and the slide from 8 px down.
@@ -376,9 +379,20 @@ impl CommandSearchState {
         self.scroll_request
     }
 
-    /// Takes the pending scroll request.
+    /// Takes the pending scroll request: an index into [`Self::rows`], or `None` when there is
+    /// nothing to scroll.
+    ///
+    /// The consumer's side of the contract is deliberately one line long: scroll row `index` of
+    /// `rows()` into view, and do nothing else. The request is consumed here, so one scroll
+    /// happens per request; it carries no ranking, no selection and no animation of its own.
+    ///
+    /// An index outside the rows is never returned. A request is made against the row set of the
+    /// keystroke that asked for it, and a rebuild between that keystroke and the paint can leave
+    /// fewer rows than the index: scrolling to a row that is gone would move the viewport for
+    /// nothing, which looks like a jump to the end of the list.
     pub fn take_scroll_request(&mut self) -> Option<usize> {
-        self.scroll_request.take()
+        let index = self.scroll_request.take()?;
+        (index < self.rows.len()).then_some(index)
     }
 
     /// The live pulse, if any.
@@ -629,15 +643,18 @@ impl CommandSearchState {
     }
 
     /// `BuildEmptyMessage`: names the query, capped, and suggests three things.
+    ///
+    /// The cap is managed's (`Aoko/Views/CommandSearchOverlay.xaml.cs:315-322`):
+    /// `trimmed[..24] + "..."`, which measures the query in characters rather than in bytes. So
+    /// the cut here is on characters too — counting characters and then slicing at byte 24 would
+    /// cut a non-ASCII query inside a character, and because the slice then has to fall back to a
+    /// boundary it would silently print fewer than the twenty-four the managed message showed.
     #[must_use]
     pub fn empty_message(&self) -> String {
         let trimmed = self.query.trim();
-        let capped = if trimmed.chars().count() > 24 {
-            let mut cut = 24;
-            while cut > 0 && !trimmed.is_char_boundary(cut) {
-                cut -= 1;
-            }
-            format!("{}...", &trimmed[..cut])
+        let capped = if trimmed.chars().count() > EMPTY_MESSAGE_QUERY_CAP {
+            let head: String = trimmed.chars().take(EMPTY_MESSAGE_QUERY_CAP).collect();
+            format!("{head}...")
         } else {
             trimmed.to_owned()
         };
@@ -931,6 +948,32 @@ mod tests {
     }
 
     #[test]
+    fn the_empty_message_caps_a_query_on_characters_not_bytes() {
+        // `Substring(0, 24)` counts characters, so a query of two-byte characters must produce
+        // twenty-four of them: a byte cut would stop at twelve, which is the difference this
+        // pins.
+        let facts = table(true, false);
+        let mut state = open_with(None, false, &facts);
+        let accented = "é".repeat(40);
+        state.set_query(&accented, false, &facts);
+
+        assert_eq!(
+            state.empty_message(),
+            format!(
+                "No module matches \"{}...\". Try \"esp\", \"aim\", or a tab name.",
+                "é".repeat(24)
+            )
+        );
+
+        // A four-byte character is cut on the same boundary, and the message is still valid text.
+        let mut state = open_with(None, false, &facts);
+        state.set_query(&"😀".repeat(30), false, &facts);
+        assert!(state
+            .empty_message()
+            .contains(&format!("\"{}\"", "😀".repeat(24))));
+    }
+
+    #[test]
     fn the_results_summary_pluralises_like_the_managed_switch() {
         let facts = table(true, false);
         let mut state = open_with(None, false, &facts);
@@ -969,6 +1012,27 @@ mod tests {
             QueryKeyOutcome::Moved(Some(0)),
             "down from the last row wraps to the first"
         );
+    }
+
+    #[test]
+    fn a_scroll_request_past_the_end_of_the_list_is_dropped() {
+        let facts = table(true, false);
+        let mut state = open_with(None, false, &facts);
+        let count = state.rows().len();
+        let _ = state.take_scroll_request();
+
+        // A rebuild between the keystroke and the paint can leave fewer rows than the index the
+        // request was made with; the view must not be told to scroll to a row that is gone.
+        state.scroll_request = Some(count);
+        assert_eq!(state.take_scroll_request(), None);
+        assert_eq!(
+            state.scroll_request(),
+            None,
+            "and the request is taken either way, so it cannot be replayed"
+        );
+
+        state.scroll_request = Some(count - 1);
+        assert_eq!(state.take_scroll_request(), Some(count - 1), "the last row");
     }
 
     #[test]
