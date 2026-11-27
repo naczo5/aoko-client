@@ -81,6 +81,31 @@ pub mod copy {
     /// title argument is this string, so there is no XAML line to cite. The port draws the same
     /// question in a form of its own and keeps the caption managed would have shown.
     pub const DELETE_TITLE: &str = "Delete account";
+
+    // The markup's tooltips, one per control the tab paints. They are `ToolTip=` attributes in
+    // `AccountsView.xaml`, not note rows, so each rides its control's wrapper rather than taking a
+    // line of the card.
+
+    /// `:197`, the Import file button — the sentence says what the picker accepts.
+    pub const IMPORT_FILE_HINT: &str = "Choose one or more Localts token or cookie export files";
+    /// `:203`, the Paste button.
+    pub const PASTE_HINT: &str = "Paste a token or cookie export";
+    /// `:209`, the Add offline button.
+    pub const ADD_OFFLINE_HINT: &str = "Save a cracked username";
+    /// `:258`, the paste panel's Import button.
+    pub const PASTE_IMPORT_HINT: &str = "Import the pasted token or cookie export";
+    /// `:265` and `:309`, the paste panel's and the offline panel's Cancel buttons — the markup
+    /// repeats the sentence for both, so this is one constant with two cites.
+    pub const CANCEL_HINT: &str = "Close the panel and keep what you typed";
+    /// `:302`, the offline panel's Add button.
+    pub const OFFLINE_ADD_HINT: &str = "Save this username as an offline account";
+    /// `:360`, the session Refresh button.
+    pub const REFRESH_HINT: &str =
+        "Read the account signed in to the game. Needs the client injected and the main menu.";
+    /// `:488`, the Open folder button.
+    pub const OPEN_FOLDER_HINT: &str = "Open the folder that holds accounts.json";
+    /// `:500`, the Lunar checkbox — two sentences in the markup, which is why it reads long.
+    pub const LUNAR_HINT: &str = "Writes every saved Microsoft account into Lunar's accounts.json after an import or switch. Offline accounts are skipped, and Lunar must be relaunched to read the file.";
 }
 
 /// One card: the avatar letter, the name, the source chip, the last-used line and
@@ -197,20 +222,22 @@ pub fn render(
             .flex()
             .flex_row()
             .gap(px(8.0))
-            .child(components::button(
+            .child(button_with_hint(
                 "accounts-import-file",
                 theme,
                 ButtonVariant::Dark,
                 copy::IMPORT_FILE,
+                copy::IMPORT_FILE_HINT,
                 move |_, _, cx| {
                     handle.update(cx, |shell, cx| shell.accounts_import_file(cx));
                 },
             ))
-            .child(components::button(
+            .child(button_with_hint(
                 "accounts-paste",
                 theme,
                 ButtonVariant::Dark,
                 copy::PASTE,
+                copy::PASTE_HINT,
                 {
                     let handle = entity.clone();
                     move |_, _, cx| {
@@ -220,11 +247,12 @@ pub fn render(
                     }
                 },
             ))
-            .child(components::button(
+            .child(button_with_hint(
                 "accounts-add-offline",
                 theme,
                 ButtonVariant::Dark,
                 copy::ADD_OFFLINE,
+                copy::ADD_OFFLINE_HINT,
                 {
                     let handle = entity.clone();
                     move |_, _, cx| {
@@ -253,11 +281,12 @@ pub fn render(
                         .flex()
                         .flex_row()
                         .gap(px(8.0))
-                        .child(components::button(
+                        .child(button_with_hint(
                             "accounts-paste-import",
                             theme,
                             ButtonVariant::Primary,
                             copy::PASTE_IMPORT,
+                            copy::PASTE_IMPORT_HINT,
                             {
                                 let handle = entity.clone();
                                 move |_, _, cx| {
@@ -265,11 +294,12 @@ pub fn render(
                                 }
                             },
                         ))
-                        .child(components::button(
+                        .child(button_with_hint(
                             "accounts-paste-cancel",
                             theme,
                             ButtonVariant::Secondary,
                             copy::CANCEL,
+                            copy::CANCEL_HINT,
                             {
                                 let handle = entity.clone();
                                 move |_, _, cx| {
@@ -308,11 +338,12 @@ pub fn render(
                         .flex()
                         .flex_row()
                         .gap(px(8.0))
-                        .child(components::button(
+                        .child(button_with_hint(
                             "accounts-offline-add",
                             theme,
                             ButtonVariant::Primary,
                             copy::OFFLINE_ADD,
+                            copy::OFFLINE_ADD_HINT,
                             {
                                 let handle = entity.clone();
                                 move |_, _, cx| {
@@ -320,11 +351,12 @@ pub fn render(
                                 }
                             },
                         ))
-                        .child(components::button(
+                        .child(button_with_hint(
                             "accounts-offline-cancel",
                             theme,
                             ButtonVariant::Secondary,
                             copy::CANCEL,
+                            copy::CANCEL_HINT,
                             {
                                 let handle = entity.clone();
                                 move |_, _, cx| {
@@ -354,11 +386,12 @@ pub fn render(
                     .justify_between()
                     .w_full()
                     .child(components::chip(theme, ChipTone::Neutral, chip_label))
-                    .child(components::button(
+                    .child(button_with_hint(
                         "accounts-refresh-session",
                         theme,
                         ButtonVariant::Secondary,
                         copy::REFRESH,
+                        copy::REFRESH_HINT,
                         {
                             let handle = entity.clone();
                             move |_, _, cx| {
@@ -581,11 +614,12 @@ pub fn render(
                 .text_color(theme.dim_text)
                 .child(copy::STORAGE_WARNING),
         )
-        .child(components::button(
+        .child(button_with_hint(
             "accounts-open-folder",
             theme,
             ButtonVariant::Secondary,
             copy::OPEN_FOLDER,
+            copy::OPEN_FOLDER_HINT,
             {
                 let handle = entity.clone();
                 move |_, _, cx| {
@@ -593,18 +627,25 @@ pub fn render(
                 }
             },
         ))
-        .child(components::checkbox(
-            "accounts-lunar",
-            theme,
-            state.lunar_accounts(),
-            copy::LUNAR_ACCOUNTS,
-            {
-                let handle = entity.clone();
-                move |_, _, cx| {
-                    handle.update(cx, |shell, cx| shell.toggle_lunar_accounts(cx));
-                }
-            },
-        ));
+        .child(
+            // The Lunar toggle's tooltip rides a wrapper for the same reason the buttons' do:
+            // `components::checkbox` takes no tooltip and this round owns no component.
+            div()
+                .id(crate::reuse::stitched("accounts-lunar", "-hint", ""))
+                .tooltip(components::tooltip(theme, copy::LUNAR_HINT))
+                .child(components::checkbox(
+                    "accounts-lunar",
+                    theme,
+                    state.lunar_accounts(),
+                    copy::LUNAR_ACCOUNTS,
+                    {
+                        let handle = entity.clone();
+                        move |_, _, cx| {
+                            handle.update(cx, |shell, cx| shell.toggle_lunar_accounts(cx));
+                        }
+                    },
+                )),
+        );
 
     body.into_any_element()
 }
@@ -621,6 +662,27 @@ fn validation_copy(text: &str) -> Option<&str> {
     } else {
         Some(text)
     }
+}
+
+/// One button with the markup's tooltip on a wrapper around it.
+///
+/// `components::button` takes no tooltip and this round owns no component, so the sentence rides an
+/// id'd wrapper — the shape `components::block_esp` gives its colour swatch and `views::stats_view`
+/// gives a histogram bar. The wrapper's id is the button's plus `-hint`, because two elements
+/// cannot share one id and the button keeps the name its tests and selectors use.
+fn button_with_hint(
+    id: &'static str,
+    theme: &Theme,
+    variant: ButtonVariant,
+    label: &'static str,
+    hint: &'static str,
+    on_click: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+) -> AnyElement {
+    div()
+        .id(crate::reuse::stitched(id, "-hint", ""))
+        .tooltip(components::tooltip(theme, hint))
+        .child(components::button(id, theme, variant, label, on_click))
+        .into_any_element()
 }
 
 /// The red validation line, collapsed when empty (`SetInlineValidation`, `:1113`).
