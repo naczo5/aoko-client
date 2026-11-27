@@ -2646,13 +2646,38 @@ impl Shell {
     /// Returns whether a field accepted it; a path with no field behind it keeps the
     /// session override only, which is the honest outcome for the two
     /// `NON_PROFILE_BINDS`.
+    ///
+    /// A toggle also goes through
+    /// [`AppController::set_switch_for_profile_key`], because a few profile fields are the
+    /// saved copy of a module switch: `"Pause when breaking"` writes `breakBlocksEnabled`
+    /// and the frame's `breakBlocks` reads `EnabledFlag::BreakBlocks`, so a checkbox that
+    /// wrote only the profile moved the module neither in the loops nor on the wire until a
+    /// save and a reload. The lookup answers `None` for every key that is not a switch, which
+    /// is why this is a table lookup and not "any bind ending in `Enabled`":
+    /// `PixelPartyAutoLookEnabled` and `PixelPartyAutoWalkEnabled` are sub-settings the
+    /// profile owns.
+    ///
+    /// It lives here rather than in [`Shell::set_checked`] because this is the one function
+    /// every control write passes through; a `Check` added later gets the switch half by
+    /// existing. A `Control::Switch` whose target is a module never reaches this — its click
+    /// calls [`Shell::toggle_module`] — and where a caller does drive both, the second write
+    /// is a no-op through `set_module_enabled`'s change test, so the paint still has one
+    /// source per control: a switch from the flag set, a check from the profile snapshot.
     fn apply_control(
         &mut self,
         bind: &'static str,
         value: crate::views::bindings::ControlValue,
     ) -> bool {
+        let switch = match value {
+            crate::views::bindings::ControlValue::Toggle(on) => Some(on),
+            _ => None,
+        };
         let written = crate::views::bindings::write(&mut self.profile, bind, value);
         if written {
+            if let Some(on) = switch {
+                // `None` is the ordinary case: a toggle that names no switch.
+                let _ = self.controller().set_switch_for_profile_key(bind, on);
+            }
             self.values = crate::views::bindings::snapshot(&self.profile);
             // The controller's copy is what the `config` frame is built from, so it has to
             // see every accepted write; see `push_profile`.
@@ -6183,6 +6208,77 @@ mod tests {
             crate::views::bindings::ControlValue::Text("Record".to_owned())
         ));
         assert_eq!(shell.profile().kill_aura_settings.cps_mode(), "record");
+    }
+
+    /// A checkbox that is the saved copy of a switch moves the switch, not only the file.
+    ///
+    /// `"Pause when breaking"` writes `breakBlocksEnabled`, and the frame's `breakBlocks` reads
+    /// `EnabledFlag::BreakBlocks`, so a press that wrote only the profile left the module off in
+    /// the loops and on the wire until a save and a reload. Driven through [`Shell::set_checked`],
+    /// which is what the painted checkbox's `on_click` runs: `components::checkbox` carries an
+    /// `ElementId` and no `debug_selector`, and a wrapper to get one would land in the Combat
+    /// frame the allocation pin measures.
+    #[gpui::test]
+    fn a_checkbox_that_is_a_switch_reaches_the_frame(cx: &mut gpui::TestAppContext) {
+        let shell = cx.update(|cx| cx.new(|_| Shell::new(Theme::slate())));
+
+        cx.update(|cx| {
+            shell.update(cx, |shell, cx| {
+                shell.set_checked("BreakBlocksEnabled", true, cx);
+            });
+        });
+        let line = cx.read(|cx| shell.read(cx).controller().config_frame().to_line());
+        assert!(
+            line.contains("\"breakBlocks\":true"),
+            "the press reaches the switch the frame reads: {line}"
+        );
+
+        cx.update(|cx| {
+            shell.update(cx, |shell, cx| {
+                shell.set_checked("BreakBlocksEnabled", false, cx);
+            });
+        });
+        let line = cx.read(|cx| shell.read(cx).controller().config_frame().to_line());
+        assert!(
+            line.contains("\"breakBlocks\":false"),
+            "and the inverse, which a write that only ever set `true` would fail: {line}"
+        );
+    }
+
+    /// The switch lookup does not fire for a sub-setting that merely ends in `Enabled`.
+    ///
+    /// `PixelPartyAutoLookEnabled` and `PixelPartyAutoWalkEnabled` are the profile's own fields
+    /// and the frame reads them from the profile, which is why the wiring is a table lookup and
+    /// not "any bind ending in `Enabled`".
+    #[gpui::test]
+    fn a_sub_setting_checkbox_stays_on_the_profile_path(cx: &mut gpui::TestAppContext) {
+        let shell = cx.update(|cx| cx.new(|_| Shell::new(Theme::slate())));
+        let before = cx.read(|cx| shell.read(cx).controller().count_enabled_modules());
+
+        cx.update(|cx| {
+            shell.update(cx, |shell, cx| {
+                shell.set_checked("PixelPartyAutoLookEnabled", true, cx);
+            });
+        });
+
+        let line = cx.read(|cx| shell.read(cx).controller().config_frame().to_line());
+        assert!(
+            line.contains("\"pixelPartyAutoLook\":true"),
+            "the profile carries it to the frame, as before: {line}"
+        );
+        let after = cx.read(|cx| shell.read(cx).controller().count_enabled_modules());
+        assert_eq!(
+            after, before,
+            "no switch moved, so the new call answered `None` for this bind"
+        );
+        assert_eq!(
+            cx.read(|cx| shell
+                .read(cx)
+                .controller()
+                .set_switch_for_profile_key("PixelPartyAutoLookEnabled", true)),
+            None,
+            "and the bind names no switch, which is what the shell relies on"
+        );
     }
 
     #[test]
