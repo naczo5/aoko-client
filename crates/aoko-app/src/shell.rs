@@ -2567,6 +2567,25 @@ impl Shell {
         cx.notify();
     }
 
+    /// The Reload Mappings press (`ReloadMappingsButton_Click`, `MainWindow.xaml.cs:1397-1404`).
+    ///
+    /// Managed's whole handler is two lines: return unless the bridge advertises
+    /// `reloadMappingsNonce`, then `RequestBridgeMappingReload`. The ask is the nonce — it is a field
+    /// of the `config` frame, and a value the bridge has not seen is its signal to re-read — so
+    /// nothing here names a message, and the gate is the capability the managed guard read.
+    ///
+    /// An unsupported press changes nothing, which is also managed's behaviour: the early return is
+    /// the answer rather than a swallowed error, and the button has no disabled state at the pin to
+    /// show it with. The frame is rebuilt and sent by `ingest`'s `sync_config`, which compares the
+    /// controller's frame against the last one on the wire, so the press needs no send of its own.
+    pub fn reload_mappings(&mut self, cx: &mut Context<Self>) {
+        if !self.runtime.setting_supported("reloadMappingsNonce") {
+            return;
+        }
+        let _nonce = self.runtime.controller().request_mapping_reload();
+        cx.notify();
+    }
+
     /// Whether animated sites run, from decision 3's client setting.
     #[must_use]
     pub fn animations(&self) -> bool {
@@ -4219,6 +4238,9 @@ impl Shell {
                     // already existed under another name, so this is the wire-up the review asked
                     // for rather than a behaviour added here.
                     ("HudEditorCard", "Reset layout") => Shell::reset_hud_layout,
+                    // `ReloadMappingsButton_Click` (`:1397-1404`): the bridge's own setting is the
+                    // gate, and the nonce in the frame is the request.
+                    ("ReloadMappingsCard", "Reload Mappings") => Shell::reload_mappings,
                     _ => |_, _| {},
                 };
                 let handle = entity.clone();
@@ -5920,6 +5942,7 @@ mod tests {
             ("ConfigsCard", "Create"),
             ("ConfigsCard", "Open Configs Folder"),
             ("HudEditorCard", "Reset layout"),
+            ("ReloadMappingsCard", "Reload Mappings"),
         ];
 
         let cards: Vec<&Card> = copy::TABS
@@ -5943,6 +5966,87 @@ mod tests {
                 "{id} carries a {label:?} button, so the wire is not stale"
             );
         }
+    }
+
+    /// Reload Mappings is the managed two lines: the bridge's setting, then the nonce.
+    ///
+    /// `ReloadMappingsButton_Click` (`MainWindow.xaml.cs:1397-1404`) returned unless the bridge
+    /// advertised `reloadMappingsNonce`, then asked it to re-read. The ask is the `config` frame's
+    /// nonce, so the observable is the frame the controller would send, and the capabilities frame
+    /// is decoded by the real reader rather than poked into the cell — the gate is then the one a
+    /// bridge trips, not a stub's.
+    #[gpui::test]
+    fn the_reload_mappings_press_needs_the_bridges_setting_and_bumps_the_nonce(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let handle = cx.update(|cx| cx.new(|_| Shell::new(Theme::slate())));
+
+        let nonce = |cx: &mut gpui::TestAppContext| {
+            cx.read(|cx| {
+                handle
+                    .read(cx)
+                    .runtime()
+                    .controller()
+                    .mapping_reload_nonce()
+            })
+        };
+        let advertised = |cx: &mut gpui::TestAppContext| {
+            cx.read(|cx| {
+                handle
+                    .read(cx)
+                    .runtime()
+                    .setting_supported("reloadMappingsNonce")
+            })
+        };
+
+        // The codec's fallback table does not name the nonce — neither did the managed fallback —
+        // so this press is the early return, not a broken wire.
+        assert!(!advertised(cx), "nothing has advertised the nonce yet");
+        let before = nonce(cx);
+        cx.update(|cx| handle.update(cx, |shell, cx| shell.reload_mappings(cx)));
+        assert_eq!(
+            nonce(cx),
+            before,
+            "an unsupported press does nothing, which is managed's `return`"
+        );
+
+        // A bridge that names it is what the managed guard was asking about. The frame is queued
+        // first: the memory transport reports end of stream on an empty queue, so a reader attached
+        // before the bytes would close the link instead of decoding them.
+        let (transport, peer) = aoko_protocol::transport::memory::duplex();
+        peer.feed(b"{\"type\":\"capabilities\",\"settings\":[\"reloadMappingsNonce\"]}\n");
+        cx.update(|cx| {
+            handle.update(cx, |shell, _| shell.runtime_mut().attach_ingest(transport));
+        });
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !advertised(cx) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the capabilities frame never reached the advertised cell"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+
+        cx.update(|cx| handle.update(cx, |shell, cx| shell.reload_mappings(cx)));
+        assert_eq!(
+            nonce(cx),
+            before + 1,
+            "the press bumped the nonce, which is the whole request"
+        );
+        let line = cx.read(|cx| {
+            handle
+                .read(cx)
+                .runtime()
+                .controller()
+                .config_frame()
+                .to_line()
+        });
+        let wanted = format!("\"reloadMappingsNonce\":{}", before + 1);
+        assert!(
+            line.contains(wanted.as_str()),
+            "and the frame the bridge reads carries the new value: {line}"
+        );
     }
 
     #[gpui::test]

@@ -470,6 +470,21 @@ impl Runtime {
             .unwrap_or(false)
     }
 
+    /// Whether the bridge advertises one setting, by the name the `config` frame uses.
+    ///
+    /// The other array of the same cell [`Runtime::module_supported`] reads: `settings` is what the
+    /// bridge says it understands, so a press gated on one is asking the bridge rather than this
+    /// crate. The reader replaces the set when a `capabilities` frame arrives and the codec's
+    /// fallback stands before the handshake, which is the managed `SupportsSetting` answer exactly —
+    /// including the `false` that makes a press a no-op against a bridge that never named it.
+    #[must_use]
+    pub fn setting_supported(&self, setting: &str) -> bool {
+        self.advertised
+            .read()
+            .map(|advertised| advertised.supports_setting(setting))
+            .unwrap_or(false)
+    }
+
     /// The shared advertised-module cell, for the reader that fills it.
     ///
     /// [`Runtime::connect_bridge`] is the only caller: the ingest thread receives the
