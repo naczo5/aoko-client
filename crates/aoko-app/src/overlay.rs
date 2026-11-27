@@ -28,7 +28,21 @@
 //! - **Row washes are opaque blends.** The C# layered `TextBrush` at 8 % / 14 % over the
 //!   card; over an opaque card that is exactly `blend(card, text, 0.08 / 0.14)`, so no
 //!   extra element is needed and a light palette still darkens the row instead of
-//!   washing it white.
+//!   washing it white. Both layers are painted: a selected row under the pointer is the two
+//!   alphas stacked, not the hover wash replacing the selected one.
+//!
+//! # The scrim is a layer, and it takes the press
+//!
+//! The C# overlay was one `Grid` over the whole window, scrim behind and card in front
+//! (`CommandSearchOverlay.xaml:114`), so the card's top ratio and the scrim's own box were both
+//! measured from the window. [`overlay`] therefore returns an **absolute** layer: as a flow child
+//! of the shell's column it was laid out under the title bar, which painted the card one title bar
+//! below `card_top` and collapsed the tab body behind it.
+//!
+//! The dimmed layer is also the close target: `Scrim_MouseLeftButtonDown`
+//! (`CommandSearchOverlay.xaml.cs:488-492`) set `Handled` and called `Close`. A backdrop element
+//! carries that here, and it `occlude`s: without that the hit test still reaches the rail and the
+//! module switches painted under the scrim, so a click on the dimmed area pressed one of them.
 //!
 //! Copy is verbatim from the XAML: `up/down navigate`, `enter jump`, `f2 toggle` and
 //! `UNAVAILABLE`. The keybind chip keeps `Consolas`'s role by using the bundled
@@ -68,21 +82,6 @@
 //!   count changes. The card is one element with one id, so re-running means keying that id
 //!   on the row count — a decision about churn on every keystroke, not a paint.
 //!
-//! `with_animation` is a second gate, and the two are kept deliberately. It consults
-//! [`App::reduce_motion`] itself: with that set, the animator runs once at the oneshot's
-//! **end** state and no frames are scheduled (`gpui/src/elements/animation.rs:326-333` at
-//! the pin). [`App::reduce_motion`] and [`Motion`] are not the same flag and never were —
-//! `Motion` is the managed `ClientAreaAnimation` the Settings card owns, while
-//! `reduce_motion` is GPUI's platform-level setting, which nothing in this tree sets except
-//! the capture harness (`capture.rs:394`, for deterministic frames). So the double gate is
-//! not redundant: [`Motion`] skips mounting the animation at all, which is the settled
-//! first frame the C# returns to at `:143-147`, and `reduce_motion` keeps a screenshot
-//! deterministic.
-//!
-//! `the_overlay_entrance_is_gated_and_starts_on_its_slide` is what catches an entrance that
-//! forgets the gate: the settled card sits 8 px above where the first animated frame paints
-//! it, and that distance is zero under `Motion::STILL`.
-//!
 //! [`card_pulse_ring`] **is** animated, and it reads the gate: it returns `None` under
 //! `Motion::STILL`, and `begin_pulse` refuses to start a pulse at all in that case, so the
 //! ring cannot outlive the setting. It advances through `with_animation`, which is what
@@ -112,7 +111,7 @@
 use gpui::prelude::*;
 use gpui::{
     div, px, Animation, AnimationExt, AnyElement, App, ClickEvent, ElementId, Entity, Hsla,
-    IntoElement, Pixels, SharedString, Size, Window,
+    IntoElement, Pixels, ScrollHandle, SharedString, Size, Window,
 };
 
 use crate::assets::MONO_FAMILY;
@@ -120,7 +119,7 @@ use crate::components::field::FieldVariant;
 use crate::components::text_input::TextInput;
 use crate::components::{self, field, glyph, highlight_text, scroll, switch::switch_static};
 use crate::theme::motion::{self, Motion};
-use crate::theme::{fixed, metrics, Theme};
+use crate::theme::{fixed, metrics, Color, Theme};
 use crate::views::command_search::{self, CommandSearchState, Row};
 use crate::views::copy;
 
@@ -137,6 +136,10 @@ const PULSE_RING_WIDTH: f32 = 1.6;
 const PULSE_HALO_INSET: f32 = 1.5;
 /// The ring's inset inside the card's box (`:1852`: `Rect(0.5, 0.5, width - 1, …)`).
 const PULSE_RING_INSET: f32 = 0.5;
+/// The selected row's accent rule: 2 px wide (`CommandSearchOverlay.xaml:304-316`).
+const ROW_RULE_WIDTH: f32 = 2.0;
+/// The rule's height, centred on the row's box.
+const ROW_RULE_HEIGHT: f32 = 24.0;
 
 /// The query row's source: the live field entity, and the viewport the card is sized from.
 ///
@@ -146,7 +149,10 @@ const PULSE_RING_INSET: f32 = 0.5;
 /// one expression at the call site:
 ///
 /// ```ignore
-/// crate::overlay::overlay(theme, &self.search, motion, (&self.search_query, window.viewport_size()), on_row, on_close)
+/// crate::overlay::overlay(
+///     theme, &self.search, motion, (&self.search_query, window.viewport_size()),
+///     ResultsScroll::new(&self.search_scroll, None), on_row, on_close,
+/// )
 /// ```
 ///
 /// The entity itself has to be created and focused where a `Context` and a `&mut Window`
@@ -175,6 +181,27 @@ impl<'a> From<(&'a Entity<TextInput>, Size<Pixels>)> for OverlayQuery<'a> {
     }
 }
 
+/// Where the results list is scrolled: the handle the card tracks, and the row to show.
+///
+/// The handle outlives the frame — it holds the offset and every row's bounds between paints —
+/// so the shell owns it and lends it here, and the overlay never invents one per frame. `to` is
+/// the row a query-field key just moved the selection to: the state records it as
+/// `CommandSearchState::scroll_request` because only the paint can act on it, and
+/// `ScrollHandle::scroll_to_item` (`crates/gpui/src/elements/div.rs:4419`) is how a paint moves a
+/// row into view — called before the list is built, so the prepaint that follows acts on it.
+pub struct ResultsScroll<'a> {
+    handle: &'a ScrollHandle,
+    to: Option<usize>,
+}
+
+impl<'a> ResultsScroll<'a> {
+    /// The handle, and the row a key moved to.
+    #[must_use]
+    pub fn new(handle: &'a ScrollHandle, to: Option<usize>) -> Self {
+        Self { handle, to }
+    }
+}
+
 /// Seeds the query field, puts the caret at the end of the seed and focuses it.
 ///
 /// This is the **open path**, not a render: it needs a `&mut Window` and a `&mut App`, and
@@ -200,13 +227,17 @@ pub fn focus_query(field: &Entity<TextInput>, seed: &str, window: &mut Window, c
 /// come from [`crate::views::command_search`], the C# `LayoutCard` port, so the clamp
 /// has one home.
 ///
+/// `results` is the list's scroll position; see [`ResultsScroll`]. It is a parameter rather
+/// than something the overlay builds because the handle has to outlive the frame, and it is
+/// how a key that moved the selection gets the new row onto the screen.
+///
 /// `on_row` receives the clicked row index; the caller owns what a click means (select,
 /// jump, or toggle), and whether the overlay closes.
 ///
-/// `on_close` is the Esc chip's click (`CloseChip_Click`, `CommandSearchOverlay.xaml.cs:245-250`),
-/// which called the same `Close` the Escape key did. The chip is a button in managed and an inert
-/// painted box here until this callback arrived, so the caller supplies the one close path rather
-/// than the overlay inventing a second one.
+/// `on_close` is the one close path the pointer takes: the Esc chip's click (`CloseChip_Click`,
+/// `CommandSearchOverlay.xaml.cs:245-250`) and a click on the dimmed layer
+/// (`Scrim_MouseLeftButtonDown`, `:488-492`) both called the `Close` the Escape key did, so the
+/// caller supplies it once rather than the overlay inventing a second one.
 ///
 /// `motion` is the animation gate for the entrance the module docs describe: `Motion::STILL`
 /// paints the settled scrim and the settled card in the first frame, which is the managed
@@ -218,6 +249,7 @@ pub fn overlay<'a>(
     state: &CommandSearchState,
     motion: Motion,
     query: impl Into<OverlayQuery<'a>>,
+    results: ResultsScroll<'_>,
     on_row: impl Fn(usize, &ClickEvent, &mut Window, &mut App) + 'static,
     on_close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
@@ -229,13 +261,26 @@ pub fn overlay<'a>(
     let card_top = command_search::card_top(viewport_height);
     let results_height = command_search::results_viewport_height(viewport_height, CHROME);
 
+    // A key moved the selection: ask for that row before the list is built, so the prepaint that
+    // follows reads the request.
+    if let Some(index) = results.to {
+        results.handle.scroll_to_item(index);
+    }
+
     let on_row = std::rc::Rc::new(on_row);
+    // One close path with two triggers: the esc chip's press and a press on the dimmed layer
+    // (`CloseChip_Click`, `CommandSearchOverlay.xaml.cs:245-250`, and `Scrim_MouseLeftButtonDown`,
+    // `:488-492`). `Rc` because both are separate `'static` closures and neither can borrow the
+    // other's copy.
+    let on_close = std::rc::Rc::new(on_close);
     let selected = state.selected_index();
 
-    let mut results = scroll("command-search-results").max_h(px(results_height));
+    let mut results_list = scroll("command-search-results")
+        .max_h(px(results_height))
+        .track_scroll(results.handle);
     for (index, row) in state.rows().iter().enumerate() {
         let callback = on_row.clone();
-        results = results.child(row_element(
+        results_list = results_list.child(row_element(
             theme,
             row,
             index,
@@ -245,7 +290,7 @@ pub fn overlay<'a>(
     }
 
     if state.rows().is_empty() {
-        results = results.child(
+        results_list = results_list.child(
             div()
                 .px(px(22.0))
                 .py(px(20.0))
@@ -268,33 +313,66 @@ pub fn overlay<'a>(
         // Decision 2: opaque card. `search_glass()` exists for the record only.
         .bg(theme.panel)
         .child(accent_line(theme))
-        .child(query_row(theme, state, query.entity, on_close))
+        .child(query_row(theme, state, query.entity, {
+            let close = std::rc::Rc::clone(&on_close);
+            move |event, window, cx| (*close)(event, window, cx)
+        }))
         .child(
             div()
                 .h(px(metrics::HAIRLINE))
                 .w_full()
                 .bg(theme.slider_background),
         )
-        .child(results)
+        .child(results_list)
         .child(legend(theme, state));
 
     // The card's own box, so the entrance can move it without restyling the card or
     // displacing its `debug_selector`.
+    //
+    // `occlude` is what keeps a press on the card's own blank space from reaching the scrim below
+    // it: the card is an opaque surface in managed, so its edge is neither a close nor a press on
+    // whatever the tab body paints there.
     let card_box = div()
         .absolute()
         .top(px(card_top))
         .left(px((viewport_width - card_width) / 2.0))
+        .occlude()
         .child(card);
 
-    // Scrim: the C# two-stop vertical gradient, darker at the bottom.
-    let scrim = div().size_full().relative().bg(gpui::linear_gradient(
+    // Scrim: the C# two-stop vertical gradient, darker at the bottom. It is a **layer** over the
+    // window, not a row in the shell's column: `card_top` and `card_width` are measured from the
+    // window, and a flow child is laid out under the title bar instead — which painted the card a
+    // title bar below its own box and collapsed the tab body behind it.
+    let scrim_bg = gpui::linear_gradient(
         180.0,
         gpui::linear_color_stop(Hsla::from(fixed::SCRIM_TOP), 0.0),
         gpui::linear_color_stop(Hsla::from(fixed::SCRIM_BOTTOM), 1.0),
-    ));
+    );
+    let scrim = div()
+        .absolute()
+        .top(px(0.0))
+        .left(px(0.0))
+        .size_full()
+        .bg(scrim_bg);
+
+    // The dimmed layer's pointer behaviour: `Scrim_MouseLeftButtonDown` set `Handled` and
+    // closed, so a press that misses the card closes the overlay and stops here. `occlude` is the
+    // "stops here" half — without it the hit test still reaches the rail and the module switches
+    // painted under the scrim, so a click on the dimmed area pressed one of them.
+    let backdrop = div()
+        .id("command-search-scrim")
+        .absolute()
+        .top(px(0.0))
+        .left(px(0.0))
+        .size_full()
+        .occlude()
+        .on_click({
+            let close = std::rc::Rc::clone(&on_close);
+            move |event, window, cx| (*close)(event, window, cx)
+        });
 
     if !motion.enabled() {
-        return scrim.child(card_box).into_any_element();
+        return scrim.child(backdrop).child(card_box).into_any_element();
     }
 
     // `AnimateIn` (`CommandSearchOverlay.xaml.cs:141-167`): the scrim over 180 ms on a
@@ -322,6 +400,7 @@ pub fn overlay<'a>(
             scrim_in,
             |element, t| element.opacity(t),
         )
+        .child(backdrop)
         .child(card_in)
         .into_any_element()
 }
@@ -511,6 +590,50 @@ pub fn card_pulse_ring(
     )
 }
 
+/// The fills a result row can paint, all of them the card colour blended towards the palette's
+/// text so a light palette darkens the row instead of washing it white.
+struct RowWashes {
+    /// The row at rest: the card itself.
+    card: Color,
+    /// A row under the pointer, unselected (`CommandSearchOverlay.xaml:281-289`).
+    hover: Color,
+    /// The selected row (`:291-300`).
+    selected: Color,
+    /// The selected row under the pointer. The managed row stacked the hover layer *over* the
+    /// selected one, so the fill is both alphas composited; painting the hover wash alone shows
+    /// the weaker of the two and the row reads as deselected under the cursor.
+    selected_hover: Color,
+}
+
+impl RowWashes {
+    /// The four fills for this palette.
+    fn of(theme: &Theme) -> Self {
+        let card = theme.panel;
+        let hover_wash = metrics::overlay::ROW_HOVER_WASH;
+        let selected_wash = metrics::overlay::ROW_SELECTED_WASH;
+        let hover = card.blend(theme.text, hover_wash);
+        let selected = card.blend(theme.text, selected_wash);
+        // Two layers of one colour over an opaque card are one blend at the combined alpha.
+        let stacked = 1.0 - (1.0 - selected_wash) * (1.0 - hover_wash);
+
+        Self {
+            card,
+            hover,
+            selected,
+            selected_hover: card.blend(theme.text, stacked),
+        }
+    }
+
+    /// The fill the row paints at rest, and the fill it paints under the pointer.
+    fn fills(&self, selected: bool) -> (Color, Color) {
+        if selected {
+            (self.selected, self.selected_hover)
+        } else {
+            (self.card, self.hover)
+        }
+    }
+}
+
 /// One result row: 48 px, radius 7, inset 10×1, a hover wash and a stronger selected
 /// wash, and an accent rule on the selected row.
 ///
@@ -523,9 +646,8 @@ pub fn row_element(
     selected: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
-    let card = theme.panel;
-    let selected_wash = card.blend(theme.text, metrics::overlay::ROW_SELECTED_WASH);
-    let hover_wash = card.blend(theme.text, metrics::overlay::ROW_HOVER_WASH);
+    let washes = RowWashes::of(theme);
+    let (rest_fill, hover_fill) = washes.fills(selected);
     let ranges: Vec<std::ops::Range<usize>> = row
         .name_ranges
         .iter()
@@ -540,7 +662,15 @@ pub fn row_element(
         .flex_col()
         .flex_1()
         .overflow_hidden()
-        .child(highlight_text(theme, row.display_name(), &ranges, 14.0))
+        // `TextTrimming="CharacterEllipsis"` on the name (`:337`) and on the caption (`:350`): a
+        // long module name ellipsises inside the row instead of wrapping onto a second line and
+        // pushing the caption out of the 48 px box.
+        .child(
+            div()
+                .truncate()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .child(highlight_text(theme, row.display_name(), &ranges, 14.0)),
+        )
         .child(
             div()
                 .text_size(px(metrics::text::CAPTION))
@@ -552,9 +682,10 @@ pub fn row_element(
         );
 
     let mut element = div()
-        .id(gpui::ElementId::Name(
-            format!("command-search-row-{index}").into(),
-        ))
+        // A name rather than a formatted string: the id is built on every frame of every row, and
+        // `NamedInteger` is the same identity without the allocation.
+        .id(gpui::ElementId::named_usize("command-search-row", index))
+        .relative()
         .flex()
         .flex_row()
         .items_center()
@@ -565,15 +696,23 @@ pub fn row_element(
         .px(px(12.0))
         .rounded(px(metrics::radius::OVERLAY_ROW))
         .cursor_pointer()
-        .bg(if selected { selected_wash } else { card })
-        .hover(move |style| style.bg(hover_wash))
+        .bg(rest_fill)
+        // The managed hover layer paints *over* the selected one (`:281-300`), so a selected row
+        // under the pointer keeps its stronger wash; the hover wash alone would read as deselected.
+        .hover(move |style| style.bg(hover_fill))
         .on_click(on_click);
 
     if selected {
+        // Absolute, as the managed rule is: it is a layer over the row's left edge, not a column.
+        // In flow its 2 px and the row's 8 px gap pushed the whole row 10 px right, so moving the
+        // selection moved every name, caption and chip sideways.
         element = element.child(
             div()
-                .w(px(2.0))
-                .h(px(24.0))
+                .absolute()
+                .top(px((metrics::overlay::ROW_HEIGHT - ROW_RULE_HEIGHT) / 2.0))
+                .left(px(0.0))
+                .w(px(ROW_RULE_WIDTH))
+                .h(px(ROW_RULE_HEIGHT))
                 .rounded(px(1.0))
                 .bg(theme.accent),
         );
@@ -610,7 +749,10 @@ pub fn row_element(
                 .px(px(6.0))
                 .py(px(2.0))
                 .text_size(px(9.0))
-                .text_color(fixed::CRITICAL)
+                // `RowSecondaryTextStyle` (`:83-92`): the palette's secondary tone, not a fixed
+                // red — the managed pill carried no colour of its own, and a literal here was one
+                // palette the HUD ignored.
+                .text_color(theme.search_subtle_text())
                 .child(copy::SEARCH_ROW_UNAVAILABLE),
         );
     }
@@ -697,6 +839,8 @@ mod tests {
     struct OverlayProbe {
         state: CommandSearchState,
         motion: Motion,
+        /// The results list's scroll position, which has to outlive a frame.
+        scroll: ScrollHandle,
     }
 
     impl Render for OverlayProbe {
@@ -706,6 +850,7 @@ mod tests {
                 &self.state,
                 self.motion,
                 window.viewport_size(),
+                ResultsScroll::new(&self.scroll, None),
                 |_, _, _, _| {},
                 |_, _, _| {},
             )
@@ -718,6 +863,7 @@ mod tests {
             cx.new(|_| OverlayProbe {
                 state: CommandSearchState::new(),
                 motion: Motion::ANIMATED,
+                scroll: ScrollHandle::new(),
             })
         });
         let window = cx.update(|cx| {
@@ -789,7 +935,11 @@ mod tests {
                     .variant(FieldVariant::Query)
             });
             let state = CommandSearchState::new();
-            cx.new(|_| QueryProbe { state, query })
+            cx.new(|_| QueryProbe {
+                state,
+                query,
+                scroll: ScrollHandle::new(),
+            })
         });
         let window = cx.update(|cx| {
             cx.open_window(WindowOptions::default(), |_, _| probe.clone())
@@ -844,6 +994,54 @@ mod tests {
             visual.debug_bounds("command-search-query-field").is_some(),
             "the field is still the painted one after the edit"
         );
+    }
+
+    /// A press on the dimmed layer closes the card; a press on the card does not.
+    ///
+    /// Both halves are new paint, so both halves are asserted: `Scrim_MouseLeftButtonDown`
+    /// (`CommandSearchOverlay.xaml.cs:488-492`) closed on a press outside the card, and the card
+    /// in managed was an opaque surface that swallowed a press on its own edge. `occlude` is what
+    /// makes the second one hold — without it the scrim's backdrop is hovered through the card,
+    /// and every press on the card closes the overlay.
+    #[gpui::test]
+    fn a_scrim_press_closes_and_a_card_press_does_not(cx: &mut TestAppContext) {
+        use gpui::{Modifiers, Point};
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let mut state = CommandSearchState::new();
+        assert!(
+            state.open(Some("esp"), false, &supported_facts()),
+            "the overlay opens with a seeded query"
+        );
+
+        let closes: Rc<Cell<usize>> = Rc::new(Cell::new(0));
+        let probe = cx.update(|cx| {
+            let closes = Rc::clone(&closes);
+            cx.new(|_| ScrimProbe {
+                state,
+                scroll: ScrollHandle::new(),
+                closes,
+            })
+        });
+        let window = cx.update(|cx| {
+            cx.open_window(WindowOptions::default(), |_, _| probe.clone())
+                .expect("test window")
+        });
+        let mut visual = VisualTestContext::from_window(window.into(), cx);
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let card = visual
+            .debug_bounds("command-search-card")
+            .expect("the card paints");
+        visual.simulate_click(card.center(), Modifiers::default());
+        assert_eq!(closes.get(), 0, "a card press is not a scrim press");
+
+        // The card is centred, so the window's top-left corner is scrim and nothing else.
+        visual.simulate_click(Point::new(px(4.0), px(4.0)), Modifiers::default());
+        assert_eq!(closes.get(), 1, "a scrim press closes the card");
     }
 
     /// The ring is drawn while the pulse is live, gone once `prune_pulse` drops it, gone
@@ -997,10 +1195,36 @@ mod tests {
         }
     }
 
+    /// A window whose root is the overlay, with the close path counted.
+    struct ScrimProbe {
+        state: CommandSearchState,
+        /// The results list's scroll position, which has to outlive a frame.
+        scroll: ScrollHandle,
+        /// How many times the overlay's `on_close` fired.
+        closes: std::rc::Rc<std::cell::Cell<usize>>,
+    }
+
+    impl Render for ScrimProbe {
+        fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let closes = std::rc::Rc::clone(&self.closes);
+            overlay(
+                &Theme::slate(),
+                &self.state,
+                Motion::STILL,
+                window.viewport_size(),
+                ResultsScroll::new(&self.scroll, None),
+                |_, _, _, _| {},
+                move |_, _, _| closes.set(closes.get() + 1),
+            )
+        }
+    }
+
     /// A window whose root is the overlay with the field wired in.
     struct QueryProbe {
         state: CommandSearchState,
         query: Entity<TextInput>,
+        /// The results list's scroll position, which has to outlive a frame.
+        scroll: ScrollHandle,
     }
 
     impl Render for QueryProbe {
@@ -1010,6 +1234,7 @@ mod tests {
                 &self.state,
                 Motion::STILL,
                 (&self.query, window.viewport_size()),
+                ResultsScroll::new(&self.scroll, None),
                 |_, _, _, _| {},
                 |_, _, _| {},
             )
@@ -1043,11 +1268,14 @@ mod tests {
     fn washes_stay_ordered_on_every_palette() {
         for name in Theme::builtin_names() {
             let theme = Theme::by_name(name);
-            let card = theme.panel;
-            let hover = card.blend(theme.text, metrics::overlay::ROW_HOVER_WASH);
-            let selected = card.blend(theme.text, metrics::overlay::ROW_SELECTED_WASH);
-            assert_ne!(hover, card, "{name}: hover wash is invisible");
-            assert_ne!(selected, hover, "{name}: selected wash is not stronger");
+            let washes = RowWashes::of(&theme);
+            assert_eq!(washes.card, theme.panel, "{name}: rest is the card");
+            assert_ne!(washes.hover, washes.card, "{name}: hover is invisible");
+            assert_ne!(washes.selected, washes.hover, "{name}: not stronger");
+            // The selected row under the pointer is the stacked pair, so it is neither of the two:
+            // a row that painted the hover wash while selected fails this on every palette.
+            assert_ne!(washes.selected_hover, washes.selected, "{name}: wash lost");
+            assert_ne!(washes.selected_hover, washes.hover, "{name}: not the stack");
         }
     }
 }
