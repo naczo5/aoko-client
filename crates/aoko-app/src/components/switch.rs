@@ -129,8 +129,9 @@ fn visual(name: SharedString, theme: &Theme, is_on: bool, motion: Motion) -> Any
 
 /// The overlay's deliberately un-animated variant (`CommandSearchOverlay.xaml:46-89`).
 ///
-/// Display only: the overlay toggles a row with `f2` rather than a click, so this keeps
-/// the picture and deliberately carries no handler. It returns a static frame, which
+/// Display only: the overlay's row wraps this in a press target of its own
+/// (`overlay::row_element`'s `on_toggle`), so the picture deliberately carries no
+/// handler here. It returns a static frame, which
 /// also keeps its animation ids out of the tree when several rows are drawn.
 #[must_use]
 pub fn switch_static(theme: &Theme, is_on: bool) -> AnyElement {

@@ -10,6 +10,7 @@ use gpui::{div, px, AnyElement, Entity, MouseButton, SharedString};
 use crate::components::{self, ButtonVariant, ChipTone};
 use crate::shell::Shell;
 use crate::theme::metrics;
+use crate::theme::motion::Motion;
 use crate::theme::Theme;
 use crate::views::accounts_state::StatusTone;
 use crate::views::forms::FormFields;
@@ -183,13 +184,15 @@ fn render_row(
     card.into_any_element()
 }
 
-/// The tab body.
+/// The tab body. `motion` is the animation gate the busy line's sweep reads
+/// (`ServersView.xaml:158-164`).
 pub fn render(
     state: &ServersState,
     fields: &FormFields,
     theme: &Theme,
     entity: &Entity<Shell>,
     tab_index: usize,
+    motion: Motion,
 ) -> AnyElement {
     let mut body = components::scroll(crate::reuse::indexed("tab-scroll", tab_index))
         .flex_col()
@@ -338,12 +341,16 @@ pub fn render(
     }
 
     // === Busy and status ===
+    //
+    // The re-templated bar at `ServersView.xaml:158-164` is `IsIndeterminate="True"` with a looping
+    // 2.2 s storyboard, so the painter is the sweeping one; a determinate half-fill froze in the
+    // middle and read as progress that had stopped.
     if state.is_busy() {
-        body = body.child(components::progress(
+        body = body.child(components::progress_indeterminate(
             "servers-busy",
             theme,
             components::progress::ProgressStyle::busy(),
-            0.5,
+            motion,
         ));
     }
 

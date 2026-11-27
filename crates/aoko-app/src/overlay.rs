@@ -151,7 +151,7 @@ const ROW_RULE_HEIGHT: f32 = 24.0;
 /// ```ignore
 /// crate::overlay::overlay(
 ///     theme, &self.search, motion, (&self.search_query, window.viewport_size()),
-///     ResultsScroll::new(&self.search_scroll, None), on_row, on_close,
+///     ResultsScroll::new(&self.search_scroll, None), on_row, on_toggle, on_close,
 /// )
 /// ```
 ///
@@ -234,6 +234,12 @@ pub fn focus_query(field: &Entity<TextInput>, seed: &str, window: &mut Window, c
 /// `on_row` receives the clicked row index; the caller owns what a click means (select,
 /// jump, or toggle), and whether the overlay closes.
 ///
+/// `on_toggle` is the switch's own press, for the rows that carry one
+/// (`CommandSearchOverlay.xaml:46-89`). A row's box is "jump to that row", so a switch painted
+/// inside it was a target no press could reach: every press on it jumped, and the module could
+/// only be flipped with `f2`. The switch takes the press, stops it there, and hands the row index
+/// back, so the caller runs whatever its `f2` runs for that row.
+///
 /// `on_close` is the one close path the pointer takes: the Esc chip's click (`CloseChip_Click`,
 /// `CommandSearchOverlay.xaml.cs:245-250`) and a click on the dimmed layer
 /// (`Scrim_MouseLeftButtonDown`, `:488-492`) both called the `Close` the Escape key did, so the
@@ -251,6 +257,7 @@ pub fn overlay<'a>(
     query: impl Into<OverlayQuery<'a>>,
     results: ResultsScroll<'_>,
     on_row: impl Fn(usize, &ClickEvent, &mut Window, &mut App) + 'static,
+    on_toggle: impl Fn(usize, &ClickEvent, &mut Window, &mut App) + 'static,
     on_close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let query = query.into();
@@ -268,6 +275,9 @@ pub fn overlay<'a>(
     }
 
     let on_row = std::rc::Rc::new(on_row);
+    // `Rc` for the same reason as `on_close`: one closure per row, each `'static`, and none can
+    // borrow the next one's copy.
+    let on_toggle = std::rc::Rc::new(on_toggle);
     // One close path with two triggers: the esc chip's press and a press on the dimmed layer
     // (`CloseChip_Click`, `CommandSearchOverlay.xaml.cs:245-250`, and `Scrim_MouseLeftButtonDown`,
     // `:488-492`). `Rc` because both are separate `'static` closures and neither can borrow the
@@ -280,12 +290,14 @@ pub fn overlay<'a>(
         .track_scroll(results.handle);
     for (index, row) in state.rows().iter().enumerate() {
         let callback = on_row.clone();
+        let toggle = on_toggle.clone();
         results_list = results_list.child(row_element(
             theme,
             row,
             index,
             selected == Some(index),
             move |event, window, cx| callback(index, event, window, cx),
+            move |event, window, cx| toggle(index, event, window, cx),
         ));
     }
 
@@ -639,12 +651,17 @@ impl RowWashes {
 ///
 /// No `Motion`: the managed overlay animated the card and the scrim, never a row, so this
 /// painter is static by construction rather than by a gate that always says no.
+///
+/// `on_click` is the row's whole box — "jump to that row" — and `on_toggle` is the switch the
+/// toggle rows carry, which is a press target of its own: the row's handler would jump where the
+/// switch means "flip this module". A row with no switch never calls it.
 pub fn row_element(
     theme: &Theme,
     row: &Row,
     index: usize,
     selected: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_toggle: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let washes = RowWashes::of(theme);
     let (rest_fill, hover_fill) = washes.fills(selected);
@@ -758,11 +775,24 @@ pub fn row_element(
     }
 
     if row.has_toggle() {
+        // The switch is painted inside a row whose handler jumps, so it needs a press target of
+        // its own: `stop_propagation` is what keeps one press from doing both, the same split the
+        // palette card's cap makes between asking and applying. The debug selector names the
+        // module rather than the row's position, so a test can ask for the switch it means without
+        // knowing where the ranking put it.
+        let toggle_module = row.entry.id;
         element = element.child(
             div()
+                .id(ElementId::named_usize("command-search-toggle", index))
+                .debug_selector(move || format!("command-search-toggle-{toggle_module}"))
                 .w(px(metrics::switch::TRACK_WIDTH))
                 .flex()
                 .justify_center()
+                .cursor_pointer()
+                .on_click(move |event, window, cx| {
+                    on_toggle(event, window, cx);
+                    cx.stop_propagation();
+                })
                 .child(switch_static(theme, row.is_on())),
         );
     }
@@ -851,6 +881,7 @@ mod tests {
                 self.motion,
                 window.viewport_size(),
                 ResultsScroll::new(&self.scroll, None),
+                |_, _, _, _| {},
                 |_, _, _, _| {},
                 |_, _, _| {},
             )
@@ -1214,6 +1245,7 @@ mod tests {
                 window.viewport_size(),
                 ResultsScroll::new(&self.scroll, None),
                 |_, _, _, _| {},
+                |_, _, _, _| {},
                 move |_, _, _| closes.set(closes.get() + 1),
             )
         }
@@ -1235,6 +1267,7 @@ mod tests {
                 Motion::STILL,
                 (&self.query, window.viewport_size()),
                 ResultsScroll::new(&self.scroll, None),
+                |_, _, _, _| {},
                 |_, _, _, _| {},
                 |_, _, _| {},
             )

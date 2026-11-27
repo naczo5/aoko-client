@@ -18,6 +18,7 @@ use gpui::{div, px, AnyElement, Entity, MouseButton, SharedString};
 use crate::components::{self, ButtonVariant, ChipTone};
 use crate::shell::Shell;
 use crate::theme::metrics;
+use crate::theme::motion::Motion;
 use crate::theme::Theme;
 use crate::views::accounts_state::{AccountPanel, AccountRowState, AccountsState, StatusTone};
 use crate::views::forms::FormFields;
@@ -215,13 +216,15 @@ fn render_card(
     card.into_any_element()
 }
 
-/// The tab body. `tab_index` scopes the scroll id so two tabs cannot share one.
+/// The tab body. `tab_index` scopes the scroll id so two tabs cannot share one, and `motion` is
+/// the animation gate the busy line's sweep reads (`AccountsView.xaml:429`).
 pub fn render(
     state: &AccountsState,
     fields: &FormFields,
     theme: &Theme,
     entity: &Entity<Shell>,
     tab_index: usize,
+    motion: Motion,
 ) -> AnyElement {
     let mut body = components::scroll(crate::reuse::indexed("tab-scroll", tab_index))
         .flex_col()
@@ -451,12 +454,15 @@ pub fn render(
     }
 
     // === Busy line ===
+    //
+    // `AccountsView.xaml:429` is `IsIndeterminate="True"`: the line says "a request is in flight"
+    // and not "half of it is done", which is what the determinate painter drew for it.
     if state.is_busy() {
-        body = body.child(components::progress(
+        body = body.child(components::progress_indeterminate(
             "accounts-busy",
             theme,
             components::progress::ProgressStyle::busy(),
-            0.5,
+            motion,
         ));
     }
 

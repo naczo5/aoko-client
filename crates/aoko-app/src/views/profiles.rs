@@ -39,7 +39,10 @@
 //! [`Profiles::save_auto`] is the one write that stays synchronous, and deliberately: it *is* the
 //! exit save (`MainWindow.xaml.cs:1866-1869`), the process is about to leave, and a write handed to
 //! a thread at that point would be dropped with the process instead of reaching the disk. It also
-//! drains the queue for its file first, so a queued save of the same slot cannot land over it.
+//! drains the queue for its file first, so a queued save of the same slot cannot land over it. A
+//! *press* that writes the same slot — a palette apply, the palette delete's fallback, the HUD
+//! reset — is not leaving the process, so it uses [`Profiles::save_auto_queued`] and the same
+//! poll.
 //!
 //! A failure never disappears with the task: [`Profiles::poll`] settles each queued write and
 //! writes its outcome into the same status line the synchronous save used — `Could not save
@@ -494,7 +497,8 @@ impl Profiles {
     /// close hook runs it while the process is on its way out, a queued write would be dropped
     /// with the process, and `save_profile` is called for exactly that reason by `OnClosed`
     /// (`:1861-1871`), the title bar's button (`:1384-1392`) and the panic path. It drains the
-    /// queue for this slot first, so a write still in flight cannot land over it.
+    /// queue for this slot first, so a write still in flight cannot land over it. A *press* that
+    /// writes the same slot is not an exit and takes [`Profiles::save_auto_queued`] instead.
     pub fn save_auto(&mut self, profile: &mut Profile) -> Result<(), String> {
         profile.name = AUTO_SAVE_NAME.to_owned();
         self.write_now(AUTO_SAVE_NAME, profile).map_err(|error| {
@@ -502,6 +506,28 @@ impl Profiles {
             self.set_status(message.clone());
             message
         })
+    }
+
+    /// Queues the auto-save slot, which is what a press that changes settings writes.
+    ///
+    /// The palette presses and the HUD editor's reset save the slot the exit save writes, and none
+    /// of them is leaving the process: they hand the bytes to the background writer the named
+    /// saves already use, so a press returns instead of spending its frame on a create, a flush
+    /// and a rename of `config.json`. `Ok` means queued; the sentence — `Saved current
+    /// settings to 'config'.`, or `Could not save config: …` — is [`Profiles::poll`]'s,
+    /// because a success reported before the rename would be claiming a file nobody wrote.
+    ///
+    /// The name is stamped first, as [`Profiles::save_auto`] stamps it, so the file this queues is
+    /// the slot a restart loads. The slot has no row in the list, which `rebuild` and `poll`
+    /// already refuse to give it.
+    pub fn save_auto_queued(&mut self, profile: &mut Profile) -> Result<(), String> {
+        profile.name = AUTO_SAVE_NAME.to_owned();
+        self.queue(AUTO_SAVE_NAME, profile, saved_line(AUTO_SAVE_NAME))
+            .map_err(|error| {
+                let message = format!("Could not save config: {error}");
+                self.set_status(message.clone());
+                message
+            })
     }
 
     /// Sets the Settings card's status line.

@@ -852,7 +852,7 @@ impl Shell {
         &self.profiles
     }
 
-    /// Writes the auto-save slot. The managed app does this on exit
+    /// Writes the auto-save slot on this thread. The managed app does this on exit
     /// (`MainWindow.xaml.cs:1866-1869`), which is why the close paths call it.
     ///
     /// The profile it writes comes from [`AppController::profile_for_save`], which takes this
@@ -864,6 +864,11 @@ impl Shell {
     /// the clicker's flags into the profile at every save
     /// (`ProfileManager.CreateFromClicker()`, `:956-958`, `:1867-1869`) and had one copy to begin
     /// with, which is why it needed neither half of this.
+    ///
+    /// **The exit save only.** The close hook, [`Shell::close`] and the panic press are the three
+    /// callers, and they are the three the process can leave from: a queued write would be dropped
+    /// with it. Every other save this view makes is [`Shell::queue_profile`], which is the same
+    /// snapshot handed to the background writer.
     pub fn save_profile(&mut self) -> Result<(), String> {
         let mut profile = self.controller().profile_for_save(&self.profile);
         let result = self.profiles.save_auto(&mut profile);
@@ -871,6 +876,27 @@ impl Shell {
         // The store stamps the profile's name before it writes (`save_auto`), so the copy it
         // hands back is not always the one that went in. A write site that keeps the stamped
         // copy without telling the controller leaves the two out of step from the first save.
+        self.push_profile();
+        result
+    }
+
+    /// Queues the auto-save slot, which is what a press that changes settings writes.
+    ///
+    /// The palette presses and the HUD editor's reset save the profile the same way an exit does,
+    /// and they used to run [`Shell::save_profile`] — the one synchronous write — inside the click
+    /// handler, so the frame the press was made in waited on a create, a flush and a rename of
+    /// `config.json`. The bytes go to the background writer `Profiles::save_named` already uses and
+    /// the sentence lands in `Profiles::poll`, which [`Shell::poll_stores`] runs every frame.
+    ///
+    /// The snapshot is the exit save's, for the reason [`Shell::save_profile`] gives: the switches
+    /// are the controller's and the theme is this view's. `Ok` means queued; a store that will not
+    /// take the job answers here, because that part happens before any write.
+    fn queue_profile(&mut self) -> Result<(), String> {
+        let mut profile = self.controller().profile_for_save(&self.profile);
+        let result = self.profiles.save_auto_queued(&mut profile);
+        self.profile = profile;
+        // Same as [`Shell::save_profile`]: `save_auto_queued` stamps `profile.name` on the way
+        // through, and a copy kept without telling the controller leaves the two out of step.
         self.push_profile();
         result
     }
@@ -886,6 +912,42 @@ impl Shell {
         // Same as [`Shell::save_profile`]: `save_named` sets `profile.name` on the way through.
         self.push_profile();
         result
+    }
+
+    /// Settles every queued store write and folds what came back into this view.
+    ///
+    /// A press queues its bytes (`crate::views::file_store::submit`) and returns, so the outcome —
+    /// `Saved current settings to '…'.`, `Could not delete '…': …`, `Could not save client
+    /// preferences: …` — can only reach the user from a frame. This is that frame: the configs
+    /// card's status is the store's own, the palette card paints `PaletteStore::status`, and the
+    /// Settings row reads `prefs_status`, which is where `PrefsFile::status` is copied.
+    ///
+    /// `true` is "something moved, repaint"; with nothing in flight, or nothing finished, every
+    /// poll returns before it touches the clock or the disk, so an idle frame costs three branches.
+    fn poll_stores(&mut self) -> bool {
+        let profiles = self.profiles.poll();
+
+        let palette = self.palette.poll();
+        if palette {
+            self.palette_status = self.palette.status().map(SharedString::from);
+            // The store's list moved with it: a landed write confirms the payload the press
+            // built, a failed one rolls the cache back to the last list the file holds. The card
+            // paints the two caches rather than the store, so those are what has to go stale.
+            self.palette_rows = None;
+            self.palette_current = None;
+        }
+
+        let prefs = self.prefs.as_mut().is_some_and(|file| file.poll());
+        if prefs {
+            self.prefs_status = self
+                .prefs
+                .as_ref()
+                .and_then(|file| file.status())
+                .unwrap_or_default()
+                .to_owned();
+        }
+
+        profiles || palette || prefs
     }
 
     /// Replaces the whole profile, which invalidates the session overrides with it.
@@ -976,7 +1038,16 @@ impl Shell {
         window.on_window_should_close(cx, move |_window, cx| {
             if let Some(shell) = handle.upgrade() {
                 shell.update(cx, |shell, _cx| {
-                    let _ = shell.save_profile();
+                    // Logged rather than dropped, as [`Shell::close`] does: the Settings card this
+                    // store reports into is about to go away with the window, so the log is the
+                    // only account of the failure that outlives the session.
+                    if let Err(error) = shell.save_profile() {
+                        tracing::warn!(
+                            slot = crate::views::profiles::AUTO_SAVE_NAME,
+                            directory = shell.profiles.directory().unwrap_or_default(),
+                            "could not save the profile on the window's close: {error}"
+                        );
+                    }
                     // Managed stops its playtime timer in `OnClosed`
                     // (`MainWindow.xaml.cs:1865`), not on disconnect, and keeps the total; see
                     // `Runtime::stop_session`.
@@ -1351,12 +1422,16 @@ impl Shell {
     /// store that moved without the profile leaves the two disagreeing at the next load, which is
     /// what [`palette_store::PaletteStore::apply`]'s own note warns about. `set_theme` recreates the
     /// field entities because each carries a copy of the palette.
+    ///
+    /// The profile is queued, not written: a preview press is a press, and a rename of the config
+    /// slot inside the click handler was the frame this path used to spend. See
+    /// [`Shell::queue_profile`].
     pub fn apply_palette(&mut self, name: &str, cx: &mut Context<Self>) {
         self.palette.apply(name);
         let theme = self.palette.theme();
         self.profile.gui_theme = theme.name.clone();
         self.set_theme(theme, cx);
-        if let Err(error) = self.save_profile() {
+        if let Err(error) = self.queue_profile() {
             self.palette_status = Some(SharedString::from(error));
         }
         // The line above the rows reads the store's current name, which just moved.
@@ -1385,7 +1460,15 @@ impl Shell {
                     self.profile.gui_theme = fallback.to_owned();
                     let theme = self.palette.theme();
                     self.set_theme(theme, cx);
-                    let _ = self.save_profile();
+                    // Queued, so a refusal can only be the store turning the job down before any
+                    // write. The delete's own sentence is already in `palette_status`, which is the
+                    // line this press is about, so the reason is logged rather than painted over it.
+                    if let Err(error) = self.queue_profile() {
+                        tracing::warn!(
+                            slot = crate::views::profiles::AUTO_SAVE_NAME,
+                            "could not queue the settings save after the palette fallback: {error}"
+                        );
+                    }
                 }
                 self.palette_current = None;
             }
@@ -1450,7 +1533,9 @@ impl Shell {
         let theme = self.palette.theme();
         self.profile.gui_theme = theme.name.clone();
         self.set_theme(theme, cx);
-        if let Err(error) = self.save_profile() {
+        // The profile is queued: the palette's own write is queued too, and neither swap belongs
+        // in the frame the Add press was made in.
+        if let Err(error) = self.queue_profile() {
             self.palette_status = Some(SharedString::from(error));
         }
     }
@@ -3538,9 +3623,15 @@ impl Shell {
         let mut layout = self.profile.to_hud_layout();
         layout.reset_all();
         self.profile.hud_layout = Some(aoko_protocol::profile::Profile::hud_layout_map(&layout));
-        // The press is also the save (`:1414`); a failure leaves the reset in place and the
-        // profile store reports it, which is the same shape the config saves use.
-        let _ = self.save_profile();
+        // The press is also the save (`:1414`), queued rather than written: the card has no status
+        // line of its own, and the configs card is the one the store reports into through `poll`,
+        // so a refusal to *queue* is logged here rather than painted somewhere it does not belong.
+        if let Err(error) = self.queue_profile() {
+            tracing::warn!(
+                slot = crate::views::profiles::AUTO_SAVE_NAME,
+                "could not queue the settings save after the HUD reset: {error}"
+            );
+        }
         // The frame carries the layout half, so the bridge has to see the reset now, not on the
         // next edit.
         self.push_profile();
@@ -3636,10 +3727,16 @@ impl Shell {
     ///
     /// The gate is process-wide, so this is the one write the shipped binary makes
     /// to it; a failure to save is reported in the card rather than dropped.
+    ///
+    /// The write is queued, so `Ok` is "the bytes are on their way", not "the file has them": the
+    /// call clears nothing, and [`Shell::poll_stores`] is what copies `PrefsFile::status` into
+    /// `prefs_status` — a success empties the line there once the rename is behind it, and a
+    /// failure paints the reason. Clearing on `Ok` here is the defect that would leave a stale
+    /// failure on screen, or none at all for a write that never landed.
     pub fn set_animations(&mut self, enabled: bool, cx: &mut Context<Self>) {
         // Both the row's boolean and its status line are what a repaint would show, so
         // the paint waits for one of them to move. The gate is applied and the file
-        // written either way: `theme::motion` is process-wide state a test can reset
+        // queued either way: `theme::motion` is process-wide state a test can reset
         // independently of this field.
         let changed = self.animations != enabled;
         let status_before = self.prefs_status.clone();
@@ -3647,13 +3744,13 @@ impl Shell {
         motion::set_animations_enabled(enabled);
 
         if let Some(prefs) = self.prefs.as_ref() {
-            match prefs.save(ClientPrefs {
+            // The reserved refusal: a request the writer will not take at all. A write that was
+            // queued and then failed is `poll`'s to report.
+            let choice = ClientPrefs {
                 animations: enabled,
-            }) {
-                Ok(()) => self.prefs_status.clear(),
-                Err(error) => {
-                    self.prefs_status = format!("Could not save client preferences: {error}");
-                }
+            };
+            if let Err(error) = prefs.save(choice) {
+                self.prefs_status = format!("Could not save client preferences: {error}");
             }
         }
 
@@ -4088,6 +4185,18 @@ impl Shell {
         self.perform_jump(cx);
     }
 
+    /// A press on one result row's switch: the `f2` toggle, for that row.
+    ///
+    /// The row's box is "jump to that row", so the switch is a target of its own; what it runs is
+    /// the keyboard's path and not a second copy of it. `CommandSearchState::toggle_selected` acts
+    /// on the selection, so the row is selected first, and the `f2` outcome then runs the one
+    /// [`Shell::handle_query_key`] arm — the module flip and the row refresh that goes with it —
+    /// which is what makes a press on the switch and `f2` on the same row indistinguishable.
+    fn toggle_row(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.search.select(Some(index));
+        self.handle_query_key(QueryKey::ToggleF2, cx);
+    }
+
     /// Performs the jump the overlay asked for: the entry's tab, and the pulse on its card.
     ///
     /// A row click and Enter both come through here, and `jump_selected` is what closes the
@@ -4296,8 +4405,10 @@ impl Shell {
         }
 
         let handle = entity.clone();
-        // A second handle because the two callbacks are separate `'static` closures: the row press
-        // jumps, the chip closes, and neither can borrow the other's.
+        // Three handles because the three callbacks are separate `'static` closures: the row press
+        // jumps, the switch flips the row it belongs to, the chip closes, and none can borrow
+        // another's.
+        let toggle = entity.clone();
         let close = entity.clone();
         // The live field when it exists, the static query line otherwise. The two shapes are
         // `OverlayQuery`'s, so which one paints is this expression and nothing inside the overlay.
@@ -4313,6 +4424,9 @@ impl Shell {
             crate::overlay::ResultsScroll::new(&self.search_scroll, scroll_to),
             move |index, _event, _window, cx| {
                 handle.update(cx, |shell, cx| shell.jump_to_row(index, cx));
+            },
+            move |index, _event, _window, cx| {
+                toggle.update(cx, |shell, cx| shell.toggle_row(index, cx));
             },
             move |_event, window, cx| {
                 close.update(cx, |shell, cx| shell.close_search_at_pointer(window, cx));
@@ -4365,6 +4479,13 @@ impl Shell {
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Before the tree is assembled: a queued write that finished since the last frame has a
+        // sentence for the card that paints it, and settling it here is what puts that sentence in
+        // *this* frame rather than the next one. See [`Shell::poll_stores`].
+        if self.poll_stores() {
+            cx.notify();
+        }
+
         // The managed app saves on exit (`MainWindow.OnClosed`, `MainWindow.xaml.cs:1861`).
         // The hook covers a platform close; the title bar's own close button calls
         // [`Shell::close`], which saves before quitting.
@@ -4494,6 +4615,7 @@ impl Render for Shell {
                     theme,
                     &entity,
                     self.tab,
+                    motion,
                 ),
                 Some(TabBody::Servers) => crate::views::servers_view::render(
                     &self.servers,
@@ -4501,6 +4623,7 @@ impl Render for Shell {
                     theme,
                     &entity,
                     self.tab,
+                    motion,
                 ),
                 None => div().flex_1().into_any_element(),
             };
@@ -7609,6 +7732,8 @@ mod tests {
         );
 
         cx.update(|cx| handle.update(cx, |shell, cx| shell.reset_hud_layout(cx)));
+        // The press queues the save, so the fresh read below is the poll's: drain, then settle.
+        settle_stores(&handle, cx);
 
         let (stored, frame) = cx.read(|cx| {
             let shell = handle.read(cx);
@@ -7892,6 +8017,9 @@ mod tests {
                 shell.configs_create(cx);
             })
         });
+        // The write is queued: the list and the name box move on the press, the file and the
+        // sentence land with the poll.
+        settle_stores(&handle, cx);
         let created = cx.read(|cx| {
             let shell = handle.read(cx);
             (
@@ -7902,7 +8030,10 @@ mod tests {
         });
         assert_eq!(created.0, ["Arena".to_owned()]);
         assert_eq!(created.1, "", "the name box clears after a create");
-        assert_eq!(created.2, "Created config 'Arena'.");
+        assert_eq!(
+            created.2, "Created config 'Arena'.",
+            "the sentence is the poll's, not the press's"
+        );
 
         // Delete asks before it removes anything.
         cx.update(|cx| handle.update(cx, |shell, cx| shell.configs_request_delete(cx)));
@@ -7917,6 +8048,8 @@ mod tests {
 
         cx.update(|cx| handle.update(cx, |shell, cx| shell.configs_request_delete(cx)));
         cx.update(|cx| handle.update(cx, |shell, cx| shell.configs_confirm_delete(cx)));
+        // The removal is queued too, so the file and `Deleted config '…'.` are the poll's.
+        settle_stores(&handle, cx);
         assert!(!aoko_platform::ProfileStore::new(&root).profile_exists("Arena"));
         assert_eq!(
             cx.read(|cx| handle.read(cx).profiles().status().message.clone()),
@@ -7944,6 +8077,9 @@ mod tests {
                 shell.configs_create(cx);
             })
         });
+        // The create is queued, so the file the prompt below compares against is the poll's. This
+        // is also what puts the name in the list the prompt's existence check reads.
+        settle_stores(&handle, cx);
 
         // A blank name reports the managed refusal rather than doing nothing.
         cx.update(|cx| {
@@ -7985,6 +8121,9 @@ mod tests {
         );
 
         cx.update(|cx| handle.update(cx, |shell, cx| shell.configs_overwrite_confirmed(cx)));
+        // The overwrite is queued like the create was: drain, settle, then read what the card and
+        // the file say.
+        settle_stores(&handle, cx);
         assert_eq!(
             cx.read(|cx| handle
                 .read(cx)
@@ -8694,6 +8833,22 @@ mod tests {
                 .label()
                 .to_string()
         })
+    }
+
+    /// Drains the queued writes and lets the shell settle them, which is what a frame does.
+    ///
+    /// A press queues its bytes on the process's background writer and returns, so a test that
+    /// asserts the file, or the sentence the card paints, has to wait for the queue and then ask
+    /// the owner: `flush_all_writes` is the exit path's own drain and `poll_stores` is the render
+    /// hook's. Both are what the shipped app runs, so the test is driving the real path rather
+    /// than a shortcut.
+    fn settle_stores(handle: &Entity<Shell>, cx: &mut gpui::TestAppContext) {
+        crate::views::file_store::flush_all_writes();
+        cx.update(|cx| {
+            handle.update(cx, |shell, _| {
+                shell.poll_stores();
+            });
+        });
     }
 
     /// A shell with a store under `root`, on a window, painted once.
@@ -10032,6 +10187,45 @@ mod tests {
         );
     }
 
+    /// A press on a result row's switch flips that row's module, and does not jump.
+    ///
+    /// The switch is painted inside the row, and the row's whole box is "jump to that row": before
+    /// the switch took the press, every click on it navigated and the module could only be flipped
+    /// with `f2`. So both halves are asserted — the flag moved and the overlay is still up, where a
+    /// jump closes it (`CommandSearchState::jump_selected`).
+    #[gpui::test]
+    fn a_press_on_a_rows_switch_toggles_it_and_does_not_jump(cx: &mut gpui::TestAppContext) {
+        use gpui::Modifiers;
+
+        let root = scratch_root();
+        let (shell, _handle, mut visual) = shell_in_window(cx, &root);
+
+        // The seed narrows the list to the module, so the switch this presses is the one the
+        // assertion is about rather than whichever row happened to be first. Its selector names
+        // the module, so the row's rank is not something this test has to know.
+        cx.update(|cx| shell.update(cx, |shell, cx| shell.open_search(Some("autoclicker"), cx)));
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let switch = visual
+            .debug_bounds("command-search-toggle-autoclicker")
+            .expect("the switch is a target of its own, not part of the row's box");
+        let before = cx.read(|cx| shell.read(cx).is_module_on("autoclicker"));
+
+        visual.simulate_click(switch.center(), Modifiers::default());
+
+        let after = cx.read(|cx| shell.read(cx).is_module_on("autoclicker"));
+        assert_ne!(
+            before, after,
+            "a press on the switch flips the module it names"
+        );
+        assert!(
+            cx.read(|cx| shell.read(cx).search().is_open()),
+            "and it did not jump: a jump closes the overlay, which is what this press used to do"
+        );
+    }
+
     // ---- the Block ESP add row -------------------------------------------------
 
     /// Focuses the Block ESP add box, so a keystroke lands in it.
@@ -10701,7 +10895,9 @@ mod tests {
         let path = root.join("palettes.json");
         let mut store = palette_store::PaletteStore::at(path.clone());
         store.draft_mut().name = "Ember".to_owned();
-        store.save_draft(false).expect("the palette was written");
+        // Queued, and `PaletteStore::at` drains the queue for the path, so the shell's store reads
+        // the file this seed wrote rather than the empty one it replaced.
+        store.save_draft(false).expect("the palette was queued");
 
         let (shell, _handle, mut visual) = shell_in_window(cx, &root);
         cx.update(|cx| shell.update(cx, |shell, _| shell.set_palette_path(path.clone())));
@@ -10749,6 +10945,9 @@ mod tests {
 
         cx.update(|cx| shell.update(cx, |shell, cx| shell.palette_confirm_delete(cx)));
 
+        // The removal is queued and the press answers `Deleting palette 'Ember'.`; the file and the
+        // sentence the card ends on are the poll's.
+        settle_stores(&shell, cx);
         assert_eq!(
             palette_store::PaletteStore::at(path).palettes().len(),
             0,
@@ -10825,6 +11024,9 @@ mod tests {
             })
         });
 
+        // The palette file and the profile that names it are both queued, and the press answers
+        // `Saving palette 'Dusk'.`; the row on disk and the settled sentence are the poll's.
+        settle_stores(&shell, cx);
         assert!(
             palette_store::PaletteStore::at(path)
                 .palettes()
@@ -10840,6 +11042,8 @@ mod tests {
             "and the card says so in the store's words"
         );
 
+        // The next frame is what paints the list the settled write left: `poll_stores` drops the
+        // cached rows, and `ensure_palette_rows` rebuilds them from the store.
         visual.update(|window, cx| {
             let _ = window.draw(cx);
         });
