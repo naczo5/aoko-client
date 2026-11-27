@@ -5005,7 +5005,7 @@ impl Shell {
             Control::PaletteRows {
                 delete_tooltip,
                 apply_tooltip,
-            } => self.render_palette_rows(theme, entity, *delete_tooltip, *apply_tooltip),
+            } => self.render_palette_rows(theme, entity, delete_tooltip, apply_tooltip),
 
             Control::PaletteNameBox { label } => self.render_palette_name_box(label, theme),
 
