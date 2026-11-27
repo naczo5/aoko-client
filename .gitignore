@@ -56,3 +56,11 @@ target/
 # Internal gate reviews are kept locally as evidence and are not published.
 GATE*.md
 /target
+
+# ── Leftovers and artifact targets ───────────────────────────────
+# The managed host was deleted (MIGRATION_ARCHITECTURE.md §9 trade-off 3). These
+# paths survive on disk as stale C# build output, and McInjector/build.bat still
+# copies its DLLs into Aoko\bin\..., so they must stay ignored rather than
+# tracked: nothing in them is source.
+/Aoko/
+/Aoko.Tests/
