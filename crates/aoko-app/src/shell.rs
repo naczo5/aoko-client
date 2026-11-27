@@ -117,6 +117,11 @@ pub struct Shell {
     runtime: Runtime,
     /// The session override for every `bind` path: the capture harness seeds it and a
     /// press writes it. A value here wins over the profile snapshot below.
+    ///
+    /// It is an override *on top of* one profile, so [`Shell::adopt_profile`] clears it whenever the
+    /// profile underneath is replaced wholesale — a config load. Without that, the panel would keep
+    /// painting the value the user last touched while the profile, the controller and the wire all
+    /// said something else, and the next touch would write the stale value back over the load.
     draft: BTreeMap<&'static str, f64>,
     /// The persisted settings. Sliders, checks and combos read and write this through
     /// [`crate::views::bindings`]; see [`Shell::profile_json`] for saving it.
@@ -567,10 +572,11 @@ impl Shell {
     /// distinct changes nothing — the function returns false and the values are untouched — so
     /// the return is not needed here. The snapshot is taken after normalisation, because a
     /// cleared key has to paint as `Unbound` rather than as the key the file survives with.
-    fn with_loaded_profile(mut self, mut profile: aoko_protocol::profile::Profile) -> Self {
-        profile.normalize_action_binds();
-        self.values = crate::views::bindings::snapshot(&profile);
-        self.profile = profile;
+    fn with_loaded_profile(mut self, profile: aoko_protocol::profile::Profile) -> Self {
+        // The same replacement a load performs, so the rule lives in one place; a fresh shell's
+        // override map is empty, and this keeps it that way if one is ever planted before this
+        // runs.
+        self.adopt_profile(profile);
         // The frame is built from the controller, not from this shell: a shell that starts
         // from a saved profile has to hand it over before anything reads it.
         self.push_profile();
@@ -613,14 +619,29 @@ impl Shell {
         result
     }
 
+    /// Replaces the whole profile, which invalidates the session overrides with it.
+    ///
+    /// [`Shell::draft`] is an override *on top of* the profile snapshot, so it is only truthful
+    /// while the profile underneath it is the one the user was editing. A wholesale replacement —
+    /// a config load — makes every override a value nobody chose for this profile, and the next
+    /// touch would write it back over the load. Managed has no such layer: `ApplyLoadedProfile`
+    /// rewrites every `Clicker` property and the TwoWay bindings repaint from it
+    /// (`MainWindow.xaml.cs:835-848`). So the replacement is the one place that clears it, and every
+    /// path that swaps the profile goes through here rather than assigning the field.
+    fn adopt_profile(&mut self, mut profile: aoko_protocol::profile::Profile) {
+        profile.normalize_action_binds();
+        self.values = crate::views::bindings::snapshot(&profile);
+        self.profile = profile;
+        self.draft.clear();
+    }
+
     /// The Settings card's Load: replaces the live settings with a saved config.
     pub fn load_config(&mut self, name: &str) -> Result<(), String> {
         match self.profiles.load_named(name) {
-            Ok(mut profile) => {
-                // The load-time half of the action-bind rule; see `with_loaded_profile`.
-                profile.normalize_action_binds();
-                self.values = crate::views::bindings::snapshot(&profile);
-                self.profile = profile;
+            Ok(profile) => {
+                // The load-time half of the action-bind rule, and the override reset, are the
+                // replacement's own business; see [`Shell::adopt_profile`].
+                self.adopt_profile(profile);
                 // The palette travels in the profile, so applying a config has to
                 // repaint with the theme it names (`ApplyLoadedProfile`,
                 // `MainWindow.xaml.cs:835-848`).
@@ -1954,6 +1975,10 @@ impl Shell {
     }
 
     /// A control value: the session override, else the profile, else `default`.
+    ///
+    /// The override only exists for a value the session set on *this* profile; a wholesale
+    /// replacement drops it, so a load cannot leave the panel painting a value the profile no
+    /// longer holds. See [`Shell::adopt_profile`].
     #[must_use]
     pub fn value(&self, bind: &'static str, default: f64) -> f64 {
         if let Some(value) = self.draft.get(bind) {
@@ -5580,6 +5605,62 @@ mod tests {
         assert!(shell.apply_control("MinCPS", crate::views::bindings::ControlValue::Number(3.0)));
         shell.load_config("PvP").expect("named load");
         assert_eq!(shell.value("MinCPS", 0.0), 12.0, "the config wins");
+    }
+
+    /// A load replaces the profile, so the session override that described the old one goes.
+    ///
+    /// The round-trip test above writes through `apply_control`, which never touches
+    /// [`Shell::draft`] — so it passed while the real drag path was broken: `set_value` writes the
+    /// override, `value()` reads it first, and a load that only replaced `values` and `profile`
+    /// left the panel painting the value the user last dragged and the next touch writing it back
+    /// over the load. This drives the path a slider actually uses.
+    #[gpui::test]
+    fn a_load_drops_the_session_override_it_replaces(cx: &mut gpui::TestAppContext) {
+        let root = scratch_root();
+        let handle = cx.update(|cx| {
+            cx.new(|_| Shell::with_store(Theme::slate(), aoko_platform::ProfileStore::new(&root)))
+        });
+
+        // A saved config whose Min CPS is 9, saved the way a user saves one.
+        cx.update(|cx| {
+            handle.update(cx, |shell, cx| {
+                shell.set_value("MinCPS", 9.0, cx);
+                shell.save_config("PvP").expect("named save");
+            })
+        });
+
+        // The session moves on: the slider is dragged to 20, which is an override on top of the
+        // same profile and repaints.
+        cx.update(|cx| handle.update(cx, |shell, cx| shell.set_value("MinCPS", 20.0, cx)));
+        assert_eq!(
+            cx.read(|cx| handle.read(cx).value("MinCPS", 0.0)),
+            20.0,
+            "the drag is what the panel paints before the load"
+        );
+
+        cx.update(|cx| {
+            handle.update(cx, |shell, _cx| {
+                shell.load_config("PvP").expect("named load");
+            })
+        });
+
+        let (painted, stored, controller) = cx.read(|cx| {
+            let shell = handle.read(cx);
+            (
+                shell.value("MinCPS", 0.0),
+                shell.profile().min_cps,
+                shell.controller().profile().min_cps,
+            )
+        });
+        assert_eq!(
+            painted, 9.0,
+            "the slider paints the loaded value, not the override the load replaced"
+        );
+        assert_eq!(stored, 9.0, "and the profile is the loaded one");
+        assert_eq!(
+            controller, 9.0,
+            "and the controller, which the config frame is built from"
+        );
     }
 
     #[test]
