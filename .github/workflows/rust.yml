@@ -177,3 +177,29 @@ jobs:
             --capture-screenshots "$RUNNER_TEMP/capture"
           count=$(find "$RUNNER_TEMP/capture" -name '*.png' | wc -l)
           test "$count" -eq 9 || { echo "expected 9 screens, got $count"; exit 1; }
+
+      # The same nine screens in a handful of the eighteen built-in palettes, so a
+      # theme can be reviewed without a local build. The list is a shell loop rather
+      # than a job matrix on purpose: the job's name is what the branch protection
+      # and the PR's checks list are keyed on, and a matrix would rename it once per
+      # theme. Six palettes is enough to see the range — the default, three dark
+      # neutrals, and two with a strong accent.
+      - name: render the same screens in six palettes
+        run: |
+          for theme in "Slate" "Ink" "Steel" "Nord" "Cherry" "Aubergine"; do
+            out="$RUNNER_TEMP/themes/$theme"
+            mkdir -p "$out"
+            cargo run -p aoko-app --features capture -- \
+              --capture-screenshots "$out" --theme "$theme"
+            count=$(find "$out" -name '*.png' | wc -l)
+            test "$count" -eq 9 || { echo "expected 9 screens for $theme, got $count"; exit 1; }
+          done
+
+      - name: upload screenshots
+        uses: actions/upload-artifact@v4
+        with:
+          name: screens
+          path: |
+            ${{ runner.temp }}/capture/*.png
+            ${{ runner.temp }}/themes/**/*.png
+          if-no-files-found: error
