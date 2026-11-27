@@ -2454,6 +2454,30 @@ impl Shell {
         cx.notify();
     }
 
+    /// The HUD editor's Reset layout (`ResetHudLayoutButton_Click`,
+    /// `MainWindow.xaml.cs:1411-1415`).
+    ///
+    /// Managed reset the live `HudLayout` and then saved the profile it built from the clicker, so
+    /// the press writes the file rather than leaving a pending edit. The reset itself is
+    /// [`aoko_protocol::hud::HudLayout::reset_all`]'s, not a table of anchors here: the canonical
+    /// layout is the protocol's, and a copy would drift from the one the bridge parses.
+    ///
+    /// What is stored is the *stored* form of the reset layout — `Profile::hud_layout_map` of the
+    /// canonical layout — which is what `Profile::to_hud_layout` reads back, so a save and a
+    /// reload agree with what the frame carries.
+    pub fn reset_hud_layout(&mut self, cx: &mut Context<Self>) {
+        let mut layout = self.profile.to_hud_layout();
+        layout.reset_all();
+        self.profile.hud_layout = Some(aoko_protocol::profile::Profile::hud_layout_map(&layout));
+        // The press is also the save (`:1414`); a failure leaves the reset in place and the
+        // profile store reports it, which is the same shape the config saves use.
+        let _ = self.save_profile();
+        // The frame carries the layout half, so the bridge has to see the reset now, not on the
+        // next edit.
+        self.push_profile();
+        cx.notify();
+    }
+
     /// Whether animated sites run, from decision 3's client setting.
     #[must_use]
     pub fn animations(&self) -> bool {
@@ -4083,6 +4107,10 @@ impl Shell {
                     ("ConfigsCard", "Delete") => Shell::configs_request_delete,
                     ("ConfigsCard", "Create") => Shell::configs_create,
                     ("ConfigsCard", "Open Configs Folder") => Shell::configs_open_folder,
+                    // `ResetHudLayoutButton_Click` (`:1411-1415`): the one card button whose action
+                    // already existed under another name, so this is the wire-up the review asked
+                    // for rather than a behaviour added here.
+                    ("HudEditorCard", "Reset layout") => Shell::reset_hud_layout,
                     _ => |_, _| {},
                 };
                 let handle = entity.clone();
@@ -5675,6 +5703,112 @@ mod tests {
 
         shell.load_config("Dark").expect("load");
         assert_eq!(shell.theme().name, "Ink");
+    }
+
+    /// Reset layout writes the canonical HUD layout into the profile, the file and the frame.
+    ///
+    /// `ResetHudLayoutButton_Click` (`MainWindow.xaml.cs:1411-1415`) reset the live layout and then
+    /// saved the profile; the port has no live editor to reset, so the assertion is that the stored
+    /// form, the saved profile and the layout half of the config frame all become canonical. The
+    /// button's own press is [`Shell::reset_hud_layout`] — `components::button` gives it an
+    /// `ElementId` and no debug selector, so a `VisualTestContext` has no bounds to click — which is
+    /// the same shape the configs-card presses use.
+    #[gpui::test]
+    fn reset_layout_stores_the_canonical_hud_layout_and_sends_it(cx: &mut gpui::TestAppContext) {
+        use aoko_protocol::hud::{element_id, HudElementLayout};
+
+        let root = scratch_root();
+        let handle = cx.update(|cx| {
+            cx.new(|_| Shell::with_store(Theme::slate(), aoko_platform::ProfileStore::new(&root)))
+        });
+
+        // A layout a user moved: one element well away from its canonical anchor.
+        let moved = HudElementLayout::new(0.42, 0.13, 1.25);
+        cx.update(|cx| {
+            handle.update(cx, |shell, _| {
+                let mut layout = shell.profile.to_hud_layout();
+                layout.set(element_id::MODULE_LIST, moved);
+                shell.profile.hud_layout =
+                    Some(aoko_protocol::profile::Profile::hud_layout_map(&layout));
+            })
+        });
+        assert_eq!(
+            cx.read(|cx| handle
+                .read(cx)
+                .profile()
+                .to_hud_layout()
+                .get(element_id::MODULE_LIST)),
+            moved,
+            "the profile really holds a moved element before the press"
+        );
+
+        cx.update(|cx| handle.update(cx, |shell, cx| shell.reset_hud_layout(cx)));
+
+        let (stored, frame) = cx.read(|cx| {
+            let shell = handle.read(cx);
+            (
+                shell.profile().to_hud_layout(),
+                shell.controller().config_frame().hud_layout.clone(),
+            )
+        });
+        assert_eq!(
+            stored,
+            aoko_protocol::hud::HudLayout::new(),
+            "the press reset every element, not just the one that moved"
+        );
+        assert_eq!(
+            frame,
+            aoko_protocol::hud::HudLayout::new(),
+            "and the frame carries the layout the bridge parses, so the wire does not lag the file"
+        );
+
+        // The press is also the save (`:1414`): a fresh read of the same store is canonical.
+        let (_, reloaded) =
+            crate::views::profiles::Profiles::with_store(aoko_platform::ProfileStore::new(&root));
+        assert_eq!(
+            reloaded.to_hud_layout(),
+            aoko_protocol::hud::HudLayout::new(),
+            "the saved profile holds the reset layout"
+        );
+    }
+
+    /// Every button the shell wires by `(card id, label)` exists in the copy table under that pair.
+    ///
+    /// `Control::Button`'s action match keys on two strings that `views/copy.rs` owns, so a rename
+    /// there would silently unwire a button instead of failing to compile — the failure mode the
+    /// review found three of. This is that seam's own check; it is deliberately not a render test.
+    #[test]
+    fn every_wired_card_button_is_a_label_the_table_carries() {
+        let wired = [
+            ("ConfigsCard", "Load"),
+            ("ConfigsCard", "Save"),
+            ("ConfigsCard", "Delete"),
+            ("ConfigsCard", "Create"),
+            ("ConfigsCard", "Open Configs Folder"),
+            ("HudEditorCard", "Reset layout"),
+        ];
+
+        let cards: Vec<&Card> = copy::TABS
+            .iter()
+            .flat_map(|tab| match tab.body {
+                TabBody::Cards(cards) => cards,
+                _ => &[],
+            })
+            .collect();
+
+        for (id, label) in wired {
+            let card = cards
+                .iter()
+                .find(|card| card.id == id)
+                .unwrap_or_else(|| panic!("{id} is a card in the table"));
+            assert!(
+                card.controls.iter().any(|control| matches!(
+                    control,
+                    Control::Button { label: carried, .. } if *carried == label
+                )),
+                "{id} carries a {label:?} button, so the wire is not stale"
+            );
+        }
     }
 
     #[gpui::test]
