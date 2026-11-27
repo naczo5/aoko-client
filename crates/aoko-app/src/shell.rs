@@ -925,14 +925,13 @@ impl Shell {
             self.fields.config_name = Some(input);
         }
 
-        // The overlay's query box. The placeholder is the overlay's own literal, which is the
-        // sentence `views/copy.rs` does not carry yet: it exists twice in `crate::overlay` and
-        // now once here, so the copy owner owns the constant rather than this file inventing a
-        // fourth spelling.
+        // The overlay's query box. The placeholder is the copy owner's constant, which is also
+        // what `crate::overlay`'s static branch paints: one sentence, one owner, whichever of the
+        // two branches a caller draws.
         if self.search_query.is_none() {
             let handle = cx.entity();
             let input = cx.new(|cx| {
-                TextInput::new(cx, theme.clone(), "Search modules and settings")
+                TextInput::new(cx, theme.clone(), copy::SEARCH_QUERY_NAME)
                     .variant(FieldVariant::Query)
                     .on_change(move |text, _window, cx| {
                         let text = text.to_string();
