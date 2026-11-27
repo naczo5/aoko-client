@@ -4,6 +4,22 @@
 //! [`ReleaseFetcher`] so the whole check is exercisable headlessly, which is what
 //! `UpdateServiceTests` needs and what keeps `aoko-core` free of a socket.
 //!
+//! **No production [`ReleaseFetcher`] exists, and that is a decision rather than a gap left
+//! open.** Managed sent one request: `https://api.github.com/repos/naczo5/aoko-client/releases/latest`
+//! with `Accept: application/vnd.github+json`, a `User-Agent` and an 8 s timeout
+//! (`UpdateService.cs:72-78`). This tree has no client to send it with — `Cargo.lock` carries no
+//! `reqwest`, `ureq`, `hyper`, `rustls`, `native-tls` or `openssl`, and gpui is built with
+//! `default-features = false`, so its own `http_client` is not compiled either. The two ways to
+//! acquire one are a TLS stack (`ring`/`aws-lc`, which has to cross-compile to the Windows leg) or
+//! WinHTTP bindings written against the `windows` crate blind, and both are new, unverifiable
+//! defence surface added for a version banner. So the port stays whole: the tag rules, the
+//! ordering and the trait are exercised below, and the shipped surface paints only what a real
+//! event produces — the running version, and no status line, because no check runs. That leaves
+//! `views/copy.rs`'s `UPDATE_STATUS_*` sentences with no reader here until something can fetch,
+//! and it leaves the release link unreachable for a second reason: `aoko_platform`'s only
+//! launcher is `open_path`, which is path-typed and refuses anything not on disk, so a URL cannot
+//! pass through it. Either mechanism is a platform-layer commit, not a shell one.
+//!
 //! Behaviour being preserved:
 //!
 //! - A GitHub tag is normalised by trimming, dropping any number of leading `v`/`V`
