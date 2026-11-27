@@ -64,6 +64,7 @@ use crate::components::ButtonVariant;
 use crate::components::FieldVariant;
 use crate::dialogs::color_picker::{PickResult, Rgb};
 use crate::dialogs::color_picker_view::ColorPickerView;
+use crate::ingest::LinkFailure;
 use crate::runtime::Runtime;
 use crate::theme::metrics;
 use crate::theme::motion::{self, Motion};
@@ -1171,6 +1172,16 @@ impl Shell {
         self.windows = windows;
     }
 
+    /// Replaces the runtime, which is how a test hands the loader a clock it can advance.
+    ///
+    /// `Shell::new` builds a headless runtime on the system clock, so nothing else in a unit test
+    /// can cross [`crate::runtime::CONNECT_DEADLINE_MS`] without sleeping for it. Same seam as
+    /// [`Shell::set_windows`]: a caller-supplied dependency the production constructors fill in.
+    #[cfg(test)]
+    pub fn set_runtime(&mut self, runtime: Runtime) {
+        self.runtime = runtime;
+    }
+
     /// Whether the window is still painting the loader rather than the control panel.
     #[must_use]
     pub fn loader_visible(&self) -> bool {
@@ -1189,10 +1200,15 @@ impl Shell {
         self.injection_selected
     }
 
-    /// What the panel paints, resolved from the machine and the controller's link.
+    /// What the panel paints, resolved from the machine, the controller's link and the reader's
+    /// report.
     #[must_use]
     pub fn injection_view(&self) -> InjectionView {
-        InjectionView::resolve(self.injection, self.runtime.ingest_status().connected)
+        InjectionView::resolve(
+            self.injection,
+            self.runtime.ingest_status().connected,
+            self.runtime.link_failure(),
+        )
     }
 
     /// The Inject press (`InjectButton_Click`, `MainWindow.xaml.cs:1431-1467`).
@@ -1201,11 +1217,17 @@ impl Shell {
     /// a single one is taken without asking (`:1449-1452`), and more than one waits for a choice.
     /// Then [`Shell::attach`] runs.
     ///
-    /// A press while the machine is busy is ignored rather than queued. `components::button` has
-    /// no disabled state at the pin, so the button's copy ("Detecting...", "...", "Connected") is
-    /// the whole affordance and this early return is what makes it truthful.
+    /// The press is gated on the *painted* rule rather than on a second one of its own: the button
+    /// is pressable exactly when [`Shell::injection_view`] says `enabled`, so a state the panel
+    /// shows as pressable cannot refuse the press and a disabled button cannot be bypassed.
+    /// `components::button` has no disabled state at the pin, so the button's copy ("Detecting...",
+    /// "...", "Connected") is the whole affordance and this early return is what makes it truthful.
+    ///
+    /// That is also what makes a failed dial retryable: [`InjectionStatus::Connecting`] stays on the
+    /// machine, but once the runtime reports why the link is down the painted rule is "pressable",
+    /// so the press after a failure is a real retry rather than a press the machine swallows.
     pub fn inject(&mut self, cx: &mut Context<Self>) {
-        if self.injection.is_busy() {
+        if !self.injection_view().enabled {
             return;
         }
 
@@ -1288,20 +1310,20 @@ impl Shell {
     /// Starts the bridge reader for an accepted target — the `Connecting` transition's only real
     /// effect.
     ///
-    /// Split out because the two builds must do different things here, and the difference is not
-    /// cosmetic. The shipped arm is `Runtime::connect_bridge`, which spawns the reader and dials
-    /// the loopback port. A test must never dial: `crate::ingest`'s header pins that every test
-    /// attaches a memory duplex instead, and a bridge genuinely listening on the machine running
-    /// the suite would flip the controller's `connected` under an assertion. So the test build
-    /// counts the call, which is what lets a press prove it got past the gate without a socket.
+    /// [`Runtime::connect_bridge`] is called in both builds, because the attempt it records is what
+    /// the deadline is measured from: a test that skipped it would have nothing to time out. What
+    /// differs is the dial itself, and it is not cosmetic. The shipped build spawns the reader on a
+    /// worker and dials the loopback port. A test must never dial: `crate::ingest`'s header pins
+    /// that every test attaches a memory duplex instead, and a bridge genuinely listening on the
+    /// machine running the suite would flip the controller's `connected` under an assertion — so
+    /// `Ingest::spawn` returns a reader with no worker under `cfg!(test)`, and this call counts the
+    /// press, which is what lets a press prove it got past the gate without a socket.
     ///
-    /// This is not a stub on the shipped path: `cfg(not(test))` is the only arm the binary
-    /// compiles, and the platform's own injector is unreachable from here anyway — see
-    /// [`Shell::attach`] and the note about the missing bridge-library path.
+    /// The dial is not target-specific: the endpoint is the constant loopback port whoever was
+    /// chosen, which is why one reader per attempt is enough for a list of windows.
     fn dial(&mut self) {
         #[cfg(test)]
         DIALS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        #[cfg(not(test))]
         self.runtime.connect_bridge();
     }
 
@@ -1914,11 +1936,21 @@ impl Shell {
 
     /// The runtime owner: the controller plus the bridge link behind it.
     ///
-    /// A status line reads `runtime().ingest_status()` for connected, state age and
-    /// freshness; nothing in this view draws it yet.
+    /// The loader's status line reads it — `ingest_status().connected` for whether the link is up
+    /// and `link_failure()` for why it is not — and nothing else in this view draws it yet.
     #[must_use]
     pub fn runtime(&self) -> &Runtime {
         &self.runtime
+    }
+
+    /// The runtime, mutably, which is how a test attaches a reader without a socket.
+    ///
+    /// Same seam as [`Shell::set_runtime`], narrower: a test that has already built its shell keeps
+    /// the runtime it was given and brings a link up on it, rather than replacing the owner the
+    /// shell's writes already go to.
+    #[cfg(test)]
+    pub fn runtime_mut(&mut self) -> &mut Runtime {
+        &mut self.runtime
     }
 
     /// A control value: the session override, else the profile, else `default`.
@@ -4554,17 +4586,15 @@ pub enum InjectionStatus {
     /// `Status: Detecting Java clients...` — enumerating, and while a target is being chosen.
     Detecting,
     /// `Status: Connecting...` — the gate passed and the bridge reader is dialling.
+    ///
+    /// It has two exits and only one of them is a variant: the link coming up is read from the
+    /// controller every frame, and a dial that fails is read from the runtime's
+    /// [`crate::runtime::Runtime::link_failure`] — a reported failure, or an attempt that outlived
+    /// [`crate::runtime::CONNECT_DEADLINE_MS`]. So `Connecting` is never a state the panel is
+    /// stuck in, which is what [`InjectionView::resolve`] paints.
     Connecting,
     /// A press the platform's rules refused before anything was attempted.
     Refused(Refusal),
-}
-
-impl InjectionStatus {
-    /// Whether a press is in flight, which is what makes a second press a no-op.
-    #[must_use]
-    pub fn is_busy(self) -> bool {
-        matches!(self, Self::Detecting | Self::Connecting)
-    }
 }
 
 /// Which rule refused an Inject press.
@@ -4620,17 +4650,24 @@ pub struct InjectionView {
 impl InjectionView {
     /// `UpdateGameStateUI` (`MainWindow.xaml.cs:1510-1547`) as a value.
     ///
-    /// The link state wins over the machine: a connected controller paints the accent
+    /// The link state that wins over the machine: a connected controller paints the accent
     /// "Connected & Injected" and "Connected" on the button whatever the last press left behind,
     /// which is the managed order and the one-owner rule in one line.
+    ///
+    /// The two failures are read only while the machine is [`InjectionStatus::Connecting`], and
+    /// that is the whole of their reach: a dial that never answered, and a link that went down
+    /// after answering, are both "the press is over and here is why". A refused press stays the
+    /// refusal even if an older attempt left a reason behind, because the rule that just refused is
+    /// what a user has to act on.
     ///
     /// One managed behaviour is deliberately not reproduced. `:1543-1547` re-enables the button on
     /// any game-state tick where the bridge is disconnected and the client is not injected, so a
     /// button disabled for a press in flight flips back under the user's cursor as soon as a tick
-    /// lands. The port keeps `Detecting`/`Connecting` disabled until the press resolves; the test
+    /// lands. The port keeps `Detecting`/`Connecting` disabled until the press resolves — where a
+    /// *failure* is a resolution and does re-enable — and the test
     /// `a_press_in_flight_is_not_re_enabled_by_a_tick` pins that.
     #[must_use]
-    pub fn resolve(state: InjectionStatus, connected: bool) -> Self {
+    pub fn resolve(state: InjectionStatus, connected: bool, failure: Option<LinkFailure>) -> Self {
         if connected {
             return Self {
                 status: copy::LOADER_STATUS_CONNECTED.to_owned(),
@@ -4651,11 +4688,17 @@ impl InjectionView {
                 copy::LOADER_INJECT_DETECTING,
                 false,
             ),
-            InjectionStatus::Connecting => (
-                copy::LOADER_STATUS_CONNECTING.to_owned(),
-                copy::LOADER_INJECT_CONNECTING,
-                false,
-            ),
+            // The one state with an exit the managed panel had and this one did not: `Connecting`
+            // with no answer is not a state the machine can stay in, because either the reader
+            // reports why the link is down or the dial's deadline does.
+            InjectionStatus::Connecting => match failure {
+                Some(failure) => (link_failure_line(failure), copy::LOADER_INJECT, true),
+                None => (
+                    copy::LOADER_STATUS_CONNECTING.to_owned(),
+                    copy::LOADER_INJECT_CONNECTING,
+                    false,
+                ),
+            },
             InjectionStatus::Refused(refusal) => (
                 format!("{}{}", copy::LOADER_STATUS_PREFIX, refusal.message()),
                 copy::LOADER_INJECT,
@@ -4670,6 +4713,23 @@ impl InjectionView {
             accent: false,
         }
     }
+}
+
+/// The status line for a dial's outcome: [`copy::LOADER_STATUS_PREFIX`] plus the reader's reason.
+///
+/// `{port}` is filled with `str::replace`, which is this crate's convention for a template in copy
+/// (`copy::MODULE_BIND_CONFLICT_NAMED` does the same): the sentence is data owned by the copy
+/// module, and `format!` would need a literal format string here, which is the second copy in
+/// disguise. Neither sentence carries a `Status:` of its own — the prefix supplies it once — which
+/// is why both are composed here rather than in the widget.
+fn link_failure_line(failure: LinkFailure) -> String {
+    let sentence = match failure {
+        LinkFailure::ConnectFailed { port } => {
+            copy::LOADER_REASON_CONNECT_FAILED.replace("{port}", &port.to_string())
+        }
+        LinkFailure::Disconnected => copy::LOADER_REASON_DISCONNECTED.to_owned(),
+    };
+    format!("{}{}", copy::LOADER_STATUS_PREFIX, sentence)
 }
 
 /// Whether one enumerated window belongs in the loader's list.
@@ -8572,6 +8632,20 @@ mod tests {
         format!("{}{}", copy::LOADER_STATUS_PREFIX, refusal.message())
     }
 
+    /// The status line a dial's outcome should paint, composed from the copy here.
+    ///
+    /// Composed from `copy` rather than from [`link_failure_line`] on purpose: the panel's rule is
+    /// the thing under test, and an expectation that called it would agree with any change to it.
+    fn failure_line(failure: LinkFailure) -> String {
+        let sentence = match failure {
+            LinkFailure::ConnectFailed { port } => {
+                copy::LOADER_REASON_CONNECT_FAILED.replace("{port}", &port.to_string())
+            }
+            LinkFailure::Disconnected => copy::LOADER_REASON_DISCONNECTED.to_owned(),
+        };
+        format!("{}{}", copy::LOADER_STATUS_PREFIX, sentence)
+    }
+
     /// A shell with no window surface still names a status; it just cannot reach a target.
     ///
     /// This is the shipped shape of a test or capture build (`cfg(test)`, `cfg(feature =
@@ -8810,24 +8884,210 @@ mod tests {
     /// Managed re-enabled the button on any tick where the bridge was disconnected and the client
     /// not injected (`MainWindow.xaml.cs:1543-1547`), so a button disabled for a press flipped back
     /// under the user's cursor. The port keeps `Detecting` and `Connecting` disabled until the
-    /// press resolves; a disconnected tick changes nothing.
+    /// press resolves — where a reported failure *is* a resolution and does re-enable, see
+    /// `an_unanswered_dial_fails_and_the_press_is_pressable_again` — and a disconnected tick
+    /// changes nothing.
     #[test]
     fn a_press_in_flight_is_not_re_enabled_by_a_tick() {
         for state in [InjectionStatus::Detecting, InjectionStatus::Connecting] {
             assert!(
-                !InjectionView::resolve(state, false).enabled,
+                !InjectionView::resolve(state, false, None).enabled,
                 "{state:?} is in flight and must not be pressable"
             );
         }
 
         assert!(
-            InjectionView::resolve(InjectionStatus::NotInjected, false).enabled,
+            InjectionView::resolve(InjectionStatus::NotInjected, false, None).enabled,
             "and an idle panel is pressable, or the wart would have been ported too far"
         );
         assert!(
-            !InjectionView::resolve(InjectionStatus::Detecting, true).enabled,
+            !InjectionView::resolve(InjectionStatus::Detecting, true, None).enabled,
             "a connected link wins over the machine, whichever state it left behind"
         );
+    }
+
+    /// A dial nobody answers stops saying `Connecting...` and says why, and the press comes back.
+    ///
+    /// This is the exit `Connecting` did not have: `self.injection` is written only by `inject` and
+    /// `attach`, and nothing in `IngestStatus` fails, so a dial that was never answered left the
+    /// panel spinning with a dead button for as long as the process lived. The deadline is the
+    /// runtime's ([`crate::runtime::CONNECT_DEADLINE_MS`]) and it is measured on the injected
+    /// clock, so this crosses it with a step clock instead of sleeping three seconds.
+    #[gpui::test]
+    fn an_unanswered_dial_fails_and_the_press_is_pressable_again(cx: &mut gpui::TestAppContext) {
+        let (runtime, clock) = Runtime::stepped();
+        let handle = cx.update(|cx| {
+            cx.new(|_| {
+                let mut shell = Shell::new(Theme::slate());
+                shell.set_runtime(runtime);
+                shell.set_windows(Some(window_surface(vec![game_window()])));
+                shell
+            })
+        });
+
+        let before = dials();
+        cx.update(|cx| handle.update(cx, |shell, cx| shell.inject(cx)));
+
+        let opening = cx.read(|cx| handle.read(cx).injection_view());
+        assert_eq!(
+            opening.status,
+            copy::LOADER_STATUS_CONNECTING,
+            "the gate passed, so the dial owns the panel"
+        );
+        assert!(!opening.enabled, "and it owns the press until it answers");
+        assert_eq!(dials(), before + 1, "one press, one dial");
+
+        // One millisecond short: still a dial in flight, and still not pressable.
+        clock.advance(std::time::Duration::from_millis(
+            crate::runtime::CONNECT_DEADLINE_MS as u64 - 1,
+        ));
+        let waiting = cx.read(|cx| handle.read(cx).injection_view());
+        assert_eq!(waiting.status, copy::LOADER_STATUS_CONNECTING);
+        assert!(!waiting.enabled);
+
+        clock.advance(std::time::Duration::from_millis(1));
+        let failed = cx.read(|cx| handle.read(cx).injection_view());
+        assert_eq!(
+            failed.status,
+            failure_line(LinkFailure::ConnectFailed {
+                port: aoko_protocol::BRIDGE_PORT
+            }),
+            "at the deadline the panel names the endpoint nobody answered on"
+        );
+        assert_eq!(
+            failed.button,
+            copy::LOADER_INJECT,
+            "the button is the only thing a user can do about a failed dial"
+        );
+        assert!(
+            failed.enabled,
+            "so a failure is pressable again, which is what makes it a state rather than a spinner"
+        );
+        assert!(!failed.accent, "the accent line is the connected one");
+
+        // And the retry really dials: a press after a failure is not swallowed by the old attempt.
+        cx.update(|cx| handle.update(cx, |shell, cx| shell.inject(cx)));
+        assert_eq!(dials(), before + 2, "the second press dialled again");
+        let retried = cx.read(|cx| handle.read(cx).injection_view());
+        assert_eq!(
+            retried.status,
+            copy::LOADER_STATUS_CONNECTING,
+            "and the panel is waiting on the new attempt, not on the dead one"
+        );
+    }
+
+    /// A link that goes down after answering lands on the disconnected line.
+    ///
+    /// The reader reports it ([`crate::ingest::LinkFailure::Disconnected`]) and the store's
+    /// `connected` goes false, but the machine is still `Connecting` — so without the reason the
+    /// panel would fall back to a dial that has already finished. The reader here is the real one
+    /// over a memory duplex, which is why the drop this asserts is the drop a socket produces
+    /// rather than one a stub wrote.
+    #[gpui::test]
+    fn a_link_that_drops_paints_the_disconnected_line(cx: &mut gpui::TestAppContext) {
+        let handle = cx.update(|cx| cx.new(|_| Shell::new(Theme::slate())));
+        cx.update(|cx| {
+            handle.update(cx, |shell, _| {
+                shell.set_windows(Some(window_surface(vec![game_window()])));
+            })
+        });
+
+        // The press first, so the machine reaches `Connecting` on the button path; the reader is
+        // attached after it, because `connect_bridge` clears the last answer when a new attempt
+        // starts and that would wipe the drop this test is waiting for.
+        cx.update(|cx| handle.update(cx, |shell, cx| shell.inject(cx)));
+        assert_eq!(
+            cx.read(|cx| handle.read(cx).injection_view()).status,
+            copy::LOADER_STATUS_CONNECTING
+        );
+
+        cx.update(|cx| {
+            handle.update(cx, |shell, _| {
+                let (transport, _peer) = aoko_protocol::transport::memory::duplex();
+                shell.runtime_mut().attach_ingest(transport);
+            })
+        });
+
+        // The peer never feeds a line, so the reader leaves at end of stream and reports the drop.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let reported = cx.read(|cx| handle.read(cx).runtime().link_failure());
+            if reported == Some(LinkFailure::Disconnected) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the reader never reported the drop: {reported:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+
+        let (view, connected) = cx.read(|cx| {
+            let shell = handle.read(cx);
+            (
+                shell.injection_view(),
+                shell.runtime().ingest_status().connected,
+            )
+        });
+        assert!(!connected, "the link really is down");
+        assert_eq!(
+            view.status,
+            failure_line(LinkFailure::Disconnected),
+            "and the panel says so instead of going back to a dial that already ran"
+        );
+        assert!(
+            view.enabled,
+            "a dropped link is retryable, or the panel has a second dead end"
+        );
+    }
+
+    /// Every state the machine can enter paints its own line, and both reasons do too.
+    ///
+    /// `resolve` is the whole mapping, so a state that fell through to another arm — or a failure
+    /// no state ever read — would be invisible here rather than at a call site.
+    #[test]
+    fn every_state_and_both_reasons_paint_their_own_line() {
+        use std::collections::BTreeSet;
+
+        let lines = [
+            InjectionView::resolve(InjectionStatus::NotInjected, false, None).status,
+            InjectionView::resolve(InjectionStatus::Detecting, false, None).status,
+            InjectionView::resolve(InjectionStatus::Connecting, false, None).status,
+            InjectionView::resolve(InjectionStatus::Refused(Refusal::NoWindow), false, None).status,
+            InjectionView::resolve(
+                InjectionStatus::Connecting,
+                false,
+                Some(LinkFailure::ConnectFailed {
+                    port: aoko_protocol::BRIDGE_PORT,
+                }),
+            )
+            .status,
+            InjectionView::resolve(
+                InjectionStatus::Connecting,
+                false,
+                Some(LinkFailure::Disconnected),
+            )
+            .status,
+        ];
+
+        let unique: BTreeSet<&str> = lines.iter().map(String::as_str).collect();
+        assert_eq!(
+            unique.len(),
+            lines.len(),
+            "no two states share a line: {lines:?}"
+        );
+        assert_eq!(
+            lines[4],
+            failure_line(LinkFailure::ConnectFailed {
+                port: aoko_protocol::BRIDGE_PORT
+            })
+        );
+        assert!(
+            !lines[4].contains("{port}"),
+            "the template's placeholder is filled, not painted: {}",
+            lines[4]
+        );
+        assert_eq!(lines[5], failure_line(LinkFailure::Disconnected));
     }
 
     /// The connected line is the controller's answer, not a state the panel stores.

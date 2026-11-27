@@ -64,13 +64,14 @@
 //! window opened before the handshake asks the codec's question rather than reading an empty list.
 //!
 //! What this deliberately does not do: no reconnect, no command frames, no injection and no
-//! module execution. A failed dial leaves the link down with the reason in the log, and
-//! the connection lifecycle (retry, backoff, teardown) belongs to a later slice. The
-//! reader thread is detached when `crate::ingest::Ingest` is dropped: a blocking
-//! `recv_line` on a live socket cannot be interrupted without closing it, and closing it
+//! module execution. A failed dial leaves the link down, and the reason is published into the
+//! runtime's [`LinkReport`] as well as logged, because the loader panel is what a user can act on
+//! and `connected` alone cannot say why it is false. Retry, backoff and socket teardown belong to
+//! a later slice. The reader thread is detached when `crate::ingest::Ingest` is dropped: a
+//! blocking `recv_line` on a live socket cannot be interrupted without closing it, and closing it
 //! is not this slice's job.
 
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -115,6 +116,67 @@ pub struct IngestStatus {
     pub fresh: bool,
 }
 
+/// Why the link is not up, in the two shapes the loader panel names.
+///
+/// `IngestStatus::connected` says *whether* the link is up; this says why it is not, which is what
+/// a user can act on. The managed host carried the same two facts in one `StatusMessage` channel —
+/// `"ERROR: Could not connect to agent on port " + _port` (`GameStateClient.cs:493`) when the dial
+/// failed, `"Disconnected from agent."` (`:615`) when a live link went down — and this is the split
+/// that lets the panel paint them as states instead of as one mutating string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkFailure {
+    /// The dial never reached the bridge, so nothing was ever injected into.
+    ///
+    /// The port is carried rather than looked up by the painter: it is the endpoint the dial
+    /// used, and the sentence that names it is a template.
+    ConnectFailed {
+        /// The bridge endpoint the reader dialled, [`aoko_protocol::BRIDGE_PORT`].
+        port: u16,
+    },
+    /// The link was up and went down, which is the transition `connected` alone cannot express.
+    Disconnected,
+}
+
+/// Where the reader publishes why the link went down, one attempt at a time.
+///
+/// The reader is the only writer, because it is the thread that dials and the thread the link
+/// closes on. The runtime holds the handle, clears it when a new attempt starts, and reads it to
+/// answer [`crate::runtime::Runtime::link_failure`] — so the panel's reason is the reader's report
+/// rather than a second guess about the same socket.
+///
+/// `Mutex` rather than `RwLock`: one writer, one reader, and the value is a `Copy` enum, so the
+/// lock is held for a load and a store and never across a paint.
+#[derive(Debug, Clone, Default)]
+pub struct LinkReport(Arc<Mutex<Option<LinkFailure>>>);
+
+impl LinkReport {
+    /// An empty report: no attempt has answered yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records why the link is down. Called by the reader thread only.
+    pub fn publish(&self, failure: LinkFailure) {
+        if let Ok(mut cell) = self.0.lock() {
+            *cell = Some(failure);
+        }
+    }
+
+    /// Forgets the last answer, which is what a new dial does before it starts.
+    pub fn clear(&self) {
+        if let Ok(mut cell) = self.0.lock() {
+            *cell = None;
+        }
+    }
+
+    /// The last answer, `None` while an attempt is still unanswered.
+    #[must_use]
+    pub fn read(&self) -> Option<LinkFailure> {
+        self.0.lock().ok().and_then(|cell| *cell)
+    }
+}
+
 /// A bridge reader running on its own thread.
 pub struct Ingest {
     /// `None` only when the thread could not be started; the reason is logged.
@@ -126,22 +188,38 @@ impl Ingest {
     ///
     /// The dial happens inside the thread: a resolved-but-silent address can block for the
     /// OS SYN timeout, and the startup path must not wait for it.
+    ///
+    /// A test build returns a reader with no worker instead of dialling. That is the rule this
+    /// module's header states — no test opens a socket, because a bridge genuinely listening on the
+    /// machine running the suite would flip the controller's `connected` under an assertion — and
+    /// it lives here rather than behind a `cfg` on the caller so the shipped path is one function
+    /// rather than two. The press that reaches it still proves itself by the counter in
+    /// `Shell::dial`; a test that needs a live link uses [`Ingest::attach`] over a memory duplex.
     #[must_use]
     pub fn spawn(
         controller: Arc<AppController>,
         advertised: Arc<RwLock<BridgeCapabilities>>,
+        report: LinkReport,
     ) -> Self {
+        if cfg!(test) {
+            return Self { worker: None };
+        }
+
         Self::start("aoko-bridge-dial", move || {
             match TcpBridgeTransport::connect_bridge() {
                 Ok(transport) => {
                     tracing::info!("bridge connected on the loopback port");
-                    pump(client(transport), &controller, &advertised);
+                    pump(client(transport), &controller, &advertised, &report);
                     tracing::info!("bridge link closed");
                 }
                 Err(error) => {
-                    // Not fatal: the window is usable without a bridge, and the next
-                    // launch tries again.
+                    // Not fatal: the window is usable without a bridge. The reason is published
+                    // as well as logged, because the loader panel is what a user can act on and
+                    // `connected` alone cannot say why it is false.
                     tracing::warn!("no bridge on the loopback port: {error}");
+                    report.publish(LinkFailure::ConnectFailed {
+                        port: aoko_protocol::BRIDGE_PORT,
+                    });
                 }
             }
         })
@@ -157,9 +235,10 @@ impl Ingest {
         transport: T,
         controller: Arc<AppController>,
         advertised: Arc<RwLock<BridgeCapabilities>>,
+        report: LinkReport,
     ) -> Self {
         Self::start("aoko-bridge-read", move || {
-            pump(client(transport), &controller, &advertised);
+            pump(client(transport), &controller, &advertised, &report);
         })
     }
 
@@ -199,12 +278,18 @@ impl Ingest {
 /// error and a panicking frame handler all leave the store saying "disconnected" rather
 /// than "connected, last seen a while ago".
 ///
+/// The exit also publishes [`LinkFailure::Disconnected`], and it does so **before** the store flips:
+/// a reader that was connected and is now going away is a drop, not a dial that never answered, and
+/// the panel's next frame has to see the reason before it sees `connected == false`. Reversed, a
+/// frame landing between the two writes would read an unanswered-looking attempt.
+///
 /// `advertised` is the cell [`crate::runtime::Runtime::module_supported`] reads. This thread
 /// is its only writer, because it is the thread that receives the capability frame.
 fn pump<T: Transport>(
     mut client: TransportClient<T>,
     controller: &AppController,
     advertised: &RwLock<BridgeCapabilities>,
+    report: &LinkReport,
 ) {
     let store = controller.store();
     store.set_connected(true);
@@ -257,6 +342,9 @@ fn pump<T: Transport>(
         }
     }
 
+    // The reason first, then the flag: see this function's doc for why the order is a
+    // correctness requirement rather than style.
+    report.publish(LinkFailure::Disconnected);
     store.set_connected(false);
 }
 
@@ -403,6 +491,7 @@ mod tests {
         peer.feed(b"{\"screenName\":\"Arena\",\"health\":20.0,\"inWorld\":true}\n");
         peer.feed(b"{\"partial\":true,\"health\":7.5,\"actionBar\":\"frame two\"}\n");
 
+        let report = LinkReport::new();
         let ingest = Ingest::attach(
             HeldTransport {
                 inner: transport,
@@ -410,6 +499,7 @@ mod tests {
             },
             Arc::clone(&controller),
             advertised_cell(),
+            report.clone(),
         );
 
         let state = wait_for_state(&controller, |state| state.health == 7.5);
@@ -443,6 +533,11 @@ mod tests {
         assert!(
             !controller.store().is_connected(),
             "end of stream disconnects the link"
+        );
+        assert_eq!(
+            report.read(),
+            Some(LinkFailure::Disconnected),
+            "and the reader published why, which is the half `connected` cannot say"
         );
         assert_eq!(
             controller
@@ -513,6 +608,7 @@ mod tests {
             },
             Arc::clone(controller),
             Arc::clone(&advertised),
+            LinkReport::new(),
         );
         (peer, closed, ingest, advertised)
     }

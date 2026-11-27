@@ -85,7 +85,7 @@ use aoko_protocol::gtb::{parse_wordlist_js, GtbWordSolver};
 use aoko_protocol::module_catalog::{self, EnabledFlag};
 use aoko_protocol::stats::StatsTracker;
 
-use crate::ingest::{Ingest, IngestStatus};
+use crate::ingest::{Ingest, IngestStatus, LinkFailure, LinkReport};
 
 /// Seed the five loop bodies start from.
 ///
@@ -103,6 +103,22 @@ const LOOP_SEED: u64 = 0x00A0_C0DE;
 /// `Timer` coalesces the ticks it misses for the same reason, so the cap follows it instead of
 /// inventing a rule. Five seconds is far beyond any frame gap a running app has.
 const PLAYTIME_MAX_CATCH_UP_SECS: u64 = 5;
+
+/// How long a bridge dial may stay unanswered before the port calls it failed.
+///
+/// The managed host had no ceiling of its own: `GameStateClient`'s connect either returned or
+/// threw, and the socket had whatever the OS offered (`aoko-platform/src/tcp.rs:59-62` records
+/// that `TcpClient.ConnectAsync` ran without an explicit timeout). On this machine's loopback a
+/// dial is answered in milliseconds — a listener accepts, a closed port refuses — so the only
+/// case this deadline covers is a host that drops the SYN, where the worker thread can block for
+/// the OS default and the panel would otherwise say `Connecting...` for as long as the process
+/// lives.
+///
+/// Three seconds is a ceiling, not a target: it is far above any loopback handshake and short
+/// enough that a user watching the loader gets an answer it can act on. The number is the port's,
+/// there is no managed line to cite for it, and it is measured in [`Runtime::now_ms`] so a test
+/// crosses it with a step clock instead of sleeping.
+pub const CONNECT_DEADLINE_MS: i64 = 3_000;
 
 /// Why a synthetic action is refused when this session has no platform input backend.
 ///
@@ -338,6 +354,17 @@ pub struct Runtime {
     advertised: Arc<RwLock<BridgeCapabilities>>,
     /// The instant [`Runtime::now_ms`] counts from: the clock's reading at construction.
     epoch: Instant,
+    /// Why the link went down, as the reader reported it.
+    ///
+    /// Shared with the reader thread, which is the only writer: it is the thread that dials and
+    /// the thread the link closes on. [`Runtime::link_failure`] reads it, so the panel's reason is
+    /// the reader's report rather than a second guess about the same socket.
+    link_report: LinkReport,
+    /// When the current dial started, on [`Runtime::now_ms`]'s clock, `None` before the first.
+    ///
+    /// This is the deadline's other half: a dial that is still unanswered this many milliseconds
+    /// after it started is a failure to report, even though the worker is blocked in `connect`.
+    connect_started_ms: Option<i64>,
 }
 
 impl Runtime {
@@ -378,6 +405,8 @@ impl Runtime {
             stats: Arc::new(StatsFeed::new()),
             advertised: Arc::new(RwLock::new(BridgeCapabilities::for_version_fallback(None))),
             epoch,
+            link_report: LinkReport::new(),
+            connect_started_ms: None,
         }
     }
 
@@ -450,20 +479,101 @@ impl Runtime {
         Arc::clone(&self.advertised)
     }
 
-    /// Starts the bridge reader on its own thread, once.
+    /// Starts the bridge reader on its own thread, once per attempt.
     ///
-    /// Idempotent so a startup path that runs twice (a reload, a second window) cannot
-    /// attach two readers to one store and interleave their `connected` writes. The dial
-    /// itself happens on the worker (`crate::ingest::Ingest::spawn`), so this call returns
-    /// without waiting for a bridge that is not there.
+    /// The dial itself happens on the worker (`crate::ingest::Ingest::spawn`), so this call
+    /// returns without waiting for a bridge that is not there. A live link is never dialled again,
+    /// and neither is an attempt that has answered nothing and still has time on its deadline —
+    /// that is the same dial the panel is already waiting for, and two readers interleaving their
+    /// `connected` writes on one store is what the guard exists to prevent.
+    ///
+    /// An attempt that *has* answered (the reader published a failure) or that has outlived
+    /// [`CONNECT_DEADLINE_MS`] is replaced instead, because the press that follows a failure is a
+    /// retry and has to actually dial. In the deadline case the previous worker is still blocked
+    /// in `connect`; it is detached rather than joined, it reports into the report cell of its own
+    /// attempt, and the store's `connected` is a boolean either way — so the panel cannot be wrong
+    /// about whether the link is up, which is the property that matters here.
     pub fn connect_bridge(&mut self) {
-        if self.ingest.is_some() {
+        if self.controller.store().is_connected() || self.attempt_is_live() {
             return;
         }
+
+        // A new attempt supersedes the last answer, and its deadline starts now.
+        self.link_report.clear();
+        self.connect_started_ms = Some(self.now_ms());
+
+        // The dial is the reader's, and a test build's reader does not dial: see
+        // [`Ingest::spawn`] and `crate::ingest`'s header.
         self.ingest = Some(Ingest::spawn(
             Arc::clone(&self.controller),
             self.advertised_handle(),
+            self.link_report.clone(),
         ));
+    }
+
+    /// Whether an unanswered dial still has time on its deadline.
+    fn attempt_is_live(&self) -> bool {
+        if self.link_report.read().is_some() {
+            return false;
+        }
+        self.connect_started_ms
+            .is_some_and(|started| self.now_ms() - started < CONNECT_DEADLINE_MS)
+    }
+
+    /// Why the link is down, or `None` while it is up or still being dialled.
+    ///
+    /// Three facts in one place, in this order: what the reader reported, whether the controller's
+    /// store says the link is up, and whether the dial has outlived its deadline. The report wins
+    /// because it is the socket's own answer; the store answers "is it up"; the deadline is the
+    /// only thing anyone can say about a dial nobody answered.
+    #[must_use]
+    pub fn link_failure(&self) -> Option<LinkFailure> {
+        if let Some(reported) = self.link_report.read() {
+            return Some(reported);
+        }
+
+        let started = self.connect_started_ms?;
+        if self.controller.store().is_connected() {
+            return None;
+        }
+        (self.now_ms() - started >= CONNECT_DEADLINE_MS).then_some(LinkFailure::ConnectFailed {
+            port: aoko_protocol::BRIDGE_PORT,
+        })
+    }
+
+    /// Attaches a reader over a transport the caller already connected.
+    ///
+    /// The seam a test uses to bring the link up and take it down without a socket, the same shape
+    /// `crate::ingest::Ingest::attach` gives `ingest`'s own suite: `memory::duplex` on one side,
+    /// the reader on the other, so the disconnect the panel paints is the one the real reader
+    /// reports rather than one a stub wrote.
+    #[cfg(test)]
+    pub fn attach_ingest<T: aoko_protocol::transport::Transport + 'static>(
+        &mut self,
+        transport: T,
+    ) {
+        self.link_report.clear();
+        self.connect_started_ms = Some(self.now_ms());
+        self.ingest = Some(Ingest::attach(
+            transport,
+            Arc::clone(&self.controller),
+            self.advertised_handle(),
+            self.link_report.clone(),
+        ));
+    }
+
+    /// A runtime on a caller-owned step clock, which is what crosses a deadline without sleeping.
+    ///
+    /// `pub(crate)` rather than `pub`: the clock type is a test item, and a public signature naming
+    /// it would be a test seam in the crate's exported API.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn stepped() -> (Self, Arc<StepClock>) {
+        let controller = Arc::new(AppController::default());
+        let source = Arc::new(StepClock::new());
+        let clock: Arc<dyn Clock> = source.clone();
+        let sleeper: Arc<dyn Sleeper> = source.clone();
+        (Self::with_time(controller, clock, sleeper), source)
     }
 
     /// What the bridge link currently reports.
@@ -1348,6 +1458,54 @@ impl InputBackend for NoInjection {
     }
 }
 
+/// A clock and sleeper that move only when a body parks, or when a test says so.
+///
+/// Lives at module level rather than inside this file's test module because two suites drive it:
+/// the runtime's own (a loop body's parks, playtime's second boundaries) and the loader's, where a
+/// connect deadline is crossed by advancing the clock instead of sleeping through it. The bodies
+/// never read the wall clock (`LoopRuntime` hands them this), so a park costs no real time.
+#[cfg(test)]
+pub(crate) struct StepClock {
+    now: std::sync::Mutex<Instant>,
+}
+
+#[cfg(test)]
+impl StepClock {
+    /// A clock at the current instant.
+    pub(crate) fn new() -> Self {
+        Self {
+            now: std::sync::Mutex::new(Instant::now()),
+        }
+    }
+
+    /// Moves the clock forward.
+    ///
+    /// A loop body only moves this clock by parking on the sleeper, and the playtime timer never
+    /// parks, so this is how a test crosses a second boundary — or a connect deadline — at no real
+    /// cost.
+    pub(crate) fn advance(&self, by: Duration) {
+        let mut now = self.now.lock().expect("clock");
+        *now += by;
+    }
+}
+
+#[cfg(test)]
+impl Clock for StepClock {
+    fn now(&self) -> Instant {
+        *self.now.lock().expect("clock")
+    }
+}
+
+#[cfg(test)]
+impl Sleeper for StepClock {
+    fn sleep_until(&self, deadline: Instant) {
+        let mut now = self.now.lock().expect("clock");
+        if deadline.checked_duration_since(*now).is_some() {
+            *now = deadline;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1495,46 +1653,6 @@ mod tests {
         assert!(!status.fresh, "an old frame is stale by definition");
     }
 
-    /// A clock and sleeper that move only when a body parks.
-    ///
-    /// The bodies never read the wall clock (`LoopRuntime` hands them this), so a park costs
-    /// no real time and the test asserts what a switch does, not how long it takes.
-    struct StepClock {
-        now: std::sync::Mutex<Instant>,
-    }
-
-    impl StepClock {
-        fn new() -> Self {
-            Self {
-                now: std::sync::Mutex::new(Instant::now()),
-            }
-        }
-
-        /// Moves the clock forward without parking a body.
-        ///
-        /// A loop body only moves this clock by parking on the sleeper, and the playtime timer
-        /// never parks, so this is how a test crosses a second boundary — at no real cost.
-        fn advance(&self, by: Duration) {
-            let mut now = self.now.lock().expect("clock");
-            *now += by;
-        }
-    }
-
-    impl Clock for StepClock {
-        fn now(&self) -> Instant {
-            *self.now.lock().expect("clock")
-        }
-    }
-
-    impl Sleeper for StepClock {
-        fn sleep_until(&self, deadline: Instant) {
-            let mut now = self.now.lock().expect("clock");
-            if deadline.checked_duration_since(*now).is_some() {
-                *now = deadline;
-            }
-        }
-    }
-
     /// The search overlay's clock: `i64` milliseconds on the injected clock.
     ///
     /// `CardPulse` counts in milliseconds and the clock hands back an `Instant`, so the accessor
@@ -1563,6 +1681,70 @@ mod tests {
 
         source.advance(Duration::from_secs(2));
         assert_eq!(runtime.now_ms(), 2_250);
+    }
+
+    /// A dial nobody answers becomes a failure at the deadline, on the injected clock.
+    ///
+    /// This is the state `Connecting` had no exit from: the worker blocks in `connect`
+    /// (`aoko-platform/src/tcp.rs:90-92` dials without a timeout), the store never says connected,
+    /// and nothing else would ever change the panel. The deadline is [`Runtime::now_ms`], so the
+    /// test advances a step clock instead of sleeping three seconds — and the retry half is
+    /// asserted too, because a failure a user cannot act on is the same defect wearing a line.
+    #[test]
+    fn an_unanswered_dial_fails_at_its_deadline_and_can_be_retried() {
+        let (mut runtime, clock) = Runtime::stepped();
+        assert_eq!(runtime.link_failure(), None, "nothing has been dialled yet");
+
+        runtime.connect_bridge();
+        assert_eq!(
+            runtime.link_failure(),
+            None,
+            "a fresh attempt is a dial in flight, not a failure"
+        );
+
+        clock.advance(Duration::from_millis(CONNECT_DEADLINE_MS as u64 - 1));
+        assert_eq!(
+            runtime.link_failure(),
+            None,
+            "one millisecond short of the deadline the dial is still whatever it is"
+        );
+
+        clock.advance(Duration::from_millis(1));
+        assert_eq!(
+            runtime.link_failure(),
+            Some(LinkFailure::ConnectFailed {
+                port: aoko_protocol::BRIDGE_PORT
+            }),
+            "at the deadline an unanswered dial is a failure with the endpoint in it"
+        );
+
+        runtime.connect_bridge();
+        assert_eq!(
+            runtime.link_failure(),
+            None,
+            "the press after a failure dials again and restarts the deadline"
+        );
+    }
+
+    /// A link the store reports as up is never a failure, however old the attempt is.
+    ///
+    /// The deadline is what to say about a dial *nobody answered*; a link that answered is not
+    /// that, so the store's `connected` wins over the clock. Without this ordering an attempt that
+    /// took longer than the deadline to come up would flip to "could not connect" the moment it
+    /// succeeded.
+    #[test]
+    fn a_connected_link_is_never_a_failure_however_old_the_attempt() {
+        let (mut runtime, clock) = Runtime::stepped();
+        runtime.connect_bridge();
+
+        runtime.controller().store().set_connected(true);
+        clock.advance(Duration::from_millis(CONNECT_DEADLINE_MS as u64 + 1));
+
+        assert_eq!(
+            runtime.link_failure(),
+            None,
+            "an attempt that answered is not a dial nobody answered"
+        );
     }
 
     /// The row facts' `supported` source: the bridge's advertised list, not a list of ours.
