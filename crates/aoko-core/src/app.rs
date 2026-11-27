@@ -186,13 +186,28 @@ pub struct AppController {
     profile: RwLock<Profile>,
     modules: RwLock<Vec<EnabledFlag>>,
     capabilities: CapabilityReport,
-    /// The `config` frame the current profile produces: built on first use, dropped by
-    /// [`AppController::update_profile`] and [`AppController::replace_profile`], which are the
-    /// only two writers of `profile`.
+    /// The `config` frame the current profile produces, dropped by every mutator:
+    /// [`AppController::update_profile`] and [`AppController::replace_profile`] for the profile,
+    /// [`AppController::set_hud_editor`] for the mode.
     ///
-    /// Always locked before `profile`. A rebuild holds this and then reads the profile; the
-    /// invalidators take this and then the profile write. One order, so no cycle.
-    frame_cache: RwLock<Option<ConfigFrame>>,
+    /// Always locked before `profile` and before `hud_editor`. A rebuild holds this and then
+    /// reads both; the mutators take this and then write theirs. One order, so no cycle.
+    frame_cache: RwLock<FrameCache>,
+    /// Whether the HUD editor mode is open. Runtime state, not a profile setting: the managed
+    /// frame reported `clicker.HudEditorActive`, which the window toggled.
+    hud_editor: AtomicBool,
+}
+
+/// The cached `config` frame and whether it still describes the controller.
+///
+/// A freshness flag rather than an `Option<ConfigFrame>`: `config_frame` hands back a mapped
+/// guard over the frame, and mapping an `Option` needs an unwrap on the read path, which this
+/// crate does not allow outside `main`. Holding a frame that starts out valid costs one build
+/// in the constructor and removes the panic.
+#[derive(Debug)]
+struct FrameCache {
+    frame: ConfigFrame,
+    fresh: bool,
 }
 
 impl AppController {
@@ -200,13 +215,43 @@ impl AppController {
     /// capability report (use `aoko_platform::probe_capabilities()` in production).
     #[must_use]
     pub fn new(capabilities: CapabilityReport) -> Self {
+        let profile = Profile::default();
+        let frame = ConfigFrame {
+            payload: crate::config_map::payload(&profile, false),
+            hud_layout: profile.to_hud_layout(),
+        };
         Self {
             store: Arc::new(StateStore::new()),
-            profile: RwLock::new(Profile::default()),
+            profile: RwLock::new(profile),
             modules: RwLock::new(Vec::new()),
             capabilities,
-            frame_cache: RwLock::new(None),
+            frame_cache: RwLock::new(FrameCache { frame, fresh: true }),
+            hud_editor: AtomicBool::new(false),
         }
+    }
+
+    /// Whether the HUD editor mode is open.
+    ///
+    /// This is runtime state, not a profile setting: the managed host read
+    /// `clicker.HudEditorActive` (`GameStateClient.cs:1540`), which the window toggled
+    /// (`MainWindow.xaml.cs:1406`), and no profile field ever carried it. The app owns the
+    /// mode; the controller holds it so the frame can report it.
+    #[must_use]
+    pub fn hud_editor(&self) -> bool {
+        self.hud_editor.load(Ordering::Relaxed)
+    }
+
+    /// Opens or closes the HUD editor mode, returning whether it changed.
+    ///
+    /// Takes the frame lock before the flag, the same order a rebuild uses, so the two cannot
+    /// be read apart, and drops the cached frame because the mode is a keyed field.
+    pub fn set_hud_editor(&self, value: bool) -> bool {
+        let mut cache = self.frame_cache.write();
+        if self.hud_editor.swap(value, Ordering::Relaxed) == value {
+            return false;
+        }
+        cache.fresh = false;
+        true
     }
 
     /// The store, for the ingest side and the automation loops.
@@ -253,7 +298,7 @@ impl AppController {
     pub fn update_profile(&self, update: impl FnOnce(&mut Profile) -> bool) -> bool {
         let mut cache = self.frame_cache.write();
         let changed = update(&mut self.profile.write());
-        *cache = None;
+        cache.fresh = false;
         changed
     }
 
@@ -269,7 +314,7 @@ impl AppController {
         let normalised = profile.normalize_action_binds();
         let mut cache = self.frame_cache.write();
         *self.profile.write() = profile;
-        *cache = None;
+        cache.fresh = false;
         normalised
     }
 
@@ -357,7 +402,7 @@ impl AppController {
     }
 
     /// The `config` frame this host would send right now: the payload and the HUD layout it
-    /// carries, served from a cache that the profile's writers drop.
+    /// carries, served from a cache that the mutators drop.
     ///
     /// The frame is more than [`config_payload`](Self::config_payload) because the encoding
     /// takes a `HudLayout`, and the layout lives on the profile as the managed JSON blob. This
@@ -386,27 +431,26 @@ impl AppController {
     #[must_use]
     pub fn config_frame(&self) -> ConfigFrameRef<'_> {
         let mut cache = self.frame_cache.write();
-        if cache.is_none() {
+        if !cache.fresh {
             let profile = self.profile.read();
-            *cache = Some(ConfigFrame {
-                payload: Self::payload(&profile),
+            cache.frame = ConfigFrame {
+                payload: Self::payload(&profile, self.hud_editor()),
                 hud_layout: profile.to_hud_layout(),
-            });
+            };
+            cache.fresh = true;
         }
         ConfigFrameRef(RwLockReadGuard::map(
             RwLockWriteGuard::downgrade(cache),
-            |cache| cache.as_ref().expect("the frame was built above"),
+            |cache| &cache.frame,
         ))
     }
 
     /// The payload half of the `config` frame: everything but the HUD layout.
     ///
-    /// The fields the profile owns are filled from live state: `fightStatus` from
-    /// [`Profile::fight_status_enabled`], and every `keybind*` field from
-    /// [`Profile::module_keys`], which is the store the managed host read through
-    /// `InputHooks.GetModuleKey(module)`. Everything else is still the managed `Clicker`
-    /// default that `ConfigPayload::default` documents, because aoko-core does not own the
-    /// clicker's property surface yet.
+    /// Every setting comes from the profile, through `crate::config_map`, which names the
+    /// `Clicker` property each key serialised and therefore the profile field behind it. The
+    /// one runtime key, `hudEditor`, comes from [`hud_editor`](Self::hud_editor); the six keys
+    /// nothing owns yet are listed in that module.
     ///
     /// All of it is one direction: the profile is the owner of the truth, this copies it out,
     /// and nothing writes a payload field back. A module the profile has no bind for sends
@@ -417,7 +461,7 @@ impl AppController {
     /// exists to close.
     #[must_use]
     pub fn config_payload(&self) -> ConfigPayload {
-        Self::payload(&self.profile.read())
+        Self::payload(&self.profile.read(), self.hud_editor())
     }
 
     /// The payload the profile produces.
@@ -425,8 +469,8 @@ impl AppController {
     /// Shared by [`config_payload`](Self::config_payload) and
     /// [`config_frame`](Self::config_frame) so the frame's two halves cannot drift apart, and
     /// delegated to `crate::config_map`, which owns the one profile-to-key mapping.
-    fn payload(profile: &Profile) -> ConfigPayload {
-        crate::config_map::payload(profile)
+    fn payload(profile: &Profile, hud_editor: bool) -> ConfigPayload {
+        crate::config_map::payload(profile, hud_editor)
     }
 }
 
@@ -797,6 +841,38 @@ mod tests {
                 "{module} must reach {key} as {code}"
             );
         }
+    }
+
+    /// `hudEditor` is runtime state, not a profile setting: the managed frame reported
+    /// `clicker.HudEditorActive`, which the window toggled. The controller owns the mode now,
+    /// and the frame has to follow it — a mapping that left it `false` would tell the bridge
+    /// the editor is closed for the whole session.
+    #[test]
+    fn the_config_frame_reports_the_hud_editor_mode() {
+        let app = AppController::default();
+        // Read the frame first so the cache is warm: the assertions below then also prove the
+        // mode drops it.
+        assert!(
+            app.config_frame().to_line().contains("\"hudEditor\":false"),
+            "the editor starts closed"
+        );
+
+        assert!(app.set_hud_editor(true), "opening the editor is a change");
+        assert!(app.hud_editor());
+        assert!(
+            app.config_frame().to_line().contains("\"hudEditor\":true"),
+            "the frame has to report the mode, and the cached frame has to be dropped"
+        );
+        assert!(
+            !app.set_hud_editor(true),
+            "setting the mode it already has reports no change"
+        );
+
+        assert!(app.set_hud_editor(false));
+        assert!(
+            app.config_frame().to_line().contains("\"hudEditor\":false"),
+            "closing it has to reach the frame too"
+        );
     }
 
     /// The gap the app builder found: `to_line` takes a `HudLayout` and nothing converted
