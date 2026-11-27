@@ -1319,10 +1319,14 @@ pub const LOADER_STATUS_CONNECTED: &str = "Status: Connected & Injected";
 /// Managed's tail is `GameStateClient.StatusMessage`, whose values are capitalised sentences
 /// with a full stop (`"Already connected/injected"` `:259`, `"ERROR: Injection failed. Check
 /// logs."` `:369`, `"Disconnected from agent."` `:615`, `"Reconnecting to agent..."` `:637`),
-/// plus a progress form at `:235`. The port has no channel for those: its loader state names one
-/// rule per refusal, and each rule owns one sentence below. So this prefix is used with those
-/// four and with nothing dynamic — a bridge message managed would show here has no line in the
-/// port, which is a loader gap to record rather than wording to invent.
+/// plus a progress form at `:235`. Six lines are written to paint behind this prefix: the four
+/// refusal rules below, which are the port's own and paint today, and the two reasons below
+/// them, which are managed's dial failure and its disconnect and paint once the machine can
+/// leave `Connecting`. The rest of the `StatusMessage` values still have no line — a
+/// conflict found at inject (`:304`), a missing bridge library (`:355`), a wrong-PID check
+/// (`:395`), a failed connectivity check (`:411`), `"Already connected/injected"` (`:259`), the
+/// progress form (`:235`) and the reconnect line (`:637`) — because the port cannot enter those
+/// states, and a sentence for a state it cannot enter is the defect rather than the gap.
 pub const LOADER_STATUS_PREFIX: &str = "Status: ";
 
 // New copy, and the only block on this panel that is: managed's `InjectButton_Click`
@@ -1356,6 +1360,36 @@ pub const LOADER_REFUSAL_NOT_GAME_TITLE: &str = "The window's title does not nam
 /// whose Minecraft marker was missing, where this rule is the reverse — the title may look right
 /// and the process is not a JVM.
 pub const LOADER_REFUSAL_NOT_JAVA_PROCESS: &str = "The window's process is not a Java launcher.";
+
+// The dial's two outcomes after the gate passed, and the only two `StatusMessage` values the
+// port has copy for: every state above is one the machine can enter, and these two cover the one
+// it was missing — the press that leaves `Connecting` for an answer that never arrives.
+//
+// There is deliberately no `LOADER_STATUS_FAILED` beside [`LOADER_STATUS_CONNECTING`]: a failed
+// dial is not a fourth status line, it is [`LOADER_STATUS_PREFIX`] plus one of the two below, so
+// neither carries a `Status:` of its own.
+
+/// The dial never reached the bridge, `GameStateClient.cs:493`:
+/// `"ERROR: Could not connect to agent on port " + _port`.
+///
+/// Two edits to the managed line. `ERROR:` is dropped: the sentence already says the dial
+/// failed, and the marker would stack a second colon after [`LOADER_STATUS_PREFIX`]. Managed
+/// needed it because one `StatusMessage` string carried progress, success and failure down the
+/// same channel, where the port has one sentence per state. The full stop is added, because the
+/// managed string was concatenated with the port number and ended mid-air.
+///
+/// `{port}` is the dialled endpoint's port — `aoko_protocol::BRIDGE_PORT` (25590) in the shipped
+/// build. Like [`MODULE_BIND_CONFLICT_NAMED`]'s placeholders it is filled with `str::replace`,
+/// never `format!`: this copy is data, and `format!` needs a literal format string.
+pub const LOADER_REASON_CONNECT_FAILED: &str = "Could not connect to agent on port {port}.";
+
+/// The link dropped after the bridge answered, `GameStateClient.cs:615`, verbatim.
+///
+/// The managed sentence is already this port's shape — capitalised, ending in a full stop — so
+/// nothing is adjusted. Its neighbour `"Reconnecting to agent..."` (`:637`) has no constant,
+/// because the port attempts no reconnect: a line for a state the machine cannot enter is the
+/// thing this panel's audit went after.
+pub const LOADER_REASON_DISCONNECTED: &str = "Disconnected from agent.";
 
 // ── The palette editor ──────────────────────────────────────────────────────────
 
@@ -1806,5 +1840,44 @@ mod tests {
             "Slate is the fallback and comes first"
         );
         assert!(previews.contains(&"Snowy Sky"));
+    }
+
+    /// The two dial outcomes are prefix tails, and the failure one is a one-placeholder template.
+    ///
+    /// The names are a contract with the shell's state machine, and the shape is a contract with
+    /// [`LOADER_STATUS_PREFIX`]: a `Status:` on either would paint `Status: Status: …`, and a
+    /// second brace would leave a placeholder in the sentence. The fill site passes the port
+    /// through `str::replace`, so this pins the template rather than a filled sentence.
+    #[test]
+    fn the_loader_reasons_are_prefix_tails_with_one_port_placeholder() {
+        for (name, reason) in [
+            ("LOADER_REASON_CONNECT_FAILED", LOADER_REASON_CONNECT_FAILED),
+            ("LOADER_REASON_DISCONNECTED", LOADER_REASON_DISCONNECTED),
+        ] {
+            assert!(
+                !reason.contains("Status:"),
+                "{name} carries a prefix the paint site adds"
+            );
+            assert!(
+                reason.starts_with(|c: char| c.is_ascii_uppercase()),
+                "{name} must open a sentence"
+            );
+            assert!(reason.ends_with('.'), "{name} must end with a full stop");
+        }
+
+        assert_eq!(
+            LOADER_REASON_CONNECT_FAILED.matches("{port}").count(),
+            1,
+            "the failure sentence names the port exactly once"
+        );
+        assert_eq!(
+            LOADER_REASON_CONNECT_FAILED.matches('{').count(),
+            1,
+            "one placeholder, so a typo cannot leave a second brace to paint"
+        );
+        assert!(
+            !LOADER_REASON_DISCONNECTED.contains('{'),
+            "the disconnect sentence takes no data"
+        );
     }
 }
