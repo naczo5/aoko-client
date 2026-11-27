@@ -99,6 +99,11 @@ impl Profiles {
         // (`aoko-platform/src/profile.rs:117-144`). Copying first means the second
         // attempt sees a populated directory and copies nothing, which is also the
         // rule a user who already has profiles gets.
+        // Both sentences in this block are new copy. WPF never migrated anything — the profiles
+        // directory is this port's own — and its configs were always writable, so a store that
+        // came up read-only had no sentence at all. The shape is managed's: a
+        // `SetConfigStatus($"Could not list configs: {ex.Message}")` line
+        // (`MainWindow.xaml.cs:795`), "could not …" with the reason appended.
         match profiles.migrate() {
             Ok(copied) => profiles.migrated = copied,
             Err(error) => {
@@ -285,6 +290,11 @@ impl Profiles {
 
     /// Writes the auto-save slot, which is what the app does on exit
     /// (`MainWindow.xaml.cs:1866-1869`).
+    ///
+    /// The failure line is the managed one with the noun changed. `save_named` reports
+    /// `Could not save config: {ex.Message}` (`:964`), which is the same write under the name the
+    /// user chose; the auto-save slot is the same write under the port's other name for it, and
+    /// managed had no line for it because it wrote the slot silently on exit.
     pub fn save_auto(&mut self, profile: &mut Profile) -> Result<(), String> {
         profile.name = AUTO_SAVE_NAME.to_owned();
         self.write(AUTO_SAVE_NAME, profile).map_err(|error| {
@@ -376,6 +386,9 @@ impl Profiles {
                 Ok(())
             }
             Err(error) => {
+                // New copy for the one case `ex.Message` could not name: managed reported
+                // `Could not delete '{name}': {ex.Message}` (`MainWindow.xaml.cs:886`), and a file
+                // that vanished between the list and the press has no message worth quoting.
                 let reason = match error.kind() {
                     ErrorKind::NotFound => "it no longer exists".to_owned(),
                     _ => error.to_string(),
@@ -475,6 +488,9 @@ impl Profiles {
 
         match load_profile_from_json(&text) {
             Some(profile) => ReadOutcome::Loaded(Box::new(profile)),
+            // Managed's sentence is `Failed to load config '{name}'.` (`MainWindow.xaml.cs:824`).
+            // The port says "parse profile" because what failed here is a JSON document that did
+            // not deserialize; a config that would not load has already been reported above.
             None => ReadOutcome::Failed(format!("Could not parse profile '{name}'.")),
         }
     }
