@@ -227,6 +227,21 @@ pub struct Shell {
     /// keeps the colour it had rather than flashing empty. Seeded from the draft's own defaults,
     /// so the first frame paints what the managed card paints.
     swatches: HashMap<&'static str, Color>,
+    /// The saved palettes as their cards paint them, read from the store once.
+    ///
+    /// [`PaletteStore::rows`] parses the palette file, and the card paints every frame, so a paint
+    /// that called it would read and parse `palettes.json` sixty times a second — the rule the
+    /// store's own field doc states, that its file reads happen on this thread and never inside a
+    /// paint. `None` is "not read yet": [`Shell::ensure_palette_rows`] fills it, and every press that
+    /// changes the file clears it again.
+    palette_rows: Option<Vec<palette_store::PaletteRow>>,
+    /// The palette card's name box (`NewPaletteNameBox`, `MainWindow.xaml:1953`).
+    ///
+    /// The typed name is not store state — [`PaletteStore::save_draft`] takes it as an argument and
+    /// the store's four drafts are the hex boxes — so the entity is the shell's, the way
+    /// [`Shell::block_add`] is, and its callback writes the draft's `name`, which is the field the
+    /// Add press reads.
+    palette_name: Option<Entity<TextInput>>,
     /// The colour picker, while it is open: the row it edits and the dialog entity.
     ///
     /// `None` is closed, and the row is named in the terms its owner already uses (see
@@ -590,6 +605,9 @@ impl Shell {
                 .unwrap_or_else(|_| PaletteStore::at(std::path::PathBuf::new())),
             color_fields: HashMap::new(),
             swatches: HashMap::new(),
+            // Both read on the first frame: the rows are a file read and the box needs a context.
+            palette_rows: None,
+            palette_name: None,
             // Closed: a picker exists only between a swatch press and the report that ends it.
             picker: None,
             // Filled on the first frame, where a context is available; see the field docs.
@@ -751,6 +769,8 @@ impl Shell {
     /// why it belongs before the first frame and not in the middle of an edit.
     pub fn set_palette_path(&mut self, path: impl Into<std::path::PathBuf>) {
         self.palette = PaletteStore::at(path);
+        // A new file is a new list: the cards paint the cache, not the store.
+        self.palette_rows = None;
     }
 
     /// The profile as the JSON `aoko-protocol` writes, ready to save.
@@ -994,6 +1014,45 @@ impl Shell {
             }
             self.color_fields.insert(bind, input);
         }
+    }
+
+    /// Reads the saved palettes once, for the cards the `CustomPalettesItems` template paints.
+    ///
+    /// Called at the top of [`Render::render`] beside the other `ensure_*` calls, because
+    /// [`PaletteStore::rows`] is a file read: once, not once per frame. The field doc has the rule.
+    fn ensure_palette_rows(&mut self) {
+        if self.palette_rows.is_none() {
+            self.palette_rows = Some(self.palette.rows());
+        }
+    }
+
+    /// Creates the palette card's name box, once.
+    ///
+    /// The same reason as [`Shell::ensure_block_add`] — an entity needs a context — and the same
+    /// owner rule: the box has no placeholder (`views/copy.rs` carries none for `NewPaletteNameBox`)
+    /// and its text lands in the draft's `name`, which is what [`PaletteStore::save_draft`] reads, so
+    /// there is no second copy of the typed name.
+    fn ensure_palette_name(&mut self, cx: &mut Context<Self>) {
+        if self.palette_name.is_some() {
+            return;
+        }
+        let theme = self.theme.clone();
+        let handle = cx.entity();
+        self.palette_name = Some(cx.new(|cx| {
+            TextInput::new(cx, theme, "").on_change(move |text, _window, cx| {
+                let name = text.to_string();
+                handle.update(cx, |shell, cx| shell.set_palette_name(name, cx));
+            })
+        }));
+    }
+
+    /// The name box's write, which lands in the draft the Add press reads.
+    fn set_palette_name(&mut self, name: String, cx: &mut Context<Self>) {
+        if self.palette.draft().name == name {
+            return;
+        }
+        self.palette.draft_mut().name = name;
+        cx.notify();
     }
 
     /// The one write path for a palette row's text: the box's `on_change`, the Enter commit and
@@ -1642,6 +1701,88 @@ impl Shell {
                     )
                     .child(div().flex_1().min_w(px(0.0)).child(field)),
             )
+            .into_any_element()
+    }
+
+    /// The saved palettes, one card each (`MainWindow.xaml:1910-1937`).
+    ///
+    /// The template's numbers are [`metrics::palette_card`]'s: a 180 px card at radius 6 with 8×6 of
+    /// padding, the name at 12 px, and the four 34×12 swatches 4 px apart. The data is the store's —
+    /// the name and the four roles [`palette_store::PaletteRow`] carries — so nothing here derives a
+    /// shade.
+    fn render_palette_rows(&self, theme: &Theme) -> AnyElement {
+        let mut rows = div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .gap(px(metrics::palette_card::GAP));
+
+        for (index, row) in self.palette_rows.iter().flatten().enumerate() {
+            let mut swatches = div()
+                .flex()
+                .flex_row()
+                .mt(px(metrics::palette_card::PREVIEW_GAP));
+            for color in [row.background, row.panel, row.slider, row.accent] {
+                swatches = swatches.child(
+                    div()
+                        .w(px(metrics::palette_card::SWATCH_WIDTH))
+                        .h(px(metrics::palette_card::SWATCH_HEIGHT))
+                        .mr(px(metrics::palette_card::SWATCH_GAP))
+                        .rounded(px(metrics::palette_card::SWATCH_RADIUS))
+                        .bg(color),
+                );
+            }
+
+            rows = rows.child(
+                div()
+                    .id(crate::reuse::indexed("saved-palette", index))
+                    .debug_selector(move || format!("saved-palette-{index}"))
+                    .w(px(metrics::palette_card::WIDTH))
+                    .rounded(px(metrics::palette_card::RADIUS))
+                    .border_1()
+                    .border_color(theme.card_border())
+                    .bg(theme.panel)
+                    .px(px(metrics::palette_card::PAD_X))
+                    .py(px(metrics::palette_card::PAD_Y))
+                    .child(
+                        div()
+                            .text_size(px(metrics::palette_card::NAME_TEXT))
+                            .text_color(theme.text)
+                            .child(SharedString::from(row.name.clone())),
+                    )
+                    .child(swatches),
+            );
+        }
+
+        rows.into_any_element()
+    }
+
+    /// The create box's name row (`MainWindow.xaml:1949-1956`): the caption, then the box.
+    ///
+    /// The box is the shell's entity ([`Shell::ensure_palette_name`]), created before the tree for
+    /// the same reason every other field is; a frame that reaches here without one paints the
+    /// caption alone rather than a box that cannot take focus.
+    fn render_palette_name_box(&self, label: &'static str, theme: &Theme) -> AnyElement {
+        let field: AnyElement = match &self.palette_name {
+            Some(field) => div()
+                .debug_selector(|| String::from("palette-name-box"))
+                .child(field.clone())
+                .into_any_element(),
+            None => div().into_any_element(),
+        };
+
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(6.0))
+            .child(
+                div()
+                    .text_size(px(metrics::text::CAPTION))
+                    .text_color(theme.dim_text)
+                    .child(label),
+            )
+            .child(field)
             .into_any_element()
     }
 
@@ -3306,7 +3447,7 @@ impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // The managed app saves on exit (`MainWindow.OnClosed`, `MainWindow.xaml.cs:1861`).
         // The hook covers a platform close; the title bar's own close button calls
-        // [`Shell::close_window`], which saves before quitting.
+        // [`Shell::close`], which saves before quitting.
         self.ensure_close_hook(window, cx);
 
         // The window keys live on the root element, and a key event only reaches it when the
@@ -3335,6 +3476,10 @@ impl Render for Shell {
         self.ensure_block_add(cx);
         // And the four palette boxes, for the same reason.
         self.ensure_color_fields(cx);
+        // The saved palettes are a file read, so it happens here once rather than in the paint,
+        // and the create box's name field is an entity for the same reason as the boxes above.
+        self.ensure_palette_rows();
+        self.ensure_palette_name(cx);
 
         // The GTB helper is polled here because this is the only per-frame hook the shell
         // has: the runtime decides whether there is work (module on, link live, frame fresh,
@@ -4382,6 +4527,16 @@ impl Shell {
             Control::ColorField { label, bind } => {
                 self.render_color_field(label, bind, theme, entity)
             }
+
+            // The saved palettes (`MainWindow.xaml:1910-1937`) and the name box (`:1949-1956`) are
+            // the two controls the card was missing a mount for. The rows paint the store's own
+            // data; the presses that make a row a button — apply on the card, remove on its cap —
+            // and the Add press are the next commit, because managed asked before a removal
+            // (`MessageBox`) and this port has no confirmation surface to ask with yet. A cap that
+            // deleted without asking would be worse than one that is not drawn.
+            Control::PaletteRows { .. } => self.render_palette_rows(theme),
+
+            Control::PaletteNameBox { label } => self.render_palette_name_box(*label, theme),
 
             Control::PalettePreview { name } => {
                 let preview_accent = Theme::accent_by_name(name);
@@ -8860,6 +9015,76 @@ mod tests {
             swatch_of(cx, &shell, "PaletteBgBox"),
             palette_store::parse_entry(&seed).expect("the draft's own default"),
             "the first frame paints the draft's background, not a literal of our own"
+        );
+    }
+
+    /// The saved palettes paint one card each, and the name box is a field whose text is the draft's.
+    ///
+    /// The two controls the card had no mount for: `CustomPalettesItems` (`MainWindow.xaml:1910-1937`),
+    /// one card per store entry with the name and the four swatches the template binds, and
+    /// `NewPaletteNameBox` (`:1949-1956`). The presses that make a card a button are not part of this
+    /// — `render_palette_rows` says why — but the data on screen is the store's, which is what the
+    /// mount had to prove, and the box's text is the draft's `name`, which is what the Add press
+    /// reads.
+    #[gpui::test]
+    fn the_palette_card_paints_the_saved_rows_and_the_name_box(cx: &mut gpui::TestAppContext) {
+        use gpui::Keystroke;
+
+        let root = scratch_root();
+        let palettes = root.join("palettes.json");
+        // One saved palette, written by the store rather than by hand.
+        let mut store = palette_store::PaletteStore::at(palettes.clone());
+        store.draft_mut().name = "Ember".to_owned();
+        store.save_draft(false).expect("the palette was written");
+
+        let (shell, handle, mut visual) = shell_in_window(cx, &root);
+        cx.update(|cx| shell.update(cx, |shell, _| shell.set_palette_path(palettes)));
+        cx.update(|cx| shell.update(cx, |shell, cx| shell.select_tab_named("settings", cx)));
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        // The rows are the store's, one card per entry.
+        scroll_into_view(&mut visual, "saved-palette-0");
+        let card = visual
+            .debug_bounds("saved-palette-0")
+            .expect("the saved palette paints a card");
+        assert_eq!(
+            card.size.width,
+            px(metrics::palette_card::WIDTH),
+            "180 wide, as the markup says"
+        );
+        assert!(
+            visual.debug_bounds("saved-palette-1").is_none(),
+            "one entry is one card"
+        );
+
+        // The name box is a field, not a painted line: a keystroke reaches the draft.
+        scroll_into_view(&mut visual, "palette-name-box");
+        assert!(
+            visual.debug_bounds("palette-name-box").is_some(),
+            "the name box paints"
+        );
+        let focus = cx.read(|cx| {
+            shell
+                .read(cx)
+                .palette_name
+                .as_ref()
+                .expect("the box exists after the first frame")
+                .read(cx)
+                .focus_handle()
+                .clone()
+        });
+        visual.update(|window, cx| window.focus(&focus, cx));
+        for key in ["e", "m"] {
+            visual
+                .cx
+                .dispatch_keystroke(handle, Keystroke::parse(key).expect("keystroke"));
+        }
+        assert_eq!(
+            cx.read(|cx| shell.read(cx).palette().draft().name.clone()),
+            "em",
+            "the box's callback writes the draft's name, which is the field the Add press reads"
         );
     }
 
