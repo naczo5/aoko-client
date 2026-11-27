@@ -58,6 +58,7 @@ use aoko_platform::{WindowInfo, WindowInspector};
 use aoko_protocol::block_esp::{self, BlockEspTargetData};
 
 use crate::components;
+use crate::components::block_esp::{BlockEspRow, RowAction};
 use crate::components::text_input::TextInput;
 use crate::components::ButtonVariant;
 use crate::components::FieldVariant;
@@ -78,6 +79,21 @@ use crate::views::prefs::ClientPrefs;
 use crate::views::profiles::{CreateOutcome, Profiles};
 use crate::views::servers_state::{AddOutcome, JoinOutcome, PingRequest, ServersState};
 use crate::views::stores::{NoStore, StoreBridge};
+
+/// Which row the colour picker was opened for.
+///
+/// Two kinds of row host a picker: a palette editor's four hex rows, keyed by the managed box name
+/// they are written back through, and a Block ESP tracked row, keyed by the `registry_id` it is
+/// found by in the profile. The key is the string type each owner already uses — `&'static str`
+/// for a box whose name is a constant, `String` for an id the profile holds — so the write-back
+/// lands on the row that was pressed even if the tab or the list moved on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PickerTarget {
+    /// One of the four palette editor rows, by the box name `PaletteDraft` keys on.
+    Palette(&'static str),
+    /// One tracked block, by `BlockEspTargetData::registry_id` as stored.
+    Block(String),
+}
 
 /// The root view.
 pub struct Shell {
@@ -183,14 +199,15 @@ pub struct Shell {
     /// keeps the colour it had rather than flashing empty. Seeded from the draft's own defaults,
     /// so the first frame paints what the managed card paints.
     swatches: HashMap<&'static str, Color>,
-    /// The colour picker, while it is open: the palette row it edits and the dialog entity.
+    /// The colour picker, while it is open: the row it edits and the dialog entity.
     ///
-    /// `None` is closed, and the bind is the managed box name the row already keys on, so the
-    /// write lands on the row the picker was opened for even if the tab or the draft moved on.
+    /// `None` is closed, and the row is named in the terms its owner already uses (see
+    /// [`PickerTarget`]), so the write lands on the row the picker was opened for even if the tab,
+    /// the draft or the list moved on.
     ///
     /// The dialog reports and does not dismiss itself, so this is the host's half: it is cleared
     /// on any result, and the row is written only for an acceptance.
-    picker: Option<(&'static str, Entity<ColorPickerView>)>,
+    picker: Option<(PickerTarget, Entity<ColorPickerView>)>,
     /// The shell's own focus handle: what holds the keyboard when no control does.
     ///
     /// This is what makes the window keys work at all. GPUI dispatches a key event from
@@ -982,17 +999,56 @@ impl Shell {
             .map(Rgb::from)
             .unwrap_or_default();
 
+        self.open_picker_on(PickerTarget::Palette(bind), initial, cx);
+    }
+
+    /// Opens the colour picker on one tracked block, which is the row's `Color` control.
+    ///
+    /// The initial value is the colour the row is painting, through the component's own
+    /// `BlockEspRow::color` — the same `normalize_color` rule the swatch draws with, so a picker
+    /// that opened on anything else would change the entry merely by being accepted.
+    pub fn open_block_color_picker(&mut self, registry_id: &str, cx: &mut Context<Self>) {
+        let Some(target) = self
+            .profile
+            .block_esp_targets
+            .iter()
+            .find(|target| target.registry_id == registry_id)
+        else {
+            return;
+        };
+
+        // The row is cloned out before the dialog is built, so the borrow of `self.profile` ends
+        // here rather than overlapping the `&mut self` that opens the picker.
+        let row = BlockEspRow::new(
+            target.registry_id.clone(),
+            target.display_name.clone(),
+            target.color_hex.clone(),
+            target.enabled,
+        );
+        let key = row.registry_id.to_string();
+
+        self.open_picker_on(PickerTarget::Block(key), Rgb::from(row.color()), cx);
+    }
+
+    /// Builds the dialog for one row and records it as the open picker.
+    ///
+    /// The two hosts differ only in what they ask and where the answer is written, so the dialog,
+    /// its callback and the "reports, never dismisses itself" contract live here once.
+    fn open_picker_on(&mut self, target: PickerTarget, initial: Rgb, cx: &mut Context<Self>) {
         let theme = self.theme.clone();
         let handle = cx.entity().downgrade();
+        let key = target.clone();
         let view = cx.new(move |cx| {
             ColorPickerView::new(cx, theme, initial).on_result(move |result, _window, cx| {
                 if let Some(shell) = handle.upgrade() {
-                    shell.update(cx, |shell, cx| shell.finish_color_picker(bind, result, cx));
+                    shell.update(cx, |shell, cx| {
+                        shell.finish_color_picker(key.clone(), result, cx)
+                    });
                 }
             })
         });
 
-        self.picker = Some((bind, view));
+        self.picker = Some((target, view));
         cx.notify();
     }
 
@@ -1004,14 +1060,94 @@ impl Shell {
     /// of the contract: the view reports an outcome and never dismisses itself.
     fn finish_color_picker(
         &mut self,
-        bind: &'static str,
+        target: PickerTarget,
         result: PickResult,
         cx: &mut Context<Self>,
     ) {
         self.picker = None;
         if result.accepted {
-            self.apply_color(bind, result.color, cx);
+            match target {
+                PickerTarget::Palette(bind) => self.apply_color(bind, result.color, cx),
+                PickerTarget::Block(registry_id) => {
+                    self.apply_block_color(&registry_id, result.color, cx);
+                }
+            }
         }
+        cx.notify();
+    }
+
+    /// Writes a picked colour into one tracked block.
+    ///
+    /// `BlockEspTargetData::color_hex` is six uppercase digits with no `#` — the form
+    /// `block_esp::normalize_color` accepts and the form the presets are written in — so the
+    /// dialog's canonical `#RRGGBB` is reduced to that rather than stored as it arrives.
+    fn apply_block_color(&mut self, registry_id: &str, color: Rgb, cx: &mut Context<Self>) {
+        // Exactly one leading `#`, which is what `palette_store::parse_entry` strips on the way
+        // in, so the value written here is the value that would be read back.
+        let canonical = color.to_hex();
+        let stored = canonical.strip_prefix('#').unwrap_or(&canonical).to_owned();
+        let Some(index) = self
+            .profile
+            .block_esp_targets
+            .iter()
+            .position(|target| target.registry_id == registry_id)
+        else {
+            return;
+        };
+        if self.profile.block_esp_targets[index].color_hex == stored {
+            return;
+        }
+
+        self.profile.block_esp_targets[index].color_hex = stored;
+        self.push_profile();
+        cx.notify();
+    }
+
+    /// One tracked-block row's press, written through to the profile.
+    ///
+    /// The row carries the value to write, not a request to invert what it paints: `Toggle`'s
+    /// `enabled` is the checkbox's new state, so a frame that arrives late cannot flip the entry
+    /// twice. `Color` opens the picker on that entry, and `Remove` drops exactly one id rather than
+    /// re-creating the list from the visible rows.
+    ///
+    /// Every write ends in `push_profile`, because the profile is what the config frame is built
+    /// from; a row that changed the paint and not the controller would be the second-copy defect
+    /// this branch keeps deleting.
+    pub fn apply_row_action(&mut self, action: RowAction, cx: &mut Context<Self>) {
+        match action {
+            RowAction::Toggle {
+                registry_id,
+                enabled,
+            } => {
+                let Some(index) = self
+                    .profile
+                    .block_esp_targets
+                    .iter()
+                    .position(|target| target.registry_id == registry_id)
+                else {
+                    return;
+                };
+                if self.profile.block_esp_targets[index].enabled == enabled {
+                    return;
+                }
+                self.profile.block_esp_targets[index].enabled = enabled;
+            }
+            RowAction::Remove { registry_id } => {
+                let before = self.profile.block_esp_targets.len();
+                self.profile
+                    .block_esp_targets
+                    .retain(|target| target.registry_id != registry_id);
+                if self.profile.block_esp_targets.len() == before {
+                    return;
+                }
+            }
+            RowAction::Color { registry_id } => {
+                self.open_block_color_picker(&registry_id, cx);
+                return;
+            }
+        }
+
+        self.push_profile();
         cx.notify();
     }
 
@@ -3973,13 +4109,7 @@ impl Shell {
                 .child(crate::reuse::joined("\u{25b8} ", header))
                 .into_any_element(),
 
-            Control::BlockEspRows => div()
-                .text_size(px(metrics::text::CAPTION))
-                .text_color(theme.dim_text)
-                // Empty until the row controls land: the managed list has no empty state to
-                // copy, because `BlockEspTargets` arrives populated by default. A placeholder
-                // sentence here would be a port invention, not a gap to fill with wording.
-                .into_any_element(),
+            Control::BlockEspRows => self.render_block_esp_rows(theme, entity),
 
             Control::BlockEspAdd { bind } => self.render_block_add(bind, theme, entity),
 
@@ -4012,6 +4142,46 @@ impl Shell {
                     .into_any_element()
             }
         }
+    }
+
+    /// The tracked-block list: one [`BlockEspRow`] per entry in the profile.
+    ///
+    /// `MainWindow.xaml:692-715` is an `ItemsControl` over `BlockEspTargets` inside a
+    /// `MaxHeight="170"` `ScrollViewer`, so the cap is the markup's and the order is the
+    /// profile's: the managed collection is only ever appended to and removed from, never
+    /// sorted, and a reorder here would repaint the rows in an order no saved profile records.
+    ///
+    /// The rows own nothing. Each control yields a [`RowAction`] naming its `registry_id` and
+    /// [`Shell::apply_row_action`] is the one writer, because the profile is what the config
+    /// frame is built from and a row that wrote itself would be a second owner of that list.
+    ///
+    /// The container carries the debug selector the rows do not: `components::block_esp` gives
+    /// its controls `ElementId`s and no selectors, so the list's own bounds are the only proof
+    /// from a `VisualTestContext` that the rows mounted at all — the failure shape that let a
+    /// placeholder arm pass its tests while painting nothing.
+    fn render_block_esp_rows(&self, theme: &Theme, entity: &Entity<Self>) -> AnyElement {
+        let handle = entity.clone();
+        let on_action = move |action: RowAction, _window: &mut Window, cx: &mut App| {
+            handle.update(cx, |shell, cx| shell.apply_row_action(action, cx));
+        };
+
+        let mut list = components::scroll(crate::reuse::indexed("blockesp-rows", 0))
+            .max_h(px(BLOCK_ESP_LIST_MAX_HEIGHT))
+            .debug_selector(|| "blockesp-rows".to_owned());
+
+        for target in &self.profile.block_esp_targets {
+            list = list.child(
+                BlockEspRow::new(
+                    target.registry_id.clone(),
+                    target.display_name.clone(),
+                    target.color_hex.clone(),
+                    target.enabled,
+                )
+                .element(theme, on_action.clone()),
+            );
+        }
+
+        list.into_any_element()
     }
 
     /// The Block ESP add row: the box, the button beside it, and the id hint under it.
@@ -4336,6 +4506,14 @@ fn switch_debug_selector(bind: &'static str) -> Option<&'static str> {
 fn block_add_selector(bind: &'static str) -> String {
     bind.to_owned()
 }
+
+/// The tracked-block list's cap: `MaxHeight="170"` on the `ScrollViewer` at
+/// `MainWindow.xaml:692`.
+///
+/// Belongs in `theme::metrics::block_esp` beside the row pad and the swatch size, which is the
+/// module that holds this panel's geometry; it sits here because that file is another builder's
+/// and a listener is not worth a cross-file edit. The report names the move.
+const BLOCK_ESP_LIST_MAX_HEIGHT: f32 = 170.0;
 
 /// The four create-palette colour rows, in the markup's order.
 ///
@@ -7522,6 +7700,290 @@ mod tests {
         );
     }
 
+    /// Selects the Render tab and draws, which is what every row test has to do first.
+    ///
+    /// `BlockEspCard` is on Render and `render_cards` paints only the selected tab's body, so a
+    /// row's callback cannot be reached from a window that never painted its card — the class of
+    /// failure that had a placeholder arm pass its own tests.
+    fn show_block_esp_rows(
+        cx: &mut gpui::TestAppContext,
+        shell: &Entity<Shell>,
+        visual: &mut gpui::VisualTestContext,
+    ) {
+        cx.update(|cx| shell.update(cx, |shell, cx| shell.select_tab_named("render", cx)));
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            visual.debug_bounds("blockesp-rows").is_some(),
+            "the tracked-block list paints on the Block ESP card"
+        );
+        scroll_into_view(visual, "blockesp-rows");
+    }
+
+    /// A toggle writes the flag the row carried, not its negation, and reaches the controller.
+    ///
+    /// Driven through [`Shell::apply_row_action`] because that is the function the checkbox's
+    /// closure calls: `components::block_esp` gives the checkbox a `format!`ed `ElementId` and no
+    /// debug selector, so a `VisualTestContext` has no bounds to click. What the paint can prove
+    /// is that the list is on screen, which is the half the placeholder arm used to fail.
+    ///
+    /// The frame half is asserted on the controller's profile rather than
+    /// `config_payload().block_esp_blocks`: `AppController::payload`
+    /// (`aoko-core/src/app.rs:426-437`) fills `fight_status` and the keybinds and leaves that
+    /// string at its default, so a frame assertion here would pass against a broken write-through.
+    /// That gap is `aoko-core`'s, and the report names it.
+    #[gpui::test]
+    fn a_toggle_writes_the_flag_the_row_reported(cx: &mut gpui::TestAppContext) {
+        let root = scratch_root();
+        let (shell, _, mut visual) = shell_in_window(cx, &root);
+        show_block_esp_rows(cx, &shell, &mut visual);
+
+        // A preset the default profile seeds disabled: `build_default_targets` seeds every
+        // `PRESETS` entry (`aoko-protocol/src/block_esp.rs:164`), so this is the state a real
+        // first frame shows rather than one this test arranged.
+        let id = "minecraft:emerald_ore";
+        let seeded = cx.read(|cx| {
+            shell
+                .read(cx)
+                .profile()
+                .block_esp_targets
+                .iter()
+                .find(|target| target.registry_id == id)
+                .map(|target| target.enabled)
+        });
+        assert_eq!(seeded, Some(false), "the preset starts disabled");
+
+        // The value the row reported is the value written: a handler that negated would turn
+        // this into `true` and prove itself here.
+        cx.update(|cx| {
+            shell.update(cx, |shell, cx| {
+                shell.apply_row_action(
+                    RowAction::Toggle {
+                        registry_id: id.to_owned(),
+                        enabled: false,
+                    },
+                    cx,
+                );
+            });
+        });
+        assert_eq!(
+            cx.read(|cx| shell
+                .read(cx)
+                .profile()
+                .block_esp_targets
+                .iter()
+                .find(|target| target.registry_id == id)
+                .map(|target| target.enabled)),
+            Some(false),
+            "an action carrying `false` leaves the entry disabled"
+        );
+
+        cx.update(|cx| {
+            shell.update(cx, |shell, cx| {
+                shell.apply_row_action(
+                    RowAction::Toggle {
+                        registry_id: id.to_owned(),
+                        enabled: true,
+                    },
+                    cx,
+                );
+            });
+        });
+        assert_eq!(
+            cx.read(|cx| shell
+                .read(cx)
+                .controller()
+                .profile()
+                .block_esp_targets
+                .iter()
+                .find(|target| target.registry_id == id)
+                .map(|target| target.enabled)),
+            Some(true),
+            "and the enable reached the controller, which is what the frame is built from"
+        );
+
+        // The paint agrees with the write, so the checkbox is not reading a stale row.
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(
+            cx.read(|cx| shell
+                .read(cx)
+                .profile()
+                .block_esp_targets
+                .iter()
+                .find(|target| target.registry_id == id)
+                .map(|target| target.enabled)),
+            Some(true),
+            "the row repaints from the profile it just wrote"
+        );
+    }
+
+    /// A remove drops the entry it names and leaves every other one in place.
+    ///
+    /// `retain` by id rather than by index: the row carries the `registry_id` it was painted
+    /// with, so a list that reordered between the press and the write still removes the row the
+    /// user pressed instead of whatever moved into its place.
+    #[gpui::test]
+    fn a_remove_drops_exactly_that_entry(cx: &mut gpui::TestAppContext) {
+        let root = scratch_root();
+        let (shell, _, mut visual) = shell_in_window(cx, &root);
+        show_block_esp_rows(cx, &shell, &mut visual);
+
+        let before = cx.read(|cx| shell.read(cx).profile().block_esp_targets.clone());
+        assert!(
+            before.len() > 1,
+            "the remove has to be distinguishable from emptying the list"
+        );
+        let removed = "minecraft:diamond_ore";
+        let kept = "minecraft:emerald_ore";
+        assert!(before.iter().any(|target| target.registry_id == removed));
+        assert!(before.iter().any(|target| target.registry_id == kept));
+
+        cx.update(|cx| {
+            shell.update(cx, |shell, cx| {
+                shell.apply_row_action(
+                    RowAction::Remove {
+                        registry_id: removed.to_owned(),
+                    },
+                    cx,
+                );
+            });
+        });
+
+        let after = cx.read(|cx| {
+            shell
+                .read(cx)
+                .controller()
+                .profile()
+                .block_esp_targets
+                .clone()
+        });
+        assert_eq!(
+            after.len(),
+            before.len() - 1,
+            "exactly one entry left the list"
+        );
+        assert!(
+            !after.iter().any(|target| target.registry_id == removed),
+            "and it is the one the row named"
+        );
+        assert!(
+            after.iter().any(|target| target.registry_id == kept),
+            "the entry beside it is untouched"
+        );
+
+        // A second remove for the same id is the no-op a stale row would produce, not a wipe.
+        cx.update(|cx| {
+            shell.update(cx, |shell, cx| {
+                shell.apply_row_action(
+                    RowAction::Remove {
+                        registry_id: removed.to_owned(),
+                    },
+                    cx,
+                );
+            });
+        });
+        assert_eq!(
+            cx.read(|cx| shell.read(cx).profile().block_esp_targets.len()),
+            after.len(),
+            "an id that is already gone removes nothing"
+        );
+    }
+
+    /// The row's colour control opens the picker on that entry, and an acceptance writes it back.
+    ///
+    /// Two halves in one cause: the press has to open on the colour the row paints — a picker
+    /// that opened on black would change the entry merely by being accepted — and the accepted
+    /// value has to land in the profile's own form, six uppercase digits with no `#`, which is
+    /// what `block_esp::normalize_color` accepts and what the presets are written in.
+    #[gpui::test]
+    fn a_row_colour_press_opens_the_picker_on_that_rows_colour(cx: &mut gpui::TestAppContext) {
+        let root = scratch_root();
+        let (shell, _, mut visual) = shell_in_window(cx, &root);
+        show_block_esp_rows(cx, &shell, &mut visual);
+
+        let id = "minecraft:diamond_ore";
+        let painted = cx.read(|cx| {
+            let shell = shell.read(cx);
+            let target = shell
+                .profile()
+                .block_esp_targets
+                .iter()
+                .find(|target| target.registry_id == id)
+                .expect("the default profile tracks diamond ore");
+            Rgb::from(
+                BlockEspRow::new(
+                    target.registry_id.clone(),
+                    target.display_name.clone(),
+                    target.color_hex.clone(),
+                    target.enabled,
+                )
+                .color(),
+            )
+        });
+
+        cx.update(|cx| {
+            shell.update(cx, |shell, cx| {
+                shell.apply_row_action(
+                    RowAction::Color {
+                        registry_id: id.to_owned(),
+                    },
+                    cx,
+                );
+            });
+        });
+
+        let opened = cx.read(|cx| {
+            shell
+                .read(cx)
+                .picker
+                .as_ref()
+                .map(|(target, view)| (target.clone(), view.read(cx).selected()))
+        });
+        assert_eq!(
+            opened,
+            Some((PickerTarget::Block(id.to_owned()), painted)),
+            "the press opened this row's picker, on the colour the row is showing"
+        );
+
+        // OK, as the dialog reports it: the accepted colour is canonical `#RRGGBB` and the
+        // profile stores it without the hash.
+        cx.update(|cx| {
+            shell.update(cx, |shell, cx| {
+                shell.finish_color_picker(
+                    PickerTarget::Block(id.to_owned()),
+                    PickResult {
+                        color: Rgb::new(0x11, 0x22, 0x33),
+                        accepted: true,
+                    },
+                    cx,
+                );
+            });
+        });
+
+        let (stored, open) = cx.read(|cx| {
+            let shell = shell.read(cx);
+            (
+                shell
+                    .controller()
+                    .profile()
+                    .block_esp_targets
+                    .iter()
+                    .find(|target| target.registry_id == id)
+                    .map(|target| target.color_hex.clone()),
+                shell.picker.is_some(),
+            )
+        });
+        assert_eq!(
+            stored.as_deref(),
+            Some("112233"),
+            "the accepted colour reached the profile in the form the presets use"
+        );
+        assert!(!open, "and the dialog closed");
+    }
+
     // ---- the startup palette precedence ----------------------------------------
 
     /// `--theme` wins over the saved profile's palette; without one, the profile wins.
@@ -7860,25 +8322,25 @@ mod tests {
 
         visual.simulate_click(bounds.center(), Modifiers::default());
 
-        let (bind, selected, painted) = cx.read(|cx| {
+        let (target, selected, painted) = cx.read(|cx| {
             let shell = shell.read(cx);
             let opened = shell
                 .picker
                 .as_ref()
-                .map(|(bind, view)| (*bind, view.read(cx).selected()));
-            let (bind, selected) = match opened {
-                Some((bind, color)) => (Some(bind), Some(color)),
+                .map(|(target, view)| (target.clone(), view.read(cx).selected()));
+            let (target, selected) = match opened {
+                Some((target, color)) => (Some(target), Some(color)),
                 None => (None, None),
             };
             (
-                bind,
+                target,
                 selected,
                 shell.swatches.get("PaletteBgBox").copied().map(Rgb::from),
             )
         });
         assert_eq!(
-            bind,
-            Some("PaletteBgBox"),
+            target,
+            Some(PickerTarget::Palette("PaletteBgBox")),
             "the press opened the bg row's picker"
         );
         assert_eq!(
