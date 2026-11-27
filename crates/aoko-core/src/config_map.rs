@@ -37,6 +37,13 @@
 //! else to take them from yet: `perfDiagnostics`, `clicking`, `gtbHint`, `gtbCount`,
 //! `gtbPreview`. They keep the payload default, and the test pins that list in both directions
 //! so a key cannot quietly join it.
+//!
+//! A sixth, `supportsStatePatches`, is not a setting and never will be: `to_line` writes the
+//! literal `true` for every frame, as the managed host did (`GameStateClient.cs:1426`: the
+//! modern bridge only emits partial fast-state packets after this explicit opt-in, so an older
+//! loader that does not read the key keeps receiving complete V1-compatible state documents).
+//! The opt-in is the host's, not the user's, so a profile has nothing to say about it: a wired
+//! frame and `ConfigPayload::default()` carry the identical string.
 
 use aoko_protocol::block_esp::{self, BlockEspTarget, BlockEspTargetData};
 use aoko_protocol::config_payload::{module_list_style_to_index, ConfigPayload};
@@ -296,8 +303,11 @@ mod tests {
 
     /// The keys with no source at all; see the module docs. `hudEditor` and
     /// `reloadMappingsNonce` are not here: the controller owns both, and the fixture turns
-    /// them on.
-    const NO_PROFILE_SOURCE: [&str; 5] = [
+    /// them on. `supportsStatePatches` is here because it is a protocol constant rather than
+    /// a field — `to_line` writes `true` unconditionally — so the guard's "must move" arm can
+    /// never pass for it, and no field should be invented to make it pass.
+    const NO_PROFILE_SOURCE: [&str; 6] = [
+        "supportsStatePatches",
         "perfDiagnostics",
         "clicking",
         "gtbHint",
@@ -355,8 +365,8 @@ mod tests {
     }
 
     /// The completeness guard: every emitted key either moves when its source moves — the
-    /// fixture profile, or the controller's HUD editor mode — or is on the no-source list and
-    /// stays put.
+    /// fixture profile, the controller's HUD editor mode, or its mapping-reload nonce — or is
+    /// on the no-source list and stays put.
     ///
     /// A key added to `ConfigPayload` and left at its default fails the first arm. A key wired
     /// to a profile field that the fixture does not move fails it too. A key that gains a
@@ -393,8 +403,16 @@ mod tests {
         }
     }
 
-    /// The block list is a derived string, so it gets a behavioural test of its own: enabled
-    /// targets are present, disabled ones are not, and a repeated id appears once.
+    /// The block list is a derived string, so it gets a behavioural test of its own: an enabled
+    /// target reaches the frame in the wire spelling, a disabled one does not reach it at all,
+    /// and a repeated id appears once.
+    ///
+    /// The spelling is the normalised path token, not the registry id: `serialize_targets` runs
+    /// `block_esp::normalize_id`, which drops the namespace, exactly as the managed
+    /// `BlockEspConfig.Serialize` did — its own test pins `diamond_ore=00E5FF` from a
+    /// `minecraft:diamond_ore` target (`Aoko.Tests/BlockEspTests.cs`). So the entry is
+    /// `emerald_block=00FF88`, and asserting the whole entry is the stronger claim: it pins the
+    /// id, the `=` separator the bridge's naive parser needs, and the uppercase colour.
     #[test]
     fn the_block_list_follows_the_profiles_enabled_targets() {
         let target = |id: &str, enabled: bool| BlockEspTargetData {
@@ -407,16 +425,16 @@ mod tests {
         let mut profile = Profile::default();
         profile.block_esp_targets = vec![target("minecraft:emerald_block", true)];
         let enabled = payload(&profile, false, 0).block_esp_blocks;
-        assert!(
-            enabled.contains("minecraft:emerald_block"),
-            "an enabled target has to reach the frame: {enabled}"
+        assert_eq!(
+            enabled, "emerald_block=00FF88",
+            "an enabled target has to reach the frame in the normalised wire spelling"
         );
 
         profile.block_esp_targets = vec![target("minecraft:emerald_block", false)];
         let disabled = payload(&profile, false, 0).block_esp_blocks;
-        assert!(
-            !disabled.contains("minecraft:emerald_block"),
-            "a disabled target must not reach the frame: {disabled}"
+        assert_eq!(
+            disabled, "",
+            "a disabled target must not reach the frame at all"
         );
 
         profile.block_esp_targets = vec![
@@ -425,9 +443,8 @@ mod tests {
         ];
         let repeated = payload(&profile, false, 0).block_esp_blocks;
         assert_eq!(
-            repeated.matches("minecraft:emerald_block").count(),
-            1,
-            "a repeated id is serialised once: {repeated}"
+            repeated, "emerald_block=00FF88",
+            "a repeated id is serialised once"
         );
     }
 }
