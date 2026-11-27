@@ -8,7 +8,7 @@
 //!
 //! Three pieces of state, one per thing the managed app keeps:
 //!
-//! * the **file**, `<app data>/Aoko/palettes.json` (`:43-51`), read on every operation
+//! * the **file**, `<app data>/Aoko/palettes.json` (`:43-51`), read once when the store is built
 //!   and written whole, because `PaletteStore` has no cache either;
 //! * the **current** palette name, the C# `Clicker.GuiTheme` the Settings card shows on
 //!   `Current palette: ` (`MainWindow.xaml:1904`);
@@ -16,6 +16,23 @@
 //!   roles are not edited: the card's own caption says they are derived (`:1946-1947`)
 //!   and `PaletteDraft::build` derives them with `AddCustomPaletteButton_Click`'s
 //!   formulas (`MainWindow.xaml.cs:1128-1143`).
+//!
+//! # The list is read once, and a press is queued
+//!
+//! Managed read the file on every operation and wrote it inside the click handler. Both are the
+//! frame's problem on a slow or scanned volume: the rows are painted every frame, and the byte
+//! swap is a `create_dir_all`, a create, a flush and a rename. So this store reads the file once,
+//! in [`PaletteStore::at`] — before the first frame — and every painting caller
+//! (`PaletteStore::rows`, `PaletteStore::theme`, `PaletteStore::palettes`) answers from what
+//! that read and the presses since left in memory. A press queues the whole file on the process's
+//! background writer (`crate::views::file_store::submit`), which runs the same
+//! `crate::views::file_store::write_atomically` swap as `accounts.json` does; the cached list
+//! moves at once, so a repaint while the write is in flight paints one of the lists a press built
+//! rather than a half-written file, and [`PaletteStore::poll`] settles it afterwards.
+//!
+//! A failure is not dropped: the press answers `saving_line`, and
+//! [`PaletteStore::status`] carries the reason or the saved sentence once the write has run. The
+//! card paints that line; nothing about it is left in a detached task.
 //!
 //! Resolution is `NormalizeThemeName` (`MainWindow.xaml.cs:1292-1306`), which is not the
 //! same rule as [`Theme::by_name`]: managed looks the name up in `GuiPalettes`, a table
@@ -59,6 +76,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use aoko_platform::{app_data_directory, PlatformError};
 use aoko_protocol::palettes::{
@@ -67,6 +85,7 @@ use aoko_protocol::palettes::{
 
 use crate::theme::{Color, CustomRoles, Theme};
 use crate::views::copy;
+use crate::views::file_store::{flush_writes, reply, settled, submit, Reply, WriteKind};
 
 /// The folder inside the app-data root that holds this client's files
 /// (`Aoko/Core/CustomPalette.cs:46-47`).
@@ -190,6 +209,11 @@ pub enum DraftError {
     /// One of the four hex boxes did not parse (`:1112-1117`).
     ColorsInvalid,
     /// The file could not be written (`:1152-1156`), carrying the I/O message.
+    ///
+    /// A press no longer answers with this: the write is queued, so a failed swap is
+    /// [`PaletteStore::status`]'s line once it has been tried. The variant keeps the managed
+    /// sentence — [`copy::PALETTE_STATUS_SAVE_FAILED_PREFIX`] — in one place, which is also what
+    /// the queued failure paints.
     Write(String),
 }
 
@@ -211,6 +235,21 @@ impl DraftError {
     }
 }
 
+/// The line a press shows while its write is still queued.
+///
+/// New copy, and the reason is the queued write: [`PaletteStore::save_draft`] answers with this
+/// instead of `Saved and applied palette '…'.`, which would be a success reported before the
+/// rename. The terminal sentence replaces it when [`PaletteStore::poll`] collects the write's
+/// outcome, which is the only moment the store knows the file really holds the palette.
+fn saving_line(name: &str) -> String {
+    format!("Saving palette '{name}'.")
+}
+
+/// The line a delete press shows while its write is still queued; see [`saving_line`].
+fn deleting_line(name: &str) -> String {
+    format!("Deleting palette '{name}'.")
+}
+
 /// What an Add-palette press did.
 ///
 /// `Saved` holds its palette behind a `Box` on purpose: [`CustomPalette`] is ten `String`s, so
@@ -228,11 +267,16 @@ pub enum DraftOutcome {
         /// The `MessageBox` caption.
         title: &'static str,
     },
-    /// The palette was written and applied.
+    /// The palette was added to the list and its write queued.
+    ///
+    /// The list and the applied theme move with the press, so the card paints the palette at
+    /// once; the sentence in `status` is the queued one, and the file's own answer arrives
+    /// through [`PaletteStore::poll`].
     Saved {
         /// What was stored, with the five derived roles filled.
         palette: Box<CustomPalette>,
-        /// `Saved and applied palette '<name>'.` (`:1170`).
+        /// `Saving palette '<name>'.`, replaced by `Saved and applied palette '<name>'.`
+        /// (`:1170`) once the swap lands.
         status: String,
     },
 }
@@ -289,6 +333,9 @@ pub enum DeleteError {
     /// header for why the port does not.
     NotFound(String),
     /// The file could not be written (`:1188-1194`), carrying the I/O message.
+    ///
+    /// As [`DraftError::Write`]: a queued write's failure is [`PaletteStore::status`]'s, and the
+    /// variant keeps the managed delete sentence in one place.
     Write(String),
 }
 
@@ -305,6 +352,22 @@ impl DeleteError {
     }
 }
 
+/// One queued write and what the press that made it changed, so a completion can settle the
+/// store's own state without reading the file back.
+#[derive(Debug, Clone)]
+struct Pending {
+    /// Where the write reports, and whether it has answered yet.
+    reply: Reply,
+    /// The whole file the job carries: the palette list this job makes the truth if it lands.
+    payload: Vec<CustomPalette>,
+    /// What [`PaletteStore::current_name`] was before the press, restored if the write fails.
+    previous_current: String,
+    /// The sentence the card settles on when the write lands or fails.
+    status: String,
+    /// The prefix a failure is painted with: a save and a delete name their own.
+    failure_prefix: &'static str,
+}
+
 /// The palette file, the palette that is applied, and the editor's four hex drafts.
 #[derive(Debug, Clone)]
 pub struct PaletteStore {
@@ -319,6 +382,16 @@ pub struct PaletteStore {
     /// The name a save press would replace, waiting for its own confirmation
     /// (`MainWindow.xaml.cs:1120-1127`), armed by [`PaletteStore::save_draft`] itself.
     overwrite_pending: Option<String>,
+    /// The palettes as this store knows them: the file it read at construction plus every press
+    /// since. Painting reads this, never the disk; see the module note.
+    cached: Vec<CustomPalette>,
+    /// The file as the last completed write (or the read at construction) left it. A failure
+    /// rolls the cache back to this, then re-applies the writes still in flight.
+    confirmed: Vec<CustomPalette>,
+    /// Writes queued and not yet settled, in submission order.
+    pending: Vec<Pending>,
+    /// The line the card paints for the last settled write, `None` while the last one landed.
+    status: Option<String>,
 }
 
 impl PaletteStore {
@@ -332,16 +405,30 @@ impl PaletteStore {
     }
 
     /// A store at an explicit path, for tests.
+    ///
+    /// The file is read once, here, and every later read of this store answers from what this and
+    /// the presses since left in memory — so a frame that paints the palette list does no I/O at
+    /// all. A write queued for the same path by another handle is drained first, which is what
+    /// keeps a second store over one file from reading the bytes the first is still swapping in.
     #[must_use]
     pub fn at(path: impl Into<PathBuf>) -> Self {
-        Self {
-            path: path.into(),
+        let path = path.into();
+        flush_writes(&path);
+
+        let mut store = Self {
+            cached: read_palettes(&path),
+            path,
             current: DEFAULT_PALETTE.to_owned(),
             draft: PaletteDraft::default(),
             // Nothing is armed until a press asks a question.
             delete_armed: None,
             overwrite_pending: None,
-        }
+            confirmed: Vec::new(),
+            pending: Vec::new(),
+            status: None,
+        };
+        store.confirmed = store.cached.clone();
+        store
     }
 
     /// Where the palettes file lives.
@@ -414,15 +501,20 @@ impl PaletteStore {
     /// Best-effort, exactly as `PaletteStore.LoadAll` is (`CustomPalette.cs:60-80`): a
     /// missing file, a blank one and a corrupt one all read as no palettes, because a
     /// palette the user cannot load must not stop the window from opening.
+    ///
+    /// Answered from what this store holds rather than from the disk: the read happens once, in
+    /// [`PaletteStore::at`], and a press afterwards updates this list. A painting caller — the
+    /// card's rows, the theme, the current-name line — therefore never waits on the volume the
+    /// palette file lives on.
     #[must_use]
     pub fn palettes(&self) -> Vec<CustomPalette> {
-        read_palettes(&self.path)
+        self.cached.clone()
     }
 
     /// The theme a palette name paints out of this store's file, or `Slate`.
     #[must_use]
     pub fn resolve(&self, name: &str) -> Theme {
-        resolve_in(&self.palettes(), name)
+        resolve_in(&self.cached, name)
     }
 
     /// The saved palettes as their cards paint them, in file order.
@@ -432,8 +524,8 @@ impl PaletteStore {
     /// [`PaletteRow`] explains why its colours come from the theme the apply builds.
     #[must_use]
     pub fn rows(&self) -> Vec<PaletteRow> {
-        self.palettes()
-            .into_iter()
+        self.cached
+            .iter()
             .map(|palette| {
                 let theme = Theme::from_custom(&palette.name, roles_of(&palette));
                 PaletteRow {
@@ -462,6 +554,107 @@ impl PaletteStore {
     /// that does not leaves the store and the profile disagreeing at the next load.
     pub fn apply(&mut self, name: &str) {
         self.current = name.to_owned();
+    }
+
+    /// The line the card paints for the last write that settled, `None` while the last one landed.
+    ///
+    /// This is where a queued write's failure reaches the user: the press returned
+    /// `saving_line`, and this replaces it with the managed `Could not save palette: …` once the
+    /// swap has failed, or with `Saved and applied palette '…'.` once it reached the file.
+    #[must_use]
+    pub fn status(&self) -> Option<&str> {
+        self.status.as_deref()
+    }
+
+    /// Whether a press is still waiting for its write, which the card can use to keep its rows
+    /// from claiming a state the file does not hold yet.
+    #[must_use]
+    pub fn is_saving(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    /// Settles every write that has finished, answering whether anything changed.
+    ///
+    /// A landed write confirms its own payload; a failed one rolls the cache back to the last
+    /// confirmed list and re-applies whatever is still in flight, so what the rows paint is always
+    /// one of the lists a press built — never a half-written file, and never a palette the disk
+    /// refused.
+    pub fn poll(&mut self) -> bool {
+        if self.pending.is_empty() {
+            return false;
+        }
+
+        let mut changed = false;
+        let mut settled_index = 0;
+        while settled_index < self.pending.len() {
+            let Some(outcome) = settled(&self.pending[settled_index].reply) else {
+                settled_index += 1;
+                continue;
+            };
+
+            let done = self.pending.remove(settled_index);
+            changed = true;
+            match outcome.error {
+                Some(error) => {
+                    self.status = Some(format!("{}{error}", done.failure_prefix));
+                    // The applied name followed the press, so a write that did not happen puts it
+                    // back where the file still says it is.
+                    self.current = done.previous_current;
+                }
+                None => {
+                    self.confirmed = done.payload;
+                    self.status = Some(done.status);
+                }
+            }
+        }
+
+        if changed {
+            self.cached = self.newest_payload();
+        }
+        changed
+    }
+
+    /// The list the presses have made the truth: the newest payload still in flight, else the
+    /// file as the last landed write left it.
+    fn newest_payload(&self) -> Vec<CustomPalette> {
+        self.pending
+            .last()
+            .map(|pending| pending.payload.clone())
+            .unwrap_or_else(|| self.confirmed.clone())
+    }
+
+    /// Queues one whole palette list and remembers what it will mean once it settles.
+    ///
+    /// The bytes are serialised here rather than on the writer, where a serialisation failure
+    /// would have to travel back through a mailbox as a string: one palettes file is small, and a
+    /// payload that does not serialise must refuse the press rather than quietly write the empty
+    /// document `from_palettes_json` reads as "no palettes".
+    fn queue(
+        &mut self,
+        payload: Vec<CustomPalette>,
+        previous_current: String,
+        status: String,
+        failure_prefix: &'static str,
+    ) {
+        let text = to_palettes_json(&payload);
+        if text.trim().is_empty() {
+            self.status = Some(format!(
+                "{failure_prefix}the palette file could not be written"
+            ));
+            return;
+        }
+
+        let reply = reply();
+        submit(self.path.clone(), WriteKind::Save(text), Arc::clone(&reply));
+
+        self.cached = payload.clone();
+        self.pending.push(Pending {
+            reply,
+            payload,
+            previous_current,
+            status,
+            failure_prefix,
+        });
     }
 
     /// The row a remove press is waiting to confirm, if any.
@@ -520,6 +713,11 @@ impl PaletteStore {
     /// One step is deliberately stricter than the managed one: the built-in refusal is
     /// case-insensitive, so `slate` never reaches the file (see the module header).
     ///
+    /// The write is queued, not performed here: the press answers `saving_line` and
+    /// [`PaletteStore::poll`] settles `Saved and applied palette '…'.` or the failure once the swap
+    /// has happened. The cached list, the applied name and the draft move at once, so a repaint
+    /// between the two paints what this press built.
+    ///
     /// # Errors
     /// [`DraftError`] with the copy line the card shows; nothing is written.
     pub fn save_draft(&mut self, overwrite: bool) -> Result<DraftOutcome, DraftError> {
@@ -545,13 +743,18 @@ impl PaletteStore {
         self.overwrite_pending = None;
 
         upsert(&mut palettes, palette.clone());
-        write_palettes(&self.path, &palettes).map_err(DraftError::Write)?;
-
-        self.current = name.clone();
+        let previous_current = std::mem::replace(&mut self.current, name.clone());
         self.draft.name.clear();
+        self.queue(
+            palettes,
+            previous_current,
+            copy::PALETTE_STATUS_SAVED.replace("{name}", &name),
+            copy::PALETTE_STATUS_SAVE_FAILED_PREFIX,
+        );
+
         Ok(DraftOutcome::Saved {
             palette: Box::new(palette),
-            status: copy::PALETTE_STATUS_SAVED.replace("{name}", &name),
+            status: saving_line(&name),
         })
     }
 
@@ -578,25 +781,32 @@ impl PaletteStore {
     /// [`DeleteError::NotFound`] and writes nothing. See the module header.
     ///
     /// # Errors
-    /// [`DeleteError::NotFound`] for a name the file does not contain, or
-    /// [`DeleteError::Write`] when the file cannot be written; nothing is written in
-    /// either case.
+    /// [`DeleteError::NotFound`] for a name the file does not contain. Nothing is written in that
+    /// case. A write that fails afterwards is [`PaletteStore::status`]'s, because the press has
+    /// already answered by then.
     pub fn delete(&mut self, name: &str) -> Result<DeleteOutcome, DeleteError> {
         let mut palettes = self.palettes();
         if !palettes.iter().any(|stored| same_name(&stored.name, name)) {
             return Err(DeleteError::NotFound(name.to_owned()));
         }
         delete(&mut palettes, name);
-        write_palettes(&self.path, &palettes).map_err(DeleteError::Write)?;
 
+        let previous_current = self.current.clone();
         let fallback = if same_name(&self.current, name) {
             self.current = DEFAULT_PALETTE.to_owned();
             Some(DEFAULT_PALETTE)
         } else {
             None
         };
+        self.queue(
+            palettes,
+            previous_current,
+            copy::PALETTE_STATUS_DELETED.replace("{name}", name),
+            copy::PALETTE_STATUS_DELETE_FAILED_PREFIX,
+        );
+
         Ok(DeleteOutcome {
-            status: copy::PALETTE_STATUS_DELETED.replace("{name}", name),
+            status: deleting_line(name),
             fallback,
         })
     }
@@ -649,14 +859,6 @@ fn read_palettes(path: &Path) -> Vec<CustomPalette> {
         Ok(text) => from_palettes_json(&text),
         Err(_) => Vec::new(),
     }
-}
-
-/// Replaces the palette file, creating `<app data>/Aoko` on the first write.
-fn write_palettes(path: &Path, palettes: &[CustomPalette]) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    fs::write(path, to_palettes_json(palettes)).map_err(|error| error.to_string())
 }
 
 /// `IsValidPaletteName` (`MainWindow.xaml.cs:1212-1224`).
@@ -752,6 +954,23 @@ mod tests {
         PaletteStore::at(scratch().join(APP_DIR).join(FILE_NAME))
     }
 
+    /// Settles every queued write, the way the frames after a press do.
+    ///
+    /// A press queues its write, so a test that reads the file immediately after one would be
+    /// racing the writer thread. This waits for every outcome the store is going to paint, which
+    /// is the only ordering the store promises.
+    fn settled_store(store: &mut PaletteStore) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while store.is_saving() {
+            store.poll();
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the queued palette write never reported"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
     #[test]
     fn a_first_run_has_no_palettes_and_resolves_slate() {
         let store = store();
@@ -800,13 +1019,25 @@ mod tests {
         );
 
         assert_eq!(store.current_name(), "Mine", "saving applies the palette");
-        assert_eq!(status, "Saved and applied palette 'Mine'.");
+        assert_eq!(
+            status, "Saving palette 'Mine'.",
+            "a queued write is not a save yet; the terminal line is the store's"
+        );
         assert_eq!(store.draft().name, "", "only the name box is cleared");
         assert_eq!(
             store.draft().background,
             "#1a2b3c",
             "the hex drafts keep what was typed"
         );
+        assert_eq!(
+            store.palettes(),
+            vec![*palette],
+            "the cached list carries the row the press built, before the file does"
+        );
+
+        settled_store(&mut store);
+        assert_eq!(store.status(), Some("Saved and applied palette 'Mine'."));
+        assert!(!store.is_saving());
 
         let text = fs::read_to_string(store.path()).expect("the file was written");
         assert!(
@@ -1060,7 +1291,9 @@ mod tests {
         let DraftOutcome::Saved { status, .. } = store.save_draft(true).expect("overwrite") else {
             panic!("the confirmed press replaces without asking again");
         };
-        assert_eq!(status, "Saved and applied palette 'Mine'.");
+        assert_eq!(status, "Saving palette 'Mine'.");
+        settled_store(&mut store);
+        assert_eq!(store.status(), Some("Saved and applied palette 'Mine'."));
         assert_eq!(
             store.palettes().len(),
             1,
@@ -1163,13 +1396,19 @@ mod tests {
         assert_eq!(title, "Delete Palette");
 
         let deleted = store.delete("Mine").expect("deleted");
-        assert_eq!(deleted.status, "Deleted palette 'Mine'.");
+        assert_eq!(
+            deleted.status, "Deleting palette 'Mine'.",
+            "a queued removal is not a deletion yet"
+        );
         assert_eq!(
             deleted.fallback,
             Some(DEFAULT_PALETTE),
             "the applied palette moved, so the caller is told to persist Slate"
         );
-        assert!(store.palettes().is_empty());
+        assert!(store.palettes().is_empty(), "the row goes at once");
+
+        settled_store(&mut store);
+        assert_eq!(store.status(), Some("Deleted palette 'Mine'."));
         assert_eq!(
             store.current_name(),
             DEFAULT_PALETTE,
@@ -1188,6 +1427,7 @@ mod tests {
         let mut store = store();
         store.draft_mut().name = "Mine".to_owned();
         store.save_draft(false).expect("save");
+        settled_store(&mut store);
         let before = fs::read_to_string(store.path()).expect("the file exists");
 
         let refused = store.delete("Gone").expect_err("nothing was deleted");
@@ -1211,13 +1451,21 @@ mod tests {
         // A name that differs only by case is a different question: the file is searched
         // case-insensitively, so that one is found and removed.
         let deleted = store.delete("MINE").expect("case-insensitive");
-        assert_eq!(deleted.status, "Deleted palette 'MINE'.");
         assert_eq!(
             deleted.fallback,
             Some(DEFAULT_PALETTE),
             "different casing is the applied palette, so it falls back too"
         );
         assert!(store.palettes().is_empty());
+
+        settled_store(&mut store);
+        assert_eq!(store.status(), Some("Deleted palette 'MINE'."));
+        assert!(
+            !fs::read_to_string(store.path())
+                .expect("the file exists")
+                .contains("MINE"),
+            "the removed palette left the file"
+        );
     }
 
     #[test]
@@ -1279,8 +1527,10 @@ mod tests {
     /// restores the black fallback, the panel assertion below turns black and fails.
     #[test]
     fn a_corrupt_role_previews_what_applying_would_paint() {
-        let store = store();
-        fs::create_dir_all(store.path().parent().expect("parent")).expect("dir");
+        // The store is built after the file is written: the read happens once, in `at`, so a file
+        // that changes underneath a live store is the next construction's business.
+        let path = scratch().join(APP_DIR).join(FILE_NAME);
+        fs::create_dir_all(path.parent().expect("parent")).expect("dir");
         let broken = CustomPalette {
             name: "Broken".to_owned(),
             background: "#1A2B3C".to_owned(),
@@ -1288,11 +1538,8 @@ mod tests {
             accent: "#C7625A".to_owned(),
             ..CustomPalette::default()
         };
-        fs::write(
-            store.path(),
-            to_palettes_json(std::slice::from_ref(&broken)),
-        )
-        .expect("write");
+        fs::write(&path, to_palettes_json(std::slice::from_ref(&broken))).expect("write");
+        let store = PaletteStore::at(path);
 
         let row = store.rows().pop().expect("the file has one palette");
         assert_eq!(row.name, "Broken");
@@ -1316,9 +1563,11 @@ mod tests {
 
     #[test]
     fn a_corrupt_file_reads_as_no_palettes() {
-        let store = store();
-        fs::create_dir_all(store.path().parent().expect("parent")).expect("dir");
-        fs::write(store.path(), "not json").expect("write");
+        // As above: the read is `at`'s, so the file is written before the store exists.
+        let path = scratch().join(APP_DIR).join(FILE_NAME);
+        fs::create_dir_all(path.parent().expect("parent")).expect("dir");
+        fs::write(&path, "not json").expect("write");
+        let store = PaletteStore::at(path);
 
         assert!(store.palettes().is_empty(), "the loader is best-effort");
         assert_eq!(store.resolve("Mine").name, "Slate");
@@ -1336,5 +1585,116 @@ mod tests {
         assert!(!is_valid_name("Mi/ne"));
         assert!(!is_valid_name("   "));
         assert!(!is_valid_name("\t"));
+    }
+
+    /// A repaint between the press and the rename paints the press, not a half-written file.
+    ///
+    /// This is the case the queued write creates: the press returned, the frame runs, and the
+    /// bytes may still be in the temporary. What the rows show has to be one of the lists a press
+    /// built — the new palette in full — while the file still holds the old one.
+    #[test]
+    fn a_repaint_while_the_write_is_in_flight_paints_the_press() {
+        let mut store = store();
+        store.draft_mut().name = "Mine".to_owned();
+        store.save_draft(false).expect("the first save");
+        settled_store(&mut store);
+
+        store.draft_mut().name = "Other".to_owned();
+        store.save_draft(false).expect("the second save");
+
+        // No settle: this is the frame after a press.
+        let rows = store.rows();
+        assert_eq!(rows.len(), 2, "the new row is painted whole, at once");
+        assert_eq!(rows[1].name, "Other");
+
+        settled_store(&mut store);
+        assert_eq!(store.status(), Some("Saved and applied palette 'Other'."));
+        let stored = PaletteStore::at(store.path().to_path_buf()).palettes();
+        assert_eq!(stored.len(), 2, "and both are in the file");
+    }
+
+    /// Two commits in quick succession: the last payoff is the file, and neither is lost.
+    ///
+    /// They share one `<file>.tmp`, so the queue is what keeps them from writing it at the same
+    /// time — the defect a second thread per press would have.
+    #[test]
+    fn two_quick_saves_end_on_the_last_palette() {
+        let mut store = store();
+        store.draft_mut().name = "Mine".to_owned();
+        store.draft_mut().accent = "#111111".to_owned();
+        store.save_draft(false).expect("first");
+        store.draft_mut().name = "Mine".to_owned();
+        store.draft_mut().accent = "#222222".to_owned();
+        store.save_draft(true).expect("second");
+
+        settled_store(&mut store);
+
+        assert_eq!(store.status(), Some("Saved and applied palette 'Mine'."));
+        let stored = PaletteStore::at(store.path().to_path_buf()).palettes();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].accent, "#222222", "the last commit is the file");
+    }
+
+    /// A write that cannot land rolls the rows back and says so; nothing claims a save.
+    #[test]
+    fn a_failed_write_rolls_back_and_reports_the_reason() {
+        let path = scratch().join(APP_DIR).join(FILE_NAME);
+        let mut store = PaletteStore::at(path.clone());
+        store.draft_mut().name = "Mine".to_owned();
+        store.save_draft(false).expect("the first save");
+        settled_store(&mut store);
+
+        // A directory where the sibling temporary belongs fails the swap, which is the shape a
+        // full or read-only volume takes here.
+        let mut temporary = path.into_os_string();
+        temporary.push(".tmp");
+        fs::create_dir_all(PathBuf::from(&temporary)).expect("a blocking directory");
+
+        store.draft_mut().name = "Other".to_owned();
+        let DraftOutcome::Saved { status, .. } = store.save_draft(false).expect("queued") else {
+            panic!("a new name does not need a confirmation");
+        };
+        assert_eq!(status, "Saving palette 'Other'.");
+
+        settled_store(&mut store);
+
+        let reported = store
+            .status()
+            .expect("a failed write is reported")
+            .to_owned();
+        assert!(
+            reported.starts_with("Could not save palette: "),
+            "the managed failure sentence, unchanged: {reported}"
+        );
+        assert!(
+            store.palettes().iter().all(|stored| stored.name != "Other"),
+            "a palette the file refused is not painted as saved"
+        );
+        assert_eq!(
+            store.current_name(),
+            "Mine",
+            "and the applied name is back where the file says it is"
+        );
+    }
+
+    /// A path that is not valid UTF-8 is an ordinary palette path.
+    #[cfg(unix)]
+    #[test]
+    fn a_palette_file_at_a_non_utf8_path_saves_and_reads_back() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let path = scratch().join(OsStr::from_bytes(b"palettes\xFF.json"));
+        let mut store = PaletteStore::at(path.clone());
+        store.draft_mut().name = "Mine".to_owned();
+        store.save_draft(false).expect("queued");
+        settled_store(&mut store);
+
+        assert_eq!(store.status(), Some("Saved and applied palette 'Mine'."));
+        assert_eq!(
+            PaletteStore::at(path).palettes().len(),
+            1,
+            "the file is where the store put it"
+        );
     }
 }

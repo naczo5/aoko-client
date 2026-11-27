@@ -505,8 +505,7 @@ fn both_click_engines_share_the_chest_menu_guards() {
         "the right engine clicks in chests too when the user allowed it"
     );
     assert_eq!(
-        configs.left.guards.chest_stealer_menu_check,
-        configs.right.guards.chest_stealer_menu_check,
+        configs.left.guards.chest_stealer_menu_check, configs.right.guards.chest_stealer_menu_check,
         "one menu-check row, both engines"
     );
     assert!(configs.left.guards.chest_stealer_menu_check);

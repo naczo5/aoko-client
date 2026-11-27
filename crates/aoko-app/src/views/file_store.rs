@@ -39,6 +39,24 @@
 //! the rename succeeded: what the tabs show is always what the file holds, and a write that
 //! failed is reported as a failure (`add_failed`, `delete_failed`) instead of a success.
 //!
+//! # Where a write runs, and where it must not
+//!
+//! `write_atomically` is the only writer, and `writer_for` is the only thing that calls it
+//! for a queued job: one thread per file, jobs in queue order, the outcome posted into the
+//! submitter's mailbox so the owner can paint it. That is what a press uses — a save on a slow or
+//! scanned directory queues its bytes and returns, and the frame is not spent waiting for a
+//! `flush` and a rename. Because the queue is per path and the temporary has one fixed name, two
+//! commits in quick succession cannot collide: the second waits, and the file ends holding the
+//! last payload.
+//!
+//! `accounts.json` and `servers.json` are the exception, and they stay on the thread that pressed
+//! the button. [`StoreBridge`] answers with the write's own result — `Option<StoredAccount>`,
+//! `Option<ServerRowSource>`, `bool` — and both tabs paint that answer as their failure line, so a
+//! queued write could only either report the add as saved before the rename or move the failure
+//! out of the tab's reach. Moving these two needs the seam to hand a ticket back and the tabs to
+//! poll it, which is their half of the code, not this module's.
+
+//!
 //! # A file that cannot be read is moved aside, never deleted
 //!
 //! An unparsable payload is renamed to `<file>.corrupt-<yyyyMMdd-HHmmss>`
@@ -87,10 +105,12 @@
 //!   the `aoko-app`-side bridge over the same files, and it can be swapped for an `aoko-core`
 //!   store later without either tab changing a line.
 
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use aoko_core::SplitMix64;
@@ -489,6 +509,11 @@ impl<T> JsonFile<T> {
     /// `false` means nothing was written: either saving is paused (`AccountStore.cs:303-304`)
     /// or the swap failed. The caller turns that into the tab's failure line, and the rows in
     /// memory stay the rows on disk.
+    ///
+    /// This one stays on the calling thread, unlike the config and palette saves: the two tabs
+    /// paint the answer of this call, so a queued write could only report the row as saved before
+    /// the rename or leave the failure where the tab cannot see it. The module header has the
+    /// reasoning and what moving it would need.
     fn commit(&mut self, next: Vec<T>, to_json: fn(&[T]) -> Option<String>) -> bool {
         if self.blocked {
             return false;
@@ -628,6 +653,247 @@ fn temporary_path(path: &Path) -> PathBuf {
     let mut temporary = path.as_os_str().to_owned();
     temporary.push(TEMP_SUFFIX);
     PathBuf::from(temporary)
+}
+
+/// What one queued job does to its file.
+#[derive(Debug, Clone)]
+pub(crate) enum WriteKind {
+    /// Swap these bytes in through the sibling temporary, the way [`write_atomically`] does.
+    Save(String),
+    /// Remove the file. A file that is already gone is not a failure.
+    Delete,
+}
+
+/// How one queued job ended.
+///
+/// `error` is the I/O message the owning view paints; `None` means the rename (or the removal)
+/// happened, so a caller that reports it is not claiming a success it has not seen.
+#[derive(Debug, Clone)]
+pub(crate) struct WriteOutcome {
+    pub(crate) error: Option<String>,
+}
+
+/// The mailbox one queued job reports into.
+///
+/// The submitter owns it, so two stores over one file can never take each other's answer — and a
+/// write whose owner is gone still runs, it just reports into a mailbox nobody reads.
+pub(crate) type Reply = Arc<Mutex<Option<WriteOutcome>>>;
+
+/// A mailbox with no answer yet.
+pub(crate) fn reply() -> Reply {
+    Arc::new(Mutex::new(None))
+}
+
+/// The answer, once the write has run; `None` while it is still queued or in progress.
+pub(crate) fn settled(reply: &Reply) -> Option<WriteOutcome> {
+    lock(reply).take()
+}
+
+/// One queued job: the file, what to do to it, and where to report.
+#[derive(Debug)]
+pub(crate) struct WriteJob {
+    path: PathBuf,
+    kind: WriteKind,
+    reply: Reply,
+}
+
+impl WriteJob {
+    /// A job over `path` reporting into `reply`.
+    pub(crate) fn new(path: PathBuf, kind: WriteKind, reply: Reply) -> Self {
+        Self { path, kind, reply }
+    }
+}
+
+/// The background writer of one file.
+///
+/// A queued write is run by one thread, in queue order, so two commits in quick succession cannot
+/// race over the `<file>.tmp` they share: the second waits for the first to finish and the file
+/// ends holding the last payload. The thread exists only while there is work — it exits when the
+/// queue drains, and the next submit starts a new one — so an idle app carries no extra thread.
+///
+/// The write itself is still [`write_atomically`]: the swap is the same temp-then-rename, only off
+/// the thread that paints. A caller that must see the new bytes now can wait for the queue to
+/// drain ([`flush_writes`]).
+pub(crate) struct Writer {
+    state: Arc<WriterState>,
+}
+
+#[derive(Debug, Default)]
+struct WriterState {
+    queue: Mutex<WriterQueue>,
+    /// Signalled when the queue drains and the worker exits, which is what [`Writer::flush`]
+    /// waits on.
+    idle: Condvar,
+}
+
+#[derive(Debug, Default)]
+struct WriterQueue {
+    jobs: VecDeque<WriteJob>,
+    /// Whether a worker is running. A flag rather than a `JoinHandle` because nothing joins the
+    /// thread: it leaves on its own when the queue is empty, and a `submit` that lands in between
+    /// starts the next one.
+    running: bool,
+}
+
+impl Writer {
+    fn new() -> Self {
+        Self {
+            state: Arc::new(WriterState::default()),
+        }
+    }
+
+    /// Queues one job, starting the worker when it is not already running.
+    ///
+    /// A thread that cannot be started is not a lost write: the queued jobs run on this thread
+    /// instead, which is slower but still reports through the same mailbox.
+    fn submit(&self, job: WriteJob) {
+        let start = {
+            let mut queue = lock(&self.state.queue);
+            queue.jobs.push_back(job);
+            let start = !queue.running;
+            queue.running = true;
+            start
+        };
+
+        if start {
+            self.start();
+        }
+    }
+
+    fn start(&self) {
+        let state = Arc::clone(&self.state);
+        let spawned = std::thread::Builder::new()
+            .name("aoko-store-write".to_owned())
+            .spawn(move || drain(&state));
+
+        if spawned.is_err() {
+            // No thread available: run what is queued on this thread instead, which is slower but
+            // still reports through the same mailbox.
+            drain(&self.state);
+        }
+    }
+
+    /// Waits until every queued job has run.
+    fn flush(&self) {
+        let mut queue = lock(&self.state.queue);
+        while !queue.jobs.is_empty() || queue.running {
+            queue = self
+                .state
+                .idle
+                .wait(queue)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+}
+
+/// Takes the next job, or clears the running flag and answers `None` when the queue is empty.
+///
+/// Popping and clearing the flag happen under one lock, so a job queued at the same moment either
+/// comes out here or starts the next worker — it can never be left in the queue with no thread to
+/// run it.
+fn next_job(state: &WriterState) -> Option<WriteJob> {
+    let mut queue = lock(&state.queue);
+    let job = queue.jobs.pop_front();
+    if job.is_none() {
+        queue.running = false;
+        state.idle.notify_all();
+    }
+    job
+}
+
+/// Runs queued jobs until the queue is empty.
+fn drain(state: &WriterState) {
+    while let Some(job) = next_job(state) {
+        perform(&job);
+    }
+}
+
+/// Runs one job and posts its outcome, whether it succeeded or not.
+fn perform(job: &WriteJob) {
+    let outcome = match &job.kind {
+        WriteKind::Save(contents) => match write_atomically(&job.path, contents) {
+            Ok(()) => WriteOutcome { error: None },
+            Err(error) => WriteOutcome {
+                error: Some(error.to_string()),
+            },
+        },
+        WriteKind::Delete => match fs::remove_file(&job.path) {
+            // `File.Exists` was the managed gate, so a file that is already gone is the state the
+            // caller asked for.
+            Err(error) if error.kind() != io::ErrorKind::NotFound => WriteOutcome {
+                error: Some(error.to_string()),
+            },
+            _ => WriteOutcome { error: None },
+        },
+    };
+
+    *lock(&job.reply) = Some(outcome);
+}
+
+/// The process's writers, one per file.
+///
+/// Shared rather than owned per store, because the temporary a save writes is the fixed
+/// `<file>.tmp`: two stores over the same path — the shell's palette store and a second one a
+/// test builds over the same file — must not write that temporary at the same time. The path is
+/// the key as it is given, as an `OsString`, so a name that is not valid UTF-8 is an ordinary key
+/// here rather than something to convert and lose.
+fn writers() -> &'static Mutex<HashMap<PathBuf, Arc<Writer>>> {
+    static WRITERS: OnceLock<Mutex<HashMap<PathBuf, Arc<Writer>>>> = OnceLock::new();
+    WRITERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The writer every job over `path` goes through, created on first use.
+pub(crate) fn writer_for(path: &Path) -> Arc<Writer> {
+    let mut writers = lock(writers());
+    if let Some(writer) = writers.get(path) {
+        return Arc::clone(writer);
+    }
+
+    let writer = Arc::new(Writer::new());
+    writers.insert(path.to_path_buf(), Arc::clone(&writer));
+    writer
+}
+
+/// Queues one job over `path`, reporting into `reply`.
+pub(crate) fn submit(path: PathBuf, kind: WriteKind, reply: Reply) {
+    let writer = writer_for(&path);
+    writer.submit(WriteJob::new(path, kind, reply));
+}
+
+/// Waits until every write queued over `path` has run.
+///
+/// A read that has to see the newest bytes — a config the user just saved, the preference the
+/// switch just changed — calls this first. It waits for a write already in the queue and nothing
+/// else: with no save in flight it returns without touching the disk.
+pub(crate) fn flush_writes(path: &Path) {
+    let writer = {
+        let writers = lock(writers());
+        writers.get(path).map(Arc::clone)
+    };
+    if let Some(writer) = writer {
+        writer.flush();
+    }
+}
+
+/// Waits until every write queued in this process has run.
+///
+/// For the exit path: a save queued a moment before the app quits is not lost to the process
+/// going away. The registry is held while the queues drain — the writer threads never take it, so
+/// the order cannot deadlock — and a submit that lands meanwhile waits for the exit flush instead
+/// of slipping past it.
+pub(crate) fn flush_all_writes() {
+    let writers = lock(writers());
+    for writer in writers.values() {
+        writer.flush();
+    }
+}
+
+/// Locks without panicking on a poisoned mutex.
+///
+/// A job holds no invariant the views depend on while the lock is held, so a panic elsewhere
+/// leaves the queue usable rather than turning every later save into a second panic.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Parses `accounts.json`, keeping every row that parses.
@@ -1284,5 +1550,179 @@ mod tests {
         );
         assert!(!same_uuid("", ""));
         assert!(!same_uuid("aa", "bb"));
+    }
+
+    /// Waits for one job's outcome, so a test can assert what a press would paint.
+    ///
+    /// The writer runs on its own thread, so the only ordering a test can rely on is the one the
+    /// contract gives: the outcome is posted after the swap, which is why this waits for it rather
+    /// than sleeping and hoping.
+    fn answer(reply: &Reply) -> WriteOutcome {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Some(outcome) = settled(reply) {
+                return outcome;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the queued write never reported"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn a_queued_write_lands_before_it_reports() {
+        let root = scratch();
+        let path = root.join("queued.json");
+        let reply = reply();
+
+        submit(
+            path.clone(),
+            WriteKind::Save("{\"a\": 1}".to_owned()),
+            Arc::clone(&reply),
+        );
+        let outcome = answer(&reply);
+
+        assert!(outcome.error.is_none(), "{:?}", outcome.error);
+        assert_eq!(
+            fs::read_to_string(&path).expect("the write landed"),
+            "{\"a\": 1}",
+            "the outcome is posted after the rename, never before it"
+        );
+        assert!(
+            !temporary_path(&path).exists(),
+            "the swap consumed its temporary"
+        );
+    }
+
+    /// Two commits in quick succession, the shape two slider presses make.
+    ///
+    /// They share one `<file>.tmp`, so they cannot run at the same time: the queue is what keeps
+    /// the second from writing the first's temporary, and the file ends holding the last payload.
+    #[test]
+    fn two_queued_writes_run_in_order_and_the_last_one_wins() {
+        let root = scratch();
+        let path = root.join("queued.json");
+        let first = reply();
+        let second = reply();
+
+        submit(
+            path.clone(),
+            WriteKind::Save("{\"v\": 1}".to_owned()),
+            Arc::clone(&first),
+        );
+        submit(
+            path.clone(),
+            WriteKind::Save("{\"v\": 2}".to_owned()),
+            Arc::clone(&second),
+        );
+
+        assert!(answer(&first).error.is_none());
+        assert!(answer(&second).error.is_none());
+        assert_eq!(
+            fs::read_to_string(&path).expect("the file exists"),
+            "{\"v\": 2}",
+            "the last commit is what the file holds"
+        );
+        assert!(!temporary_path(&path).exists());
+    }
+
+    #[test]
+    fn a_failed_queued_write_reports_and_keeps_the_old_bytes() {
+        let root = scratch();
+        let path = root.join("queued.json");
+        fs::write(&path, "{\"old\": true}").expect("the file the user already has");
+
+        // A directory where the temporary belongs is the way the managed failure tests steer at
+        // the pre-swap failure, and it needs no permissions the runner might not honour.
+        fs::create_dir_all(temporary_path(&path)).expect("a blocking directory");
+
+        let reply = reply();
+        submit(
+            path.clone(),
+            WriteKind::Save("{\"new\": true}".to_owned()),
+            Arc::clone(&reply),
+        );
+        let outcome = answer(&reply);
+
+        assert!(
+            outcome.error.is_some(),
+            "a write that did not happen is reported, not swallowed"
+        );
+        assert_eq!(
+            fs::read_to_string(&path).expect("the old file survives"),
+            "{\"old\": true}",
+            "a failed save never truncates what was there"
+        );
+    }
+
+    /// A temporary a killed process left behind is not the file, and the next save replaces it.
+    #[test]
+    fn a_stale_temporary_is_never_the_file() {
+        let root = scratch();
+        let path = root.join("queued.json");
+        fs::write(&path, "{\"old\": true}").expect("the saved file");
+        fs::write(temporary_path(&path), "{\"half\": ").expect("a crash's leftovers");
+
+        let reply = reply();
+        submit(
+            path.clone(),
+            WriteKind::Save("{\"new\": true}".to_owned()),
+            Arc::clone(&reply),
+        );
+
+        assert!(answer(&reply).error.is_none());
+        assert_eq!(
+            fs::read_to_string(&path).expect("the file"),
+            "{\"new\": true}",
+            "the half-written temporary never becomes the store"
+        );
+        assert!(!temporary_path(&path).exists());
+    }
+
+    #[test]
+    fn a_queued_delete_removes_the_file_and_a_missing_one_is_not_a_failure() {
+        let root = scratch();
+        let path = root.join("queued.json");
+        fs::write(&path, "{}").expect("a file to remove");
+
+        let reply = reply();
+        submit(path.clone(), WriteKind::Delete, Arc::clone(&reply));
+        assert!(answer(&reply).error.is_none());
+        assert!(!path.exists(), "the confirmation removed it");
+
+        let again = reply();
+        submit(path.clone(), WriteKind::Delete, Arc::clone(&again));
+        assert!(
+            answer(&again).error.is_none(),
+            "a file that is already gone is the state the caller asked for"
+        );
+    }
+
+    /// A name that is not valid UTF-8 is an ordinary path here, not a conversion to lose.
+    #[cfg(unix)]
+    #[test]
+    fn a_path_that_is_not_valid_utf8_is_written_like_any_other() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let root = scratch();
+        let path = root.join(OsStr::from_bytes(b"pal\xFFette.json"));
+        let reply = reply();
+
+        submit(
+            path.clone(),
+            WriteKind::Save("{}".to_owned()),
+            Arc::clone(&reply),
+        );
+        let outcome = answer(&reply);
+
+        assert!(outcome.error.is_none(), "{:?}", outcome.error);
+        assert_eq!(fs::read_to_string(&path).expect("the bytes"), "{}");
+        assert!(
+            !temporary_path(&path).exists(),
+            "the temporary is named the same way"
+        );
     }
 }

@@ -17,6 +17,20 @@ use aoko_protocol::accounts::StoredAccount;
 use crate::views::servers_logic::ServerRowSource;
 
 /// Everything the Accounts and Servers tabs need from persistence.
+///
+/// # These answers are the write, which is why they are not queued
+///
+/// [`crate::views::file_store`] runs a queued write on a background thread and reports it through
+/// the submitter's mailbox; that is what the config and palette saves use. This seam cannot: each
+/// method below answers with the write's own outcome — the saved row, or `None`/`false` — and both
+/// tabs paint that answer as their failure line. An implementation that queued the bytes would
+/// have to answer before the rename, which is exactly the success this port removes, or answer
+/// `None` and move the failure out of the tab's reach.
+///
+/// So [`FileStore`](crate::views::file_store::FileStore) writes on the calling thread, and the two
+/// tabs keep the managed rule: what they paint is what the file holds. Making these two files
+/// asynchronous needs a seam that hands a ticket back and a tab that polls it, which is the tabs'
+/// half of the code — a signature here alone cannot do it.
 pub trait StoreBridge {
     /// Every saved account, in store order.
     fn accounts(&self) -> Vec<StoredAccount>;

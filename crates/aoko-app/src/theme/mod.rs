@@ -157,9 +157,8 @@ impl Color {
     pub fn blend(self, other: Self, t: impl Into<f64>) -> Self {
         let amount: f64 = t.into();
         let amount = amount.clamp(0.0, 1.0);
-        let mix = |x: u8, y: u8| {
-            round_ties_even(f64::from(x) + (f64::from(y) - f64::from(x)) * amount)
-        };
+        let mix =
+            |x: u8, y: u8| round_ties_even(f64::from(x) + (f64::from(y) - f64::from(x)) * amount);
         Self {
             r: mix(self.r, other.r),
             g: mix(self.g, other.g),
@@ -999,9 +998,9 @@ mod tests {
                 slider_foreground: "#0A0B0C",   // six digits -> taken
                 accent: "#80FF8800",            // ARGB -> Colors.Gray
                 text: "#FFFFFF",
-                dim_text: "#80112233",    // ARGB -> Blend(text, background, 0.45)
+                dim_text: "#80112233", // ARGB -> Blend(text, background, 0.45)
                 tab_selected: "#400A0B0C", // ARGB -> Lighten(background, 0.10)
-                tab_hover: "#400A0B0C",    // ARGB -> Lighten(background, 0.04)
+                tab_hover: "#400A0B0C", // ARGB -> Lighten(background, 0.04)
             },
         );
 

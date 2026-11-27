@@ -25,16 +25,49 @@
 //! no row in the config list, so it is the one file the user cannot see and cannot rescue.
 //! A named config that will not parse is left where it is — it is in the list, and deleting
 //! or overwriting it is a press.
+//!
+//! # A press queues its write; the exit save does not
+//!
+//! `TrySaveCurrentAs` and `CreateConfigButton_Click` used to write inside the click handler: a
+//! `create_dir_all`, a create, a flush and a rename on a scanned or slow volume, plus the
+//! directory scan `RefreshConfigList` ran afterwards. Both are queued now.
+//! [`Profiles::save_named`], [`Profiles::create`] and [`Profiles::delete`] hand the bytes to the
+//! process's background writer (`crate::views::file_store::submit`), which runs the same
+//! `crate::views::file_store::write_atomically` swap the exit save uses, and the list the card
+//! paints moves at once so a repaint never shows a half-written state.
+//!
+//! [`Profiles::save_auto`] is the one write that stays synchronous, and deliberately: it *is* the
+//! exit save (`MainWindow.xaml.cs:1866-1869`), the process is about to leave, and a write handed to
+//! a thread at that point would be dropped with the process instead of reaching the disk. It also
+//! drains the queue for its file first, so a queued save of the same slot cannot land over it.
+//!
+//! A failure never disappears with the task: [`Profiles::poll`] settles each queued write and
+//! writes its outcome into the same status line the synchronous save used — `Could not save
+//! config: …`, `Could not delete '…': …` — and rolls the list back to the names the directory
+//! actually holds. Only a write that reached the rename reports the success sentence.
 
 use std::fs;
-use std::io::ErrorKind;
+use std::sync::Arc;
 
 use aoko_platform::PlatformError;
 use aoko_platform::ProfileStore;
 use aoko_protocol::profile::{load_profile_from_json, to_profile_json, Profile};
 
+use crate::views::file_store::{
+    flush_all_writes, flush_writes, reply, settled, submit, Reply, WriteKind,
+};
+
 /// The internal auto-save slot (`ProfileManager.AutoSaveConfigName`, `Profile.cs:371`).
 pub const AUTO_SAVE_NAME: &str = "config";
+
+/// Whether `name` is the internal slot, which a scan of the directory never lists.
+///
+/// The whole list comes from [`ProfileStore::list_profiles`], so it hides this name on its own.
+/// The card also paints names whose write is still in flight, without asking the directory, which
+/// is why the rule is repeated here: a write of the slot must never turn into a row either.
+fn is_auto_save(name: &str) -> bool {
+    name.eq_ignore_ascii_case(AUTO_SAVE_NAME)
+}
 
 /// Ceiling on a profile file's size, the same one
 /// [`crate::views::file_store`] puts on `accounts.json` and `servers.json`.
@@ -61,6 +94,30 @@ impl ConfigStatus {
     }
 }
 
+/// One config write queued for the background writer, and what the press that made it changed.
+#[derive(Debug)]
+struct PendingWrite {
+    /// Where the rename reports.
+    reply: Reply,
+    /// The config name the job writes, or removes.
+    name: String,
+    /// Which of the two the press asked for.
+    kind: PendingKind,
+    /// The selection before the press, restored when the write fails.
+    previous_selection: usize,
+    /// The sentence the status line takes when the write lands.
+    status: String,
+}
+
+/// What a queued config write does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingKind {
+    /// Write the file, creating it when the name is new.
+    Save,
+    /// Remove the file.
+    Delete,
+}
+
 /// Where profiles live and what the list currently holds.
 ///
 /// `None` for the store means "no persistence available in this context": the
@@ -68,7 +125,7 @@ impl ConfigStatus {
 /// screenshot never depends on the machine's profile directory. A store that exists
 /// but failed to open stays `Some`-less too, with [`Profiles::store_error`] saying
 /// why — the failure is reported, never replaced by a silent default.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Profiles {
     store: Option<ProfileStore>,
     store_error: Option<String>,
@@ -78,11 +135,49 @@ pub struct Profiles {
     selection: usize,
     /// The config the user pressed Delete on, waiting for the in-card confirmation.
     delete_armed: Option<String>,
-    /// The config a Create would overwrite, waiting for the in-card confirmation.
+    /// The config a Create would overwrite, waiting for its own confirmation.
     create_pending: Option<String>,
+    /// The names the directory itself holds, as of the read at startup and the writes that have
+    /// landed since. The painted list is this plus whatever is still in flight.
+    confirmed: Vec<String>,
+    /// Config writes queued and not yet settled, in submission order.
+    pending: Vec<PendingWrite>,
+}
+
+impl Default for Profiles {
+    fn default() -> Self {
+        Self::new(None)
+    }
+}
+
+impl Drop for Profiles {
+    /// Drains the queue on the way out, so a config saved a moment before the app quits is not
+    /// lost with the process.
+    fn drop(&mut self) {
+        flush_all_writes();
+    }
 }
 
 impl Profiles {
+    /// Every field at its starting value, over `store` or over nothing.
+    ///
+    /// A plain constructor rather than `..Self::default()`: [`Profiles`] implements `Drop`, and the
+    /// struct-update form cannot move fields out of a type that does.
+    fn new(store: Option<ProfileStore>) -> Self {
+        Self {
+            store,
+            store_error: None,
+            status: ConfigStatus::default(),
+            migrated: 0,
+            configs: Vec::new(),
+            selection: 0,
+            delete_armed: None,
+            create_pending: None,
+            confirmed: Vec::new(),
+            pending: Vec::new(),
+        }
+    }
+
     /// A store over the platform's app-data root, with migration and a first read.
     ///
     /// Returns the profile to start from: the `config` slot when it parses, else
@@ -104,10 +199,7 @@ impl Profiles {
     /// A store over an explicit app-data root, for tests and for an injected path.
     #[must_use]
     pub fn with_store(store: ProfileStore) -> (Self, Profile) {
-        let mut profiles = Self {
-            store: Some(store),
-            ..Self::default()
-        };
+        let mut profiles = Self::new(Some(store));
 
         // Migration runs before `initialize` so the count is the real one: the
         // store's own `initialize` migrates too, but only logs the number
@@ -249,20 +341,22 @@ impl Profiles {
 
     /// Re-reads the config list, keeping the selection when it still exists
     /// (`RefreshConfigList`, `MainWindow.xaml.cs:781-805`).
+    ///
+    /// This is the explicit re-read, not a paint path: the constructor runs it once, before the
+    /// first frame, and every press after that moves the list from what it wrote instead of
+    /// scanning the directory again — so no frame and no press waits on a `read_dir` of a slow
+    /// volume. A caller that wants the directory as it is now can still ask for it.
     pub fn refresh(&mut self) {
-        let previous = self.selected().map(str::to_owned);
         let Some(store) = self.store.as_ref() else {
-            self.configs.clear();
-            self.selection = 0;
+            self.confirmed.clear();
+            self.rebuild();
             return;
         };
 
         match store.list_profiles() {
             Ok(names) => {
-                self.configs = names;
-                self.selection = previous
-                    .and_then(|name| self.configs.iter().position(|entry| *entry == name))
-                    .unwrap_or(0);
+                self.confirmed = names;
+                self.rebuild();
             }
             Err(error) => {
                 self.set_status(format!("Could not list configs: {}", error.user_facing()));
@@ -270,12 +364,74 @@ impl Profiles {
         }
     }
 
+    /// Settles every config write that has finished, answering whether anything changed.
+    ///
+    /// A landed write confirms its name and paints the sentence the press earned; a failed one
+    /// paints the reason and drops back to the names the directory holds, so the card cannot show
+    /// a config the file refused. The caller repaints when this answers `true`.
+    pub fn poll(&mut self) -> bool {
+        if self.pending.is_empty() {
+            return false;
+        }
+
+        let mut changed = false;
+        let mut index = 0;
+        while index < self.pending.len() {
+            let Some(outcome) = settled(&self.pending[index].reply) else {
+                index += 1;
+                continue;
+            };
+
+            let done = self.pending.remove(index);
+            changed = true;
+            match outcome.error {
+                Some(error) => {
+                    let message = match done.kind {
+                        PendingKind::Save => format!("Could not save config: {error}"),
+                        PendingKind::Delete => {
+                            format!("Could not delete '{}': {error}", done.name)
+                        }
+                    };
+                    self.set_status(message);
+                    self.selection = done.previous_selection;
+                }
+                None => {
+                    match done.kind {
+                        PendingKind::Save => {
+                            if !is_auto_save(&done.name) && !self.confirmed.contains(&done.name) {
+                                self.confirmed.push(done.name.clone());
+                            }
+                        }
+                        PendingKind::Delete => {
+                            self.confirmed.retain(|name| name != &done.name);
+                        }
+                    }
+                    self.set_status(done.status);
+                }
+            }
+        }
+
+        if changed {
+            self.rebuild();
+        }
+        changed
+    }
+
     /// Reads one profile by name.
     ///
     /// `Ok(Profile::default())` is never returned for a missing file: the caller
     /// decides what an absent profile means, which is what keeps a saved config from
     /// being silently replaced by defaults.
+    ///
+    /// A save queued a moment ago is the newest state of this file, so a read waits for the
+    /// writes of that path first: pressing Save and then Load is a round trip, and it would be a
+    /// lie to answer it from the bytes the save is about to replace. With nothing in flight the
+    /// wait touches nothing.
     pub fn load_named(&mut self, name: &str) -> Result<Profile, String> {
+        if let Some(path) = self.path(name) {
+            flush_writes(&path);
+        }
+
         match self.read(name) {
             ReadOutcome::Loaded(profile) => {
                 self.set_status(format!("Loaded config '{name}'."));
@@ -290,7 +446,6 @@ impl Profiles {
             ReadOutcome::Absent | ReadOutcome::Unparsable | ReadOutcome::Failed(_) => {
                 let message = format!("Failed to load config '{name}'.");
                 self.set_status(message.clone());
-                self.refresh();
                 Err(message)
             }
         }
@@ -298,6 +453,11 @@ impl Profiles {
 
     /// Writes the current settings to a named config, the way `TrySaveCurrentAs`
     /// does: the profile's own name becomes the file name.
+    ///
+    /// `Ok` means the bytes were queued and the row is in the list; the outcome — `Saved current
+    /// settings to '…'.` or `Could not save config: …` — lands in [`Profiles::poll`], because a
+    /// press that answered the success sentence before the rename would be claiming a file it has
+    /// not written.
     pub fn save_named(&mut self, name: &str, profile: &mut Profile) -> Result<(), String> {
         let display = display_name(name);
         if display.is_empty() {
@@ -307,10 +467,10 @@ impl Profiles {
         }
 
         profile.name = display.clone();
-        match self.write(&display, profile) {
+        match self.queue(&display, profile, saved_line(&display)) {
             Ok(()) => {
-                self.set_status(format!("Saved current settings to '{display}'."));
-                self.refresh();
+                // The list moves now, the sentence lands with the rename (see `poll`): a success
+                // reported before the swap is the defect a queued write makes easy to write.
                 self.select(&display);
                 Ok(())
             }
@@ -329,9 +489,15 @@ impl Profiles {
     /// `Could not save config: {ex.Message}` (`:964`), which is the same write under the name the
     /// user chose; the auto-save slot is the same write under the port's other name for it, and
     /// managed had no line for it because it wrote the slot silently on exit.
+    ///
+    /// **This write stays synchronous**, alone among the config saves. It is the exit save: the
+    /// close hook runs it while the process is on its way out, a queued write would be dropped
+    /// with the process, and `save_profile` is called for exactly that reason by `OnClosed`
+    /// (`:1861-1871`), the title bar's button (`:1384-1392`) and the panic path. It drains the
+    /// queue for this slot first, so a write still in flight cannot land over it.
     pub fn save_auto(&mut self, profile: &mut Profile) -> Result<(), String> {
         profile.name = AUTO_SAVE_NAME.to_owned();
-        self.write(AUTO_SAVE_NAME, profile).map_err(|error| {
+        self.write_now(AUTO_SAVE_NAME, profile).map_err(|error| {
             let message = format!("Could not save settings: {error}");
             self.set_status(message.clone());
             message
@@ -384,10 +550,13 @@ impl Profiles {
     /// Deletes one config.
     ///
     /// `ProfileStore` has no delete, so the path comes from `profile_path` — which
-    /// sanitises the name — and the file is removed here. A missing file is a
-    /// failure rather than a quiet success: the managed `DeleteProfile`
-    /// (`Profile.cs:556-561`) returns without touching the disk and the caller then
-    /// reports "Deleted config", which is exactly the kind of lie this port removes.
+    /// sanitises the name — and the removal is queued on the same writer the saves use, which is
+    /// what keeps a delete from landing in front of a save of the same name that is still in
+    /// flight. A missing file is a failure rather than a quiet success: the managed
+    /// `DeleteProfile` (`Profile.cs:556-561`) returns without touching the disk and the caller then
+    /// reports "Deleted config", which is exactly the kind of lie this port removes. The check is
+    /// one `is_file` on the press — not a scan — and it is skipped for a name a save is still
+    /// writing, whose file does not exist yet.
     ///
     /// Deleting the **last** config is allowed: the list empties, the trigger shows
     /// nothing selected, and Load/Save/Delete report "Select a config to ...". The
@@ -409,30 +578,25 @@ impl Profiles {
         let Some(path) = self.path(&display) else {
             let message = format!("Could not delete '{display}': not a config name.");
             self.set_status(message.clone());
-            self.refresh();
             return Err(message);
         };
 
-        match fs::remove_file(&path) {
-            Ok(()) => {
-                self.refresh();
-                self.set_status(format!("Deleted config '{display}'."));
-                Ok(())
-            }
-            Err(error) => {
-                // New copy for the one case `ex.Message` could not name: managed reported
-                // `Could not delete '{name}': {ex.Message}` (`MainWindow.xaml.cs:886`), and a file
-                // that vanished between the list and the press has no message worth quoting.
-                let reason = match error.kind() {
-                    ErrorKind::NotFound => "it no longer exists".to_owned(),
-                    _ => error.to_string(),
-                };
-                let message = format!("Could not delete '{display}': {reason}");
-                self.set_status(message.clone());
-                self.refresh();
-                Err(message)
-            }
+        let saving = self
+            .pending
+            .iter()
+            .any(|pending| pending.name == display && pending.kind == PendingKind::Save);
+        if !saving && !path.is_file() {
+            // New copy for the one case `ex.Message` could not name: managed reported
+            // `Could not delete '{name}': {ex.Message}` (`MainWindow.xaml.cs:886`), and a file
+            // that vanished between the list and the press has no message worth quoting.
+            let message = format!("Could not delete '{display}': it no longer exists");
+            self.set_status(message.clone());
+            return Err(message);
         }
+
+        let previous_selection = self.selection();
+        self.queue_delete(&display, previous_selection);
+        Ok(())
     }
 
     /// Creates a named config from the current settings.
@@ -442,6 +606,9 @@ impl Profiles {
     /// sanitised-away name, then the reserved auto-save name, then the overwrite
     /// confirmation the managed app asked in a `MessageBox`. `overwrite` is the
     /// caller saying the user confirmed; without it an existing name is untouched.
+    ///
+    /// A name whose own save is still in flight counts as existing, so a press cannot slip past
+    /// the prompt and overwrite a config the queue has not written yet.
     pub fn create(&mut self, raw: &str, profile: &mut Profile, overwrite: bool) -> CreateOutcome {
         let name = display_name(raw);
         if name.is_empty() {
@@ -459,7 +626,11 @@ impl Profiles {
         let exists = self
             .store
             .as_ref()
-            .is_some_and(|store| store.profile_exists(&name));
+            .is_some_and(|store| store.profile_exists(&name))
+            || self
+                .pending
+                .iter()
+                .any(|pending| pending.name == name && pending.kind == PendingKind::Save);
         if exists && !overwrite {
             // The card's own prompt row carries the managed `MessageBox` copy and the
             // two buttons, so the status line stays free for the outcome.
@@ -469,11 +640,9 @@ impl Profiles {
         self.create_pending = None;
 
         profile.name = name.clone();
-        match self.write(&name, profile) {
+        match self.queue(&name, profile, created_line(&name)) {
             Ok(()) => {
-                self.refresh();
                 self.select(&name);
-                self.set_status(format!("Created config '{name}'."));
                 CreateOutcome::Created(name)
             }
             Err(error) => {
@@ -546,25 +715,111 @@ impl Profiles {
     /// they were.
     fn quarantine(&self, name: &str) -> Option<String> {
         let path = self.path(name)?;
-        crate::views::file_store::quarantine(&path)
-            .map(|kept| kept.to_string_lossy().into_owned())
+        crate::views::file_store::quarantine(&path).map(|kept| kept.to_string_lossy().into_owned())
     }
 
-    fn write(&self, name: &str, profile: &Profile) -> Result<(), String> {
-        let Some(store) = self.store.as_ref() else {
+    /// The serialised profile, or the refusal that keeps the file that is already there.
+    ///
+    /// `to_profile_json` answers with an empty string when serde fails, and writing that would
+    /// replace a config that loads with a file that does not: the next read would find nothing
+    /// and the next save would write the defaults over it.
+    fn json_for(&self, profile: &Profile) -> Result<String, String> {
+        if self.store.is_none() {
             return Err("no profile store".to_owned());
-        };
+        }
 
         let json = to_profile_json(profile);
-        // `to_profile_json` answers with an empty string when serde fails, and writing that would
-        // replace a config that loads with a file that does not: the next read would find nothing
-        // and the next save would write the defaults over it. A refusal keeps the old file.
         if json.trim().is_empty() {
             return Err("the profile could not be serialized".to_owned());
         }
+        Ok(json)
+    }
+
+    /// Queues one config write and moves the list to what the press asked for.
+    fn queue(&mut self, name: &str, profile: &Profile, status: String) -> Result<(), String> {
+        // The store is checked before the name so a view with no store answers the reason it is
+        // missing rather than blaming the name.
+        let json = self.json_for(profile)?;
+        let path = self
+            .path(name)
+            .ok_or_else(|| format!("'{name}' is not a config name"))?;
+
+        let reply = reply();
+        submit(path, WriteKind::Save(json), Arc::clone(&reply));
+        self.pending.push(PendingWrite {
+            reply,
+            name: name.to_owned(),
+            kind: PendingKind::Save,
+            previous_selection: self.selection(),
+            status,
+        });
+        self.rebuild();
+        Ok(())
+    }
+
+    /// Queues the removal of one config file.
+    fn queue_delete(&mut self, name: &str, previous_selection: usize) {
+        let Some(path) = self.path(name) else {
+            return;
+        };
+
+        let reply = reply();
+        submit(path, WriteKind::Delete, Arc::clone(&reply));
+        self.pending.push(PendingWrite {
+            reply,
+            name: name.to_owned(),
+            kind: PendingKind::Delete,
+            previous_selection,
+            status: deleted_line(name),
+        });
+        self.rebuild();
+    }
+
+    /// Writes one config on this thread, for the exit save [`Profiles::save_auto`].
+    ///
+    /// The queue for that path is drained first. A write still in flight would otherwise land
+    /// after this one, and the settings the process saved on its way out would be the state the
+    /// app lost: draining makes this write the last word on the file.
+    fn write_now(&self, name: &str, profile: &Profile) -> Result<(), String> {
+        let Some(store) = self.store.as_ref() else {
+            return Err("no profile store".to_owned());
+        };
+        let json = self.json_for(profile)?;
+        if let Some(path) = store.profile_path(name) {
+            flush_writes(&path);
+        }
+
         store
             .write_profile(name, &json)
             .map_err(|error| error.user_facing())
+    }
+
+    /// Rebuilds the painted list from the directory's names plus the writes still in flight, and
+    /// keeps the selection on the name it was on.
+    ///
+    /// The sort is `ProfileStore::list_profiles`' (`aoko-platform/src/profile.rs:250`): ordinal
+    /// ignore case, with the spelling as a tie-break, so a name a press added sits where the next
+    /// scan of the directory would put it.
+    fn rebuild(&mut self) {
+        let selected = self.selected().map(str::to_owned);
+
+        let mut names = self.confirmed.clone();
+        for pending in &self.pending {
+            match pending.kind {
+                PendingKind::Save => {
+                    if !is_auto_save(&pending.name) && !names.contains(&pending.name) {
+                        names.push(pending.name.clone());
+                    }
+                }
+                PendingKind::Delete => names.retain(|name| name != &pending.name),
+            }
+        }
+        names.sort_by_cached_key(|name| (name.to_lowercase(), name.clone()));
+
+        self.configs = names;
+        self.selection = selected
+            .and_then(|name| self.configs.iter().position(|entry| *entry == name))
+            .unwrap_or_else(|| self.selection.min(self.configs.len().saturating_sub(1)));
     }
 }
 
@@ -585,6 +840,24 @@ pub enum CreateOutcome {
 #[must_use]
 pub fn display_name(raw: &str) -> String {
     aoko_protocol::profile::sanitize_config_name(Some(raw))
+}
+
+/// `Saved current settings to '{name}'` for a write that has landed.
+///
+/// The sentence is `TrySaveCurrentAs`'s (`MainWindow.xaml.cs:968`), moved from the press to the
+/// completion: a save reported before its rename is a success the file has not got.
+fn saved_line(name: &str) -> String {
+    format!("Saved current settings to '{name}'.")
+}
+
+/// `Created config '{name}'.` for a write that has landed (`MainWindow.xaml.cs:940`).
+fn created_line(name: &str) -> String {
+    format!("Created config '{name}'.")
+}
+
+/// `Deleted config '{name}'.` for a queued removal that has landed.
+fn deleted_line(name: &str) -> String {
+    format!("Deleted config '{name}'.")
 }
 
 /// What reading a profile produced.
@@ -644,6 +917,23 @@ mod tests {
         ProfileStore::new(root)
     }
 
+    /// Settles every queued config write, the way the frames after a press do.
+    ///
+    /// A press queues its write, so a test that reads the disk or the status line immediately
+    /// after one would be racing the writer thread. This waits for the outcome the card is going
+    /// to paint, which is the only ordering the view promises.
+    fn settled(profiles: &mut Profiles) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !profiles.pending.is_empty() {
+            profiles.poll();
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the queued config write never reported"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
     #[test]
     fn a_first_launch_yields_defaults_and_no_error() {
         let root = scratch();
@@ -686,19 +976,30 @@ mod tests {
         profile.min_cps = 7.0;
         profiles.save_named("PvP", &mut profile).expect("save");
         assert_eq!(
+            profiles.configs(),
+            ["PvP".to_owned()],
+            "the row is the press's, painted before the file is"
+        );
+        assert_eq!(profiles.selected(), Some("PvP"));
+        assert!(
+            !profiles.status().is_visible(),
+            "a queued write is not a save yet"
+        );
+
+        settled(&mut profiles);
+        assert_eq!(
             profiles.status().message,
             "Saved current settings to 'PvP'."
         );
-        assert_eq!(profiles.configs(), ["PvP".to_owned()]);
-        assert_eq!(profiles.selected(), Some("PvP"));
 
+        // A load waits for the write of that name, which is what makes the round trip honest.
         let loaded = profiles.load_named("PvP").expect("load");
         assert_eq!(loaded.min_cps, 7.0);
         assert_eq!(profiles.status().message, "Loaded config 'PvP'.");
     }
 
     #[test]
-    fn a_missing_named_config_reports_and_refreshes() {
+    fn a_missing_named_config_reports_the_managed_line() {
         let root = scratch();
         let (mut profiles, _) = Profiles::with_store(store_at(&root));
 
@@ -765,6 +1066,7 @@ mod tests {
             let mut profile = Profile::default();
             profiles.save_named(name, &mut profile).expect("save");
         }
+        settled(&mut profiles);
         profiles.refresh();
         assert_eq!(profiles.configs().len(), 3);
 
@@ -847,9 +1149,11 @@ mod tests {
             profiles.create("  PvP  ", &mut profile, false),
             CreateOutcome::Created("PvP".to_owned())
         );
-        assert_eq!(profiles.status().message, "Created config 'PvP'.");
         assert_eq!(profiles.selected(), Some("PvP"));
         assert_eq!(profiles.create_pending_name(), None);
+
+        settled(&mut profiles);
+        assert_eq!(profiles.status().message, "Created config 'PvP'.");
 
         let text = store_at(&root).read_profile("PvP").expect("written");
         let loaded = load_profile_from_json(&text).expect("parses");
@@ -868,11 +1172,13 @@ mod tests {
         second.gui_theme = "Coral".to_owned();
         assert_eq!(
             profiles.create("PvP", &mut second, false),
-            CreateOutcome::Overwrite("PvP".to_owned())
+            CreateOutcome::Overwrite("PvP".to_owned()),
+            "a save still in flight is a name that already exists"
         );
         assert_eq!(profiles.create_pending_name(), Some("PvP"));
 
         // Confirmation is required before the file changes.
+        settled(&mut profiles);
         let text = store_at(&root).read_profile("PvP").expect("still there");
         assert_eq!(
             load_profile_from_json(&text).expect("parses").gui_theme,
@@ -883,6 +1189,7 @@ mod tests {
             profiles.create("PvP", &mut second, true),
             CreateOutcome::Created("PvP".to_owned())
         );
+        settled(&mut profiles);
         let text = store_at(&root).read_profile("PvP").expect("overwritten");
         assert_eq!(
             load_profile_from_json(&text).expect("parses").gui_theme,
@@ -897,6 +1204,7 @@ mod tests {
         let (mut profiles, _) = Profiles::with_store(store_at(&root));
         let mut profile = Profile::default();
         profiles.save_named("PvP", &mut profile).expect("seed");
+        settled(&mut profiles);
 
         let _ = profiles.create("PvP", &mut profile, false);
         profiles.cancel_create();
@@ -912,6 +1220,7 @@ mod tests {
             let mut profile = Profile::default();
             profiles.save_named(name, &mut profile).expect("seed");
         }
+        settled(&mut profiles);
 
         profiles.request_delete("Alpha");
         assert_eq!(profiles.delete_armed(), Some("Alpha"));
@@ -925,7 +1234,14 @@ mod tests {
         assert!(store_at(&root).profile_exists("Alpha"));
 
         profiles.request_delete("Alpha");
-        profiles.confirm_delete().expect("deleted");
+        profiles.confirm_delete().expect("queued");
+        assert_eq!(
+            profiles.configs(),
+            ["Beta".to_owned()],
+            "the row goes at once"
+        );
+
+        settled(&mut profiles);
         assert!(!store_at(&root).profile_exists("Alpha"));
         assert_eq!(profiles.status().message, "Deleted config 'Alpha'.");
         assert_eq!(profiles.configs(), ["Beta".to_owned()]);
@@ -937,12 +1253,15 @@ mod tests {
         let (mut profiles, _) = Profiles::with_store(store_at(&root));
         let mut profile = Profile::default();
         profiles.save_named("Only", &mut profile).expect("seed");
+        settled(&mut profiles);
 
         profiles.request_delete("Only");
-        profiles.confirm_delete().expect("deleted");
+        profiles.confirm_delete().expect("queued");
 
         assert!(profiles.configs().is_empty());
         assert_eq!(profiles.selected(), None, "the trigger shows nothing");
+
+        settled(&mut profiles);
         assert_eq!(profiles.status().message, "Deleted config 'Only'.");
 
         // The auto-save slot is separate, so the live settings still survive a
@@ -961,6 +1280,7 @@ mod tests {
         let (mut profiles, _) = Profiles::with_store(store_at(&root));
         let mut profile = Profile::default();
         profiles.save_named("PvP", &mut profile).expect("seed");
+        settled(&mut profiles);
 
         let path = store_at(&root).profile_path("PvP").expect("path");
         std::fs::remove_file(path).expect("removed behind the store's back");
@@ -1064,5 +1384,126 @@ mod tests {
             message.starts_with("config.json could not be read."),
             "{message}"
         );
+    }
+
+    /// The exit save is the one write that must be on disk when it returns.
+    ///
+    /// `Shell::close` and the close hook call it and then end the process: a queued write would be
+    /// dropped there, so this one is deliberately synchronous and the file is readable at once.
+    #[test]
+    fn the_exit_save_is_on_disk_before_it_returns() {
+        let root = scratch();
+        let (mut profiles, _) = Profiles::with_store(store_at(&root));
+        let mut profile = Profile::default();
+        profile.min_cps = 21.0;
+
+        profiles.save_auto(&mut profile).expect("exit save");
+
+        let text = store_at(&root)
+            .read_profile(AUTO_SAVE_NAME)
+            .expect("written before the call returned");
+        let restored = load_profile_from_json(&text).expect("parses");
+        assert_eq!(restored.min_cps, 21.0);
+    }
+
+    /// A repaint between a save and its rename paints the press, not a half-written file.
+    #[test]
+    fn the_list_moves_before_the_write_lands() {
+        let root = scratch();
+        let (mut profiles, _) = Profiles::with_store(store_at(&root));
+        let mut profile = Profile::default();
+        profile.min_cps = 4.0;
+
+        profiles.save_named("Quick", &mut profile).expect("save");
+
+        // No settle: this is the frame after the press.
+        assert_eq!(profiles.configs(), ["Quick".to_owned()]);
+        assert_eq!(profiles.selected(), Some("Quick"));
+
+        settled(&mut profiles);
+        assert_eq!(
+            profiles.status().message,
+            "Saved current settings to 'Quick'."
+        );
+    }
+
+    /// Two commits in quick succession: the last one is the file, and neither is lost to the
+    /// temporary the two of them share.
+    #[test]
+    fn two_quick_saves_end_on_the_last_settings() {
+        let root = scratch();
+        let (mut profiles, _) = Profiles::with_store(store_at(&root));
+
+        let mut first = Profile::default();
+        first.min_cps = 2.0;
+        profiles.save_named("Slider", &mut first).expect("first");
+        let mut second = Profile::default();
+        second.min_cps = 9.0;
+        profiles.save_named("Slider", &mut second).expect("second");
+
+        settled(&mut profiles);
+
+        let text = store_at(&root).read_profile("Slider").expect("written");
+        assert_eq!(
+            load_profile_from_json(&text).expect("parses").min_cps,
+            9.0,
+            "the last commit is what the file holds"
+        );
+        assert_eq!(profiles.configs(), ["Slider".to_owned()]);
+    }
+
+    /// A write that cannot land says so and takes the row back out of the list.
+    #[test]
+    fn a_failed_save_reports_the_reason_and_rolls_the_list_back() {
+        let root = scratch();
+        let (mut profiles, _) = Profiles::with_store(store_at(&root));
+        let store = store_at(&root);
+        store.initialize().expect("initialize");
+
+        // A directory where the sibling temporary belongs fails the swap, which is the shape a
+        // full or read-only volume takes here.
+        let path = store.profile_path("Doomed").expect("path");
+        let mut temporary = path.into_os_string();
+        temporary.push(".tmp");
+        std::fs::create_dir_all(PathBuf::from(&temporary)).expect("a blocking directory");
+
+        let mut profile = Profile::default();
+        profiles.save_named("Doomed", &mut profile).expect("queued");
+        assert_eq!(profiles.configs(), ["Doomed".to_owned()]);
+
+        settled(&mut profiles);
+
+        let message = profiles.status().message.clone();
+        assert!(message.starts_with("Could not save config: "), "{message}");
+        assert!(
+            profiles.configs().is_empty(),
+            "a config the file refused is not painted as saved"
+        );
+        assert!(!store.profile_exists("Doomed"));
+    }
+
+    /// A profile directory that is not valid UTF-8 is an ordinary directory here.
+    #[cfg(unix)]
+    #[test]
+    fn a_save_into_a_non_utf8_directory_lands() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let root = scratch().join(OsStr::from_bytes(b"root\xFF"));
+        std::fs::create_dir_all(&root).expect("a root that is not UTF-8");
+        let (mut profiles, _) = Profiles::with_store(store_at(&root));
+        let mut profile = Profile::default();
+        profile.min_cps = 6.0;
+
+        profiles.save_named("Mine", &mut profile).expect("queued");
+        settled(&mut profiles);
+
+        assert_eq!(
+            profiles.status().message,
+            "Saved current settings to 'Mine'."
+        );
+        let text = store_at(&root).read_profile("Mine").expect("written");
+        let restored = load_profile_from_json(&text).expect("parses");
+        assert_eq!(restored.min_cps, 6.0);
     }
 }
