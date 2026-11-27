@@ -110,6 +110,11 @@ pub struct AccountRowState {
     pub initial: String,
     pub source_label: &'static str,
     pub source_tone: AccountSourceTone,
+    /// The stored `lastUsedAt` stamp, kept beside the sentence it produced so a repaint can
+    /// re-age it. The managed card held the `DateTimeOffset` (`AccountsView.xaml.cs:307-323`) and
+    /// re-ran `LastUsedLabel` on every load; a formatted string alone cannot do that, and
+    /// [`AccountsState::refresh_session_marks`] is exactly the repaint that needs it.
+    pub last_used_at: Option<String>,
     pub last_used_label: String,
     /// `UUID: {dashed}`.
     pub uuid_label: String,
@@ -132,6 +137,7 @@ impl AccountRowState {
             initial: initial_of(Some(&account.name)),
             source_label,
             source_tone: accounts_logic::source_tone(Some(&account.source), account.has_refresh()),
+            last_used_at: account.last_used_at.clone(),
             last_used_label: accounts_logic::last_used_label(
                 account.last_used_at.as_deref(),
                 now_ms,
@@ -532,6 +538,13 @@ impl AccountsState {
 
     /// Repaints the "in use" dots after a session read, without touching the
     /// selection: `ApplySessionResult` reloads with the current card kept.
+    ///
+    /// `now_ms` also re-ages every card's `Last used …` line from the stamp the row kept. This
+    /// used to be discarded (`let _ = now_ms;`) and the caller passed `0`, which made every card
+    /// read `Last used just now` after a Refresh: a timestamp in the future is the managed
+    /// `elapsed < TimeSpan.Zero` branch, so a zero clock silently rewrote the one line on the card
+    /// that records the past. The sentence is the same [`accounts_logic::last_used_label`] the
+    /// load uses, so the two paths cannot drift.
     pub fn refresh_session_marks(&mut self, now_ms: i64) {
         let session_uuid = self.session.uuid().map(str::to_owned);
         let keep = self.selected_id().map(str::to_owned);
@@ -544,9 +557,12 @@ impl AccountsState {
                     accounts_logic::is_current_session(row_uuid(row), session_uuid.as_deref());
                 let mut next = row.clone();
                 next.is_current = is_current;
+                next.last_used_label = accounts_logic::last_used_label(
+                    next.last_used_at.as_deref(),
+                    now_ms,
+                );
                 next.automation_name =
                     accounts_logic::card_automation_name(&row.name, row.source_label, is_current);
-                let _ = now_ms;
                 next
             })
             .collect();
@@ -847,17 +863,24 @@ impl AccountsState {
     }
 
     /// A session read answered.
+    ///
+    /// `now_ms` reaches [`Self::refresh_session_marks`], which re-ages each card's `Last used …`
+    /// line. It is a parameter for the same reason [`Self::load`]'s is: this state owns no clock,
+    /// and the zero this call used to pass itself rewrote every card's stamp as `just now`.
+    /// Nothing in `shell.rs` calls this yet — the bridge reply handler that will is still missing —
+    /// so the extra argument is a wiring note rather than a break.
     pub fn apply_session_read(
         &mut self,
         identity: Option<SessionIdentity>,
         message: Option<&str>,
         ok: bool,
+        now_ms: i64,
     ) {
         self.session.refresh_in_flight = false;
 
         if ok {
             self.session.identity = identity;
-            self.refresh_session_marks(0);
+            self.refresh_session_marks(now_ms);
         }
 
         if let Some(message) = message {
@@ -1352,6 +1375,7 @@ mod tests {
             }),
             Some("Session read."),
             true,
+            NOW_MS,
         );
 
         assert!(!state.session().refresh_in_flight);
@@ -1362,6 +1386,45 @@ mod tests {
         assert_eq!(
             state.status().map(|status| status.text.as_str()),
             Some("Session read.")
+        );
+    }
+
+    /// A session read repaints the "in use" dot; it must not touch the one line on the card that
+    /// records the past.
+    ///
+    /// The bug this pins: `refresh_session_marks` discarded its timestamp and its caller passed
+    /// `0`, so every card's `Last used 3d ago` became `Last used just now` the moment a Refresh
+    /// answered — a future timestamp is the managed `elapsed < TimeSpan.Zero` branch.
+    #[test]
+    fn a_session_read_re_ages_the_last_used_line_instead_of_clearing_it() {
+        let mut state = AccountsState::new();
+        let mut accounts = three();
+        // 2023-11-11T22:13:20Z against NOW_MS (2023-11-14T22:13:20Z) is exactly three days.
+        accounts[0].last_used_at = Some("2023-11-11T22:13:20Z".to_owned());
+        state.set_session(connected());
+
+        state.load(&accounts, None, NOW_MS);
+        assert_eq!(state.rows()[0].last_used_label, "Last used 3d ago");
+
+        assert!(state.session_read_started());
+        state.apply_session_read(
+            Some(SessionIdentity {
+                name: Some("Notch".to_owned()),
+                uuid: Some("069a79f444e94726a5befca90e38aaf5".to_owned()),
+            }),
+            Some("Session read."),
+            true,
+            NOW_MS,
+        );
+
+        assert_eq!(
+            state.rows()[0].last_used_label,
+            "Last used 3d ago",
+            "the stamp is re-aged against the caller's clock, not against zero"
+        );
+        assert_eq!(
+            state.rows()[1].last_used_label, "Never used",
+            "a card with no stamp keeps its own sentence"
         );
     }
 

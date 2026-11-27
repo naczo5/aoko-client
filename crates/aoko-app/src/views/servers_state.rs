@@ -680,15 +680,26 @@ impl ServersState {
 
     /// Ends the pass and returns the footer summary, empty when the pass was
     /// silent (`announce: false`).
+    ///
+    /// The tone is the managed one: `ServersView.xaml.cs:611-617` paints the summary
+    /// `StatusTone.Success` when every pinged server answered and `StatusTone.Critical` otherwise,
+    /// so a pass with one dead bookmark reads as a problem rather than as neutral information. A
+    /// silent pass (`announce: false`, the auto-ping after an add) sets no status at all, so the
+    /// tone is unused there.
     pub fn finish_pass(&mut self, announce: bool) -> String {
         self.ping_in_flight = false;
         self.auto_pinged = true;
 
         let summary = servers_logic::ping_summary_text(self.pass.total, self.pass.online);
+        let tone = if self.pass.online == self.pass.total {
+            StatusTone::Success
+        } else {
+            StatusTone::Critical
+        };
         self.pass = PingPass::default();
 
         if announce {
-            self.set_status(summary.clone(), StatusTone::Neutral);
+            self.set_status(summary.clone(), tone);
         }
 
         summary
@@ -1051,6 +1062,59 @@ mod tests {
         assert_eq!(state.rows()[0].status_text, "42 ms");
         assert_eq!(state.rows()[0].motd, "A Minecraft Server");
         assert_eq!(state.rows()[0].players_label, "12/100");
+        assert_eq!(
+            state.status().map(|status| status.tone),
+            Some(StatusTone::Critical),
+            "one offline server makes the summary a problem, not a neutral note"
+        );
+    }
+
+    #[test]
+    fn a_pass_where_every_server_answered_is_a_success() {
+        let mut state = ready();
+        state.load(&three(), None, None, NOW_MS);
+        state.start_ping_all();
+
+        for id in ["a", "b", "c"] {
+            assert!(state.apply_ping(
+                id,
+                &PingOutcome {
+                    online: true,
+                    latency_ms: 20,
+                    ..PingOutcome::default()
+                }
+            ));
+        }
+
+        assert_eq!(
+            state.finish_pass(true),
+            "Pinged 3 servers: 3 online, 0 offline."
+        );
+        assert_eq!(
+            state.status().map(|status| status.tone),
+            Some(StatusTone::Success),
+            "`online == pinged.Count` is the managed Success branch"
+        );
+    }
+
+    #[test]
+    fn a_silent_pass_paints_nothing() {
+        let mut state = ready();
+        state.load(&three(), None, None, NOW_MS);
+        state.start_ping_all();
+        state.apply_ping(
+            "a",
+            &PingOutcome {
+                online: true,
+                ..PingOutcome::default()
+            },
+        );
+
+        state.finish_pass(false);
+        assert!(
+            state.status().is_none(),
+            "an auto-ping after an add announces nothing"
+        );
     }
 
     #[test]

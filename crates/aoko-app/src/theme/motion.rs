@@ -16,8 +16,33 @@ use std::time::Duration;
 
 /// Module switch thumb travel and accent fade, `App.xaml:184-188`.
 pub const SWITCH: Duration = Duration::from_millis(200);
-/// `DarkButton` hover overlay, `App.xaml:337-360`.
+/// `DarkButton` hover overlay fade-in, `App.xaml:352`.
 pub const BUTTON_HOVER: Duration = Duration::from_millis(150);
+/// The same overlay fading back out, which the C# runs slower, `App.xaml:359`. Hover-out
+/// being longer than hover-in is deliberate in the template and is why the pair exists
+/// rather than one `BUTTON_HOVER`.
+pub const BUTTON_HOVER_OUT: Duration = Duration::from_millis(200);
+/// `DarkButton` press: the shell scales to 0.96, `App.xaml:369-370`.
+pub const BUTTON_PRESS: Duration = Duration::from_millis(80);
+/// Release back to 1, `App.xaml:377-378`.
+pub const BUTTON_RELEASE: Duration = Duration::from_millis(120);
+/// Control-center rail item hover: 1.035 scale plus a 0.12 accent glow,
+/// `MainWindow.xaml:119-121`.
+pub const TAB_HOVER: Duration = Duration::from_millis(150);
+/// The rail item easing back out, `MainWindow.xaml:128-130`.
+pub const TAB_HOVER_OUT: Duration = Duration::from_millis(200);
+/// The active rail item's accent bar growing to full height, `MainWindow.xaml:141` —
+/// `BackEase Amplitude="0.6"`, so this one goes with [`back_ease_out`].
+pub const TAB_SELECT: Duration = Duration::from_millis(220);
+/// The same bar's opacity, `MainWindow.xaml:143`. Shorter than [`TAB_SELECT`], so the bar
+/// is already opaque while it is still growing.
+pub const TAB_SELECT_FADE: Duration = Duration::from_millis(180);
+/// Slider thumb scale on hover, `App.xaml:281-282`.
+pub const SLIDER_HOVER: Duration = Duration::from_millis(120);
+/// The thumb shrinking back, `App.xaml:289-290`.
+pub const SLIDER_HOVER_OUT: Duration = Duration::from_millis(180);
+/// The thumb's drag scale, `App.xaml:298-299`.
+pub const SLIDER_DRAG: Duration = Duration::from_millis(100);
 /// Overlay close fade, `CommandSearchOverlay.xaml.cs:104`.
 pub const OVERLAY_CLOSE: Duration = Duration::from_millis(100);
 /// Overlay card entrance, `CommandSearchOverlay.xaml.cs:150`.
@@ -26,6 +51,29 @@ pub const OVERLAY_CARD_IN: Duration = Duration::from_millis(140);
 pub const OVERLAY_SCRIM: Duration = Duration::from_millis(180);
 /// Overlay card re-anchor when the result count changes, `:221`.
 pub const OVERLAY_RECARD: Duration = Duration::from_millis(120);
+/// Dropdown entrance. The C# asked WPF for `PopupAnimation="Slide"` (`App.xaml:72`), whose
+/// built-in slide is the platform's own duration; 120 ms is ours, inside the
+/// `design-aesthetic` skill's "under 250 ms" rule and the same pitch as the overlay card.
+pub const POPUP_IN: Duration = Duration::from_millis(120);
+/// Tooltip fade. WPF's `ToolTip` defaults to `PopupAnimation="Fade"`, so the managed
+/// tooltips faded in without the XAML saying so, and a tooltip that appears in one frame
+/// reads as a glitch next to every other animated surface.
+pub const TOOLTIP_FADE: Duration = Duration::from_millis(120);
+/// An expander body appearing. WPF's `Expander` has no animation at all
+/// (`MainWindow.xaml:1212` sets only `Foreground`), so this is a client choice: a body that
+/// pops into place reads as a broken layout, and the `design-aesthetic` skill's motion table
+/// puts disclosure at the same 150 ms as a button hover.
+pub const EXPANDER_BODY: Duration = Duration::from_millis(150);
+
+/// How far the overlay card rises as it fades in, `CommandSearchOverlay.xaml.cs:163`:
+/// `CardSlide.Y` runs 8 → 0. The close runs 0 → 6, not 8 (`:109`), so the two are not
+/// symmetric and must not share a constant.
+pub const OVERLAY_CARD_SLIDE: f32 = 8.0;
+/// Dropdown entrance offset, ours. It exists only while [`POPUP_IN`] runs, which is why it
+/// lives here rather than in `metrics`, whose numbers are laid-out geometry.
+pub const POPUP_SLIDE: f32 = 4.0;
+/// Expander body rise, ours; see [`EXPANDER_BODY`].
+pub const EXPANDER_SLIDE: f32 = 4.0;
 
 /// Card pulse keyframe times, `MainWindow.xaml.cs:1797-1810`.
 pub const PULSE_RISE: Duration = Duration::from_millis(160);
@@ -58,6 +106,18 @@ pub fn cubic_ease_out(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     let inverse = 1.0 - t;
     1.0 - inverse * inverse * inverse
+}
+
+/// `QuarticEase EasingMode="EaseOut"` (`CommandSearchOverlay.xaml.cs:151`): `1 - (1 - t)⁴`.
+///
+/// The overlay card and its slide use this rather than the cubic the pulse uses, and the
+/// difference is visible on a 140 ms run: quartic is already 94 % of the way at the halfway
+/// point, so the card snaps into place and settles instead of gliding.
+#[must_use]
+pub fn quartic_ease_out(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    let inverse = 1.0 - t;
+    1.0 - inverse * inverse * inverse * inverse
 }
 
 /// `BackEase` with [`BACK_AMPLITUDE`], eased out.
@@ -190,11 +250,75 @@ mod tests {
 
     #[test]
     fn easings_hit_their_endpoints_and_clamp() {
-        for easing in [linear, quadratic_ease_out, cubic_ease_out, back_ease_out] {
+        for easing in [
+            linear,
+            quadratic_ease_out,
+            cubic_ease_out,
+            quartic_ease_out,
+            back_ease_out,
+        ] {
             assert!((easing(0.0) - 0.0).abs() < 1e-6);
             assert!((easing(1.0) - 1.0).abs() < 1e-6);
             assert!((easing(-2.0) - easing(0.0)).abs() < 1e-6);
             assert!((easing(3.0) - easing(1.0)).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn the_durations_are_the_csharp_numbers() {
+        // One home for every duration the C# storyboards use, so a component cannot
+        // round 140 to "about 150" and call it the port.
+        assert_eq!(BUTTON_HOVER.as_millis(), 150);
+        assert_eq!(BUTTON_HOVER_OUT.as_millis(), 200);
+        assert_eq!(BUTTON_PRESS.as_millis(), 80);
+        assert_eq!(BUTTON_RELEASE.as_millis(), 120);
+        assert_eq!(TAB_HOVER.as_millis(), 150);
+        assert_eq!(TAB_HOVER_OUT.as_millis(), 200);
+        assert_eq!(TAB_SELECT.as_millis(), 220);
+        assert_eq!(TAB_SELECT_FADE.as_millis(), 180);
+        assert_eq!(SLIDER_HOVER.as_millis(), 120);
+        assert_eq!(SLIDER_HOVER_OUT.as_millis(), 180);
+        assert_eq!(SLIDER_DRAG.as_millis(), 100);
+        assert_eq!(OVERLAY_CARD_IN.as_millis(), 140);
+        assert_eq!(OVERLAY_SCRIM.as_millis(), 180);
+        // The card slide is 8 px in and 6 px out (`CommandSearchOverlay.xaml.cs:163`, `:109`).
+        assert_eq!(OVERLAY_CARD_SLIDE, 8.0);
+        // Hover-out is slower than hover-in wherever the C# bothered to say so.
+        for (enter, exit) in [
+            (BUTTON_HOVER, BUTTON_HOVER_OUT),
+            (TAB_HOVER, TAB_HOVER_OUT),
+            (SLIDER_HOVER, SLIDER_HOVER_OUT),
+        ] {
+            assert!(exit > enter, "hover-out must be the slower half");
+        }
+        // The one rule the design system adds on top of the C# set: interaction feedback
+        // is short. The pulse and the sweep are the only long ones, and they are not
+        // feedback, so they are deliberately absent from this list.
+        let ceiling = Duration::from_millis(250);
+        for duration in [
+            SWITCH,
+            BUTTON_HOVER,
+            BUTTON_HOVER_OUT,
+            BUTTON_PRESS,
+            BUTTON_RELEASE,
+            TAB_HOVER,
+            TAB_HOVER_OUT,
+            TAB_SELECT,
+            TAB_SELECT_FADE,
+            SLIDER_HOVER,
+            SLIDER_HOVER_OUT,
+            SLIDER_DRAG,
+            OVERLAY_CARD_IN,
+            OVERLAY_SCRIM,
+            OVERLAY_CLOSE,
+            POPUP_IN,
+            TOOLTIP_FADE,
+            EXPANDER_BODY,
+        ] {
+            assert!(
+                duration < ceiling,
+                "a micro-interaction is {duration:?}, above the design system's 250 ms ceiling"
+            );
         }
     }
 

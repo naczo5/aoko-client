@@ -178,7 +178,19 @@ mod tests {
     /// Treat this as a budget: if a change to the UI legitimately moves it, update the
     /// constant in the same commit and say why. If it moves on its own, something in
     /// `render` started allocating.
-    const SHELL_FRAME_ALLOCATIONS: usize = 986;
+    ///
+    /// Moved from 986 to 991 by the tab body's entrance animation
+    /// (`Shell::render_tab_entry`). `with_animation` is not free and cannot be made free at
+    /// this pin: `AnimationExt::with_animation` boxes the animator closure and stores the
+    /// easing in an `Rc`, and the element keeps both for as long as it is mounted
+    /// (`elements/animation.rs:96-113`). So the five are structural — one `Box`, one `Rc`
+    /// for the easing, one `SmallVec` for the animation list, and the two the wrapper
+    /// element itself costs — and they are paid on *every* tab, which is why
+    /// `TAB_BUDGET` moves with them rather than staying put. The alternative is no
+    /// transition at all: the panel swapping nine documents with no frame in between is
+    /// the thing a user reported as "no animations whatsoever", and five allocations
+    /// against a 991-per-frame baseline is not what makes a frame expensive.
+    const SHELL_FRAME_ALLOCATIONS: usize = 991;
 
     fn warm_shell() -> (VisualTestContext, Entity<Shell>) {
         let cx = TestAppContext::single();
@@ -248,7 +260,7 @@ mod tests {
     /// The tabs differ by how many controls they draw (Combat ≈ 1000, Stats ≈ 150), so
     /// one ceiling over all nine catches a regression anywhere without pinning nine
     /// numbers that any copy change would move.
-    const TAB_BUDGET: usize = 2228;
+    const TAB_BUDGET: usize = 2233;
 }
 
 #[cfg(test)]

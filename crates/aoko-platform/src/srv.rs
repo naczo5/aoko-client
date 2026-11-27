@@ -58,6 +58,37 @@ const MAX_DATAGRAM: usize = 65_535;
 /// step cannot move backwards mid-TTL.
 pub type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
 
+/// Reads this machine's resolver list on demand.
+///
+/// A probe rather than a stored list because the managed host re-read the list for every lookup:
+/// `GetDnsServers()` was called inside `ServerAddress.TrySrvAsync` (`ServerAddress.cs:143`), and it
+/// re-ran `CollectSystemDnsServers()` each time (`:181-185`). A laptop that joins another network,
+/// or a VPN that comes up after the host started, would otherwise keep asking the resolver of the
+/// network it was on at launch - usually an address that no longer answers, so every SRV lookup
+/// after the change failed and the server-list join fell back to port 25565.
+pub type ResolverProbe = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
+
+/// Where a [`SrvResolver`] gets the resolver list it asks.
+enum ResolverSource {
+    /// A list handed in at construction: a test, or a host that wants a fixed answer.
+    Fixed(Vec<String>),
+    /// The system list, re-read before every lookup, which is the managed behaviour.
+    Probed(ResolverProbe),
+}
+
+impl ResolverSource {
+    /// The list to ask this time, with the public fallback applied.
+    ///
+    /// `GetDnsServers()` did the same substitution: an empty system list means
+    /// [`resolve_dns_servers`]'s public resolvers, never "ask nobody".
+    fn current(&self) -> Vec<String> {
+        match self {
+            Self::Fixed(list) => resolve_dns_servers(list),
+            Self::Probed(probe) => resolve_dns_servers(&probe()),
+        }
+    }
+}
+
 /// A resolved target: the host stays a name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SrvTarget {
@@ -195,19 +226,37 @@ impl SrvLookupCache {
 pub struct SrvResolver {
     cache: SrvLookupCache,
     exchange: Arc<dyn SrvExchange>,
-    resolvers: Vec<String>,
+    resolvers: ResolverSource,
     timeout: Duration,
 }
 
 impl SrvResolver {
-    /// Builds a resolver over the system list, falling back to the public
+    /// Builds a resolver over a fixed list, falling back to the public
     /// resolvers when it is empty, as `GetDnsServers()` did.
+    ///
+    /// Fixed on purpose: a caller that hand-built a list (a test, or a host with its own
+    /// configuration) is not asking for the system's. [`SrvResolver::with_probe`] is the live one.
     #[must_use]
     pub fn new(system_resolvers: Vec<String>) -> Self {
         Self {
             cache: SrvLookupCache::new(SRV_FAILURE_TTL, SRV_SUCCESS_TTL),
             exchange: Arc::new(UdpExchange),
-            resolvers: resolve_dns_servers(&system_resolvers),
+            resolvers: ResolverSource::Fixed(system_resolvers),
+            timeout: SRV_TIMEOUT,
+        }
+    }
+
+    /// Builds a resolver that re-reads the system list before every lookup.
+    ///
+    /// This is what a shipped session wants: `services()` hands it the platform's
+    /// `collect_system_dns_servers`, so a network change is picked up without a restart, which is
+    /// what the managed host's per-lookup `GetDnsServers()` achieved.
+    #[must_use]
+    pub fn with_probe(probe: ResolverProbe) -> Self {
+        Self {
+            cache: SrvLookupCache::new(SRV_FAILURE_TTL, SRV_SUCCESS_TTL),
+            exchange: Arc::new(UdpExchange),
+            resolvers: ResolverSource::Probed(probe),
             timeout: SRV_TIMEOUT,
         }
     }
@@ -223,15 +272,18 @@ impl SrvResolver {
         Self {
             cache,
             exchange,
-            resolvers: resolve_dns_servers(&system_resolvers),
+            resolvers: ResolverSource::Fixed(system_resolvers),
             timeout: SRV_TIMEOUT,
         }
     }
 
-    /// The resolvers this resolver will ask, in order.
+    /// The resolvers this resolver would ask right now, in order.
+    ///
+    /// A `Vec` rather than a slice because a probed resolver has no list to borrow: reading the
+    /// current list is the whole point of the probe.
     #[must_use]
-    pub fn resolvers(&self) -> &[String] {
-        &self.resolvers
+    pub fn resolvers(&self) -> Vec<String> {
+        self.resolvers.current()
     }
 
     /// The cache, for reporting.
@@ -296,7 +348,12 @@ impl SrvResolver {
         // wire, so the whole lookup is abandoned and the explicit host is used.
         let query = build_srv_query(&query_name)?;
 
-        for resolver in &self.resolvers {
+        // Read once per lookup, not once per process: the list is the probe's answer and every
+        // resolver below is asked from this snapshot, so a network change mid-lookup cannot make
+        // the loop ask two different networks.
+        let resolvers = self.resolvers.current();
+
+        for resolver in &resolvers {
             if cancelled.load(Ordering::Acquire) {
                 return None;
             }
@@ -892,6 +949,40 @@ mod tests {
             "192.168.1.3".to_string(),
         ]);
         assert_eq!(resolver.resolvers(), ["192.168.1.1", "192.168.1.2"]);
+    }
+
+    /// A probed resolver re-reads the system list, which a fixed one must not.
+    ///
+    /// This is the staleness the managed host never had: `GetDnsServers()` ran per lookup
+    /// (`ServerAddress.cs:143`, `:181-185`), so a machine that changed networks mid-session asked
+    /// the new resolver. A `Fixed` list is the caller's decision and stays put.
+    #[test]
+    fn a_probe_is_re_read_for_every_lookup_and_a_fixed_list_is_not() {
+        let answers = Mutex::new(vec![
+            vec!["10.0.0.1".to_string()],
+            vec!["10.0.0.2".to_string()],
+        ]);
+        let probe: ResolverProbe = Arc::new(move || {
+            let mut answers = lock(&answers);
+            if answers.len() > 1 {
+                answers.remove(0)
+            } else {
+                answers.first().cloned().unwrap_or_default()
+            }
+        });
+
+        let resolver = SrvResolver::with_probe(probe);
+        assert_eq!(resolver.resolvers(), ["10.0.0.1"]);
+        assert_eq!(
+            resolver.resolvers(),
+            ["10.0.0.2"],
+            "the second read is the probe's second answer"
+        );
+
+        // A fixed list answers the same thing however often it is asked.
+        let fixed = SrvResolver::new(vec!["10.0.0.1".to_string()]);
+        assert_eq!(fixed.resolvers(), ["10.0.0.1"]);
+        assert_eq!(fixed.resolvers(), ["10.0.0.1"]);
     }
 
     #[test]

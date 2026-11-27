@@ -72,12 +72,14 @@
 //!
 //! # Geometry against the C#
 //!
-//! The field paints the same two shapes [`super::field::field`] does, chosen with
-//! [`TextInput::variant`]. `FieldVariant::Panel` is the `TabTextBox` / `HexBox` box:
-//! panel fill, 1 px edge, 6 px radius, 8×5 padding, 13 px text. `FieldVariant::Query`
-//! is the overlay's line: no fill, no edge, no padding, 18 px text and the search
-//! card's own placeholder colour. The caret is drawn by splitting the display text at
-//! the caret and putting a 1 px accent line between the halves, so it needs no text
+//! The field paints the same shapes [`super::field::field`] does, chosen with
+//! [`TextInput::variant`]. `FieldVariant::Panel` is `TabTextBox` (`TabStyles.xaml:155-201`):
+//! slider-background fill, a `SliderFgBrush` edge that turns accent on hover and on focus,
+//! 6 px radius, 8×6 padding, 12 px text. `FieldVariant::Hex` is the picker's `HexBox`
+//! (`ColorPickerDialog.xaml:83`): panel fill, a `SliderBgBrush` edge, 8×5 padding, 13 px.
+//! `FieldVariant::Query` is the overlay's line: no fill, no edge, no padding, 18 px text and
+//! the search card's own placeholder colour. The caret is drawn by splitting the display text
+//! at the caret and putting a 1 px accent line between the halves, so it needs no text
 //! measurement.
 
 use std::ops::Range;
@@ -497,15 +499,21 @@ impl Render for TextInput {
         // placeholder in `CommandSearchPlaceholderBrush` rather than `DimTextBrush`
         // (`CommandSearchOverlay.xaml:215-227`).
         let placeholder_colour = match self.variant {
-            FieldVariant::Panel => theme.dim_text,
+            FieldVariant::Panel | FieldVariant::Hex => theme.dim_text,
             FieldVariant::Query => theme.search_placeholder(),
         };
         let font_size = self.variant.font_size();
+        // `TabStyles.xaml:158` is the visible `SliderFgBrush` hairline; the picker's hex entry
+        // is the quieter `SliderBgBrush` one (`ColorPickerDialog.xaml:84`). Focus beats both.
         let edge = if focused {
             theme.accent
         } else {
-            theme.slider_background
+            match self.variant {
+                FieldVariant::Panel => theme.slider_foreground,
+                FieldVariant::Hex | FieldVariant::Query => theme.slider_background,
+            }
         };
+        let hover_edge = theme.accent;
         let placeholder = self.placeholder.clone();
         let focus = self.focus.clone();
         let variant = self.variant;
@@ -536,9 +544,19 @@ impl Render for TextInput {
             });
 
         element = match variant {
-            // `TabTextBox` (`TabStyles.xaml:155`) and the picker's `HexBox`
-            // (`ColorPickerDialog.xaml:83`).
+            // `TabTextBox` (`TabStyles.xaml:155-201`).
             FieldVariant::Panel => element
+                .rounded(px(metrics::radius::CARD))
+                .border_1()
+                .bg(theme.slider_background)
+                .px(px(8.0))
+                .py(px(6.0))
+                .border_color(edge)
+                // `TabStyles.xaml:195-199`: the pointer lights the edge too, not only the
+                // caret, which is what a field that can be clicked into owes the user.
+                .hover(move |style| style.border_color(hover_edge)),
+            // The picker's hex entry (`ColorPickerDialog.xaml:83`): no hover rule in the XAML.
+            FieldVariant::Hex => element
                 .rounded(px(metrics::radius::CARD))
                 .border_1()
                 .bg(theme.panel)

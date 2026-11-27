@@ -203,7 +203,10 @@ pub fn services() -> crate::PlatformServices {
         input: Box::new(LinuxInputBackend::new()),
         injector: Box::new(LinuxBridgeInjector::new()),
         discord: Box::new(LinuxDiscordTransport::new()),
-        srv: crate::SrvResolver::new(srv::collect_system_dns_servers()),
+        // The probe, not a list: the managed host re-ran `CollectSystemDnsServers` for every SRV
+        // lookup, so a session that changes networks must re-read the resolvers rather than keep
+        // asking the one it started on.
+        srv: crate::SrvResolver::with_probe(std::sync::Arc::new(srv::collect_system_dns_servers)),
         capabilities: probe_capabilities(),
     }
 }

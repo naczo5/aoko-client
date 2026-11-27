@@ -72,6 +72,15 @@ pub mod window {
     pub const HEIGHT: f32 = 760.0;
     pub const MIN_WIDTH: f32 = 560.0;
     pub const MIN_HEIGHT: f32 = 460.0;
+    /// The loader's window, 360×310 (`MainWindow.xaml:8-10`, `NoResize`).
+    ///
+    /// The managed host opened *small* and grew: the splash that carries the inject
+    /// button was a 360×310 fixed window, and `EnterControlMode` swapped it for
+    /// 1020×760 `CanResizeWithGrip` (`MainWindow.xaml.cs:469-493`). Opening at control
+    /// geometry instead is what made the loader look like a full-size GUI with one
+    /// button in it.
+    pub const LOADER_WIDTH: f32 = 360.0;
+    pub const LOADER_HEIGHT: f32 = 310.0;
     /// Client-drawn title bar height. The C# had no client chrome and left this to
     /// DWM; this is our value, chosen to match the 32 px caption the shell strips.
     pub const TITLE_BAR_HEIGHT: f32 = 32.0;
@@ -96,15 +105,23 @@ pub mod checkbox {
 
 /// Slider (`App.xaml:232-298`): 6 px track, 4 px end dot, 6×16 thumb, and the two
 /// scale pairs the template animates.
+///
+/// The scale pairs are the thumb's `ScaleTransform` (`:269`), which is `ScaleX`/`ScaleY` and
+/// therefore not symmetric: the pill widens more than it grows. The `_X`/`_Y` suffixes are
+/// the template's, so a call site cannot read the vertical number as a width.
 pub mod slider {
     pub const TRACK_HEIGHT: f32 = 6.0;
     pub const END_DOT: f32 = 4.0;
     pub const THUMB_WIDTH: f32 = 6.0;
     pub const THUMB_HEIGHT: f32 = 16.0;
-    pub const HOVER_SCALE: f32 = 1.4;
-    pub const HOVER_DOT_SCALE: f32 = 1.15;
-    pub const DRAG_SCALE: f32 = 1.5;
-    pub const DRAG_DOT_SCALE: f32 = 1.2;
+    /// Hover: `ScaleX="1.4"` (`App.xaml:281`).
+    pub const HOVER_SCALE_X: f32 = 1.4;
+    /// Hover: `ScaleY="1.15"` (`App.xaml:282`).
+    pub const HOVER_SCALE_Y: f32 = 1.15;
+    /// Drag: `ScaleX="1.5"` (`App.xaml:298`).
+    pub const DRAG_SCALE_X: f32 = 1.5;
+    /// Drag: `ScaleY="1.2"` (`App.xaml:299`).
+    pub const DRAG_SCALE_Y: f32 = 1.2;
 }
 
 /// Stats tab (`MainWindow.xaml:1440-1515`).

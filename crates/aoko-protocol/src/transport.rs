@@ -199,6 +199,14 @@ pub mod memory {
     struct Shared {
         inbound: VecDeque<u8>,
         sent: Vec<Vec<u8>>,
+        /// Whether an empty queue reads as end of stream.
+        ///
+        /// `duplex()` starts with this set: a test that feeds its frames and expects the
+        /// reader to finish uses the drained queue as the close. `duplex_open()` clears it
+        /// so the link stays up until [`MemoryPeer::close`] - which is what a test of
+        /// anything the reader resets on exit needs, because a link that closes the instant
+        /// it has answered would reset the very state under assertion.
+        eof_when_drained: bool,
     }
 
     fn lock(shared: &Arc<Mutex<Shared>>) -> MutexGuard<'_, Shared> {
@@ -216,10 +224,17 @@ pub mod memory {
     }
 
     impl MemoryPeer {
-        /// Appends bytes the client will read. Empty inbound behaves as EOF.
+        /// Appends bytes the client will read. With [`duplex`] an empty queue is EOF.
         pub fn feed(&self, bytes: &[u8]) {
             let mut shared = lock(&self.shared);
             shared.inbound.extend(bytes.iter().copied());
+        }
+
+        /// Closes the link: a reader parked on an empty [`duplex_open`] queue wakes up at end
+        /// of stream, and a [`duplex`] peer is already closed at birth.
+        pub fn close(&self) {
+            let mut shared = lock(&self.shared);
+            shared.eof_when_drained = true;
         }
 
         /// Every line the client has written, in order, without the trailing LF.
@@ -244,7 +259,7 @@ pub mod memory {
         }
     }
 
-    /// Reads from the peer's inbound queue; empty means end of stream.
+    /// Reads from the peer's inbound queue; what an empty queue means is the peer's choice.
     #[derive(Debug)]
     struct QueueReader {
         shared: Arc<Mutex<Shared>>,
@@ -252,16 +267,25 @@ pub mod memory {
 
     impl Read for QueueReader {
         fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
-            let mut shared = lock(&self.shared);
-            if shared.inbound.is_empty() {
-                return Ok(0);
+            loop {
+                {
+                    let mut shared = lock(&self.shared);
+                    if !shared.inbound.is_empty() {
+                        let take = out.len().min(shared.inbound.len());
+                        for slot in out.iter_mut().take(take) {
+                            *slot = shared.inbound.pop_front().unwrap_or_default();
+                        }
+                        return Ok(take);
+                    }
+                    if shared.eof_when_drained {
+                        return Ok(0);
+                    }
+                }
+                // An open link with nothing queued parks the reader instead of reporting a
+                // close it never had. A millisecond, not zero: the caller's loop is a real
+                // read path and a spin would show up as CPU in a test run.
+                std::thread::sleep(std::time::Duration::from_millis(1));
             }
-
-            let take = out.len().min(shared.inbound.len());
-            for slot in out.iter_mut().take(take) {
-                *slot = shared.inbound.pop_front().unwrap_or_default();
-            }
-            Ok(take)
         }
     }
 
@@ -300,9 +324,33 @@ pub mod memory {
     }
 
     /// Creates the pair, both ends honouring the 1 MiB inbound cap.
+    ///
+    /// The queue is closed at birth: an empty inbound reads as end of stream, which is what
+    /// most tests want — they feed what the reader should see and stop there.
     #[must_use]
     pub fn duplex() -> (MemoryTransport, MemoryPeer) {
-        let shared = Arc::new(Mutex::new(Shared::default()));
+        let (transport, peer) = pair(true);
+        (transport, peer)
+    }
+
+    /// The same pair, left **open**: an empty queue parks the reader instead of closing it.
+    ///
+    /// Needed by anything that asserts on state the reader owns for the life of the link —
+    /// the advertised capabilities cell is reset to the codec fallback when the reader exits,
+    /// so a test that let the queue drain would race its own assertion. Close it with
+    /// [`MemoryPeer::close`] when the test is done with the link.
+    #[must_use]
+    pub fn duplex_open() -> (MemoryTransport, MemoryPeer) {
+        pair(false)
+    }
+
+    /// One pair, with the empty-queue behaviour chosen by the caller.
+    fn pair(eof_when_drained: bool) -> (MemoryTransport, MemoryPeer) {
+        let shared = Arc::new(Mutex::new(Shared {
+            inbound: VecDeque::new(),
+            sent: Vec::new(),
+            eof_when_drained,
+        }));
         let transport = MemoryTransport {
             reader: BoundedLineReader::with_wire_cap(QueueReader {
                 shared: Arc::clone(&shared),

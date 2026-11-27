@@ -17,7 +17,10 @@ pub struct ProcessInfo {
     pub pid: u32,
     /// Executable basename, e.g. `java.exe` / `java`.
     pub name: String,
-    /// Full command line where readable. `None` when the OS denies it.
+    /// Full command line where readable. `None` when the OS denies it, and also for a process the
+    /// backend did not read one for: reading a command line means reading the target's PEB, which
+    /// is paid only for a JVM ([`is_java_process_name`]) because that is the only case anything
+    /// asks about. A non-JVM entry is therefore `None` rather than "there is no command line".
     pub command_line: Option<String>,
 }
 

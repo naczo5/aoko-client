@@ -75,7 +75,10 @@ pub fn services() -> crate::PlatformServices {
         input: Box::new(WindowsInputBackend::new()),
         injector: Box::new(WindowsBridgeInjector::new()),
         discord: Box::new(WindowsDiscordTransport::new()),
-        srv: crate::SrvResolver::new(srv::collect_system_dns_servers()),
+        // The probe, not a list: a shipped session must re-read the resolvers, because the managed
+        // host re-ran `CollectSystemDnsServers` for every SRV lookup and a network change would
+        // otherwise leave the host asking a resolver that no longer answers.
+        srv: crate::SrvResolver::with_probe(std::sync::Arc::new(srv::collect_system_dns_servers)),
         capabilities: probe_capabilities(),
     }
 }

@@ -17,21 +17,34 @@ use crate::theme::{metrics, Theme};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FieldVariant {
-    /// `TabTextBox` (`TabStyles.xaml:155`) and the colour picker's `HexBox`
-    /// (`ColorPickerDialog.xaml:83`): panel fill, 1 px edge, accent edge on hover and
-    /// on focus.
+    /// `TabTextBox` (`TabStyles.xaml:155-201`): slider-background fill, a 1 px
+    /// `SliderFgBrush` edge that turns accent on hover and on keyboard focus, 12 px text in
+    /// 8,6 padding, radius 6.
+    ///
+    /// This is **not** the same box as the colour picker's hex entry, which is why
+    /// [`Self::Hex`] exists: the two templates disagree on the fill, the edge, the padding
+    /// and the font size, and an earlier revision of this file averaged them into one shape
+    /// that matched neither — every tab field drew the picker's panel fill with a
+    /// `SliderBgBrush` edge, which is a near-invisible hairline on a panel, instead of the
+    /// C# field's visible `SliderFgBrush` edge.
     Panel,
+    /// The colour picker's `HexBox` (`ColorPickerDialog.xaml:83-85`): `Padding="8,5"`,
+    /// `FontSize="13"`, `PanelBrush` fill and a `SliderBgBrush` edge. It is deliberately the
+    /// quieter of the two — the picker sits on the panel it matches, and the tab field sits
+    /// on a card.
+    Hex,
     /// The overlay's `QueryBox` (`CommandSearchOverlay.xaml:215-227`): no fill, no
     /// border, 18 px.
     Query,
 }
 
 impl FieldVariant {
-    /// `pub(crate)` because [`super::text_input::TextInput`] paints the same two shapes
-    /// and must not restate the sizes.
+    /// `pub(crate)` because [`super::text_input::TextInput`] paints the same shapes and must
+    /// not restate the sizes.
     pub(crate) fn font_size(self) -> f32 {
         match self {
-            Self::Panel => 13.0,
+            Self::Panel => 12.0,
+            Self::Hex => 13.0,
             Self::Query => metrics::text::QUERY,
         }
     }
@@ -47,7 +60,20 @@ pub fn field(
     focused: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
-    let rest_edge = theme.slider_background;
+    // The two bordered variants differ in every one of these, which is the point of the
+    // split: `TabStyles.xaml:155-201` against `ColorPickerDialog.xaml:83`.
+    let rest_edge = match variant {
+        FieldVariant::Panel => theme.slider_foreground,
+        FieldVariant::Hex => theme.slider_background,
+        FieldVariant::Query => theme.slider_background,
+    };
+    let fill = match variant {
+        FieldVariant::Panel => theme.slider_background,
+        FieldVariant::Hex => theme.panel,
+        // `QueryBox` has no fill; the branch below never paints it, and a token keeps the
+        // match total without inventing a colour.
+        FieldVariant::Query => crate::theme::Color::TRANSPARENT,
+    };
     let focus_edge = theme.accent;
     let accent = theme.accent;
 
@@ -65,17 +91,26 @@ pub fn field(
         FieldVariant::Panel => element
             .rounded(px(metrics::radius::CARD))
             .border_1()
-            .bg(theme.panel)
+            .bg(fill)
             .px(px(8.0))
-            .py(px(5.0))
+            // `Padding="8,6"` (`TabStyles.xaml:161`).
+            .py(px(6.0))
             .border_color(if focused { focus_edge } else { rest_edge })
             .hover(move |style| style.border_color(focus_edge)),
+        FieldVariant::Hex => element
+            .rounded(px(metrics::radius::CARD))
+            .border_1()
+            .bg(fill)
+            .px(px(8.0))
+            // `Padding="8,5"` (`ColorPickerDialog.xaml:83`).
+            .py(px(5.0))
+            .border_color(if focused { focus_edge } else { rest_edge }),
         FieldVariant::Query => element.px(px(0.0)).py(px(0.0)),
     };
 
     if text.is_empty() {
         let placeholder_colour = match variant {
-            FieldVariant::Panel => theme.dim_text,
+            FieldVariant::Panel | FieldVariant::Hex => theme.dim_text,
             FieldVariant::Query => theme.search_placeholder(),
         };
         element = element.child(
@@ -105,10 +140,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_query_field_is_the_height_the_overlay_draws() {
-        // 18 px is `CommandSearchOverlay.xaml:216`; the caret is two pixels taller.
+    fn the_three_variants_are_the_three_templates() {
+        // `CommandSearchOverlay.xaml:216`: the query line is 18 px.
         assert_eq!(FieldVariant::Query.font_size(), 18.0);
-        assert_eq!(FieldVariant::Panel.font_size(), 13.0);
         assert!(FieldVariant::Query.font_size() + 2.0 <= 24.0);
+        // `TabStyles.xaml:159` is 12 px and `ColorPickerDialog.xaml:83` is 13; one number
+        // cannot serve both, which is why the variants are two boxes.
+        assert_eq!(FieldVariant::Panel.font_size(), 12.0);
+        assert_eq!(FieldVariant::Hex.font_size(), 13.0);
     }
 }

@@ -34,6 +34,15 @@ use crate::clicker::ClickDeadlineScheduler;
 /// `Math.Max(0.1f, cps)` floor (`Clicker.cs:3243`).
 pub const MAX_INTERVAL_MS: f64 = 10_000.0;
 
+/// `Clicker.MinCPS` field initialiser (`Clicker.cs:118`).
+pub const DEFAULT_MIN_CPS: f32 = 8.0;
+/// `Clicker.MaxCPS` field initialiser (`Clicker.cs:119`).
+pub const DEFAULT_MAX_CPS: f32 = 12.0;
+/// `Clicker.RightMinCPS` field initialiser (`Clicker.cs:128`).
+pub const DEFAULT_RIGHT_MIN_CPS: f32 = 10.0;
+/// `Clicker.RightMaxCPS` field initialiser (`Clicker.cs:129`).
+pub const DEFAULT_RIGHT_MAX_CPS: f32 = 14.0;
+
 /// One clicker engine's settings.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ClickLoopConfig {
@@ -57,16 +66,22 @@ impl ClickLoopConfig {
             left_button: true,
             guards: ClickConfig::default(),
             mode: ClickRandomizationMode::Medium,
-            min_cps: 8.0,
-            max_cps: 12.0,
+            min_cps: DEFAULT_MIN_CPS,
+            max_cps: DEFAULT_MAX_CPS,
         }
     }
 
     /// The right engine's defaults.
+    ///
+    /// The CPS band is the right engine's own (`Clicker.cs:128-129`, `10`/`14`); the managed
+    /// property pair was never shared with the left one, so `..Self::left()` would have started
+    /// the right engine 2 CPS slow.
     #[must_use]
     pub fn right() -> Self {
         Self {
             left_button: false,
+            min_cps: DEFAULT_RIGHT_MIN_CPS,
+            max_cps: DEFAULT_RIGHT_MAX_CPS,
             ..Self::left()
         }
     }
@@ -160,6 +175,16 @@ pub fn run(
     config: &ClickLoopConfig,
     timing: &mut AdvancedClickTimingState,
 ) {
+    // The settings this body was started with. They are the fallback for a sense with no
+    // profile behind it (tests, captures) and the source of `left_button`, which a live
+    // config has to agree with because it decides which module and which button this body
+    // is.
+    let started = *config;
+    let module = if started.left_button {
+        super::AUTOCLICKER_MODULE
+    } else {
+        super::RIGHT_CLICK_MODULE
+    };
     let mut next_deadline: Option<Instant> = None;
     // The not-connected state, built once per process: no snapshot is not "do nothing",
     // it is the managed not-connected branch (`Clicker.cs:3175-3183`), which only
@@ -172,6 +197,34 @@ pub fn run(
     let disconnected = disconnected_state();
 
     while !runtime.is_cancelled() {
+        // The engine's own switch, read on every tick (`LoopSense::module_enabled`). The
+        // managed host never ran this loop while its module was off: `StartClicking`
+        // refused to start a stream whose module was disabled (`Clicker.cs:470-476`) and
+        // `StopClicking`/`Disarm` cancelled the running one (`:459`, `:488-509`). Without
+        // this gate the body kept clicking for as long as *any* loop-driving module held
+        // the bundle up, so switching the AutoClicker off did nothing while aim assist was
+        // on, and switching aim assist on started a click stream nobody asked for.
+        if sense.module_enabled(module) == Some(false) {
+            // Drop the phase. A managed restart began from `nextClickDeadline = 0`
+            // (`:3119`), so re-arming must not resume a deadline from before the pause.
+            next_deadline = None;
+            if !runtime.park(super::MODULE_OFF_POLL) {
+                break;
+            }
+            continue;
+        }
+
+        // The managed loop read `Clicker`'s properties inside its `while`, so a CPS or guard
+        // change took effect on the next click. This does the same instead of trusting the
+        // snapshot the bundle was started with.
+        let config = sense.loop_configs().map_or(started, |configs| {
+            if started.left_button {
+                configs.left
+            } else {
+                configs.right
+            }
+        });
+
         let now = runtime.now();
 
         let snapshot = sense.snapshot();
@@ -196,7 +249,7 @@ pub fn run(
             TickDecision::Click => {}
         }
 
-        let (cps, interval_ms) = next_click_interval(runtime, config, timing, now);
+        let (cps, interval_ms) = next_click_interval(runtime, &config, timing, now);
 
         // `if (token.IsCancellationRequested) break;` right before the click
         // (`:3277-3278`): a stop never injects one more click.

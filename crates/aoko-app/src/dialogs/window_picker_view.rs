@@ -40,6 +40,19 @@ use crate::theme::{metrics, Theme};
 /// `Width="620"` / `Height="500"` (`WindowPickerDialog.xaml:6-7`).
 pub const DIALOG_WIDTH: f32 = 620.0;
 pub const DIALOG_HEIGHT: f32 = 500.0;
+
+/// The dialog's own size in logical pixels, as `(width, height)`.
+///
+/// The one pair a host needs to place the dialog: the managed window was 620×500 and centred on
+/// its owner (`WindowPickerDialog.xaml:6-7`, `:8`), so a host that centres this view in the one
+/// window reproduces `WindowStartupLocation="CenterOwner"` with the same numbers. Kept as a
+/// function rather than two literals at the call site, and returns plain `f32` rather than a
+/// `gpui::Size` so this module stays callable from a test that owns no `Pixels` value.
+#[must_use]
+pub const fn dialog_size() -> (f32, f32) {
+    (DIALOG_WIDTH, DIALOG_HEIGHT)
+}
+
 /// The dialog's `Grid Margin="16"` (`:10`).
 const MARGIN: f32 = 16.0;
 /// `Width="90"` on Cancel and `Width="160"` on Inject (`:117-131`).
@@ -323,13 +336,26 @@ impl Render for WindowPickerView {
             column
         });
 
+        // The dialog keeps its own geometry, whatever container hosts it.
+        //
+        // The managed dialog was a `Window` with `Width="620" Height="500"`
+        // (`WindowPickerDialog.xaml:6-7`) and `WindowStartupLocation="CenterOwner"`, so its size
+        // came from the dialog, never from the window that opened it. This port has one window
+        // (`MIGRATION_ARCHITECTURE.md` section 12 decision 4), so the dialog can only be an overlay
+        // child — and a child of a flex row is stretched on the cross axis unless it refuses.
+        // `flex_none` refuses to grow or shrink, and `max_w`/`max_h` cap what a stretch would
+        // otherwise produce, so no host can lay a 620×500 dialog out at the GUI's 1020×760.
+        // [`dialog_size`] is the same pair for a host that wants to place or clamp the dialog.
         let mut root = div()
             .id("window-picker")
             .debug_selector(|| String::from("window-picker"))
             .flex()
             .flex_col()
+            .flex_none()
             .w(px(DIALOG_WIDTH))
             .h(px(DIALOG_HEIGHT))
+            .max_w(px(DIALOG_WIDTH))
+            .max_h(px(DIALOG_HEIGHT))
             .p(px(MARGIN))
             .bg(theme.background)
             .child(
@@ -530,6 +556,34 @@ mod tests {
         }
 
         assert_eq!(probe.selected_index(), Some(0), "the first row is selected");
+    }
+
+    /// The dialog is the size the managed window was, not the size of whatever hosts it.
+    ///
+    /// `WindowPickerDialog.xaml:6-7` is the only source of the 620×500, and the probe's host is a
+    /// `div().size_full()` — the shape an overlay child gets in `shell.rs`. A view that inherited
+    /// its parent's box, or that a flex parent stretched, fails the layout assertion below.
+    #[gpui::test]
+    fn the_dialog_keeps_the_managed_window_size(cx: &mut TestAppContext) {
+        let (width, height) = dialog_size();
+        assert_eq!((width, height), (620.0, 500.0));
+
+        let mut probe = probe(cx, two_targets());
+        let bounds = probe
+            .visual
+            .debug_bounds("window-picker")
+            .expect("the dialog is laid out");
+
+        // Sub-pixel tolerance: the property under test is that the host's box was not inherited,
+        // not that taffy rounded a definite 620 px the same way twice.
+        let laid_out = (
+            f32::from(bounds.size.width),
+            f32::from(bounds.size.height),
+        );
+        assert!(
+            (laid_out.0 - width).abs() < 0.5 && (laid_out.1 - height).abs() < 0.5,
+            "the dialog laid out at {laid_out:?}, not at the managed {width}x{height}"
+        );
     }
 
     #[gpui::test]

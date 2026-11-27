@@ -108,8 +108,31 @@ pub mod copy {
     pub const LUNAR_HINT: &str = "Writes every saved Microsoft account into Lunar's accounts.json after an import or switch. Offline accounts are skipped, and Lunar must be relaunched to read the file.";
 }
 
+/// The chip tone for an account's source.
+///
+/// `AccountsView.xaml:163-176` tints the chip from the row's own source family: `IsLocalts`
+/// takes `AccentBrush`, `IsOffline` takes `WarnBrush`, and every other source keeps the dim
+/// default. The state already resolves that family into
+/// [`AccountSourceTone`](crate::views::accounts_logic::AccountSourceTone); painting one
+/// `ChipTone::Accent` for every row — which is what a hard-coded accent did — made a cracked
+/// account look identical to a refresh-backed Localts one, and painted `Cookie`/`Token`/`Saved`
+/// in a colour the markup never gives them.
+fn source_chip_tone(tone: crate::views::accounts_logic::AccountSourceTone) -> ChipTone {
+    match tone {
+        crate::views::accounts_logic::AccountSourceTone::Neutral => ChipTone::Neutral,
+        crate::views::accounts_logic::AccountSourceTone::Localts => ChipTone::Accent,
+        crate::views::accounts_logic::AccountSourceTone::Offline => ChipTone::Warn,
+    }
+}
+
 /// One card: the avatar letter, the name, the source chip, the last-used line and
 /// the in-use dot (`AccountsView.xaml:42-160`).
+///
+/// The dashed UUID is the card's **tooltip**, not a line of text: the managed style binds
+/// `ToolTip` and `AutomationProperties.HelpText` to `UuidTooltip` (`:35`, `:37`) and its
+/// template paints only `LastUsedText` (`:156-160`). Drawing the UUID as visible copy both
+/// added a row the markup does not have and put a saved account's identifier on screen for
+/// anyone looking over a shoulder.
 fn render_card(
     row: &AccountRowState,
     theme: &Theme,
@@ -119,6 +142,7 @@ fn render_card(
     let selected = row.is_current;
     let mut card = components::card(theme)
         .id(crate::reuse::indexed("account-card", index))
+        .tooltip(components::tooltip(theme, row.uuid_label.clone()))
         .cursor_pointer()
         .on_mouse_down(MouseButton::Left, {
             let handle = entity.clone();
@@ -150,7 +174,11 @@ fn render_card(
                         .text_color(theme.text)
                         .child(SharedString::from(row.name.clone())),
                 )
-                .child(components::chip(theme, ChipTone::Accent, row.source_label)),
+                .child(components::chip(
+                    theme,
+                    source_chip_tone(row.source_tone),
+                    row.source_label,
+                )),
         )
         .child(
             div()
@@ -160,8 +188,7 @@ fn render_card(
                 .w_full()
                 .text_size(px(metrics::text::CAPTION))
                 .text_color(theme.dim_text)
-                .child(SharedString::from(row.last_used_label.clone()))
-                .child(SharedString::from(row.uuid_label.clone())),
+                .child(SharedString::from(row.last_used_label.clone())),
         );
 
     if selected {
@@ -369,6 +396,12 @@ pub fn render(
     }
 
     // === Session strip ===
+    //
+    // Hidden while a panel is open, which is `TogglePanel`'s own rule
+    // (`AccountsView.xaml.cs:697-736`): "The panels are scratch surfaces: collapse the strip and
+    // the empty state so opening one does not halve the visible grid." `HidePanel` (`:722-728`)
+    // puts both back, which falls out of this being read from the state every frame.
+    let panel_open = state.panel() != AccountPanel::None;
     let session = state.session();
     let chip = session.chip();
     let chip_label = match chip {
@@ -376,43 +409,45 @@ pub fn render(
         crate::views::accounts_logic::SessionChipTone::MainMenu => copy::CHIP_MAIN_MENU,
         crate::views::accounts_logic::SessionChipTone::InWorld => copy::CHIP_WORLD,
     };
-    body = body.child(
-        components::card(theme)
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .w_full()
-                    .child(components::chip(theme, ChipTone::Neutral, chip_label))
-                    .child(button_with_hint(
-                        "accounts-refresh-session",
-                        theme,
-                        ButtonVariant::Secondary,
-                        copy::REFRESH,
-                        copy::REFRESH_HINT,
-                        {
-                            let handle = entity.clone();
-                            move |_, _, cx| {
-                                handle.update(cx, |shell, cx| shell.accounts_refresh_session(cx));
-                            }
-                        },
-                    )),
-            )
-            .child(
-                div()
-                    .text_size(px(metrics::text::BUTTON))
-                    .text_color(theme.text)
-                    .child(SharedString::from(session.name_text())),
-            )
-            .child(
-                div()
-                    .text_size(px(metrics::text::CAPTION))
-                    .text_color(theme.dim_text)
-                    .child(SharedString::from(session.detail_text())),
-            ),
-    );
+    if !panel_open {
+        body = body.child(
+            components::card(theme)
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .justify_between()
+                        .w_full()
+                        .child(components::chip(theme, ChipTone::Neutral, chip_label))
+                        .child(button_with_hint(
+                            "accounts-refresh-session",
+                            theme,
+                            ButtonVariant::Secondary,
+                            copy::REFRESH,
+                            copy::REFRESH_HINT,
+                            {
+                                let handle = entity.clone();
+                                move |_, _, cx| {
+                                    handle.update(cx, |shell, cx| shell.accounts_refresh_session(cx));
+                                }
+                            },
+                        )),
+                )
+                .child(
+                    div()
+                        .text_size(px(metrics::text::BUTTON))
+                        .text_color(theme.text)
+                        .child(SharedString::from(session.name_text())),
+                )
+                .child(
+                    div()
+                        .text_size(px(metrics::text::CAPTION))
+                        .text_color(theme.dim_text)
+                        .child(SharedString::from(session.detail_text())),
+                ),
+        );
+    }
 
     // === Busy line ===
     if state.is_busy() {
@@ -425,7 +460,13 @@ pub fn render(
     }
 
     // === Cards or the empty state ===
-    if state.is_empty() {
+    //
+    // `ShowEmptyState` hides the cards when the list is empty and `TogglePanel` collapses the
+    // empty state itself while a panel is open (`AccountsView.xaml.cs:340-350`, `:720-727`), so
+    // an open panel never competes with "No accounts yet" for the same column. The rows branch
+    // draws nothing at all for an empty list, which is what makes the combined condition the
+    // whole rule.
+    if state.is_empty() && !panel_open {
         body = body.child(
             div()
                 .flex()
@@ -490,11 +531,12 @@ pub fn render(
             .flex()
             .flex_row()
             .gap(px(8.0))
-            .child(components::button(
+            .child(button_with_hint(
                 "accounts-delete",
                 theme,
                 ButtonVariant::Danger,
                 copy::DELETE,
+                state.delete_tooltip(),
                 {
                     let handle = entity.clone();
                     move |_, _, cx| {
@@ -502,11 +544,12 @@ pub fn render(
                     }
                 },
             ))
-            .child(components::button(
+            .child(button_with_hint(
                 "accounts-use",
                 theme,
                 ButtonVariant::Primary,
                 copy::USE_ACCOUNT,
+                state.use_account_tooltip(),
                 {
                     let handle = entity.clone();
                     move |_, _, cx| {
@@ -671,12 +714,19 @@ fn validation_copy(text: &str) -> Option<&str> {
 /// id'd wrapper — the shape `components::block_esp` gives its colour swatch and `views::stats_view`
 /// gives a histogram bar. The wrapper's id is the button's plus `-hint`, because two elements
 /// cannot share one id and the button keeps the name its tests and selectors use.
+///
+/// `hint` is `impl Into<SharedString>` rather than `&'static str` because two of the callers pass
+/// a sentence the state builds: `UseAccountButton.ToolTip` and `DeleteButton.ToolTip` are
+/// [`AccountsState::use_account_tooltip`] and [`AccountsState::delete_tooltip`]
+/// (`AccountsView.xaml.cs:1090-1100`), and they name whichever gate is closed — the same reason
+/// the markup sets `ToolTipService.ShowOnDisabled`. A `&'static str` parameter is what made those
+/// two accessors dead code.
 fn button_with_hint(
     id: &'static str,
     theme: &Theme,
     variant: ButtonVariant,
     label: &'static str,
-    hint: &'static str,
+    hint: impl Into<SharedString>,
     on_click: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
 ) -> AnyElement {
     div()

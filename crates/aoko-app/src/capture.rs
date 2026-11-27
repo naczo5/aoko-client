@@ -399,7 +399,7 @@ mod harness {
             // screen's state.
             let window = cx.update(|app: &mut App| {
                 let root_theme = theme.clone();
-                app.open_window(crate::window::options(), move |_window, cx| {
+                app.open_window(crate::window::control_options(), move |_window, cx| {
                     cx.new(|cx| {
                         let mut shell = Shell::new(root_theme);
                         (screen.enter)(&mut shell, cx);

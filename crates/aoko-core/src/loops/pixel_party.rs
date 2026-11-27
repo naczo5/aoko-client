@@ -8,11 +8,15 @@
 //!
 //! | Condition | Delay |
 //! | --- | --- |
+//! | the module's own switch is off | [`super::MODULE_OFF_POLL`] |
 //! | neither auto-look nor auto-walk enabled | 16 ms |
 //! | GUI open *and* OS cursor visible | 16 ms |
 //! | state older than [`PIXEL_PARTY_STATE_FRESH_MS`] | 8 ms |
 //! | target found (steer or walk active) | 4 ms |
 //! | no target, still enabled | 8 ms |
+//!
+//! The first row is the port's: `SyncPixelPartyAssistInputLoop` (`Clicker.cs:626-636`)
+//! cancelled the loop when the module went off instead of parking it.
 //!
 //! Key presses are edge-tracked by [`WalkKeys`], which is what makes the loop
 //! allocation-free and keeps the release on *every* exit path — including
@@ -50,10 +54,14 @@ pub const TRACK_POLL: Duration = Duration::from_millis(4);
 pub const NO_TARGET_POLL: Duration = Duration::from_millis(8);
 
 /// Settings the loop reads each tick.
+///
+/// **`PixelPartyAssistEnabled` is not one of them**: `SyncPixelPartyAssistInputLoop`
+/// (`Clicker.cs:626-636`) started or cancelled this loop on the switch, so the loop's
+/// existence was the switch. A ported body that outlives it asks
+/// [`LoopSense::module_enabled`] instead; a captured `enabled` flag here is what made the
+/// fixture's "off" indistinguishable from a real module switch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PixelPartyConfig {
-    /// `PixelPartyAssistEnabled`.
-    pub enabled: bool,
     /// `PixelPartyAutoLookEnabled`.
     pub auto_look: bool,
     /// `PixelPartyAutoWalkEnabled`.
@@ -177,10 +185,26 @@ pub fn run(
     keys: &mut WalkKeys,
 ) {
     let mut memory = TargetMemory::default();
+    // The fallback settings, for a sense with no profile behind it (tests, captures).
+    let started = *config;
 
     while !runtime.is_cancelled() {
-        let module_ok = config.enabled
-            && sense.supports_module("pixelpartyassist")
+        // `PixelPartyAssistEnabled`, read fresh. See [`PixelPartyConfig`].
+        if sense.module_enabled(super::PIXEL_PARTY_MODULE) == Some(false) {
+            keys.release_all(input);
+            memory.last_ms = 0;
+            if !runtime.park(super::MODULE_OFF_POLL) {
+                break;
+            }
+            continue;
+        }
+
+        // The two sub-switches were read inside the managed `while` too
+        // (`Clicker.cs:2731-2733`), so they come from the live profile rather than from the
+        // value the bundle started with.
+        let config = sense.loop_configs().map_or(started, |configs| configs.pixel_party);
+
+        let module_ok = sense.supports_module(super::PIXEL_PARTY_MODULE)
             && sense.supports_state_field("pixelpartyyawdelta")
             && sense.is_connected()
             && sense.minecraft_active();

@@ -355,11 +355,30 @@ impl AppController {
         self.capabilities = capabilities;
     }
 
-    /// Clones the active profile. The click loop holds the clone for the duration
-    /// of a tick so a settings change never tears a read.
+    /// Clones the active profile, for a caller that has to own it.
+    ///
+    /// The automation loops do **not** use this: they map over the live profile once per tick
+    /// through [`Self::with_profile`], because a clone per tick would allocate on the
+    /// automation thread and a clone held across a tick is exactly the snapshot that let a
+    /// settings change go unnoticed.
     #[must_use]
     pub fn profile(&self) -> Profile {
         self.profile.read().clone()
+    }
+
+    /// Runs `f` over the active profile without cloning it.
+    ///
+    /// The automation loops read their settings every tick
+    /// (`aoko_core::loops::LoopSense::loop_configs`), and a full `Profile` clone per tick would
+    /// allocate a dozen strings and three vectors on the automation thread for values that
+    /// change once per edit. A read guard keeps the profile borrowed for exactly the length of
+    /// the mapping, which is also what stops a settings change from tearing a tick's read.
+    ///
+    /// Nothing below `f` may take another lock: `replace_profile` holds `modules` and then
+    /// `profile`, so a read that nested `modules` under `profile` the other way round could
+    /// deadlock. Read the switches first, then call this.
+    pub fn with_profile<T>(&self, f: impl FnOnce(&Profile) -> T) -> T {
+        f(&self.profile.read())
     }
 
     /// `working` with every module switch copied into the field that stores it, ready to save.
@@ -387,6 +406,15 @@ impl AppController {
         for (flag, _) in crate::config_map::SWITCH_PROFILE_KEYS {
             crate::config_map::set_switch(&mut profile, flag, modules.contains(&flag));
         }
+        // The HUD layout is the one field two writers share, and the controller is the copy
+        // that is never stale: a drag in the game's HUD editor arrives as an inbound
+        // `hudLayout` and is applied here ([`AppController::update_profile`] through the
+        // reader), while a GUI edit reaches this controller too — the shell pushes its whole
+        // working copy on every change. Taking it from the controller therefore keeps an
+        // in-game drag that the shell never saw, which saving the working copy alone would
+        // revert to the pre-drag layout (`ApplyInboundHudLayout`,
+        // `GameStateClient.cs:1624-1648`).
+        profile.hud_layout = self.profile.read().hud_layout.clone();
         profile
     }
 
@@ -1164,6 +1192,37 @@ mod tests {
         // The rest of the profile is the user's settings, untouched by the overlay.
         assert_eq!(reloaded.min_cps, working.min_cps);
         assert_eq!(reloaded.gui_theme, "Ember");
+    }
+
+    /// A HUD drag in the game reaches the file, even though the shell never saw it.
+    ///
+    /// This is the one field the save path takes from the controller instead of the working
+    /// copy: an inbound `hudLayout` is applied to the controller's profile by the reader, so a
+    /// save that wrote the shell's pre-drag copy would silently undo the user's drag the next
+    /// time the app closed. `ApplyInboundHudLayout` is the managed counterpart.
+    #[test]
+    fn a_save_takes_the_hud_layout_from_the_controller() {
+        let app = AppController::default();
+        let stale = app.profile();
+
+        // The reader's write, the shape `ingest::adopt_inbound_hud_layout` makes.
+        let mut layout = stale.to_hud_layout();
+        layout.set(
+            element_id::MODULE_LIST,
+            HudElementLayout::new(640.0, 300.0, 1.0),
+        );
+        let adopted = Profile::hud_layout_map(&layout);
+        assert!(app.update_profile(|profile| {
+            profile.hud_layout = Some(adopted.clone());
+            true
+        }));
+
+        let saved = app.profile_for_save(&stale);
+        assert_eq!(
+            saved.hud_layout,
+            Some(adopted),
+            "the controller's layout is the one the game last moved"
+        );
     }
 
     /// The checkbox half of the switch wiring: a bind that names a switch has to move it, and a

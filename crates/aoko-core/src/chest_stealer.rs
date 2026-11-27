@@ -15,12 +15,40 @@
 //! `NextIntervalMs` is a distance-adaptive cadence: a slot near the cursor is
 //! clicked faster than one across the window, and the whole thing stays inside
 //! `35..=750 ms` so neither the client nor the server sees a burst.
+//!
+//! # Nothing drives this module yet
+//!
+//! The loop above does not exist in this tree. `loops/` has no chest-stealer body and
+//! `aoko-app::runtime::loop_for` has no `EnabledFlag::ChestStealer` arm, so switching the
+//! module on starts nothing, the bridge's `chestStealerState` (which it publishes only
+//! while the module is on, `McInjector/src/main/cpp/bridge.cpp:9759`) is read by nobody,
+//! and no click is ever sent: that is the reported "chest stealer does nothing". Nothing
+//! outside this module and `refill.rs` names [`ChestGate`], [`nearest_live_slot`] or
+//! [`next_interval_ms`].
+//!
+//! The body cannot be finished from inside this module, because two of its inputs are
+//! missing at the platform seam:
+//!
+//! * `aoko_platform::InputBackend` has no absolute pointer placement. The managed click
+//!   began with `SetCursorPos(x, y)` (`ChestStealerController.cs:305`), and
+//!   `move_relative` cannot land on a slot from an unknown start. `button_down`,
+//!   `button_up` and `probe_key_state(Key::Shift)` already cover the rest of the click.
+//! * the client rect is `WindowDetection.GetMinecraftClientRectOnScreen()` (`:241`), which is
+//!   `WindowInspector::client_bounds`. [`crate::loops::LoopSense`] does not carry it, and
+//!   `framebuffer_size` is not a substitute: that reports the outer window rect
+//!   (`WindowInfo::bounds`, decorations included), which would offset every slot by the title
+//!   bar. The body needs the client rect handed in with the state.
+//!
+//! With those two, the body is [`ChestGate::check`] (refusal: [`IDLE_POLL_MS`]),
+//! [`WindowTracker::observe`], [`RetryBlocks::prune`], [`nearest_live_slot`], a click
+//! shaped like [`crate::refill::plan_click`], an [`SLOT_RETRY_COOLDOWN_MS`] block, and then
+//! [`NO_SLOT_POLL_MS`] or [`next_interval_ms`] minus the click time.
 
 use std::collections::BTreeMap;
 
 use aoko_protocol::state::{ChestStealerSlot, ChestStealerState, GameState};
 
-use crate::clock::Rng;
+use crate::clock::{next_below, Rng};
 
 /// A chest whose state is older than this is ignored (`ChestStealerController.cs:76`).
 pub const FRESH_STATE_MS: u64 = 300;
@@ -318,9 +346,16 @@ pub fn next_interval_ms(configured_delay_ms: i32, distance_px: f64, rng: &mut dy
     };
 
     // `Math.Max(8, baseDelay / 6)`, then a symmetric jitter draw.
+    //
+    // The managed draw is `_random.Next(-jitter, jitter + 1)`: an integer in
+    // `-jitter..=jitter` (`ChestStealerController.cs:394`). Drawing a float from
+    // `[-jitter, jitter + 1)` and rounding it instead reaches `jitter + 1` for the top
+    // half of the last unit interval, which is a millisecond above the managed bound at
+    // the top of the range; a half-open integer draw cannot.
     let jitter = (base / 6).max(8);
-    let jitter_draw = rng.next_range(-f64::from(jitter), f64::from(jitter) + 1.0);
-    let interval = (base_f * multiplier).round_ties_even() + jitter_draw.round_ties_even();
+    let span = u32::try_from(jitter.saturating_mul(2).saturating_add(1)).unwrap_or(1);
+    let jitter_draw = f64::from(next_below(rng, span)) - f64::from(jitter);
+    let interval = (base_f * multiplier).round_ties_even() + jitter_draw;
 
     #[allow(clippy::cast_possible_truncation)]
     let interval = interval as i32;
@@ -328,10 +363,23 @@ pub fn next_interval_ms(configured_delay_ms: i32, distance_px: f64, rng: &mut dy
 }
 
 /// Stores the freshness bookkeeping the loop needs between iterations.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct WindowTracker {
     active_window_id: i32,
     click_count: u32,
+}
+
+/// The managed loop starts at `-1`, the "no container" id
+/// (`ChestStealerController.cs:143`), and that is what [`WindowTracker::reset`]
+/// restores and [`WindowTracker::active_window_id`] promises. A derived default would
+/// be `0`, which reads as a real container id before the loop has seen one.
+impl Default for WindowTracker {
+    fn default() -> Self {
+        Self {
+            active_window_id: -1,
+            click_count: 0,
+        }
+    }
 }
 
 impl WindowTracker {
@@ -605,6 +653,11 @@ mod tests {
     #[test]
     fn the_window_tracker_resets_on_a_container_change() {
         let mut tracker = WindowTracker::new();
+        assert_eq!(
+            tracker.active_window_id(),
+            -1,
+            "a tracker that has not seen a container must not name one"
+        );
         let mut blocked = RetryBlocks::new();
         blocked.block(10, 0);
 
@@ -670,6 +723,27 @@ mod tests {
         // Clamps hold for absurd configuration.
         assert!(next_interval_ms(0, 0.0, &mut rng) >= INTERVAL_RANGE_MS.0);
         assert!(next_interval_ms(i32::MAX, 1000.0, &mut rng) <= INTERVAL_RANGE_MS.1);
+    }
+
+    /// The jitter is an integer draw in `-jitter..=jitter`, exactly as
+    /// `_random.Next(-jitter, jitter + 1)` is (`ChestStealerController.cs:393-395`).
+    ///
+    /// At the 50 ms floor the jitter is `max(8, 50 / 6) = 8` and the largest multiplier is
+    /// below 1.48, so `(int)Math.Round(50 * 1.48) + 8 = 82` is the ceiling. A float draw
+    /// in `[-jitter, jitter + 1)` that is then rounded reaches 83 for the top half of one
+    /// unit interval, which is what this pins shut.
+    #[test]
+    fn the_jitter_stays_inside_the_managed_integer_range() {
+        let mut rng = SplitMix64::new(0x5EED);
+
+        for _ in 0..512 {
+            let interval = next_interval_ms(50, 400.0, &mut rng);
+            assert!(interval <= 82, "{interval} ms is above the 82 ms ceiling");
+            assert!(
+                interval >= INTERVAL_RANGE_MS.0,
+                "{interval} ms is below the floor"
+            );
+        }
     }
 
     #[test]

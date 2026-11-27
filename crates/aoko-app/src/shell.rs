@@ -10,18 +10,31 @@
 //! The three window actions are the verified GPUI surface at the pin:
 //! `Window::minimize_window` (`crates/gpui/src/window.rs:7285`),
 //! `Window::zoom_window` (`:3397`), `Window::start_window_move` (`:3410`) and
-//! `App::quit` (`crates/gpui/src/app.rs:1374`).
+//! `App::quit` (`crates/gpui/src/app.rs:1374`). `start_window_move` is a no-op on
+//! Windows, so the drag region also declares `WindowControlArea::Drag`: the
+//! platform then answers `HTCAPTION` for it (`gpui_windows/src/events.rs:989`) and
+//! Win32 runs the move loop, which is what also gives double-click-to-maximise.
 //!
 //! Two things about this file are worth knowing before reading it:
 //!
-//! * **Resize edges.** Decision 5 asks for them, and they are drawn here rather
-//!   than deferred: `resize_strips` places four 4 px edges and four 10 px corners
-//!   over the client area, and each one calls `Window::start_window_resize(edge)`
-//!   (`crates/gpui/src/window.rs:2873`; `ResizeEdge` has all eight variants at
-//!   `platform.rs:850`, and both Linux backends implement it). What GPUI does not
-//!   give us is *automatic* edge hit-testing — the old note here claimed resize was
-//!   impossible at the pin, which was false — so the strips exist to be the hit
-//!   targets. `window_min_size` remains creation-time only, which is why the managed
+//! * **Resize edges.** On Linux the client area carries them, and they are drawn
+//!   here rather than deferred: `resize_strips` places four 4 px edges and four
+//!   10 px corners over the client area, and each one calls
+//!   `Window::start_window_resize(edge)` (`crates/gpui/src/window.rs:2873`;
+//!   `ResizeEdge` has all eight variants at `platform.rs:850`, and both Linux
+//!   backends implement it). What GPUI does not give us is *automatic* edge
+//!   hit-testing, so the strips exist to be the hit targets. Windows is the
+//!   exception, and the reason the whole path is `cfg`-gated: `gpui_windows`
+//!   overrides neither `start_window_resize` nor `start_window_move` at the pin
+//!   (the trait bodies at `platform.rs:1468` and `:1475` are empty and nothing in
+//!   `crates/gpui_windows/src` shadows them), so a strip there painted a resize
+//!   cursor over a 4 px band that swallowed the press and resized nothing. It sat
+//!   *inside* the sizing border the Win32 window already has: `WM_NCCALCSIZE`
+//!   restores only the top edge (`gpui_windows/src/events.rs:795`), so left, right
+//!   and bottom keep their native frame, and GPUI hit-tests the top edge itself
+//!   (`events.rs:1019`). Windows therefore keeps its frame, and the title bar asks
+//!   for `WindowControlArea::Drag` so the native move loop runs.
+//!   `window_min_size` remains creation-time only, which is why the managed
 //!   `ResizeMode`/`MinWidth` swap at runtime (`MainWindow.xaml.cs:474-483`) is not
 //!   ported.
 //! * **Persistence.** Sliders, checkboxes and combos resolve their `bind` path
@@ -48,8 +61,8 @@ use std::time::Instant;
 
 use gpui::prelude::*;
 use gpui::{
-    div, px, AnyElement, App, Context, Entity, FocusHandle, KeyDownEvent, MouseButton, Render,
-    SharedString, Window,
+    div, px, Animation, AnimationExt, AnyElement, App, Context, Entity, FocusHandle, KeyDownEvent,
+    MouseButton, Render, SharedString, Window, WindowControlArea,
 };
 
 use aoko_core::app::AppController;
@@ -199,6 +212,15 @@ pub struct Shell {
     /// source wins before anything is clicked", not "may the palette ever change".
     theme_pinned: bool,
     tab: usize,
+    /// Bumped on every tab change, so the body's entrance animation has a fresh
+    /// `ElementId` each time.
+    ///
+    /// `with_animation` keys its timeline on the element id and drops the state of an
+    /// id that stopped being painted, so keying on the index alone would replay the
+    /// entrance for a *new* tab and skip it when a user returns to one they visited
+    /// earlier: the map still holds that id's settled timeline. The counter is the
+    /// only thing that can tell "the third switch" from "the first switch to tab 3".
+    tab_epoch: u64,
     /// The one owner of module state: every switch reads and writes the controller
     /// inside it. See [`crate::runtime`] for why there is no second copy.
     runtime: Runtime,
@@ -410,6 +432,10 @@ pub struct Shell {
     /// The last resize edge a strip asked for. The platform owns the actual resize
     /// (`Window::start_window_resize`), so this is the only part a test can observe,
     /// and it is what proves the strip is hit-testable.
+    ///
+    /// Linux only, with the strips themselves: on Windows the strips are not drawn
+    /// (no platform implementation), so nothing would ever set it.
+    #[cfg(not(target_os = "windows"))]
     resize_requested: Option<gpui::ResizeEdge>,
     /// Whether the close hook has been registered on this window, so a repaint does
     /// not box a new callback every frame.
@@ -523,6 +549,17 @@ impl Shell {
         // not look like it can reveal the folder.
         shell.open_configs_folder = capabilities.open_path;
         shell.runtime = Runtime::new(Arc::new(AppController::new(capabilities)));
+
+        // The two data tabs' persistence, and the only session that opens it: `accounts.json` and
+        // `servers.json` live beside the profiles, so a test or a capture (which construct a shell
+        // over a temporary store) never reads this machine's list. When the app-data directory
+        // cannot be resolved the tabs keep `NoStore`, which is the honest answer — a press then
+        // reports the managed failure line instead of pretending the row was saved somewhere.
+        if let Some(store) = crate::views::file_store::FileStore::at_default_root() {
+            shell.stores = Box::new(store);
+            shell.reload_accounts();
+            shell.reload_servers();
+        }
 
         // The loader's window list comes from the platform, and this is the only session that may
         // touch it: `default_services()` builds the real inspector, so a test or a capture run
@@ -671,6 +708,7 @@ impl Shell {
             // and a test or a capture starts with the palette it was handed.
             theme_pinned: false,
             tab: 0,
+            tab_epoch: 0,
             // The capture harness and every unit test land here, so the controller is
             // built without a probe; `from_system` replaces it with the probed one.
             runtime: Runtime::headless(),
@@ -724,6 +762,7 @@ impl Shell {
             animations: motion::animations_enabled(),
             prefs: None,
             prefs_status: String::new(),
+            #[cfg(not(target_os = "windows"))]
             resize_requested: None,
             close_hook_installed: false,
             pending_join: None,
@@ -1874,10 +1913,17 @@ impl Shell {
     /// The latch is one-way: a later disconnect does not bring the loader back, which is what
     /// `:524-528` pins. `connected` is read from the controller and never stored; the field this
     /// flips is the latch, not the fact.
-    fn latch_control_mode(&mut self) {
+    ///
+    /// Returns whether *this* call latched, which is what tells [`Shell::render`] to grow the
+    /// window: `EnterControlMode` is also where the managed host swapped 360×310 for 1020×760
+    /// (`MainWindow.xaml.cs:472-475`), and the resize has to happen exactly once, on the frame the
+    /// panel changes, or a user's own window size would be stomped on every later frame.
+    fn latch_control_mode(&mut self) -> bool {
         if self.loader_visible && self.runtime.ingest_status().connected {
             self.loader_visible = false;
+            return true;
         }
+        false
     }
 
     /// One palette-editor row: the caption, the swatch, and the hex box beside it.
@@ -2516,6 +2562,7 @@ impl Shell {
     pub fn select_tab(&mut self, index: usize, cx: &mut Context<Self>) {
         if index < copy::TABS.len() && index != self.tab {
             self.tab = index;
+            self.tab_epoch = self.tab_epoch.wrapping_add(1);
             cx.notify();
         }
     }
@@ -3915,6 +3962,13 @@ impl Render for Shell {
         // session running, or with no whole second since the last tick, it returns before it
         // touches the clock's value, so an idle frame costs one branch.
         self.runtime.sample_playtime();
+        // And the module keybinds ride it too. The global hook has been installed since the
+        // platform backend existed and nothing drained it, so every bound key was dead: this is
+        // the one per-frame caller of `Runtime::poll_module_keys`, and it repaints only when a
+        // switch actually moved.
+        if self.runtime.poll_module_keys() > 0 {
+            cx.notify();
+        }
 
         let motion = motion::motion();
         // The two chrome strings are built before the theme is borrowed: each needs
@@ -3972,6 +4026,8 @@ impl Render for Shell {
                 None => div().flex_1().into_any_element(),
             };
 
+            let body_entry = self.render_tab_entry(motion, body);
+
             div()
                 .flex()
                 .flex_row()
@@ -3979,7 +4035,7 @@ impl Render for Shell {
                 .min_h(px(0.0))
                 .gap(px(metrics::rail::GAP))
                 .child(self.render_rail(theme, &entity, &chip))
-                .child(div().flex().flex_1().min_w(px(0.0)).child(body))
+                .child(div().flex().flex_1().min_w(px(0.0)).child(body_entry))
                 .into_any_element()
         };
 
@@ -4037,13 +4093,21 @@ impl Render for Shell {
 
         // Decision 5's resize edges. They are last so they paint above the title bar
         // and the tab body, and each consumes its own mouse-down before anything
-        // else can see it.
+        // else can see it. Linux only: see the module note — `gpui_windows` has no
+        // `start_window_resize`, so a strip there is a dead band over the native
+        // sizing frame.
+        #[cfg(not(target_os = "windows"))]
         for handle in resize_strips() {
             root = root.child(self.render_resize_handle(&handle, &entity));
         }
 
-        // Last, so this frame is the loader's and the next is the control panel.
-        self.latch_control_mode();
+        // Last, so this frame is the loader's and the next is the control panel. The
+        // window grows in the same breath: `EnterControlMode` set 1020×760 and the
+        // 560×460 floor (`MainWindow.xaml.cs:472-482`), and the port opens at the
+        // loader's 360×310 so the splash is not a full-size GUI with one button in it.
+        if self.latch_control_mode() {
+            window.resize(crate::window::content_size());
+        }
 
         root.into_any_element()
     }
@@ -4051,6 +4115,16 @@ impl Render for Shell {
 
 impl Shell {
     /// Decision 5: the themed, draggable, hit-tested title bar.
+    ///
+    /// The strip is two children, not one: a drag region that holds the wordmark and
+    /// the profile name, and the three window buttons beside it. The split is what
+    /// makes `WindowControlArea::Drag` safe. GPUI resolves a control area by walking
+    /// `window_control_hitboxes` in paint order and taking the first hit
+    /// (`crates/gpui/src/window.rs:2312`), and a parent paints before its children —
+    /// a drag area spanning the whole strip would therefore answer for the close
+    /// button and turn it into a window drag. Keeping the buttons outside the
+    /// region's bounds leaves them their own `on_click`, and it costs nothing: the
+    /// region is the `flex_1` remainder of the bar.
     fn render_title_bar(
         &self,
         theme: &Theme,
@@ -4070,23 +4144,36 @@ impl Shell {
             .border_color(theme.card_border())
             .px(px(12.0))
             .gap(px(8.0))
-            .on_mouse_down(MouseButton::Left, |_, window, _| {
-                // The drag region is the whole strip; the buttons sit above it and
-                // consume their own clicks first.
-                window.start_window_move();
-            })
             .child(
                 div()
-                    .text_size(px(metrics::text::SECTION_TITLE))
-                    .text_color(theme.text)
-                    .child("Aoko"),
-            )
-            .child(
-                div()
+                    .id("title-bar-drag")
+                    .flex()
+                    .flex_row()
+                    .items_center()
                     .flex_1()
-                    .text_size(px(metrics::text::CAPTION))
-                    .text_color(theme.dim_text)
-                    .child(SharedString::clone(title)),
+                    .h_full()
+                    .gap(px(8.0))
+                    // `HTCAPTION` on Windows (`gpui_windows/src/events.rs:989`), which is
+                    // the native move loop and native double-click-to-maximise.
+                    .window_control_area(WindowControlArea::Drag)
+                    .on_mouse_down(MouseButton::Left, |_, window, _| {
+                        // The Linux path: `start_window_move` is what both backends
+                        // implement there. On Windows this is the empty trait body and
+                        // the platform has already taken the press as `HTCAPTION`.
+                        window.start_window_move();
+                    })
+                    .child(
+                        div()
+                            .text_size(px(metrics::text::SECTION_TITLE))
+                            .text_color(theme.text)
+                            .child("Aoko"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(metrics::text::CAPTION))
+                            .text_color(theme.dim_text)
+                            .child(SharedString::clone(title)),
+                    ),
             )
             .child(
                 div()
@@ -4252,6 +4339,45 @@ impl Shell {
         }
     }
 
+    /// The tab body's entrance: a short fade with a 6 px settle, replayed on every
+    /// switch.
+    ///
+    /// The managed host had no transition here — a tab was a `Visibility` flip — so
+    /// this is not parity, it is the thing the port was missing: the whole control
+    /// panel swapped between nine documents with no frame in between, which reads as
+    /// a jump cut. 160 ms and a cubic ease-out is the same pitch as `App.xaml`'s
+    /// button hover (`:337-360`, 150 ms) so the window does not have two speeds.
+    ///
+    /// The id carries [`Shell::tab_epoch`] as well as the index: keying on the index
+    /// alone would skip the replay on a return visit, because GPUI keeps a settled
+    /// timeline under that id. `motion.enabled()` is checked first, so a reduced-motion
+    /// session (and the capture harness) paints the settled body with no animator at
+    /// all, which is what keeps a screenshot deterministic.
+    fn render_tab_entry(&self, motion: Motion, body: AnyElement) -> AnyElement {
+        let frame = div().flex().flex_1().min_w(px(0.0)).child(body);
+        if !motion.enabled() {
+            return frame.into_any_element();
+        }
+
+        /// One tab's entrance. Not a `theme::motion` token: this transition has no
+        /// managed counterpart, and the token table exists to mirror the C# values.
+        const TAB_ENTER: std::time::Duration = std::time::Duration::from_millis(160);
+
+        let animation =
+            Animation::new(motion.duration(TAB_ENTER)).with_easing(motion::cubic_ease_out);
+        frame
+            .with_animation(
+                ("tab-body", self.tab_epoch),
+                animation,
+                |element, t| {
+                    // `with_easing` already shaped `t`, so this is the eased progress
+                    // rather than a second pass over it.
+                    element.opacity(t).relative().top(px(6.0 * (1.0 - t)))
+                },
+            )
+            .into_any_element()
+    }
+
     fn render_rail_item(
         &self,
         index: usize,
@@ -4390,6 +4516,14 @@ impl Shell {
 
     /// One resize strip: absolutely placed, and the only element that asks the
     /// platform to start a resize for its edge.
+    ///
+    /// Linux only. `gpui_windows` implements no `start_window_resize`
+    /// (`crates/gpui/src/platform.rs:1475` is the empty default and nothing in
+    /// `crates/gpui_windows/src` overrides it), so on Windows the strip would paint a
+    /// resize cursor over a band that swallows the press, inside the native sizing
+    /// border the window already has. The platform keeps that border instead; see the
+    /// module note.
+    #[cfg(not(target_os = "windows"))]
     fn render_resize_handle(&self, strip: &ResizeStrip, entity: &Entity<Self>) -> AnyElement {
         let mut element = div().id(strip.id).absolute().cursor(strip.cursor);
         if let Some(left) = strip.left {
@@ -5246,6 +5380,10 @@ fn format_value(value: f64) -> String {
 }
 
 /// One client-drawn resize strip: an edge or a corner, placed absolutely.
+///
+/// Linux only, with the two functions that use it; see the module note for why
+/// Windows keeps its native frame instead.
+#[cfg(not(target_os = "windows"))]
 struct ResizeStrip {
     id: &'static str,
     edge: gpui::ResizeEdge,
@@ -5265,6 +5403,7 @@ struct ResizeStrip {
 /// (`platform.rs:850`), and both Linux backends implement it, but GPUI does no edge
 /// hit-testing for us: the pointer has to land on an element that asks. These are
 /// that element, drawn in client area like the title bar.
+#[cfg(not(target_os = "windows"))]
 #[must_use]
 fn resize_strips() -> [ResizeStrip; 8] {
     use gpui::{CursorStyle, ResizeEdge};
@@ -6998,9 +7137,12 @@ mod tests {
         );
 
         // A bridge that names it is what the managed guard was asking about. The frame is queued
-        // first: the memory transport reports end of stream on an empty queue, so a reader attached
-        // before the bytes would close the link instead of decoding them.
-        let (transport, peer) = aoko_protocol::transport::memory::duplex();
+        // before the reader attaches, and the pair is `duplex_open`: the reader resets the
+        // advertised cell to the codec fallback when the link *ends*
+        // (`GameStateClient.cs:609`'s `finally`), so a queue that drained as soon as it was read
+        // would undo the very answer this asserts. `peer` stays alive to the end of the test and
+        // the link is never closed by hand.
+        let (transport, peer) = aoko_protocol::transport::memory::duplex_open();
         peer.feed(b"{\"type\":\"capabilities\",\"settings\":[\"reloadMappingsNonce\"]}\n");
         cx.update(|cx| {
             handle.update(cx, |shell, _| shell.runtime_mut().attach_ingest(transport));
@@ -7485,6 +7627,8 @@ mod tests {
         motion::set_animations_enabled(true);
     }
 
+    /// Linux only, with the strips and the field it reads.
+    #[cfg(not(target_os = "windows"))]
     #[gpui::test]
     fn the_bottom_right_strip_asks_for_a_window_resize(cx: &mut gpui::TestAppContext) {
         use gpui::{point, Modifiers, WindowOptions};

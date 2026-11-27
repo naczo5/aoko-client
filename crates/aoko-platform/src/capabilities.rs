@@ -60,7 +60,12 @@ pub struct CapabilityReport {
     /// [`CapabilityReport::input_observation`] is `true`, so the UI must not claim it
     /// can see a held button when the loops cannot.
     pub pointer_state_sampling: bool,
-    /// Synthetic clicks, key presses and relative mouse movement.
+    /// Synthetic clicks, key presses, relative mouse movement, and absolute pointer placement
+    /// ([`crate::InputBackend::move_to`], which the chest stealer needs to land a slot click).
+    ///
+    /// One flag for the whole surface, because every shipped backend that can synthesize can do
+    /// all four: a backend that could click but not place a pointer would be a partial claim the
+    /// loops cannot use, and `move_to`'s own refusal is what reports it per call.
     pub input_synthesis: bool,
     /// Discord IPC reachability.
     pub discord_rpc: bool,

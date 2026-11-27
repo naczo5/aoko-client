@@ -48,19 +48,40 @@
 //! An entity cannot be created during a render, so the field arrives as a parameter: see
 //! [`OverlayQuery`] for the two shapes and what the shell has to do to supply the live one.
 //!
-//! # Motion: the gate is read by the ring, not by the entrance
+//! # Motion
 //!
-//! Decision 3 makes one toggle govern every animated site. The overlay's own entrance is
-//! still not ported — the card, the scrim and every row are drawn at their settled size,
-//! colour and opacity on every frame — so [`overlay`]'s `_motion` parameter remains the
-//! seam for it rather than a gate being bypassed. The managed overlay had four animations
-//! (`theme::motion`: `OVERLAY_CARD_IN` 140 ms at `CommandSearchOverlay.xaml.cs:150`,
-//! `OVERLAY_SCRIM` 180 ms at `:153`, `OVERLAY_CLOSE` 100 ms at `:104`, `OVERLAY_RECARD`
-//! 120 ms at `:221`), all opacity on `CardVisual` / `Scrim` plus a 6 px `CardSlide.Y`, and
-//! none of them is ported. A user with animations off needs no special path here, because
-//! the settled paint is what `Motion::STILL` asks for — and that is the managed answer too,
-//! where `!ClientAreaAnimation` returns straight to the settled state (`:98-101` for the
-//! close, `:148-149` for the open).
+//! Decision 3 makes one toggle govern every animated site, and this view now reads it for
+//! its own entrance the way the managed overlay did. `AnimateIn`
+//! (`CommandSearchOverlay.xaml.cs:141-167`) ran three animations: the scrim from 0 to 1
+//! over 180 ms on a `QuadraticEase EaseOut` (`:153`), the card's own opacity over 140 ms on
+//! a `QuarticEase EaseOut` (`:158`), and `CardSlide.Y` from 8 to 0 over the same 140 ms
+//! (`:163`). All three are here: [`overlay`] animates the scrim root and the card's absolute
+//! box, which is the same pair of objects the C# animated.
+//!
+//! Two of the managed four are deliberately still missing, and both need the shell:
+//!
+//! - **Close** (`:104-130`): 100 ms back out to 0 opacity and `CardSlide.Y = 6`. An exited
+//!   element cannot animate, so this needs the mount to hold the overlay for 100 ms after
+//!   `search.is_open()` goes false and to notify when it finishes. Until then the close is
+//!   a cut, which is what a user with animations off sees anyway.
+//! - **Re-card** (`:221`, `OVERLAY_RECARD`): re-running the card's entrance when the result
+//!   count changes. The card is one element with one id, so re-running means keying that id
+//!   on the row count — a decision about churn on every keystroke, not a paint.
+//!
+//! `with_animation` is a second gate, and the two are kept deliberately. It consults
+//! [`App::reduce_motion`] itself: with that set, the animator runs once at the oneshot's
+//! **end** state and no frames are scheduled (`gpui/src/elements/animation.rs:326-333` at
+//! the pin). [`App::reduce_motion`] and [`Motion`] are not the same flag and never were —
+//! `Motion` is the managed `ClientAreaAnimation` the Settings card owns, while
+//! `reduce_motion` is GPUI's platform-level setting, which nothing in this tree sets except
+//! the capture harness (`capture.rs:394`, for deterministic frames). So the double gate is
+//! not redundant: [`Motion`] skips mounting the animation at all, which is the settled
+//! first frame the C# returns to at `:143-147`, and `reduce_motion` keeps a screenshot
+//! deterministic.
+//!
+//! `the_overlay_entrance_is_gated_and_starts_on_its_slide` is what catches an entrance that
+//! forgets the gate: the settled card sits 8 px above where the first animated frame paints
+//! it, and that distance is zero under `Motion::STILL`.
 //!
 //! [`card_pulse_ring`] **is** animated, and it reads the gate: it returns `None` under
 //! `Motion::STILL`, and `begin_pulse` refuses to start a pulse at all in that case, so the
@@ -81,17 +102,17 @@
 //! element and paint it at opacity 0. Under capture the ring is therefore present and
 //! invisible, which is why a screenshot settles the timeline and a window test does not.
 //!
-//! `the_overlay_paints_the_same_card_under_either_motion_setting` is what catches an
-//! entrance that forgets the gate: the managed card slides 6 px, so an ungated slide moves
-//! the painted box and the test's bounds comparison fails.
+//! `the_overlay_entrance_is_gated_and_starts_on_its_slide` is what catches an entrance that
+//! forgets the gate: the entrance starts `CardSlide.Y` (8 px) below the settled card, so an
+//! ungated slide moves even the `Motion::STILL` frame and the test's comparison fails.
 //!
 //! [`row_element`] takes no `Motion` at all: rows never animated in the managed overlay,
 //! and a parameter nothing reads is worse than a signature the mount has to extend.
 
 use gpui::prelude::*;
 use gpui::{
-    div, px, Animation, AnimationExt, AnyElement, App, ClickEvent, Entity, Hsla, IntoElement,
-    Pixels, SharedString, Size, Window,
+    div, px, Animation, AnimationExt, AnyElement, App, ClickEvent, ElementId, Entity, Hsla,
+    IntoElement, Pixels, SharedString, Size, Window,
 };
 
 use crate::assets::MONO_FAMILY;
@@ -187,14 +208,15 @@ pub fn focus_query(field: &Entity<TextInput>, seed: &str, window: &mut Window, c
 /// painted box here until this callback arrived, so the caller supplies the one close path rather
 /// than the overlay inventing a second one.
 ///
-/// `_motion` is the animation gate, accepted and not read: this view has no entrance
-/// animation to gate, and the module docs say what the mount must do with it. It is named
-/// with a leading underscore so the signature does not promise a behaviour the file does
-/// not have. [`card_pulse_ring`], which is animated, takes its own.
+/// `motion` is the animation gate for the entrance the module docs describe: `Motion::STILL`
+/// paints the settled scrim and the settled card in the first frame, which is the managed
+/// `!ClientAreaAnimation` early return (`CommandSearchOverlay.xaml.cs:143-147`), and only an
+/// enabled gate mounts the two animations. [`card_pulse_ring`] takes its own copy so the
+/// ring cannot outlive the setting independently of the entrance.
 pub fn overlay<'a>(
     theme: &Theme,
     state: &CommandSearchState,
-    _motion: Motion,
+    motion: Motion,
     query: impl Into<OverlayQuery<'a>>,
     on_row: impl Fn(usize, &ClickEvent, &mut Window, &mut App) + 'static,
     on_close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -238,7 +260,7 @@ pub fn overlay<'a>(
         .flex_col()
         .w(px(card_width))
         // The one stable handle on the card's box: the window test compares it under both
-        // motion settings, and the mount asserts against it once the entrance exists.
+        // motion settings.
         .debug_selector(|| String::from("command-search-card"))
         .rounded(px(metrics::radius::OVERLAY_CARD))
         .border_1()
@@ -256,22 +278,51 @@ pub fn overlay<'a>(
         .child(results)
         .child(legend(theme, state));
 
-    div()
-        .size_full()
-        .relative()
-        // Scrim: the C# two-stop vertical gradient, darker at the bottom.
-        .bg(gpui::linear_gradient(
-            180.0,
-            gpui::linear_color_stop(Hsla::from(fixed::SCRIM_TOP), 0.0),
-            gpui::linear_color_stop(Hsla::from(fixed::SCRIM_BOTTOM), 1.0),
-        ))
-        .child(
-            div()
-                .absolute()
-                .top(px(card_top))
-                .left(px((viewport_width - card_width) / 2.0))
-                .child(card),
+    // The card's own box, so the entrance can move it without restyling the card or
+    // displacing its `debug_selector`.
+    let card_box = div()
+        .absolute()
+        .top(px(card_top))
+        .left(px((viewport_width - card_width) / 2.0))
+        .child(card);
+
+    // Scrim: the C# two-stop vertical gradient, darker at the bottom.
+    let scrim = div().size_full().relative().bg(gpui::linear_gradient(
+        180.0,
+        gpui::linear_color_stop(Hsla::from(fixed::SCRIM_TOP), 0.0),
+        gpui::linear_color_stop(Hsla::from(fixed::SCRIM_BOTTOM), 1.0),
+    ));
+
+    if !motion.enabled() {
+        return scrim.child(card_box).into_any_element();
+    }
+
+    // `AnimateIn` (`CommandSearchOverlay.xaml.cs:141-167`): the scrim over 180 ms on a
+    // quadratic ease-out, the card and its slide over 140 ms on a quartic one.
+    let scrim_in = Animation::new(motion.duration(motion::OVERLAY_SCRIM))
+        .with_easing(motion::quadratic_ease_out);
+    let card_in = Animation::new(motion.duration(motion::OVERLAY_CARD_IN))
+        .with_easing(motion::quartic_ease_out);
+
+    let card_in = card_box.with_animation(
+        // Both ids are constants rather than per-open names: a fresh id would restart the
+        // entrance on every frame the shell rebuilds, which is most keystrokes.
+        ElementId::Name("command-search-card-in".into()),
+        card_in,
+        move |element, t| {
+            element
+                .top(px(card_top + motion::OVERLAY_CARD_SLIDE * (1.0 - t)))
+                .opacity(t)
+        },
+    );
+
+    scrim
+        .with_animation(
+            ElementId::Name("command-search-scrim-in".into()),
+            scrim_in,
+            |element, t| element.opacity(t),
         )
+        .child(card_in)
         .into_any_element()
 }
 
@@ -662,7 +713,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn the_overlay_paints_the_same_card_under_either_motion_setting(cx: &mut TestAppContext) {
+    fn the_overlay_entrance_is_gated_and_starts_on_its_slide(cx: &mut TestAppContext) {
         let probe = cx.update(|cx| {
             cx.new(|_| OverlayProbe {
                 state: CommandSearchState::new(),
@@ -685,11 +736,9 @@ mod tests {
             "the card has a box to compare"
         );
 
-        // Flip the gate the way the settings toggle does. Nothing in this view animates, so
-        // the settled card is the same card: an entrance that lands without consulting the
-        // gate is what this comparison catches, and under either setting what is asserted
-        // here is the frame a user with animations off sees. GPUI's test frames expose
-        // geometry rather than opacity, which is the limit of what this can check.
+        // Flip the gate the way the settings toggle does. Under `Motion::STILL` no
+        // animation element is mounted at all, so this frame *is* the settled card — the
+        // managed early return (`CommandSearchOverlay.xaml.cs:143-147`).
         visual.update(|_, cx| {
             probe.update(cx, |probe, cx| {
                 probe.motion = Motion::STILL;
@@ -703,20 +752,30 @@ mod tests {
             .debug_bounds("command-search-card")
             .expect("the card is still laid out");
 
+        // The entrance is a fade and a slide, not a resize: the card's box moves down by
+        // `CardSlide.Y` on the first animated frame and its size and left edge do not move
+        // by a pixel. A gate that leaked would move the settled frame too, which is what the
+        // comparison against `still` catches.
         assert_eq!(
             (
                 f32::from(animated.origin.x),
-                f32::from(animated.origin.y),
                 f32::from(animated.size.width),
                 f32::from(animated.size.height),
             ),
             (
                 f32::from(still.origin.x),
-                f32::from(still.origin.y),
                 f32::from(still.size.width),
                 f32::from(still.size.height),
             ),
-            "the gate changes nothing, because there is no animation here to gate"
+            "the entrance must not move the card sideways or resize it"
+        );
+
+        let slide = f32::from(animated.origin.y) - f32::from(still.origin.y);
+        assert!(
+            slide > 0.0 && slide <= motion::OVERLAY_CARD_SLIDE + 0.5,
+            "the first animated frame starts {slide} px below the settled card; \
+             `CardSlide.Y` runs 8 -> 0 (`CommandSearchOverlay.xaml.cs:163`), and 0 would \
+             mean the entrance never ran"
         );
     }
 
@@ -790,7 +849,7 @@ mod tests {
     /// The ring is drawn while the pulse is live, gone once `prune_pulse` drops it, gone
     /// for another card, and gone under `Motion::STILL`.
     ///
-    /// GPUI's test frames expose geometry, not opacity (`the_overlay_paints_the_same_card…`
+    /// GPUI's test frames expose geometry, not opacity (`the_overlay_entrance_is_gated…`
     /// records the same limit), so this asserts that the ring is **painted** — its box
     /// exists — and the alpha comes from the keyframe test in `views::command_search`,
     /// which asserts `opacity_at` is positive while live and zero at the end.

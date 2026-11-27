@@ -22,9 +22,22 @@
 //!
 //! # What this does not do yet
 //!
-//! Keyboard stepping (`SmallChange` 1 / `LargeChange` 5), the thumb's animated scale
-//! (its hover pair is applied by size rather than a transform, and the 120/180 ms
-//! curves are not run), and drag continuation outside the row.
+//! Keyboard stepping (`SmallChange` 1 / `LargeChange` 5), drag continuation outside the row,
+//! and the thumb's **animated** scale: the hover pair is applied as a size on the frame the
+//! pointer arrives, because the 120 ms in / 180 ms out storyboards (`App.xaml:281-290`) need
+//! a hover bit that survives a render and this component has none. The drag pair
+//! (`:298-307`) is not drawn at all, for the same reason. The hover size *is* centred, which
+//! is what the C# `ScaleTransform` did — see the thumb below.
+//!
+//! # Why the drag reads the platform's button state
+//!
+//! `slider` runs again on every render, and every published pixel calls the caller's
+//! `on_change`, which is `Shell::set_value` — so the shell notifies and the next frame builds
+//! a *new* slider. A `bool` captured in this call therefore does not survive the first
+//! published value, and a drag that read only that flag moved once and stopped. The press
+//! state has to come from the event (`MouseMoveEvent::pressed_button`), which the platform
+//! owns and every rebuild sees. WPF's `Track` had no such problem because the thumb is a live
+//! visual (`App.xaml:283-312`).
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -231,7 +244,11 @@ pub fn slider(
         let publish = publish.clone();
         let dragging = dragging.clone();
         move |event: &gpui::MouseMoveEvent, window: &mut Window, cx: &mut App| {
-            if dragging.get() {
+            // Either half is enough: the flag covers a move that arrives in the same frame as
+            // the press, and the platform's own `pressed_button` covers every frame after the
+            // rebuild the first published value caused. Reading only the flag was the bug —
+            // see the module docs.
+            if dragging.get() || event.pressed_button == Some(MouseButton::Left) {
                 publish(event.position.x, window, cx);
             }
         }
@@ -279,16 +296,28 @@ pub fn slider(
                 .bg(colour_fill),
         )
         .child(
+            // The thumb. Its layout box stays 6×16 in every state: the hover pair widens the
+            // pill to 1.4× and grows it to 1.15× (`App.xaml:281-282`) and takes the growth
+            // back as a negative side margin, so the fill boundary and the pill's own centre
+            // do not move. Resizing it inside the flex row without that compensation pushed
+            // the pill 2.4 px to the right and left the track 2.4 px short — the WPF
+            // `ScaleTransform` is centred on the thumb (`RenderTransformOrigin="0.5,0.5"`,
+            // `:269`), so the un-compensated version was moving the control, not scaling it.
             div()
                 .flex_shrink_0()
                 .w(px(thumb))
                 .h(px(metrics::slider::THUMB_HEIGHT))
                 .rounded(px(metrics::radius::SLIDER_TRACK))
                 .bg(colour_thumb)
-                .hover(|style| {
-                    style.w(px(thumb * metrics::slider::HOVER_SCALE)).h(px(
-                        metrics::slider::THUMB_HEIGHT * metrics::slider::HOVER_DOT_SCALE,
-                    ))
+                .hover(move |style| {
+                    let grown = thumb * metrics::slider::HOVER_SCALE_X;
+                    style
+                        .w(px(grown))
+                        .h(px(
+                            metrics::slider::THUMB_HEIGHT * metrics::slider::HOVER_SCALE_Y,
+                        ))
+                        .ml(px(-(grown - thumb) / 2.0))
+                        .mr(px(-(grown - thumb) / 2.0))
                 }),
         )
         .child(

@@ -22,6 +22,7 @@ pub mod accounts_view;
 pub mod bindings;
 pub mod command_search;
 pub mod copy;
+pub mod file_store;
 pub mod forms;
 pub mod keybind_text;
 pub mod palette_store;

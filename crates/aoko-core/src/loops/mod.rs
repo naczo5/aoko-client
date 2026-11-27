@@ -11,7 +11,10 @@
 //!   reads `Instant::now()` or a thread-local RNG.
 //! * [`LoopSense`] is the read side: a snapshot of [`aoko_protocol::state::GameState`]
 //!   plus the handful of facts that do not live in the state (foreground window,
-//!   OS cursor visibility, which bridge modules are supported).
+//!   OS cursor visibility, which bridge modules are supported), and the two things the bodies
+//!   must re-read every tick rather than capture: the module switch that owns the body
+//!   ([`LoopSense::module_enabled`]) and the settings it runs with
+//!   ([`LoopSense::loop_configs`]).
 //! * Writing goes through `aoko_platform::InputBackend`.
 //!
 //! ## Cancellation latency
@@ -27,10 +30,23 @@
 //! Waits are absolute by the time they reach the sleeper: `park(d)` computes
 //! `now + d` once and then sleeps *until* that instant, so a slow wake-up shortens
 //! the next piece instead of accumulating drift.
+//!
+//! ## Module switches
+//!
+//! A body runs only while its own module's switch is on. The managed client never needed a
+//! gate inside a body because each module's arm path owned one: `Clicker.StartClicking`
+//! (`Clicker.cs:462-486`) and `StopClicking` (`:488-509`) for the two click engines,
+//! `AimAssistEnabled`'s setter (`:773-781`), `SyncPixelPartyAssistInputLoop` (`:626-636`),
+//! the triggerbot's arm path (`:2201`), `ChestStealerEnabled` (`:1076-1090`) and
+//! `RefillEnabled` (`:1174-1188`) for the rest. The port starts one bundle of seven
+//! bodies, so the switch is read from [`LoopSense::module_enabled`] on every tick instead of
+//! being frozen where the bundle was started; a disabled body parks at [`MODULE_OFF_POLL`].
 
 pub mod aim;
+pub mod chest_stealer;
 pub mod click;
 pub mod pixel_party;
+pub mod refill;
 pub mod triggerbot;
 
 #[cfg(test)]
@@ -39,7 +55,10 @@ mod tests;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use aoko_protocol::profile::Profile;
+
 use crate::app::StateSnapshot;
+use crate::chest_stealer::ScreenRect;
 use crate::clock::{next_below, Clock, Rng, Sleeper};
 use crate::concurrency::CancelToken;
 
@@ -51,12 +70,63 @@ use crate::concurrency::CancelToken;
 /// slice, so only the 100 ms guard polls are split, into four.
 pub const CANCEL_SLICE: Duration = Duration::from_millis(25);
 
+/// Catalog ids of the seven modules that own a loop body.
+///
+/// Each body asks [`LoopSense::module_enabled`] about exactly one of these, so the id has to
+/// be the [`aoko_protocol::module_catalog`] id the switch set is keyed by — the production
+/// sense resolves it through `module_catalog::flag_for_id` and an id that does not resolve
+/// reads as off. Spelling each once means a body and the app's lookup cannot disagree about
+/// which module keeps it running.
+pub const AUTOCLICKER_MODULE: &str = "autoclicker";
+/// `rightclick`.
+pub const RIGHT_CLICK_MODULE: &str = "rightclick";
+/// `aimassist`.
+pub const AIM_ASSIST_MODULE: &str = "aimassist";
+/// `pixelpartyassist`.
+pub const PIXEL_PARTY_MODULE: &str = "pixelpartyassist";
+/// `triggerbot`.
+pub const TRIGGERBOT_MODULE: &str = "triggerbot";
+/// `cheststealer`.
+pub const CHEST_STEALER_MODULE: &str = "cheststealer";
+/// `refill`.
+pub const REFILL_MODULE: &str = "refill";
+
+/// Poll a body takes while its own module is switched off.
+///
+/// The managed host had no such interval: `Clicker.StopClicking` (`Clicker.cs:488-509`) and
+/// the aim, Pixel Party, triggerbot, chest-stealer and refill arm paths cancelled the loop
+/// instead, so a feature that was off owned no thread. The port keeps all seven bodies alive
+/// under one supervisor, so an off module parks here; 100 ms is the clicker's slowest guard
+/// poll (`Clicker.cs:3136`) and holds a disabled body to ten wake-ups a second.
+pub const MODULE_OFF_POLL: Duration = Duration::from_millis(100);
+
+/// Places the pointer at an absolute position in virtual-desktop pixels.
+///
+/// The chest stealer and refill both have to move the cursor onto a slot before pressing:
+/// `SetCursorPos` in `ChestStealerController.ClickSlotAsync` (`ChestStealerController.cs:305`)
+/// and `RefillController.ClickSlotAsync` (`RefillController.cs:247`). A relative move cannot do
+/// that from an unknown cursor position, so this is `InputBackend::move_to` — the absolute
+/// placement the platform backend offers — and it is the only place either body names it.
+///
+/// The `i32 -> f32` conversion is the signature's, not a precision choice: every client rect a
+/// screen can present fits in an `f32`'s 24-bit mantissa exactly.
+#[allow(clippy::cast_precision_loss)]
+pub(crate) fn place_cursor(
+    input: &dyn aoko_platform::InputBackend,
+    x: i32,
+    y: i32,
+) -> Result<(), aoko_platform::PlatformError> {
+    input.move_to(x as f32, y as f32)
+}
+
 /// Reads the outside world for a loop body.
 ///
 /// Everything that is not in [`aoko_protocol::state::GameState`] but that the C#
 /// loops query directly — `WindowDetection.IsMinecraftActive`, `IsCursorVisible`,
-/// `GameStateClient.SupportsModule` — is here. The production implementation is
-/// [`crate::app::StoreSense`]; a test can implement the trait over fixed values.
+/// `GameStateClient.SupportsModule`, and the clicker's own switches and settings — is here.
+/// [`crate::app::StoreSense`] is the store-only implementation; the shipped path is
+/// `aoko_app::runtime::ControllerSense`, which adds the controller's switch set and profile on
+/// top of these. A test implements the trait over fixed values.
 pub trait LoopSense: Send + Sync {
     /// Latest state snapshot, `None` before the first bridge message.
     fn snapshot(&self) -> Option<Arc<StateSnapshot>>;
@@ -82,6 +152,54 @@ pub trait LoopSense: Send + Sync {
 
     /// Window size to fall back on when the state carries no viewport.
     fn framebuffer_size(&self) -> Option<(i32, i32)>;
+
+    /// The focused game window's client area, in virtual-desktop pixels.
+    ///
+    /// `WindowDetection.GetMinecraftClientRectOnScreen()` (`WindowDetection.cs:256-276`). The
+    /// chest-stealer and refill bodies map a slot from the game's GUI-scaled coordinates onto
+    /// the screen through this rect (`ChestStealerCoordinateMapper.cs:7-27`), so it has to be
+    /// the **client** area and not [`Self::framebuffer_size`]'s outer window rect: decorations
+    /// would move every click up by the height of the title bar, which on a chest GUI is a
+    /// different slot.
+    ///
+    /// `None` when this sense cannot answer — no window surface, no focused game window, or an
+    /// empty client area. A body that cannot map a slot must park: clicking at a guessed
+    /// position is worse than not clicking at all.
+    fn client_rect(&self) -> Option<ScreenRect> {
+        None
+    }
+
+    /// The switch behind one module, read fresh: `Some(on)` when this sense reads the same
+    /// switch set the UI writes, `None` when it models no switches at all.
+    ///
+    /// The managed host never had to ask. A loop's existence *was* its switch: `Disarm`
+    /// cancelled the click stream (`Clicker.cs:459`), `StartClicking` refused to start one
+    /// whose module was off (`:462-486`), and `AimAssistEnabled = true`, the Pixel Party
+    /// sync and the triggerbot's arm path each started or cancelled their own loop
+    /// (`:617-620`, `:626-636`, `:725-728`). The port runs one supervisor with five
+    /// long-lived bodies, so the switch has to be read *inside* the body: a value captured
+    /// when the bundle started is what let the left clicker keep clicking after its own module
+    /// was switched off, and let aim assist start a click stream while the clicker was never on.
+    ///
+    /// `None` is "this sense models no switches" — a test fixture or a capture harness — and
+    /// the body then runs as its settings say. It must not mean "off": that would make every
+    /// body dead on a sense that never had switches, which is the worse failure.
+    fn module_enabled(&self, _module: &str) -> Option<bool> {
+        None
+    }
+
+    /// The clicker settings, read fresh on every tick.
+    ///
+    /// `Clicker`'s properties were read inside each managed `while`, so a CPS band, a guard or
+    /// an aim parameter took effect on the very next click. The port's bodies take their
+    /// settings from here rather than from the value `ClickerLoops::start` was handed, which was
+    /// a snapshot: every clicker setting a user changed in the GUI was ignored by the engine
+    /// until the whole bundle restarted.
+    ///
+    /// `None` keeps the settings the body was started with (tests, captures).
+    fn loop_configs(&self) -> Option<ClickerLoopConfigs> {
+        None
+    }
 
     /// Age of the current snapshot at `now`.
     fn state_age_ms(&self, now: Instant) -> Option<u64> {
@@ -266,14 +384,23 @@ impl LoopRuntime {
 /// Every loop `Clicker.cs` owns, started together.
 ///
 /// This is the assembly the managed host performed in `Clicker.StartAutomation`
-/// (`Clicker.cs:470-500`): five bodies, one per thread — the left and right click
-/// engines, aim assist, Pixel Party assist and the triggerbot. Owning this owns all
-/// five; dropping it stops them.
+/// (`Clicker.cs:470-500`) plus the two container controllers it owned beside the clicker
+/// (`_chestStealerController`, `_refillController`, `Clicker.cs:521-522`): seven bodies, one
+/// per thread — the left and right click engines, aim assist, Pixel Party assist, the
+/// triggerbot, the chest stealer and refill. Owning this owns all seven; dropping it stops
+/// them.
+///
+/// Started is not the same as running: each body also asks its own module's switch on every
+/// tick (see the module docs), so a bundle can outlive the module that raised it without that
+/// module's body acting.
 pub struct ClickerLoops {
     handles: Vec<LoopHandle>,
 }
 
-/// One configuration set for [`ClickerLoops::start`].
+/// One configuration set for the seven bodies, as [`LoopSense::loop_configs`] hands it over.
+///
+/// Each body picks its own field; the two click engines are separate because the managed
+/// client kept two independent CPS bands and guard sets for them.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ClickerLoopConfigs {
     /// Left click engine.
@@ -286,31 +413,159 @@ pub struct ClickerLoopConfigs {
     pub pixel_party: pixel_party::PixelPartyConfig,
     /// Triggerbot.
     pub triggerbot: triggerbot::TriggerbotConfig,
+    /// Chest stealer.
+    pub chest_stealer: chest_stealer::ChestStealerLoopConfig,
+    /// Refill.
+    pub refill: refill::RefillLoopConfig,
 }
 
 impl ClickerLoopConfigs {
     /// The defaults: both click engines on `Medium`, everything else off.
+    ///
+    /// Derived through [`Self::from_profile`] rather than restated, so the fallback a
+    /// profile-less sense gets cannot drift from `Profile::default()`. It had drifted: the
+    /// right engine started at `8/12` where the managed field initialisers are `10/14`
+    /// (`Clicker.cs:128-129`), aim strength was `50` against `40` (`:755`) and the triggerbot's
+    /// cooldown threshold was `90` against `92` (`:2554`).
     #[must_use]
     pub fn defaults() -> Self {
+        Self::from_profile(&Profile::default(), false)
+    }
+
+    /// `Profile` -> the seven bodies' settings, clamped the way the managed setters clamped.
+    ///
+    /// `left_clicking` is `Clicker.IsUsingLeftButton` (`Clicker.cs:253`): the aim-assist hold
+    /// guard runs when the left click engine is clicking (`:2704-2705`), and the port's
+    /// equivalent of "the left engine is running" is the AutoClicker switch.
+    ///
+    /// Every clamp below is a managed property setter's, not an invention. `MinCPS`/`MaxCPS`
+    /// accepted only `(0, 25]` and left a refused value at the field initialiser
+    /// (`:257-293`, `:362-398`), so a hand-edited `maxCPS: 500` has to fall back to the default
+    /// rather than become a 2 ms click interval. `AimAssistFov` clamps to `1..=180`,
+    /// `AimAssistRange` to `1..=12`, `AimAssistStrength` to `1..=100` (`:787-828`), and
+    /// `TriggerbotCooldownThreshold` / `TriggerbotHitChance` to `1..=100` (`:2555-2584`).
+    ///
+    /// The Chest Stealer menu check is the OR of the three sub-checks, which is the invariant
+    /// the managed sub-check setters maintain — each one recomputed
+    /// `_chestStealerMenuCheck = _chestStealerTitleCheck || _chestStealerCustomItemsCheck ||
+    /// _chestStealerPhysicalCheck` (`:1135`, `:1150`, `:1165`). Those are the three rows the GUI
+    /// paints, so the OR is what the user's checkboxes mean; the stored `menuCheck` boolean is
+    /// not recomputed by this port's profile setters.
+    #[must_use]
+    pub fn from_profile(profile: &Profile, left_clicking: bool) -> Self {
+        let mode = profile.randomization_mode();
+        let (left_min, left_max) = cps_band(
+            profile.min_cps,
+            profile.max_cps,
+            click::DEFAULT_MIN_CPS,
+            click::DEFAULT_MAX_CPS,
+        );
+        let (right_min, right_max) = cps_band(
+            profile.right_min_cps,
+            profile.right_max_cps,
+            click::DEFAULT_RIGHT_MIN_CPS,
+            click::DEFAULT_RIGHT_MAX_CPS,
+        );
+        let chest_menu_check = profile.chest_stealer_menu_check()
+            || profile.chest_stealer_title_check()
+            || profile.chest_stealer_custom_items_check()
+            || profile.chest_stealer_physical_check();
+
         Self {
-            left: click::ClickLoopConfig::left(),
-            right: click::ClickLoopConfig::right(),
+            left: click::ClickLoopConfig {
+                left_button: true,
+                guards: crate::clicker::tick::ClickConfig {
+                    click_in_chests: profile.click_in_chests,
+                    chest_stealer_menu_check: chest_menu_check,
+                    break_blocks_enabled: profile.break_blocks_enabled,
+                    hit_select_enabled: profile.hit_select_enabled,
+                    // The left engine's guard never reads this one; the right engine has it.
+                    right_click_only_block: false,
+                    // Filled from the live link state inside the body.
+                    injected: false,
+                },
+                mode,
+                min_cps: left_min,
+                max_cps: left_max,
+            },
+            right: click::ClickLoopConfig {
+                left_button: false,
+                guards: crate::clicker::tick::ClickConfig {
+                    right_click_only_block: profile.right_click_only_block,
+                    ..Default::default()
+                },
+                mode,
+                min_cps: right_min,
+                max_cps: right_max,
+            },
             aim: aim::AimLoopConfig {
-                enabled: false,
                 params: crate::aim_assist::AimAssistParams {
+                    // Both are overwritten from the state each tick; the state's viewport wins
+                    // and `LoopSense::framebuffer_size` is the fallback.
                     width: 0,
                     height: 0,
                     game_fov: 70.0,
-                    aim_assist_fov: 30.0,
-                    range: 4.5,
-                    strength: 50,
+                    aim_assist_fov: profile.aim_assist_fov.clamp(1.0, 180.0),
+                    range: profile.aim_assist_range.clamp(1.0, 12.0),
+                    strength: profile.aim_assist_strength.clamp(1, 100),
                 },
-                auto_left_clicking: false,
+                auto_left_clicking: left_clicking,
             },
-            pixel_party: pixel_party::PixelPartyConfig::default(),
-            triggerbot: triggerbot::TriggerbotConfig::default(),
+            pixel_party: pixel_party::PixelPartyConfig {
+                auto_look: profile.pixel_party_auto_look_enabled,
+                auto_walk: profile.pixel_party_auto_walk_enabled,
+            },
+            triggerbot: triggerbot::TriggerbotConfig {
+                break_blocks_enabled: profile.break_blocks_enabled,
+                require_click: profile.triggerbot_require_click,
+                only_crosshair: profile.triggerbot_only_crosshair,
+                only_if_can_attack: profile.triggerbot_only_if_can_attack,
+                cooldown_threshold: profile.triggerbot_cooldown_threshold.clamp(1, 100),
+                hit_chance: profile.triggerbot_hit_chance.clamp(1, 100),
+            },
+            chest_stealer: chest_stealer::ChestStealerLoopConfig {
+                // `ChestStealerDelayMs`'s setter clamps to `50..=500` (`Clicker.cs:1093-1106`);
+                // `next_interval_ms` clamps again, so an out-of-range profile value is harmless
+                // either way, but the field is what the GUI shows.
+                delay_ms: profile.chest_stealer_delay_ms.clamp(50, 500),
+                // `clicker.ChestStealerMenuCheck` (`Clicker.cs:1108-1125`): the OR of the three
+                // sub-checks, as above.
+                menu_check: chest_menu_check,
+            },
+            refill: refill::RefillLoopConfig {
+                // `RefillDelayMs`'s setter clamps to `50..=500` (`Clicker.cs:1191-1204`).
+                delay_ms: crate::refill::normalize_delay_ms(profile.refill_delay_ms),
+            },
         }
     }
+}
+
+/// The CPS band as `Clicker.MinCPS` then `Clicker.MaxCPS` would have applied it.
+///
+/// `Profile.ApplyToClicker` assigns the pair in that order (`Profile.cs:740-741`,
+/// `:750-751`), and each setter accepted only `(0, 25]` while cross-clamping the other end.
+/// So both steps are reproduced in sequence: a valid minimum raises a lower maximum, then a
+/// valid maximum pulls a higher minimum down. Anything a setter would have refused leaves the
+/// field at its initialiser.
+fn cps_band(min: f32, max: f32, default_min: f32, default_max: f32) -> (f32, f32) {
+    let accepted = |value: f32| value > 0.0 && value <= 25.0;
+    let mut low = default_min;
+    let mut high = default_max;
+
+    if accepted(min) {
+        low = min;
+        if low > high {
+            high = low;
+        }
+    }
+    if accepted(max) {
+        high = max;
+        if high < low {
+            low = high;
+        }
+    }
+
+    (low, high)
 }
 
 /// Why one of the loops could not start. The loops that did start are stopped
@@ -320,26 +575,39 @@ impl ClickerLoopConfigs {
 pub struct ClickerStartError(#[from] LoopSpawnError);
 
 impl ClickerLoops {
-    /// Starts all five bodies (two click engines and three assist loops).
+    /// Starts all seven bodies: two click engines, three assist loops and the two container
+    /// controllers.
     ///
     /// `make_runtime` is called once per loop so each body gets its own token and
     /// RNG; `seed` differentiates them.
+    ///
+    /// No settings are handed in. A body resolves its own on every tick from
+    /// [`LoopSense::loop_configs`] and falls back to [`ClickerLoopConfigs::defaults`] for a
+    /// sense with no profile behind it, which is the shape the managed loops had: they read
+    /// `Clicker`'s properties inside their `while`, so an edit took effect on the next click.
+    /// The set this function used to take was a snapshot, and every clicker setting a user
+    /// changed in the GUI was ignored until the whole bundle restarted.
+    ///
+    /// Whether a body may act is not decided here either: it asks
+    /// [`LoopSense::module_enabled`] about its own module every tick.
     pub fn start(
         sense: Arc<dyn LoopSense>,
         input: Arc<dyn aoko_platform::InputBackend>,
         sink: Arc<dyn ClickSink>,
-        configs: ClickerLoopConfigs,
         make_runtime: impl Fn(u64) -> LoopRuntime,
     ) -> Result<Self, ClickerStartError> {
-        let mut handles: Vec<LoopHandle> = Vec::with_capacity(5);
+        let mut handles: Vec<LoopHandle> = Vec::with_capacity(7);
+        // The started settings, resolved once: a `Profile::default()` clone per body would be
+        // seven allocations of the same strings for the same values.
+        let fallback = ClickerLoopConfigs::defaults();
 
         for (index, left_button) in [(0_u64, true), (1, false)] {
             let runtime = make_runtime(index);
             let clock = runtime.clock();
             let config = if left_button {
-                configs.left
+                fallback.left
             } else {
-                configs.right
+                fallback.right
             };
             let sense = Arc::clone(&sense);
             let input = Arc::clone(&input);
@@ -381,7 +649,7 @@ impl ClickerLoops {
         {
             let sense = Arc::clone(&sense);
             let input = Arc::clone(&input);
-            let config = configs.aim;
+            let config = fallback.aim;
             let started = LoopHandle::spawn("aim-assist", runtime, move |runtime| {
                 let mut controller = crate::aim_assist::AimAssistMotionController::new();
                 aim::run(
@@ -407,7 +675,7 @@ impl ClickerLoops {
         {
             let sense = Arc::clone(&sense);
             let input = Arc::clone(&input);
-            let config = configs.pixel_party;
+            let config = fallback.pixel_party;
             let started = LoopHandle::spawn("pixel-party", runtime, move |runtime| {
                 let mut keys = pixel_party::WalkKeys::default();
                 pixel_party::run(runtime, sense.as_ref(), input.as_ref(), &config, &mut keys);
@@ -427,9 +695,47 @@ impl ClickerLoops {
         {
             let sense = Arc::clone(&sense);
             let input = Arc::clone(&input);
-            let config = configs.triggerbot;
+            let config = fallback.triggerbot;
             let started = LoopHandle::spawn("triggerbot", runtime, move |runtime| {
                 triggerbot::run(runtime, sense.as_ref(), input.as_ref(), &config);
+            });
+            match started {
+                Ok(handle) => handles.push(handle),
+                Err(error) => {
+                    for mut handle in handles {
+                        handle.stop();
+                    }
+                    return Err(ClickerStartError(error));
+                }
+            }
+        }
+
+        let runtime = make_runtime(5);
+        {
+            let sense = Arc::clone(&sense);
+            let input = Arc::clone(&input);
+            let config = fallback.chest_stealer;
+            let started = LoopHandle::spawn("chest-stealer", runtime, move |runtime| {
+                chest_stealer::run(runtime, sense.as_ref(), input.as_ref(), &config);
+            });
+            match started {
+                Ok(handle) => handles.push(handle),
+                Err(error) => {
+                    for mut handle in handles {
+                        handle.stop();
+                    }
+                    return Err(ClickerStartError(error));
+                }
+            }
+        }
+
+        let runtime = make_runtime(6);
+        {
+            let sense = Arc::clone(&sense);
+            let input = Arc::clone(&input);
+            let config = fallback.refill;
+            let started = LoopHandle::spawn("refill", runtime, move |runtime| {
+                refill::run(runtime, sense.as_ref(), input.as_ref(), &config);
             });
             match started {
                 Ok(handle) => handles.push(handle),

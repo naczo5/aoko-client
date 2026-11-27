@@ -14,6 +14,16 @@
 //!   8..17 ms, then the remaining slice of `RefillDelayMs` (`:243-291`);
 //! * the synthetic-Shift ownership rule: the flag is only cleared after the
 //!   release is *accepted*, so a failed release is retried (`:318-326`).
+//!
+//! # Nothing drives this module yet
+//!
+//! As with [`crate::chest_stealer`], the loop that would use these pieces does not exist:
+//! `loops/` has no refill body and `aoko-app::runtime::loop_for` has no
+//! `EnabledFlag::Refill` arm, so the bridge's `refillState` (published only while the
+//! module is on, `McInjector/src/main/cpp/bridge.cpp:10057`) is read by nobody and no
+//! shift-click is ever sent. The two missing platform inputs are the same ones: an
+//! absolute pointer placement for [`plan_click`]'s coordinates, and the foreground
+//! window's client rect, which [`crate::loops::LoopSense`] does not carry.
 
 use aoko_protocol::state::{ChestStealerSlot, GameState, RefillState};
 
@@ -225,9 +235,21 @@ pub fn note_click(blocked: &mut RetryBlocks, slot_number: i32, now_ms: u64) {
 
 /// Shared tracker for the container window id, so a new inventory screen clears
 /// stale cooldowns (`RefillController.cs:176-180`).
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct RefillWindow {
     active_window_id: i32,
+}
+
+/// The managed loop starts at `-1`, the "no container" id
+/// (`RefillController.cs:150`), which is also what [`RefillWindow::reset`] restores and
+/// [`RefillWindow::active_window_id`] promises. A derived default would be `0`, a real
+/// window id the loop has never seen.
+impl Default for RefillWindow {
+    fn default() -> Self {
+        Self {
+            active_window_id: -1,
+        }
+    }
 }
 
 impl RefillWindow {
@@ -255,7 +277,7 @@ impl RefillWindow {
 
     /// Active window id, `-1` when none.
     #[must_use]
-    pub fn active_window_id(self) -> i32 {
+    pub fn active_window_id(&self) -> i32 {
         self.active_window_id
     }
 }
@@ -456,6 +478,11 @@ mod tests {
     #[test]
     fn the_window_tracker_clears_cooldowns_once() {
         let mut window = RefillWindow::new();
+        assert_eq!(
+            window.active_window_id(),
+            -1,
+            "a tracker that has not seen a container must not name one"
+        );
         let mut blocked = RetryBlocks::new();
         blocked.block(1, 0);
 

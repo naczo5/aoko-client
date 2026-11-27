@@ -437,13 +437,20 @@ impl Render for ColorPickerView {
                 .child(notice)
         });
 
+        // `Width="360"` with `SizeToContent="Height"` (`ColorPickerDialog.xaml:5-8`): the width is
+        // the dialog's, the height is its content's. `flex_none` keeps a flex host from growing or
+        // shrinking the card and `max_w` caps a cross-axis stretch, so the overlay layer that
+        // centres it (`shell.rs`'s `render_picker`) places a 360 px card rather than a full-width
+        // one. No height cap: the managed window sized itself to its content.
         div()
             .id("color-picker")
             .debug_selector(|| String::from("color-picker"))
             .flex()
             .flex_col()
+            .flex_none()
             .gap(px(12.0))
             .w(px(DIALOG_WIDTH))
+            .max_w(px(DIALOG_WIDTH))
             .p(px(MARGIN))
             .bg(theme.background)
             .child(

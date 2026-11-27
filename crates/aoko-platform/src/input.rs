@@ -50,6 +50,42 @@ pub enum InputEvent {
     },
 }
 
+/// The [`Key`] a Win32 virtual-key code names, for the codes a module bind can carry.
+///
+/// A saved profile stores a module's key as the **virtual-key code** the managed host
+/// wrote (`InputHooks.ModuleKeys`, and every `Profile.ModuleKeys` entry), because that is
+/// what `GetAsyncKeyState`/the hook compared against. The hook now reports a [`Key`], so
+/// the two have to meet somewhere, and this is that place: the letters and digits, whose
+/// virtual-key codes *are* their ASCII uppercase value (`VK_A` = 0x41 ... `VK_0` = 0x30),
+/// plus the handful of named keys a bind realistically uses.
+///
+/// Anything else is `None` rather than a guess: an unknown code must mean "no bind fires"
+/// and not "some other key fires", because the result is a module being switched on.
+#[must_use]
+pub fn key_for_virtual_key(code: i32) -> Option<Key> {
+    match code {
+        // VK 0x30..=0x39 are '0'..='9' and 0x41..=0x5A are 'A'..='Z'.
+        0x30..=0x39 => char::from_u32(code as u32).map(Key::Char),
+        0x41..=0x5A => char::from_u32(code as u32).map(Key::Char),
+        // The named keys, `VK_*` values from `windows::Win32::UI::Input::KeyboardAndMouse`.
+        0x08 => Some(Key::Backspace),
+        0x09 => Some(Key::Tab),
+        0x0D => Some(Key::Enter),
+        0x10 | 0xA0 | 0xA1 => Some(Key::Shift),
+        0x11 | 0xA2 | 0xA3 => Some(Key::Control),
+        0x12 | 0xA4 | 0xA5 => Some(Key::Alt),
+        0x1B => Some(Key::Escape),
+        0x20 => Some(Key::Space),
+        0x25 => Some(Key::Left),
+        0x26 => Some(Key::Up),
+        0x27 => Some(Key::Right),
+        0x28 => Some(Key::Down),
+        // VK_F1 = 0x70.
+        0x70..=0x87 => Some(Key::F((code - 0x70 + 1) as u8)),
+        _ => None,
+    }
+}
+
 pub trait InputBackend: Send + Sync {
     /// Sampled mouse state, or `None` when this backend cannot see the mouse at
     /// all - no display, no `/dev/input` access, no session to query.
@@ -89,6 +125,38 @@ pub trait InputBackend: Send + Sync {
     fn click(&self, button: MouseButton) -> Result<(), PlatformError>;
     fn move_relative(&self, dx: i32, dy: i32) -> Result<(), PlatformError>;
     fn key_press(&self, key: Key) -> Result<(), PlatformError>;
+
+    /// Places the pointer at an absolute position, in virtual-desktop pixels.
+    ///
+    /// `(x, y)` is a point in the coordinate space the window inspectors report:
+    /// **physical pixels of the virtual desktop, origin at its top-left corner**, y growing
+    /// downwards. That is the same space `WindowInspector::client_bounds` returns the game's
+    /// client area in, so a caller maps a `chestStealerState` slot through that rect and hands
+    /// the result here without a second conversion. Negative coordinates are legitimate on a
+    /// multi-monitor desktop whose leftmost monitor sits left of or above the primary one.
+    ///
+    /// **Why this is not [`InputBackend::move_relative`].** A relative move is a *delta*: the OS
+    /// applies pointer ballistics to it, and with the game's mouse captured it becomes camera
+    /// yaw/pitch rather than pointer motion at all. Neither is a position a caller can aim at, so
+    /// accumulating deltas can only ever converge on a target by trial and feedback. A chest
+    /// slot has to be hit on a pixel: the managed host's chest stealer computed the screen point
+    /// once (`ChestStealerCoordinateMapper.TryMapScaledPoint`, `ChestStealerController.cs:296-308`)
+    /// and then called `SetCursorPos` - absolute placement - before each click, which is exactly
+    /// this call. Keep the two operations separate rather than expressing one through the other:
+    /// aiming a camera and pointing at a menu item are different intents with different failure
+    /// modes, and a backend can plausibly support one without the other.
+    ///
+    /// The default refuses with the same `unsupported` shape as the other optional capabilities,
+    /// so a session that cannot place the cursor says so instead of reporting a click at a
+    /// position nothing moved to.
+    ///
+    /// # Errors
+    /// [`PlatformError::Unsupported`] from a backend without absolute placement,
+    /// [`PlatformError::InvalidArgument`] for a coordinate that is not a finite number, and
+    /// whatever the OS call reports.
+    fn move_to(&self, x: f32, y: f32) -> Result<(), PlatformError> {
+        Err(not_implemented((x, y), "move_to"))
+    }
 
     /// Drains queued global hook events into `out`, which is reused so a hot
     /// loop allocates nothing.
@@ -188,5 +256,15 @@ mod tests {
             backend.button_up(MouseButton::Left),
             Err(PlatformError::Unsupported { .. })
         ));
+        // Absolute placement is optional in the same sense: a backend that cannot put the
+        // pointer on a pixel must refuse, not report a click at a position nothing moved to.
+        let err = backend
+            .move_to(10.0, 20.0)
+            .expect_err("no absolute placement");
+        assert!(matches!(err, PlatformError::Unsupported { .. }), "{err:?}");
+        assert!(
+            err.user_facing().contains("move_to"),
+            "the refusal names the operation: {err:?}"
+        );
     }
 }

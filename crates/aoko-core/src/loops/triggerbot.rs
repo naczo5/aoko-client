@@ -7,13 +7,17 @@
 //!
 //! | Condition | Delay |
 //! | --- | --- |
-//! | not enabled / unsupported / disconnected / inactive / cursor visible | 25 ms |
+//! | the module's own switch is off | [`super::MODULE_OFF_POLL`] |
+//! | bridge lacks the module / disconnected / inactive / cursor visible | 25 ms |
 //! | state older than [`TRIGGERBOT_STATE_FRESH_MS`] | 8 ms |
 //! | GUI open *and* OS cursor visible | 20 ms |
 //! | break-blocks owns a block target | 12 ms |
 //! | `TriggerbotRequireClick` and the button is up | 8 ms |
 //! | no valid target | 8 ms |
 //! | end of tick | 4 ms |
+//!
+//! The first row is the port's: the managed arm path cancelled this loop when the module went
+//! off (`Clicker.cs:2201`) instead of parking it.
 //!
 //! The stale check runs *before* the GUI check here, unlike the aim-assist loop.
 //! That ordering is preserved because it decides whether a stale GUI state can
@@ -54,10 +58,12 @@ pub const ATTACK_RADIUS: f64 = 30.0;
 pub const MAX_ATTACK_RANGE: f64 = 3.8;
 
 /// Settings the loop reads each tick.
+///
+/// **`TriggerbotEnabled` is not one of them**: the managed arm path started or cancelled this
+/// loop on the switch (`Clicker.cs:2201`, `:725-728`), so the loop's existence was the switch.
+/// A ported body that outlives it asks [`LoopSense::module_enabled`] every tick instead.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TriggerbotConfig {
-    /// `TriggerbotEnabled`.
-    pub enabled: bool,
     /// `BreakBlocksEnabled`, shared with the click loop.
     pub break_blocks_enabled: bool,
     /// `TriggerbotRequireClick`.
@@ -75,12 +81,13 @@ pub struct TriggerbotConfig {
 impl Default for TriggerbotConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             break_blocks_enabled: false,
             require_click: true,
             only_crosshair: true,
             only_if_can_attack: true,
-            cooldown_threshold: 90,
+            // `Clicker.cs:2554`: the managed field initialiser, which is also what
+            // `Profile::default()` stores. The port said 90.
+            cooldown_threshold: 92,
             hit_chance: 100,
         }
     }
@@ -197,10 +204,25 @@ pub fn run(
     config: &TriggerbotConfig,
 ) {
     let mut timing = Timing::default();
+    // The fallback settings, for a sense with no profile behind it (tests, captures).
+    let started = *config;
 
     while !runtime.is_cancelled() {
-        let should_run = config.enabled
-            && sense.supports_module("triggerbot")
+        // `TriggerbotEnabled`, read fresh. See [`TriggerbotConfig`].
+        if sense.module_enabled(super::TRIGGERBOT_MODULE) == Some(false) {
+            timing.had_target = false;
+            if !runtime.park(super::MODULE_OFF_POLL) {
+                break;
+            }
+            continue;
+        }
+
+        // `TriggerbotRequireClick`, the cooldown threshold, the hit chance and the shared
+        // break-blocks flag were all read inside the managed `while` (`:2898-2966`), so they
+        // come from the live profile rather than from the value the bundle started with.
+        let config = sense.loop_configs().map_or(started, |configs| configs.triggerbot);
+
+        let should_run = sense.supports_module(super::TRIGGERBOT_MODULE)
             && sense.is_connected()
             && sense.minecraft_active()
             && !sense.cursor_visible();

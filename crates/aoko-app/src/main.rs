@@ -1,3 +1,13 @@
+// No console window in a release build.
+//
+// A `bin` crate linked with the GNU toolchain defaults to the console subsystem, so
+// the packaged `aoko.exe` opened a black terminal beside the GUI and every
+// `tracing` line the app wrote to stderr landed in it. The managed host was a WPF
+// executable (`OutputType=WinExe`) and never had one. `debug_assertions` keeps the
+// console for `cargo run` and for `--help`/`--version`, where the exit code and the
+// usage text are the point.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 //! The binary: one `main`, one window, one mount point.
 //!
 //! Builder 4 owns this file (the boundary in `UI_INVENTORY.md` §7): both builders want

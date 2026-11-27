@@ -21,9 +21,15 @@
 //! present.
 //!
 //! Supervision is the third: `crate::runtime::Runtime::start_supervision` makes a module
-//! switch the trigger for `aoko_core::loops::ClickerLoops`, which owns the five automation
+//! switch the trigger for `aoko_core::loops::ClickerLoops`, which owns the seven automation
 //! threads, so enabling a loop-driving module starts them and turning the last one off
-//! stops them. It is off until the shipped path turns it on.
+//! stops them. It is off until the shipped path turns it on. The bundle is not the gate: each
+//! body asks [`ControllerSense`] about its **own** module switch on every tick, so the left
+//! clicker stops when the AutoClicker is switched off even while aim assist keeps the bundle
+//! alive, and enabling aim assist no longer starts a click stream. The same sense carries the
+//! live profile, so a settings edit reaches the engine on the next click instead of at the
+//! next restart, and the bridge's advertised lists, so the three assist loops can answer
+//! `SupportsModule` the way the managed client did.
 //!
 //! What those bodies may touch is [`crate::runtime::select_loop_surfaces`], one pure function
 //! over the capability report. A session that can synthesise input *and* sample the pointer
@@ -72,8 +78,10 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
 use aoko_core::app::{AppController, StateSnapshot};
-use aoko_core::chest_stealer::FRESH_STATE_MS;
-use aoko_core::loops::{ClickSink, ClickerLoopConfigs, ClickerLoops, LoopRuntime, LoopSense};
+use aoko_core::chest_stealer::{ScreenRect, FRESH_STATE_MS};
+use aoko_core::loops::{
+    ClickSink, ClickerLoopConfigs, ClickerLoops, LoopRuntime, LoopSense, AUTOCLICKER_MODULE,
+};
 use aoko_core::{Clock, Sleeper, SplitMix64, SystemClock, ThreadSleeper};
 use aoko_platform::{
     CapabilityReport, InputBackend, InputEvent, Key, MouseButton, MouseState, PlatformError,
@@ -86,7 +94,7 @@ use aoko_protocol::stats::StatsTracker;
 
 use crate::ingest::{Ingest, IngestStatus, LinkFailure, LinkReport};
 
-/// Seed the five loop bodies start from.
+/// Seed the seven loop bodies start from.
 ///
 /// One RNG per body, as `ClickerLoops::start` expects: the bodies draw click intervals from
 /// it, so two bodies sharing a seed would pace identically. Deterministic on purpose — a
@@ -243,11 +251,11 @@ impl GtbHelper {
 
 /// The click feed the loop supervisor writes and the Stats tab reads.
 ///
-/// `aoko_core::loops::ClickSink::record_click` is the production seam, and the loops already
-/// call it once per accepted click: the five bodies take an `Arc<dyn ClickSink>` when they
-/// start, so handing them this one is the whole feed. That is also where the managed host
-/// records a click — `Clicker.cs:3270`, `StatsTracker.Instance.RecordClick(cps, leftButton)`,
-/// one line before `PerformClick`.
+/// `aoko_core::loops::ClickSink::record_click` is the production seam, and the two click engines
+/// already call it once per accepted click — the other five bodies are handed the same sink by
+/// the bundle but never record. That is also where the managed host records a click —
+/// `Clicker.cs:3270`, `StatsTracker.Instance.RecordClick(cps, leftButton)`, one line before
+/// `PerformClick`.
 ///
 /// **Why not the ingest path:** nothing on the wire carries a click count or a CPS value.
 /// `aoko_protocol::codec::Inbound` has `State`, `Capabilities`, `CommandResult` and `Ignored`,
@@ -681,6 +689,60 @@ impl Runtime {
         helper.solves += 1;
     }
 
+    /// One frame's worth of module keybind edges, dispatched to the controller.
+    ///
+    /// The global hook has been installed since the platform backend was built, but nothing
+    /// ever drained it: `InputBackend::poll_events` had no caller in the whole app, so every
+    /// key the user bound to a module (`Profile::module_keys`, the managed
+    /// `InputHooks.ModuleKeys` table) did nothing. This is that caller.
+    ///
+    /// Only key-down edges act, because a module is a toggle: acting on the up too would
+    /// switch it back on the same press. Repeat events are not a problem — the hook reports
+    /// transitions, not auto-repeat.
+    ///
+    /// Returns how many switches were flipped, which is what tells the caller whether a
+    /// repaint is needed. Every refusal is silent on purpose: an unbindable code
+    /// ([`aoko_platform::key_for_virtual_key`] answering `None`), or an id the catalog does
+    /// not know, is a key that does nothing, which is also what the managed host did.
+    pub fn poll_module_keys(&mut self) -> usize {
+        let Some(platform) = self.platform.as_ref() else {
+            return 0;
+        };
+        let mut events = Vec::new();
+        if let Err(error) = platform.input.poll_events(&mut events) {
+            tracing::debug!(%error, "global input hook could not be drained");
+            return 0;
+        }
+        if events.is_empty() {
+            return 0;
+        }
+
+        // The binds are read from the live profile, not cached: a capture that just recorded a
+        // new key must be in force on the next press, and the table is small.
+        let binds: Vec<(String, Key)> = {
+            let profile = self.controller.with_profile(|profile| profile.module_keys.clone());
+            profile
+                .into_iter()
+                .filter_map(|(module, code)| {
+                    aoko_platform::key_for_virtual_key(code).map(|key| (module, key))
+                })
+                .collect()
+        };
+
+        let mut flipped = 0;
+        for event in events {
+            let InputEvent::KeyDown(key) = event else {
+                continue;
+            };
+            for (module, bound) in &binds {
+                if *bound == key && self.flip_module(module) {
+                    flipped += 1;
+                }
+            }
+        }
+        flipped
+    }
+
     /// What the helper last answered, or `None` when there is nothing to show.
     ///
     /// A view reads this instead of the store: it is the solved word, already normalised, and
@@ -774,8 +836,10 @@ impl Runtime {
             return;
         }
         let windows = self.platform().windows.clone();
-        let sense: Arc<dyn LoopSense> =
-            Arc::new(ControllerSense::new(Arc::clone(&self.controller), windows));
+        let sense: Arc<dyn LoopSense> = Arc::new(
+            ControllerSense::new(Arc::clone(&self.controller), windows)
+                .with_advertised(self.advertised_handle()),
+        );
         self.start_session_with(sense);
     }
 
@@ -860,8 +924,11 @@ impl Runtime {
 
     /// The names the supervisor has registered, empty when nothing is running.
     ///
-    /// `ClickerLoops` starts its five bodies as one bundle, so enabling any loop-driving
-    /// module registers all five names, and the last one to be disabled stops all five.
+    /// `ClickerLoops` starts its seven bodies as one bundle, so enabling any loop-driving
+    /// module registers all seven names, and the last one to be disabled stops all seven.
+    /// Registered is not the same as acting: each body also checks its own switch on every
+    /// tick, so the bundle can outlive the module that raised it without that module's body
+    /// doing anything.
     #[must_use]
     pub fn loop_names(&self) -> Vec<&str> {
         self.loops
@@ -920,7 +987,7 @@ impl Runtime {
         })
     }
 
-    /// Starts the five bodies on their own threads.
+    /// Starts the seven bodies on their own threads.
     ///
     /// The backend and the window surface are not chosen here:
     /// [`crate::runtime::select_loop_surfaces`] decides from the controller's capability
@@ -934,8 +1001,10 @@ impl Runtime {
             // the annotation to coerce, and there is nothing to coerce here.
             (Arc::clone(&platform.input), platform.windows.clone())
         };
-        let sense: Arc<dyn LoopSense> =
-            Arc::new(ControllerSense::new(Arc::clone(&self.controller), windows));
+        let sense: Arc<dyn LoopSense> = Arc::new(
+            ControllerSense::new(Arc::clone(&self.controller), windows)
+                .with_advertised(self.advertised_handle()),
+        );
         // The one click feed: the sink the bodies record into, which is `StatsFeed`.
         let sink: Arc<dyn ClickSink> = self.stats.clone();
 
@@ -949,13 +1018,7 @@ impl Runtime {
             )
         };
 
-        match ClickerLoops::start(
-            sense,
-            input,
-            sink,
-            ClickerLoopConfigs::defaults(),
-            make_runtime,
-        ) {
+        match ClickerLoops::start(sense, input, sink, make_runtime) {
             Ok(loops) => {
                 tracing::info!(names = ?loops.names(), "automation loops started");
                 self.loops = Some(loops);
@@ -1051,7 +1114,7 @@ impl Runtime {
 /// which means a catalog rename cannot desynchronise it. `every_loop_driver_is_a_catalog_entry`
 /// pins each arm to a real entry and pins the names to the strings `ClickerLoops` registers.
 ///
-/// The five arms are the five bodies `ClickerLoops::start` spawns. Everything else
+/// The seven arms are the seven bodies `ClickerLoops::start` spawns. Everything else
 /// (`jitter`, `clickinchests`, `reach`, ...) is read by one of those bodies as a setting
 /// or a guard, so enabling it starts no thread of its own.
 fn loop_for(flag: EnabledFlag) -> Option<&'static str> {
@@ -1061,6 +1124,12 @@ fn loop_for(flag: EnabledFlag) -> Option<&'static str> {
         EnabledFlag::AimAssist => Some("aim-assist"),
         EnabledFlag::PixelPartyAssist => Some("pixel-party"),
         EnabledFlag::Triggerbot => Some("triggerbot"),
+        // The two container controllers the managed `Clicker` owned beside the clicker
+        // (`_chestStealerController` / `_refillController`, `Clicker.cs:521-522`), armed by
+        // `ChestStealerEnabled` (`:1076-1090`) and `RefillEnabled` (`:1174-1188`). Without these
+        // arms the switches started nothing, so neither module could ever press a button.
+        EnabledFlag::ChestStealer => Some("chest-stealer"),
+        EnabledFlag::Refill => Some("refill"),
         _ => None,
     }
 }
@@ -1148,41 +1217,53 @@ pub fn select_loop_surfaces(capabilities: &CapabilityReport) -> LoopSurfaces {
     LoopSurfaces { injection, windows }
 }
 
-/// Whether the game is the foreground window, confirmed strictly enough to gate injection.
+/// Whether the game is the foreground window, by the managed rule.
 ///
-/// The platform's rule composed with the launcher test, both required:
+/// `WindowDetection.IsMinecraftActive` (`WindowDetection.cs:184-204`) is **title-only**: the
+/// foreground window is the game when its title contains one of `GameTitles` (`Minecraft`,
+/// `Lunar Client`, `Badlion`, ordinal substring). [`aoko_platform::is_game_window`] is that
+/// rule, and it is the whole test here.
 ///
-/// * `aoko_platform::is_game_window(&foreground)` — the managed `GameTitles` rule (`Minecraft`,
-///   `Lunar Client`, `Badlion`, ordinal substring), now the one copy in the workspace:
-///   `select_best_window` uses the same function;
-/// * `foreground.is_jvm()` — the owning process is `java`, `javaw`, `java.exe` or `javaw.exe`,
-///   `WindowDetection.WindowTarget.IsJvm`.
+/// **The process-name half was this port's addition and is deliberately gone.** The guard used
+/// to require `foreground.is_jvm()` as well. The managed host never required it on the acting
+/// path — the click loop, the four assist loops and both container controllers gate on
+/// `IsMinecraftActive`/`IsMinecraftForeground`, both title-based — so a client whose process
+/// name the platform cannot resolve (a permission-restricted `/proc`, a Wine/Proton wrapper, a
+/// renamed launcher) passed the managed check and failed this one: every loop parked, every
+/// synthetic click was refused, and the only symptom was a module that did nothing. Parity wins
+/// over the extra strictness here because the strictness was never in the reference.
 ///
-/// Neither half is safe alone, which is why the pair is the gate rather than either one. The title
-/// rule answers `true` for an editor literally titled `Minecraft` — `window.rs` says so in the
-/// builder's own note — and `is_jvm` is `false` there, so the pair refuses. The launcher test alone
-/// answers `true` for any bare Java process, and the title rule refuses that.
+/// The case the pair used to catch is still caught by the title test, which is why it is kept:
+/// a focused IDE on a mod workspace (`fabric-mod-template - IntelliJ IDEA`) names no game and is
+/// refused. What a title test cannot catch — an editor whose *project* is called `minecraft-…`
+/// — is a residual of the managed rule too, so this port inherits it rather than inventing an
+/// IDE blocklist; closing it needs the managed cached-handle comparison against a full window
+/// enumeration, which is `select_loop_surfaces`' window surface and not this function.
 ///
-/// The pair also replaces the score this module used to run:
-/// `describe_target(..).is_likely_minecraft()` counts `fabric`, `forge`, `quilt` and `feather`, so
-/// a focused IDE on a mod workspace passed it. `fabric-mod-template - IntelliJ IDEA` is a Java
-/// process, so it passes the launcher half and fails the title half.
-///
-/// One residual is worth stating rather than hiding: this is still a title test, so a *Java* IDE
-/// whose window title contains a game title — a project called `minecraft-plugin`, say — satisfies
-/// both halves. Closing it needs the managed host's cached-handle test (the foreground equals a
-/// known game window, i.e. `select_best_window` over a full enumeration), which no public platform
-/// function offers today; an IDE blocklist here would be the drift `is_game_window` exists to
-/// avoid, so it is reported instead.
-///
-/// A missing window surface, a foreground the backend cannot read, and a window with no process
-/// name all answer `false`: this is the guard, so it fails closed.
+/// A missing window surface, a foreground the backend cannot read, and a window with no title
+/// all answer `false`: this is still a guard, so it fails closed.
 #[must_use]
 pub fn game_is_foreground(windows: &dyn WindowInspector) -> bool {
     let Ok(Some(foreground)) = windows.foreground() else {
         return false;
     };
-    aoko_platform::is_game_window(&foreground) && foreground.is_jvm()
+    if !aoko_platform::is_game_window(&foreground) {
+        return false;
+    }
+    // The title alone is not the managed rule, and it is not safe on its own: a browser tab or an
+    // editor titled `Minecraft 1.8.9` passes it, and the only thing between that window and a
+    // synthetic click would be this function. `WindowDetection.IsMinecraftActive` pairs the title
+    // with a live `FindMinecraftWindow` target; the port pairs it with the JVM name test.
+    //
+    // The *unknown* case is the one that used to be wrong. Requiring `is_jvm` outright meant a
+    // client whose process name the backend could not resolve (`process_name: None` — a protected
+    // process, a handle without query rights) was treated as "not the game", and every module
+    // silently stopped acting in a real session. An unreadable name is not evidence against the
+    // title, so it passes: exactly one unverifiable fact, and the title already matched.
+    match foreground.process_name.as_deref() {
+        Some(name) if !name.is_empty() => aoko_platform::is_java_process_name(name),
+        _ => true,
+    }
 }
 
 /// The platform input backend, gated on the game being confirmed foreground.
@@ -1249,6 +1330,19 @@ impl InputBackend for ForegroundGated {
     fn move_relative(&self, dx: i32, dy: i32) -> Result<(), PlatformError> {
         self.require_game()?;
         self.platform.move_relative(dx, dy)
+    }
+
+    /// Gated like every other acting call, and it has to be spelled out here rather than
+    /// inherited.
+    ///
+    /// `InputBackend::move_to`'s default refuses (a backend has to opt in to placing the
+    /// cursor), so leaving this unoverridden would hand the chest stealer an `Unsupported`
+    /// on a machine where the platform backend implements it: the module would park at the
+    /// pre-move guard forever with no error a user could see. The gate is the same one
+    /// `click` uses — an absolute move is a click's first half.
+    fn move_to(&self, x: f32, y: f32) -> Result<(), PlatformError> {
+        self.require_game()?;
+        self.platform.move_to(x, y)
     }
 
     fn key_press(&self, key: Key) -> Result<(), PlatformError> {
@@ -1330,15 +1424,17 @@ fn platform_surfaces(
     (input, windows)
 }
 
-/// The read side of a loop body, over the controller's store and, when the capability report
-/// allows it, the platform's window surface.
+/// The read side of a loop body, over the controller's store, its switches and profile, and,
+/// when the capability report allows it, the platform's window surface.
 ///
-/// `aoko_core::app::StoreSense` is the production implementation, but it is built over an
+/// `aoko_core::app::StoreSense` is the store-and-cursor implementation, but it is built over an
 /// `Arc<StateStore>` and [`AppController::store`] hands out `&StateStore`, so a
-/// `StoreSense` cannot be built here without a second store or a change in `aoko-core`.
-/// This is that read side over the controller. The store half keeps the defaults
-/// `StoreSense::new` starts with: module and state-field support stay `false` until the
-/// bridge's `capabilities` frame is stored (the ingest decodes it and drops it today).
+/// `StoreSense` cannot be built here without a second store or a change in `aoko-core`. This
+/// is that read side over the controller, plus the three things the loops lost by not going
+/// through it: the module switch that owns each body
+/// ([`LoopSense::module_enabled`] → [`AppController::is_module_enabled`]), the clicker settings
+/// ([`LoopSense::loop_configs`] → [`AppController::with_profile`]), and the bridge's advertised
+/// module and state-field lists ([`Runtime::advertised_handle`]).
 ///
 /// The window half is [`crate::runtime::select_loop_surfaces`]'s decision: `windows` is `None`
 /// exactly when that function refused the surface. Without it the game can never be confirmed
@@ -1347,6 +1443,14 @@ fn platform_surfaces(
 struct ControllerSense {
     controller: Arc<AppController>,
     windows: Option<Arc<dyn WindowInspector>>,
+    /// The bridge's advertised lists, shared with the reader thread that fills them.
+    ///
+    /// `None` for a sense a test builds, which answers `false` to every support question — the
+    /// same answer the shared cell gives before a handshake, and the reason `supports_module`
+    /// used to answer `false` in production too: the loops therefore never ran aim assist,
+    /// Pixel Party assist or the triggerbot, all three of which gate on it
+    /// (`Clicker.cs:2665`, `:2727-2729`, `:2853`).
+    advertised: Option<Arc<RwLock<BridgeCapabilities>>>,
 }
 
 impl ControllerSense {
@@ -1354,7 +1458,28 @@ impl ControllerSense {
         Self {
             controller,
             windows,
+            advertised: None,
         }
+    }
+
+    /// Hands the sense the bridge's advertised lists, as [`Runtime::connect_bridge`] fills them.
+    ///
+    /// The cell is the one [`Runtime::module_supported`] reads, so the loops and the UI cannot
+    /// disagree about what the attached bridge implements.
+    fn with_advertised(mut self, advertised: Arc<RwLock<BridgeCapabilities>>) -> Self {
+        self.advertised = Some(advertised);
+        self
+    }
+
+    /// `Clicker.IsUsingLeftButton`, as far as this port models it: the left click engine's
+    /// switch (`EnabledFlag::LeftClick`, which the AutoClicker card toggles).
+    ///
+    /// Read here rather than inside the profile lock: `AppController::replace_profile` takes
+    /// `modules` and then `profile`, so anything that read `modules` while holding `profile`
+    /// could deadlock against a config load.
+    fn left_clicking(&self) -> bool {
+        module_catalog::flag_for_id(AUTOCLICKER_MODULE)
+            .is_some_and(|flag| self.controller.is_module_enabled(flag))
     }
 }
 
@@ -1413,18 +1538,111 @@ impl LoopSense for ControllerSense {
             .unwrap_or(true)
     }
 
-    fn supports_module(&self, _module: &str) -> bool {
-        false
+    /// `GameStateClient.SupportsModule(id)`, from the bridge's own advertised list.
+    ///
+    /// The three assist loops gate on this exactly as managed did, and a hardcoded `false` is
+    /// why aim assist, Pixel Party assist and the triggerbot did nothing in the packaged build:
+    /// their bodies parked on the very first condition, forever.
+    fn supports_module(&self, module: &str) -> bool {
+        self.advertised.as_ref().is_some_and(|cell| {
+            cell.read()
+                .map(|advertised| advertised.supports_module(module))
+                .unwrap_or(false)
+        })
     }
 
-    fn supports_state_field(&self, _field: &str) -> bool {
-        false
+    fn supports_state_field(&self, field: &str) -> bool {
+        self.advertised.as_ref().is_some_and(|cell| {
+            cell.read()
+                .map(|advertised| advertised.supports_state_field(field))
+                .unwrap_or(false)
+        })
     }
 
-    /// `None`: window geometry needs `WindowInspector::client_bounds` plus a known game handle,
-    /// and the state's own viewport is what the bodies fall back to until that handle exists.
+    /// The catalog switch behind one loop-driving module, read live.
+    ///
+    /// This is the gate each body checks every tick. An id the catalog does not carry, or one
+    /// with no boolean behind it, answers `Some(false)` — off — rather than `None`, because
+    /// `None` means "this sense models no switches" and would let the body run ungoverned.
+    fn module_enabled(&self, module: &str) -> Option<bool> {
+        Some(
+            module_catalog::flag_for_id(module)
+                .is_some_and(|flag| self.controller.is_module_enabled(flag)),
+        )
+    }
+
+    /// `Clicker`'s clicker settings, mapped from the controller's live profile on every read.
+    ///
+    /// The managed loops read those properties inside their `while`, so a slider or a guard
+    /// took effect on the next click; a settings set captured when the bundle started ignored
+    /// every edit until a restart.
+    fn loop_configs(&self) -> Option<ClickerLoopConfigs> {
+        let left_clicking = self.left_clicking();
+        Some(
+            self.controller
+                .with_profile(|profile| ClickerLoopConfigs::from_profile(profile, left_clicking)),
+        )
+    }
+
+    /// `WindowDetection.GetMinecraftWindowRect()` (`WindowDetection.cs:245-254`).
+    ///
+    /// Only the foreground window is considered. The managed helper searched every top-level
+    /// window for the game; each caller here (aim assist's viewport fallback, the triggerbot's)
+    /// only runs while the game *is* the foreground window, so the focused window is the same
+    /// answer for a fraction of the cost — one `WindowInspector::foreground` per tick instead of
+    /// an `enumerate`.
+    ///
+    /// `None` when the session refused the window surface, when nothing is focused, when the
+    /// focused window is not the game, or when its bounds are empty. `None` is what makes the
+    /// aim loop reset instead of moving with a guessed aspect ratio.
     fn framebuffer_size(&self) -> Option<(i32, i32)> {
-        None
+        let windows = self.windows.as_deref()?;
+        let Ok(Some(foreground)) = windows.foreground() else {
+            return None;
+        };
+        if !aoko_platform::is_game_window(&foreground) {
+            return None;
+        }
+        let bounds = foreground.bounds;
+        if !bounds.is_non_empty() {
+            return None;
+        }
+        Some((bounds.width, bounds.height))
+    }
+
+    /// `WindowDetection.GetMinecraftClientRectOnScreen()` (`WindowDetection.cs:256-276`).
+    ///
+    /// The chest-stealer and refill bodies scale a slot's GUI-scaled coordinate into this rect
+    /// before they click (`ChestStealerCoordinateMapper.cs:20-25`), so it has to be the
+    /// **client** area — `WindowInspector::client_bounds` is `GetClientRect` mapped through
+    /// `ClientToScreen` — and not [`Self::framebuffer_size`]'s outer rect, which includes the
+    /// decorations and would move every click up by the height of the title bar.
+    ///
+    /// Only the focused game window is considered, for the reason [`Self::framebuffer_size`]
+    /// gives: both container loops gate on the game being foreground, so the focused window is
+    /// the one whose slots are on screen. `None` when the surface is refused, nothing is
+    /// focused, the focused window is not the game, or the client area is empty — the bodies
+    /// park on `None` rather than clicking a position they could not compute.
+    fn client_rect(&self) -> Option<ScreenRect> {
+        let windows = self.windows.as_deref()?;
+        let Ok(Some(foreground)) = windows.foreground() else {
+            return None;
+        };
+        if !aoko_platform::is_game_window(&foreground) {
+            return None;
+        }
+        let Ok(bounds) = windows.client_bounds(foreground.handle) else {
+            return None;
+        };
+        if !bounds.is_non_empty() {
+            return None;
+        }
+        Some(ScreenRect {
+            left: bounds.x,
+            top: bounds.y,
+            right: bounds.x.saturating_add(bounds.width),
+            bottom: bounds.y.saturating_add(bounds.height),
+        })
     }
 }
 
@@ -1808,7 +2026,7 @@ mod tests {
         );
         assert_eq!(
             runtime.loops_owned(),
-            5,
+            7,
             "the bundle owns one thread per body: {names:?}"
         );
 
@@ -1817,6 +2035,48 @@ mod tests {
         assert!(
             runtime.loop_names().is_empty(),
             "the last loop-driving module off stops the bundle"
+        );
+        assert_eq!(runtime.loops_owned(), 0);
+    }
+
+    /// The two container modules drive bodies of their own, and the bundle outlives one of them.
+    ///
+    /// `cheststealer` and `refill` had no `loop_for` arm, so their cards started no thread and
+    /// neither could press a button. The second half is the supervision rule the other five
+    /// already followed: one driver off is not the bundle off — the remaining module's body is
+    /// still allowed to act, and the body whose switch went off parks on it.
+    #[test]
+    fn the_container_modules_drive_their_own_bodies_and_one_driver_off_keeps_the_bundle() {
+        let controller = Arc::new(AppController::default());
+        let source = Arc::new(StepClock::new());
+        let clock: Arc<dyn Clock> = source.clone();
+        let sleeper: Arc<dyn Sleeper> = source.clone();
+
+        let mut runtime = Runtime::with_time(controller, clock, sleeper);
+        runtime.start_supervision();
+
+        runtime.set_module_enabled("cheststealer", true);
+        let names = runtime.loop_names();
+        assert!(
+            names.contains(&"chest-stealer"),
+            "the chest stealer must be registered by name: {names:?}"
+        );
+        assert_eq!(runtime.loops_owned(), 7);
+
+        runtime.set_module_enabled("refill", true);
+        assert!(runtime.loop_names().contains(&"refill"));
+
+        runtime.set_module_enabled("cheststealer", false);
+        assert_eq!(
+            runtime.loops_owned(),
+            7,
+            "refill is still a driver, so the bundle stays up"
+        );
+
+        runtime.set_module_enabled("refill", false);
+        assert!(
+            runtime.loop_names().is_empty(),
+            "the last driver off stops every body"
         );
         assert_eq!(runtime.loops_owned(), 0);
     }
@@ -2205,6 +2465,252 @@ mod tests {
         );
     }
 
+    /// A window surface whose client area is a real rectangle.
+    ///
+    /// `FakeWindows` answers an empty `Rect`, which is enough for every test that only asks
+    /// whether the rect exists; the chest-stealer and refill bodies *map through* it, so their
+    /// input needs a non-empty one. A separate fixture keeps the shared one untouched.
+    struct ClientArea {
+        game: aoko_platform::WindowInfo,
+        client: aoko_platform::Rect,
+    }
+
+    impl WindowInspector for ClientArea {
+        fn enumerate(&self) -> Result<Vec<aoko_platform::WindowInfo>, PlatformError> {
+            Ok(vec![self.game.clone()])
+        }
+
+        fn foreground(&self) -> Result<Option<aoko_platform::WindowInfo>, PlatformError> {
+            Ok(Some(self.game.clone()))
+        }
+
+        fn client_bounds(
+            &self,
+            _handle: aoko_platform::WindowHandle,
+        ) -> Result<aoko_platform::Rect, PlatformError> {
+            Ok(self.client)
+        }
+
+        fn cursor_visible(&self) -> Option<bool> {
+            None
+        }
+    }
+
+    /// The two window numbers the container bodies need, from the two different rects.
+    ///
+    /// `framebuffer_size` is `WindowDetection.GetMinecraftWindowRect()` — the *outer* window,
+    /// used as the aim/triggerbot viewport fallback. `client_rect` is
+    /// `GetMinecraftClientRectOnScreen()` — the *client* area, which the slot mapper scales
+    /// into. Answering the outer rect to the mapper would offset every click by the title bar,
+    /// so the test hands the fixture two different rects and asserts both answers.
+    #[test]
+    fn the_client_rect_is_the_focused_game_windows_client_area_not_its_outer_rect() {
+        let controller = Arc::new(AppController::default());
+
+        let mut game = window("Minecraft 1.8.9", "java");
+        game.bounds = aoko_platform::Rect {
+            x: 100,
+            y: 100,
+            width: 1280,
+            height: 800,
+        };
+        let client = aoko_platform::Rect {
+            x: 108,
+            y: 130,
+            width: 1264,
+            height: 735,
+        };
+
+        let sense = ControllerSense::new(
+            Arc::clone(&controller),
+            Some(Arc::new(ClientArea {
+                game: game.clone(),
+                client,
+            })),
+        );
+
+        assert_eq!(
+            sense.framebuffer_size(),
+            Some((1280, 800)),
+            "the viewport fallback is the outer window rect"
+        );
+        let rect = sense
+            .client_rect()
+            .expect("a focused game has a client area");
+        assert_eq!(
+            (rect.left, rect.top, rect.right, rect.bottom),
+            (108, 130, 108 + 1264, 130 + 735),
+            "the slot mapper scales into the client area, so a click does not drift by the \
+             title bar's height"
+        );
+
+        // Nothing focused, or no window surface at all: no rect, and the bodies park.
+        let unfocused = ControllerSense::new(
+            Arc::clone(&controller),
+            Some(Arc::new(ClientArea {
+                game,
+                client: aoko_platform::Rect::default(),
+            })),
+        );
+        assert!(unfocused.client_rect().is_none(), "an empty client area");
+        assert!(
+            ControllerSense::new(Arc::clone(&controller), None)
+                .client_rect()
+                .is_none(),
+            "no window surface, no mapping"
+        );
+
+        // A focused IDE is not the game, so it has no client area to map into.
+        let mut editor = window("fabric-mod-template - IntelliJ IDEA", "java");
+        editor.bounds = client;
+        let sense = ControllerSense::new(
+            controller,
+            Some(Arc::new(ClientArea {
+                game: editor,
+                client,
+            })),
+        );
+        assert!(sense.client_rect().is_none());
+    }
+
+    /// Every body sees the same switch the UI writes, and sees it change.
+    ///
+    /// This is the gate that the shipped build was missing: the bundle started on any driver and
+    /// every body ran, so the left clicker kept clicking after its own card went off, and
+    /// switching aim assist on started a click stream. A captured value cannot pass this test.
+    #[test]
+    fn the_loop_switch_is_read_live_from_the_controller() {
+        let controller = Arc::new(AppController::default());
+        let sense = ControllerSense::new(Arc::clone(&controller), None);
+
+        assert_eq!(
+            sense.module_enabled("autoclicker"),
+            Some(false),
+            "off by default"
+        );
+
+        controller.set_module_enabled(EnabledFlag::LeftClick, true);
+        assert_eq!(
+            sense.module_enabled("autoclicker"),
+            Some(true),
+            "the same call each body makes, on the same tick"
+        );
+
+        controller.set_module_enabled(EnabledFlag::LeftClick, false);
+        assert_eq!(sense.module_enabled("autoclicker"), Some(false));
+
+        assert_eq!(
+            sense.module_enabled("nonsense"),
+            Some(false),
+            "an id the catalog does not carry is off, not ungoverned"
+        );
+        assert_eq!(
+            sense.module_enabled("panic"),
+            Some(false),
+            "panic has no stored boolean, so it can gate nothing on"
+        );
+
+        // The two container modules the bundle used to have no arms for.
+        assert_eq!(sense.module_enabled("cheststealer"), Some(false));
+        controller.set_module_enabled(EnabledFlag::ChestStealer, true);
+        assert_eq!(sense.module_enabled("cheststealer"), Some(true));
+        assert_eq!(sense.module_enabled("refill"), Some(false));
+    }
+
+    /// The settings a body reads are the profile's, and they are re-read every tick.
+    ///
+    /// `Clicker`'s properties were read inside each managed `while`, so an edit reached the
+    /// engine on the next click. A settings set captured when the bundle started is exactly the
+    /// defect this pins: the second read must differ from the first after one `update_profile`.
+    #[test]
+    fn the_loop_settings_follow_the_live_profile() {
+        let controller = Arc::new(AppController::default());
+        controller.set_module_enabled(EnabledFlag::LeftClick, true);
+        let sense = ControllerSense::new(Arc::clone(&controller), None);
+
+        let first = sense.loop_configs().expect("the controller holds a profile");
+        assert_eq!(first.left.min_cps, 8.0);
+        assert_eq!(first.left.max_cps, 12.0);
+        assert!(!first.left.guards.click_in_chests);
+        assert!(
+            first.chest_stealer.menu_check,
+            "the profile default has the menu checks on"
+        );
+        assert!(
+            first.aim.auto_left_clicking,
+            "`IsUsingLeftButton` is the left engine's switch"
+        );
+
+        let changed = controller.update_profile(|profile| {
+            profile.click_in_chests = true;
+            profile.min_cps = 14.0;
+            profile.max_cps = 14.0;
+            profile.aim_assist_fov = 45.0;
+            profile.chest_stealer_delay_ms = 200;
+            profile.refill_delay_ms = 5_000;
+            true
+        });
+        assert!(changed);
+
+        let second = sense.loop_configs().expect("still a live profile");
+        assert!(
+            second.left.guards.click_in_chests,
+            "a settings edit reaches the engine without restarting the bundle"
+        );
+        assert_eq!(second.left.min_cps, 14.0);
+        assert_eq!(second.left.max_cps, 14.0);
+        assert_eq!(second.aim.params.aim_assist_fov, 45.0);
+        assert_eq!(second.chest_stealer.delay_ms, 200);
+        assert_eq!(
+            second.refill.delay_ms, 500,
+            "an out-of-range delay is clamped the way the managed setter clamped it"
+        );
+
+        // The earlier read is a value, not a view: nothing about it moved.
+        assert!(!first.left.guards.click_in_chests);
+        assert_eq!(first.left.min_cps, 8.0);
+    }
+
+    /// `SupportsModule` answers from the bridge's advertised lists, not from a constant.
+    ///
+    /// The three assist loops gate on it (`Clicker.cs:2665`, `:2727-2729`, `:2853`), which is
+    /// why a hardcoded `false` made aim assist, Pixel Party assist and the triggerbot do
+    /// nothing; the cell is the same one [`Runtime::module_supported`] reads.
+    #[test]
+    fn module_support_reads_the_advertised_capabilities_cell() {
+        let controller = Arc::new(AppController::default());
+
+        let bare = ControllerSense::new(Arc::clone(&controller), None);
+        assert!(
+            !bare.supports_module("aimassist"),
+            "no cell, nothing advertised, nothing supported"
+        );
+        assert!(!bare.supports_state_field("pixelpartyyawdelta"));
+
+        let cell = Arc::new(RwLock::new(BridgeCapabilities::for_version_fallback(None)));
+        let sense =
+            ControllerSense::new(Arc::clone(&controller), None).with_advertised(Arc::clone(&cell));
+
+        assert!(
+            sense.supports_module("aimassist"),
+            "the codec's fallback table is what a pre-handshake question gets"
+        );
+        assert!(
+            sense.supports_module("AIMASSIST"),
+            "the lookup normalises case, like `BridgeCapabilities`"
+        );
+        assert!(
+            sense.supports_state_field("pixelpartyyawdelta"),
+            "Pixel Party assist gates on its state field too"
+        );
+
+        *cell.write().expect("cell") = BridgeCapabilities::empty();
+        assert!(
+            !sense.supports_module("aimassist"),
+            "a bridge that advertises nothing supports nothing rather than everything"
+        );
+    }
+
     // ---- GTB helper -----------------------------------------------------------------
 
     /// A GTB action bar for a seven-letter theme with only its first letter revealed.
@@ -2530,9 +3036,13 @@ mod tests {
     /// The confirmation needs both halves of the managed rule: a game title and a Java launcher.
     ///
     /// The pair is what makes it safe. `aoko_platform::is_game_window` is a title test, so it
-    /// answers `true` for an editor literally titled `Minecraft`, and `is_jvm` is what refuses
-    /// that window; `is_jvm` alone answers `true` for any Java process, and the title rule is
-    /// what refuses that one.
+    /// answers `true` for an editor literally titled `Minecraft`, and the JVM name test is what
+    /// refuses that window; the name test alone answers `true` for any Java process, and the title
+    /// rule is what refuses that one.
+    ///
+    /// The exception is the third case below: a window whose owning executable cannot be resolved
+    /// is not evidence against the title, and treating it as a refusal is what stopped every module
+    /// from acting in a session where the backend could not name the client's process.
     #[test]
     fn the_foreground_needs_a_java_launcher_and_a_game_title() {
         fn confirmed(title: &str, process: &str) -> bool {
@@ -2547,13 +3057,26 @@ mod tests {
         assert!(confirmed("Lunar Client v3.2.1", "javaw.exe"));
         assert!(confirmed("Badlion Client 1.8.9", "javaw"));
 
+        // An unreadable owner: the title is the only fact there is, and it matched.
+        let unresolved = FakeWindows {
+            foreground: Some(aoko_platform::WindowInfo {
+                process_name: None,
+                ..window("Minecraft 1.8.9", "")
+            }),
+            cursor: None,
+        };
+        assert!(
+            game_is_foreground(&unresolved),
+            "an unreadable process name must not turn a titled game window into a refusal"
+        );
+
         assert!(
             !confirmed("Minecraft 1.8.9", "explorer.exe"),
             "a game title in a non-Java process is not the game"
         );
         assert!(
             !confirmed("Minecraft", "code"),
-            "an editor titled Minecraft is exactly why the pair needs is_jvm"
+            "an editor titled Minecraft is exactly why the pair needs the JVM name test"
         );
         assert!(
             !confirmed("fabric-mod-template - IntelliJ IDEA", "java"),
@@ -2619,7 +3142,7 @@ mod tests {
     /// The table is anchored to the catalog, not to a list of spellings.
     ///
     /// Every id that answers "yes" must be a real `module_catalog::ALL` entry, the set of
-    /// them must be the five bodies `ClickerLoops` starts, and the names must be the strings
+    /// them must be the seven bodies `ClickerLoops` starts, and the names must be the strings
     /// those bodies register — a rename on either side fails here rather than leaving a
     /// switch that starts a loop it cannot name.
     #[test]
@@ -2636,7 +3159,9 @@ mod tests {
             vec![
                 "aimassist",
                 "autoclicker",
+                "cheststealer",
                 "pixelpartyassist",
+                "refill",
                 "rightclick",
                 "triggerbot"
             ]
@@ -2652,9 +3177,11 @@ mod tests {
             names,
             vec![
                 "aim-assist",
+                "chest-stealer",
                 "click-left",
                 "click-right",
                 "pixel-party",
+                "refill",
                 "triggerbot"
             ]
         );
@@ -2668,5 +3195,28 @@ mod tests {
             loop_for(EnabledFlag::HudEditorActive).is_none(),
             "the HUD editor is a modal, not a thread"
         );
+    }
+}
+
+#[cfg(test)]
+mod link_capability_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// A capabilities frame that arrives over an attached transport has to land in the cell
+    /// `Runtime::setting_supported` reads, or the Settings card's reload-mappings press can
+    /// never see the bridge agree to it.
+    #[test]
+    fn an_attached_capabilities_frame_reaches_the_setting_cell() {
+        let mut runtime = Runtime::headless();
+        let (transport, peer) = aoko_protocol::transport::memory::duplex_open();
+        peer.feed(b"{\"type\":\"capabilities\",\"settings\":[\"reloadMappingsNonce\"]}\n");
+        runtime.attach_ingest(transport);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !runtime.setting_supported("reloadMappingsNonce") {
+            assert!(Instant::now() < deadline, "the cell never filled");
+            std::thread::sleep(Duration::from_millis(2));
+        }
     }
 }

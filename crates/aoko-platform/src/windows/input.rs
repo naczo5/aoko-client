@@ -9,7 +9,11 @@
 //! Synthesis matches `Clicker.PerformClick`, `Clicker.SetPixelPartyWalkKey` and
 //! `Clicker.TryApplyAimAssist`: a click is one `SendInput` of two `INPUT`s, a
 //! relative move is one `MOUSEEVENTF_MOVE` `INPUT`, and a key is a down or up
-//! `INPUT_KEYBOARD` event.
+//! `INPUT_KEYBOARD` event. A down/up pair is one batch because the managed call was one
+//! batch, and also because a pair that arrives as two calls can be split by a failure and
+//! leave the button or key down; `send` reports a partial batch and the pair releases
+//! what it can before reporting it, so a failed click cannot leave the game holding the
+//! attack button.
 
 use std::sync::Mutex;
 
@@ -17,17 +21,18 @@ use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, SendInput, VkKeyScanW, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE,
-    KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
-    MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN,
-    MOUSEEVENTF_RIGHTUP, MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_DOWN,
-    VK_ESCAPE, VK_F1, VK_LBUTTON, VK_LEFT, VK_MENU, VK_RBUTTON, VK_RETURN, VK_RIGHT, VK_SHIFT,
-    VK_SPACE, VK_TAB, VK_UP,
+    KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN,
+    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE,
+    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT,
+    MOUSE_EVENT_FLAGS, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_F1, VK_LBUTTON,
+    VK_LEFT, VK_MENU, VK_RBUTTON, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, SetWindowsHookExW, UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, MSLLHOOKSTRUCT,
-    WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
-    WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
+    CallNextHookEx, GetSystemMetrics, SetWindowsHookExW, UnhookWindowsHookEx, HHOOK,
+    KBDLLHOOKSTRUCT, MSLLHOOKSTRUCT, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+    SM_YVIRTUALSCREEN, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
 };
 
 use crate::error::PlatformError;
@@ -265,6 +270,70 @@ const fn mouse_flags(button: MouseButton) -> (MOUSE_EVENT_FLAGS, MOUSE_EVENT_FLA
     }
 }
 
+/// Flags for one absolute placement.
+///
+/// `MOUSEEVENTF_ABSOLUTE` makes `dx`/`dy` a position rather than a delta, and
+/// `MOUSEEVENTF_VIRTUALDESK` normalises them over the whole virtual desktop instead of the
+/// primary monitor, which is the coordinate space [`InputBackend::move_to`] documents.
+///
+/// Built per call rather than as a `const`: `MOUSE_EVENT_FLAGS` is a newtype whose `BitOr` is an
+/// ordinary (non-`const`) operator, so the combination cannot be a constant item.
+fn absolute_move_flags() -> MOUSE_EVENT_FLAGS {
+    MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK
+}
+
+/// The virtual desktop in pixels: the rectangle `MOUSEEVENTF_VIRTUALDESK` normalises into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct VirtualScreen {
+    left: i32,
+    top: i32,
+    width: i32,
+    height: i32,
+}
+
+/// Reads the virtual desktop metrics, or `None` when the session reports no usable area.
+///
+/// `GetSystemMetrics` has no error channel: a session with no display reports a zero-sized
+/// desktop rather than failing, so the size is the check. A zero size would otherwise divide the
+/// placement back to the origin, which is a click in the corner of the screen rather than a
+/// refusal.
+fn virtual_screen() -> Option<VirtualScreen> {
+    // SAFETY: `GetSystemMetrics` takes an index constant by value, touches no caller memory, and
+    // answers an `i32` for both the metrics below.
+    let (left, top, width, height) = unsafe {
+        (
+            GetSystemMetrics(SM_XVIRTUALSCREEN),
+            GetSystemMetrics(SM_YVIRTUALSCREEN),
+            GetSystemMetrics(SM_CXVIRTUALSCREEN),
+            GetSystemMetrics(SM_CYVIRTUALSCREEN),
+        )
+    };
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+    Some(VirtualScreen {
+        left,
+        top,
+        width,
+        height,
+    })
+}
+
+/// One axis of `SendInput`'s absolute coordinate: `0..=65535` across `span` pixels.
+///
+/// The documented mapping is normalised 0 to 65535 onto the desktop, where 0 is the first pixel
+/// and 65535 the last, so the denominator is `span - 1`. A one-pixel axis has no interval to
+/// normalise into and answers the only coordinate that exists.
+fn normalise_axis(coordinate: i32, span: i32) -> i32 {
+    if span <= 1 {
+        return 0;
+    }
+    let clamped = coordinate.clamp(0, span - 1);
+    // `i64` so a wide desktop cannot overflow the product; the quotient is bounded by 65535, so
+    // the narrowing back to `i32` is exact.
+    ((i64::from(clamped) * 65535) / i64::from(span - 1)) as i32
+}
+
 fn mouse_input(flags: MOUSE_EVENT_FLAGS, dx: i32, dy: i32) -> INPUT {
     INPUT {
         r#type: INPUT_MOUSE,
@@ -359,7 +428,21 @@ impl InputBackend for WindowsInputBackend {
     fn click(&self, button: MouseButton) -> Result<(), PlatformError> {
         let (down, up) = mouse_flags(button);
         // One call for the pair, like `Clicker.PerformClick`.
-        send(&[mouse_input(down, 0, 0), mouse_input(up, 0, 0)])
+        if let Err(error) = send(&[mouse_input(down, 0, 0), mouse_input(up, 0, 0)]) {
+            // A batch can be *partly* queued: `SendInput` returns how many of the two events it
+            // inserted, so a refused or half-inserted pair can leave `LEFTDOWN` in the input
+            // stream with nothing to release it. The game would then see the attack button held
+            // for as long as the process lives - the clicker keeps clicking with the module off,
+            // because the loop is not what is pressing - and no later click repairs it, since a
+            // second down on a held button is not a press/release pair either.
+            //
+            // The compensation is best effort and cannot make the stream worse: an `UP` for a
+            // button that is already up is a release event the game has nothing to release,
+            // while a missing `UP` is a held button. The original error is what the caller sees.
+            let _ = send(&[mouse_input(up, 0, 0)]);
+            return Err(error);
+        }
+        Ok(())
     }
 
     fn button_down(&self, button: MouseButton) -> Result<(), PlatformError> {
@@ -377,6 +460,43 @@ impl InputBackend for WindowsInputBackend {
         send(&[mouse_input(MOUSE_MOVE_FLAGS, dx, dy)])
     }
 
+    /// Absolute placement: the managed `SetCursorPos` (`ChestStealerController.cs:303-306`),
+    /// spelled with `SendInput` so the placement goes through the same injector as every other
+    /// synthetic event and cannot be separated from the click that follows it by a desktop
+    /// switch.
+    ///
+    /// Unlike `SetCursorPos`, `SendInput` takes the position normalised, so the point is mapped
+    /// through the **virtual desktop** rectangle (`MOUSEEVENTF_VIRTUALDESK`): the primary
+    /// monitor alone would put a game on a second screen out of reach and clamp a negative
+    /// coordinate on a left-hand monitor to the primary's origin.
+    fn move_to(&self, x: f32, y: f32) -> Result<(), PlatformError> {
+        // A `NaN` or an infinity is not a position, and the saturating `as i32` cast below would
+        // otherwise turn it into the origin - a click in the corner of the desktop.
+        if !x.is_finite() || !y.is_finite() {
+            return Err(PlatformError::invalid_argument(format!(
+                "move_to({x}, {y}) is not a screen coordinate"
+            )));
+        }
+
+        let screen = virtual_screen().ok_or_else(|| {
+            PlatformError::os(
+                "GetSystemMetrics",
+                "the session reports an empty virtual desktop",
+            )
+        })?;
+
+        // Round once, here, at the OS boundary: the caller's point is a fractional mapping of a
+        // slot through the client rect, and a pixel of error is a pixel the click can miss.
+        let pixel_x = x.round() as i32;
+        let pixel_y = y.round() as i32;
+
+        send(&[mouse_input(
+            absolute_move_flags(),
+            normalise_axis(pixel_x.saturating_sub(screen.left), screen.width),
+            normalise_axis(pixel_y.saturating_sub(screen.top), screen.height),
+        )])
+    }
+
     fn key_press(&self, key: Key) -> Result<(), PlatformError> {
         let vk = virtual_key(key);
         if vk.0 == 0 {
@@ -384,7 +504,14 @@ impl InputBackend for WindowsInputBackend {
                 "{key:?} has no virtual-key code"
             )));
         }
-        send(&[keyboard_input(vk, false), keyboard_input(vk, true)])
+        if let Err(error) = send(&[keyboard_input(vk, false), keyboard_input(vk, true)]) {
+            // Same partial-batch hazard as [`Self::click`], with a worse symptom: a key stuck
+            // down is a held movement input, so the player walks, jumps or sprints with the
+            // module off until the game loses focus. Release it before reporting the failure.
+            let _ = send(&[keyboard_input(vk, true)]);
+            return Err(error);
+        }
+        Ok(())
     }
 
     fn key_down(&self, key: Key) -> Result<(), PlatformError> {
@@ -453,6 +580,61 @@ mod tests {
             mouse_flags(MouseButton::Middle),
             (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP)
         );
+    }
+
+    #[test]
+    fn the_absolute_axis_maps_the_ends_of_the_desktop() {
+        // The two ends of the documented range, then a midpoint, on a 1920-pixel axis: 0 is the
+        // first pixel and 65535 the last, so the span that is divided is `width - 1`.
+        assert_eq!(normalise_axis(0, 1920), 0);
+        assert_eq!(normalise_axis(1919, 1920), 65535);
+        assert_eq!(normalise_axis(960, 1920), (960 * 65535) / 1919);
+    }
+
+    #[test]
+    fn an_out_of_range_absolute_axis_clamps_instead_of_wrapping() {
+        assert_eq!(normalise_axis(-50, 1920), 0);
+        assert_eq!(normalise_axis(i32::MAX, 1920), 65535);
+        // A one-pixel (or zero, or negative) axis has a single coordinate, not a division by zero.
+        assert_eq!(normalise_axis(0, 1), 0);
+        assert_eq!(normalise_axis(7, 0), 0);
+        assert_eq!(normalise_axis(7, -3), 0);
+    }
+
+    #[test]
+    fn the_absolute_move_flags_carry_absolute_and_virtual_desk() {
+        let flags = absolute_move_flags();
+        for expected in [
+            MOUSEEVENTF_MOVE,
+            MOUSEEVENTF_ABSOLUTE,
+            MOUSEEVENTF_VIRTUALDESK,
+        ] {
+            assert_eq!(
+                flags.0 & expected.0,
+                expected.0,
+                "flag {:#x} is missing",
+                expected.0
+            );
+        }
+        // A relative move must not pick these up: it stays one `MOUSEEVENTF_MOVE`.
+        assert_eq!(MOUSE_MOVE_FLAGS.0 & MOUSEEVENTF_ABSOLUTE.0, 0);
+    }
+
+    #[test]
+    fn a_non_finite_placement_is_refused_before_anything_is_injected() {
+        // The refusal happens before `send`, so this is safe without a desktop.
+        let backend = WindowsInputBackend::new();
+        for (x, y) in [
+            (f32::NAN, 0.0),
+            (0.0, f32::INFINITY),
+            (f32::NEG_INFINITY, 1.0),
+        ] {
+            let err = backend.move_to(x, y).expect_err("not a screen coordinate");
+            assert!(
+                matches!(err, PlatformError::InvalidArgument { .. }),
+                "{err:?}"
+            );
+        }
     }
 
     #[test]

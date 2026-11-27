@@ -132,6 +132,13 @@ fn render_row(
                 )
                 .child(
                     // The chip is also the row's ping button (`LatencyChip_Click`).
+                    //
+                    // The press stops here rather than reaching the card's own listener. The
+                    // markup nests a `ServerChipButton` (`ServersView.xaml:83-140`) inside the
+                    // card's `Button`, and a WPF `ButtonBase` marks its mouse event handled, so
+                    // the card's `ServerCard_Click` never ran for a chip press. Without this the
+                    // row is selected *and* pinged, which quietly moves what "Join selected" and
+                    // "Delete" would act on.
                     div()
                         .id(crate::reuse::indexed("server-chip", index))
                         .cursor_pointer()
@@ -139,6 +146,7 @@ fn render_row(
                             let id = row.id.clone();
                             let handle = entity.clone();
                             move |_, _, cx| {
+                                cx.stop_propagation();
                                 let id = id.clone();
                                 handle.update(cx, |shell, cx| shell.ping_server(id, cx));
                             }
@@ -215,11 +223,12 @@ pub fn render(
                     .flex_1()
                     .child(FormFields::element(&fields.direct_address)),
             )
-            .child(components::button(
+            .child(button_with_hint(
                 "servers-direct-join",
                 theme,
                 ButtonVariant::Primary,
                 copy::JOIN,
+                state.direct_join_tooltip(),
                 {
                     let handle = entity.clone();
                     move |_, _, cx| {
@@ -401,11 +410,12 @@ pub fn render(
                     }
                 },
             ))
-            .child(components::button(
+            .child(button_with_hint(
                 "servers-ping-all",
                 theme,
                 ButtonVariant::Secondary,
                 copy::PING_ALL,
+                state.ping_all_tooltip(),
                 {
                     let handle = entity.clone();
                     move |_, _, cx| {
@@ -413,11 +423,12 @@ pub fn render(
                     }
                 },
             ))
-            .child(components::button(
+            .child(button_with_hint(
                 "servers-delete",
                 theme,
                 ButtonVariant::Danger,
                 copy::DELETE,
+                state.delete_tooltip(),
                 {
                     let handle = entity.clone();
                     move |_, _, cx| {
@@ -483,6 +494,33 @@ pub fn render(
     }
 
     body.into_any_element()
+}
+
+/// One button with a tooltip on a wrapper around it.
+///
+/// `components::button` takes no tooltip and this round owns no component, so the sentence rides
+/// an id'd wrapper — the shape [`crate::views::accounts_view`] gives its buttons. The wrapper's id
+/// is the button's plus `-hint`, because two elements cannot share one id and the button keeps the
+/// name its selectors use.
+///
+/// The sentences are the state's, not literals: `DirectJoinButton.ToolTip`, `PingAllButton.ToolTip`
+/// and `DeleteButton.ToolTip` are set from the capability gate and the selection in
+/// `ServersView.xaml.cs:145-166`, which is the only place a user is told *why* a press will not go
+/// through. The accessors were written and tested but never read, so those three sentences were
+/// dead code and the buttons explained nothing.
+fn button_with_hint(
+    id: &'static str,
+    theme: &Theme,
+    variant: ButtonVariant,
+    label: &'static str,
+    hint: impl Into<SharedString>,
+    on_click: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+) -> AnyElement {
+    div()
+        .id(crate::reuse::stitched(id, "-hint", ""))
+        .tooltip(components::tooltip(theme, hint))
+        .child(components::button(id, theme, variant, label, on_click))
+        .into_any_element()
 }
 
 #[cfg(test)]

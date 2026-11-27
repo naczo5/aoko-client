@@ -46,6 +46,8 @@ const XTEST_BUTTON_RELEASE: u8 = 5;
 const XTEST_MOTION: u8 = 6;
 /// `detail == 1` on a motion event means "relative to the current position".
 const XTEST_MOTION_RELATIVE: u8 = 1;
+/// `detail == 0` on a motion event means "absolute root-window coordinates".
+const XTEST_MOTION_ABSOLUTE: u8 = 0;
 
 /// X11 button numbers.
 const BUTTON_LEFT: u8 = 1;
@@ -327,6 +329,41 @@ impl InputBackend for LinuxInputBackend {
         self.with_uinput(|device| device.emit_relative(dx, dy))
     }
 
+    /// Absolute placement through XTest, which is the platform's `SetCursorPos`.
+    ///
+    /// XTest's motion event takes the *root window* coordinates directly when `detail` is 0
+    /// (`XTEST_MOTION_ABSOLUTE`), so no pointer query and no delta accumulate: the pointer lands
+    /// on the pixel. X11's protocol carries those coordinates as `i16`, which is the whole root
+    /// window, so a point outside that range is refused as an argument error rather than wrapped
+    /// into a different corner of the screen.
+    ///
+    /// With no XTest there is no absolute path: the uinput device declares relative axes only
+    /// (`REL_X`/`REL_Y`), and a compositor applies its own pointer acceleration to them, so
+    /// "absolute" through that device would be a guess. It refuses, which is the honest answer
+    /// and the one [`InputBackend::move_to`]'s contract allows.
+    fn move_to(&self, x: f32, y: f32) -> Result<(), PlatformError> {
+        if !x.is_finite() || !y.is_finite() {
+            return Err(PlatformError::invalid_argument(format!(
+                "move_to({x}, {y}) is not a screen coordinate"
+            )));
+        }
+        if !self.has_xtest() {
+            return Err(PlatformError::unsupported(
+                "absolute pointer placement needs XTest; the uinput device declares relative axes \
+                 only, so it cannot be aimed at a pixel",
+            ));
+        }
+
+        let out_of_range = || {
+            PlatformError::invalid_argument(format!(
+                "move_to({x}, {y}) is outside the X11 root window's i16 coordinate range"
+            ))
+        };
+        let x = i16::try_from(x.round() as i32).map_err(|_| out_of_range())?;
+        let y = i16::try_from(y.round() as i32).map_err(|_| out_of_range())?;
+        self.xtest(XTEST_MOTION, XTEST_MOTION_ABSOLUTE, x, y)
+    }
+
     fn key_press(&self, key: Key) -> Result<(), PlatformError> {
         self.synthesize_key(key, true)?;
         self.synthesize_key(key, false)
@@ -443,6 +480,33 @@ mod tests {
                 Ok(()) => assert!(backend.has_uinput()),
                 Err(err) => assert!(!err.user_facing().is_empty()),
             }
+        }
+    }
+
+    #[test]
+    fn absolute_placement_refuses_without_a_display_and_never_panics() {
+        let backend = LinuxInputBackend::new();
+
+        // A non-finite point is refused before any X11 call, so this is safe headless.
+        for (x, y) in [(f32::NAN, 0.0), (0.0, f32::INFINITY)] {
+            let err = backend.move_to(x, y).expect_err("not a screen coordinate");
+            assert!(
+                matches!(err, PlatformError::InvalidArgument { .. }),
+                "{err:?}"
+            );
+        }
+
+        // With no XTest the placement is refused and the reason names the uinput device's
+        // relative axes. The XTest path itself is not exercised here: it would move the pointer
+        // of whichever desktop runs the suite, which the other synthesis tests avoid too.
+        if !backend.has_xtest() {
+            let err = backend
+                .move_to(10.0, 20.0)
+                .expect_err("uinput cannot place absolutely");
+            assert!(
+                matches!(err, PlatformError::Unsupported { .. }),
+                "a session that cannot place must say why: {err:?}"
+            );
         }
     }
 

@@ -170,6 +170,76 @@ fn extract_mca_token_reads_the_shipped_line_shape() {
 }
 
 #[test]
+fn a_space_separated_netscape_value_is_the_rest_of_the_row() {
+    // The row's cookie name also occurs inside its own domain. The value used to be taken by
+    // searching the row for the name, so the hit landed in `.example.com` and the stored value
+    // became `om TRUE / TRUE 0 example positional value`.
+    let text = "# Netscape HTTP Cookie File\n\
+                .login.live.com TRUE / TRUE 0 __Host-MSAAUTHP secret value\n\
+                .example.com TRUE / TRUE 0 example positional value\n";
+
+    let parsed = parse_cookies(text).expect("parses");
+
+    let cookie = parsed
+        .cookies
+        .get(".example.com\0example")
+        .expect("the space-separated row keeps its cookie");
+    assert_eq!(cookie.value, "positional value");
+    assert_eq!(cookie.name, "example");
+    assert_eq!(
+        parsed.cookies[".login.live.com\0__Host-MSAAUTHP"].value,
+        "secret value"
+    );
+}
+
+#[test]
+fn an_http_only_row_is_not_a_comment_whatever_the_marker_case() {
+    // `IsCommentLine` matched the marker with `OrdinalIgnoreCase`, so `#HTTPONLY_` is a cookie
+    // row and not a comment. Treated as a comment, the only row of the file disappeared and the
+    // import reported "Cookie file is empty."
+    let text = "# Netscape HTTP Cookie File\n\
+                #HTTPONLY_.login.live.com\tTRUE\t/\tTRUE\t0\t__Host-MSAAUTHP\tsecret\n";
+
+    let parsed = parse_cookies(text).expect("parses");
+
+    assert_eq!(parsed.cookies.len(), 1);
+    assert!(parsed
+        .cookies
+        .contains_key(".login.live.com\0__Host-MSAAUTHP"));
+}
+
+#[test]
+fn a_short_localts_token_is_still_a_localts_token() {
+    // `LooksLikeLocaltsRefreshToken` was the bare `M.C` prefix; a length rule here rejected a
+    // token the managed host accepted.
+    let parsed = parse_cookies("M.C42").expect("parses");
+
+    assert!(parsed.cookies.is_empty());
+    assert_eq!(parsed.refresh_token, "M.C42");
+    assert_eq!(parsed.access_token, "");
+}
+
+#[test]
+fn a_tabbed_export_with_a_token_is_a_cookie_file_not_a_token_file() {
+    // `TryExtractMcaToken` refuses tab-separated input, so a malformed cookie export that
+    // contains a JWT reports the cookie-file error instead of importing the token.
+    let token =
+        jwt(r#"{"profiles":{"mc":"069a79f444e94726a5befca90e38aaf5"},"xuid":"2533274909086470"}"#);
+    let text = format!(".login.live.com\tTRUE\t/\t{token}\n");
+
+    let error = parse_cookies(&text).expect_err("a tabbed export is a cookie file");
+
+    assert!(
+        error
+            .message
+            .contains("expected at least 6 tab-separated fields"),
+        "{}",
+        error.message
+    );
+    assert!(!error.message.contains(&token), "{}", error.message);
+}
+
+#[test]
 fn source_display_covers_every_known_source() {
     assert_eq!(source_display(Some(sources::COOKIE)), "Microsoft cookies");
     assert_eq!(source_display(Some(sources::LOCALTS)), "Localts token");

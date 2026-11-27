@@ -28,6 +28,15 @@ struct StaticSense {
     modules: Vec<&'static str>,
     fields: Vec<&'static str>,
     framebuffer: Option<(i32, i32)>,
+    /// Module switches the bodies see through [`LoopSense::module_enabled`].
+    ///
+    /// `None` is "this fixture models no switches", which is the trait default and keeps a
+    /// direct `run` test ungoverned. `Some(list)` answers from the list, so a body's own gate
+    /// can be driven without adding a flag to every config.
+    switches: Option<Vec<&'static str>>,
+    /// Live settings handed over through [`LoopSense::loop_configs`]; `None` keeps the settings
+    /// the body was started with.
+    configs: Option<super::ClickerLoopConfigs>,
 }
 
 impl StaticSense {
@@ -46,6 +55,8 @@ impl StaticSense {
             modules: vec!["aimassist", "triggerbot", "pixelpartyassist"],
             fields: vec!["pixelpartyyawdelta"],
             framebuffer: Some((1600, 900)),
+            switches: None,
+            configs: None,
         }
     }
 
@@ -56,6 +67,18 @@ impl StaticSense {
 
     fn with_cursor_visible(mut self) -> Self {
         self.cursor_visible = true;
+        self
+    }
+
+    /// Answers [`LoopSense::module_enabled`] from `switches`, so only the named modules are on.
+    fn with_switches(mut self, switches: &[&'static str]) -> Self {
+        self.switches = Some(switches.to_vec());
+        self
+    }
+
+    /// Hands the bodies a live settings set instead of the one they were started with.
+    fn with_configs(mut self, configs: super::ClickerLoopConfigs) -> Self {
+        self.configs = Some(configs);
         self
     }
 }
@@ -84,6 +107,14 @@ impl LoopSense for StaticSense {
     }
     fn framebuffer_size(&self) -> Option<(i32, i32)> {
         self.framebuffer
+    }
+    fn module_enabled(&self, module: &str) -> Option<bool> {
+        self.switches
+            .as_ref()
+            .map(|switches| switches.contains(&module))
+    }
+    fn loop_configs(&self) -> Option<super::ClickerLoopConfigs> {
+        self.configs
     }
 }
 
@@ -317,6 +348,142 @@ fn the_right_click_engine_clicks_the_right_button() {
         .all(|call| matches!(call, InputCall::Click(MouseButton::Right))));
 }
 
+/// The AutoClicker's own switch gates the left body, not the bundle's.
+///
+/// The state here is the one that produced the shipped bug: another loop-driving module is on,
+/// so the bundle (and this body) exists, but the AutoClicker is off. `Clicker.StartClicking`
+/// refused to start such a stream (`Clicker.cs:470-476`), so nothing may be clicked.
+#[test]
+fn the_click_body_parks_while_its_own_switch_is_off() {
+    let clock = Arc::new(VirtualClock::new());
+    // `MODULE_OFF_POLL` is 100 ms: four 25 ms slices, twice.
+    let sleeper = Arc::new(CancelAfterSleeper::new(clock.clone(), 8));
+    let loop_runtime = LoopRuntime::new(
+        clock.clone(),
+        sleeper.clone(),
+        Box::new(SplitMix64::new(151)),
+    );
+    sleeper.attach(loop_runtime.token().clone());
+    let token = loop_runtime.token().clone();
+
+    let sense = StaticSense::new(Some(clicking_state())).with_switches(&["aimassist"]);
+    let input = FakeInput::new();
+    let sink = CountingSink::default();
+    let mut state = timing();
+
+    super::click::run(
+        &loop_runtime,
+        &sense,
+        &input,
+        &sink,
+        &click_config(true),
+        &mut state,
+    );
+
+    assert!(token.is_cancelled());
+    assert_eq!(input.click_count(), 0, "an off module must not click");
+    assert_eq!(sink.clicks.load(Ordering::Acquire), 0);
+    assert_eq!(
+        clock.gaps(),
+        vec![Duration::from_millis(25); 8],
+        "the body parks at MODULE_OFF_POLL instead of clicking"
+    );
+}
+
+/// Each click engine answers to its own module id.
+///
+/// The two engines are one catalog pair, and a gate keyed on the wrong id would run the right
+/// clicker whenever the left one was armed: `StartClicking(false)` checked
+/// `RightClickEnabled` (`Clicker.cs:477-481`).
+#[test]
+fn the_right_click_body_does_not_run_on_the_left_modules_switch() {
+    let clock = Arc::new(VirtualClock::new());
+    let sleeper = Arc::new(CancelAfterSleeper::new(clock.clone(), 4));
+    let loop_runtime = LoopRuntime::new(
+        clock.clone(),
+        sleeper.clone(),
+        Box::new(SplitMix64::new(157)),
+    );
+    sleeper.attach(loop_runtime.token().clone());
+
+    let sense = StaticSense::new(Some(clicking_state())).with_switches(&["autoclicker"]);
+    let input = FakeInput::new();
+    let sink = CountingSink::default();
+    let mut state = timing();
+
+    super::click::run(
+        &loop_runtime,
+        &sense,
+        &input,
+        &sink,
+        &click_config(false),
+        &mut state,
+    );
+
+    assert_eq!(input.click_count(), 0);
+    assert_eq!(clock.gaps(), vec![Duration::from_millis(25); 4]);
+}
+
+/// The engine runs the settings the sense reports now, not the ones it was started with.
+///
+/// The state is a physical chest with the cursor visible, which the guard chain blocks unless
+/// `ClickInChests` is on (`Clicker.cs:3145-3157`). The started config has it off, so a click can
+/// only come from the live settings — which is the wiring that was missing: every clicker
+/// setting a user changed in the GUI was ignored until the bundle restarted.
+#[test]
+fn the_click_body_reads_its_settings_live() {
+    use aoko_protocol::state::ChestStealerState;
+
+    let clock = Arc::new(VirtualClock::new());
+    let sleeper = Arc::new(CancelAfterSleeper::new(clock.clone(), 1));
+    let loop_runtime = LoopRuntime::new(
+        clock.clone(),
+        sleeper.clone(),
+        Box::new(SplitMix64::new(163)),
+    );
+    sleeper.attach(loop_runtime.token().clone());
+
+    let mut state = clicking_state();
+    state.chest_stealer_state = Some(ChestStealerState {
+        ready: true,
+        physical: true,
+        ..ChestStealerState::default()
+    });
+    state.gui_open = true;
+    state.screen_name = "GuiChest".to_owned();
+
+    let mut live = click_config(true);
+    live.guards.click_in_chests = true;
+    let configs = super::ClickerLoopConfigs {
+        left: live,
+        ..super::ClickerLoopConfigs::defaults()
+    };
+
+    let sense = StaticSense::new(Some(state))
+        .with_cursor_visible()
+        .with_switches(&["autoclicker"])
+        .with_configs(configs);
+    let input = FakeInput::new();
+    let sink = CountingSink::default();
+    let mut state_timing = timing();
+
+    // The starting config blocks chest clicks, so a click proves the live set was used.
+    super::click::run(
+        &loop_runtime,
+        &sense,
+        &input,
+        &sink,
+        &click_config(true),
+        &mut state_timing,
+    );
+
+    assert_eq!(
+        input.click_count(),
+        1,
+        "the live `ClickInChests` must reach the guard chain"
+    );
+}
+
 #[test]
 fn cancelling_mid_sleep_does_not_inject_another_click() {
     let clock = Arc::new(VirtualClock::new());
@@ -514,9 +681,9 @@ fn the_click_loop_polls_at_one_hundred_milliseconds_while_not_connected() {
 }
 
 #[test]
-fn the_triggerbot_polls_at_twenty_five_milliseconds_when_disabled() {
+fn the_triggerbot_polls_at_one_hundred_milliseconds_when_disabled() {
     let clock = Arc::new(VirtualClock::new());
-    let sleeper = Arc::new(CancelAfterSleeper::new(clock.clone(), 3));
+    let sleeper = Arc::new(CancelAfterSleeper::new(clock.clone(), 8));
     let loop_runtime = LoopRuntime::new(
         clock.clone(),
         sleeper.clone(),
@@ -524,24 +691,21 @@ fn the_triggerbot_polls_at_twenty_five_milliseconds_when_disabled() {
     );
     sleeper.attach(loop_runtime.token().clone());
     let token = loop_runtime.token().clone();
-    let sense = StaticSense::new(None);
+    // `TriggerbotEnabled` off: an empty switch set, since the switch is the sense's now and
+    // not a field of the settings (`Clicker.cs:2201` started and cancelled the loop on it).
+    let sense = StaticSense::new(None).with_switches(&[]);
     let input = FakeInput::new();
 
-    let config = super::triggerbot::TriggerbotConfig {
-        enabled: false,
-        ..super::triggerbot::TriggerbotConfig::default()
-    };
+    let config = super::triggerbot::TriggerbotConfig::default();
 
     super::triggerbot::run(&loop_runtime, &sense, &input, &config);
 
     assert!(token.is_cancelled());
+    // `MODULE_OFF_POLL` is 100 ms, sliced into four 25 ms waits per tick.
     assert_eq!(
         clock.gaps(),
-        vec![
-            Duration::from_millis(25),
-            Duration::from_millis(25),
-            Duration::from_millis(25)
-        ]
+        vec![Duration::from_millis(25); 8],
+        "a disabled body parks rather than polling at the enabled cadence"
     );
     assert_eq!(input.call_count(), 0);
 }
@@ -561,10 +725,7 @@ fn the_triggerbot_stops_at_the_stale_state_poll() {
     let sense = StaticSense::new(Some(clicking_state()));
     let input = FakeInput::new();
 
-    let config = super::triggerbot::TriggerbotConfig {
-        enabled: true,
-        ..super::triggerbot::TriggerbotConfig::default()
-    };
+    let config = super::triggerbot::TriggerbotConfig::default();
 
     super::triggerbot::run(&loop_runtime, &sense, &input, &config);
     assert_eq!(clock.gaps(), vec![Duration::from_millis(8)]);
@@ -574,40 +735,45 @@ fn the_triggerbot_stops_at_the_stale_state_poll() {
 #[test]
 fn the_aim_loop_never_moves_when_the_module_is_off() {
     let clock = Arc::new(VirtualClock::new());
-    let gate = Arc::new(GateSleeper::new());
-    let input = Arc::new(FakeInput::new());
-    let sense = StaticSense::new(Some(clicking_state()));
-    let loop_runtime = runtime(&clock, gate.clone(), 37);
+    let sleeper = Arc::new(CancelAfterSleeper::new(clock.clone(), 2));
+    let loop_runtime = LoopRuntime::new(
+        clock.clone(),
+        sleeper.clone(),
+        Box::new(SplitMix64::new(37)),
+    );
+    sleeper.attach(loop_runtime.token().clone());
 
-    let input_for_loop = Arc::clone(&input);
-    let mut handle = LoopHandle::spawn("aim-off", loop_runtime, move |runtime| {
-        let mut controller = crate::aim_assist::AimAssistMotionController::new();
-        super::aim::run(
-            runtime,
-            &sense,
-            input_for_loop.as_ref(),
-            &super::aim::AimLoopConfig {
-                enabled: false,
-                params: crate::aim_assist::AimAssistParams {
-                    width: 1600,
-                    height: 900,
-                    game_fov: 70.0,
-                    aim_assist_fov: 30.0,
-                    range: 6.0,
-                    strength: 50,
-                },
-                auto_left_clicking: false,
+    let input = FakeInput::new();
+    // `AimAssistEnabled` off. The body still exists — the bundle keeps seven threads alive —
+    // so it has to park on its own switch instead of moving the crosshair.
+    let sense = StaticSense::new(Some(aim_target_state())).with_switches(&[]);
+    let mut controller = crate::aim_assist::AimAssistMotionController::new();
+
+    super::aim::run(
+        &loop_runtime,
+        &sense,
+        &input,
+        &super::aim::AimLoopConfig {
+            params: crate::aim_assist::AimAssistParams {
+                width: 1600,
+                height: 900,
+                game_fov: 70.0,
+                aim_assist_fov: 30.0,
+                range: 6.0,
+                strength: 100,
             },
-            &mut controller,
-        );
-    })
-    .expect("thread starts");
+            // A licensed tick: without the switch this configuration does move.
+            auto_left_clicking: true,
+        },
+        &mut controller,
+    );
 
-    gate.wait_until_entered();
-    // Release before joining: `stop` joins, and the loop is parked inside the gate.
-    gate.release();
-    handle.stop();
     assert_eq!(input.move_count(), 0);
+    assert_eq!(
+        clock.gaps(),
+        vec![Duration::from_millis(25); 2],
+        "an off module parks at MODULE_OFF_POLL (100 ms, four 25 ms slices)"
+    );
 }
 
 #[test]
@@ -632,7 +798,6 @@ fn the_aim_loop_uses_sixteen_milliseconds_while_a_gui_owns_the_cursor() {
         &sense,
         &input,
         &super::aim::AimLoopConfig {
-            enabled: true,
             params: crate::aim_assist::AimAssistParams {
                 width: 1600,
                 height: 900,
@@ -682,7 +847,6 @@ fn the_aim_loop_injects_a_move_and_ticks_eight_milliseconds() {
         &sense,
         &input,
         &super::aim::AimLoopConfig {
-            enabled: true,
             params: crate::aim_assist::AimAssistParams {
                 width: 1600,
                 height: 900,
@@ -709,7 +873,8 @@ fn the_triggerbot_never_clicks_when_it_is_not_enabled() {
     let clock = Arc::new(VirtualClock::new());
     let gate = Arc::new(GateSleeper::new());
     let input = Arc::new(FakeInput::new());
-    let sense = StaticSense::new(Some(clicking_state()));
+    // `TriggerbotEnabled` off: the switch is the sense's, see `TriggerbotConfig`.
+    let sense = StaticSense::new(Some(clicking_state())).with_switches(&[]);
     let loop_runtime = runtime(&clock, gate.clone(), 41);
 
     let input_for_loop = Arc::clone(&input);
@@ -771,7 +936,6 @@ fn the_triggerbot_clicks_once_the_reaction_and_cooldown_are_ready() {
         &sense,
         &input,
         &super::triggerbot::TriggerbotConfig {
-            enabled: true,
             require_click: true,
             only_crosshair: true,
             only_if_can_attack: true,
@@ -816,8 +980,7 @@ fn the_pixel_party_loop_releases_its_keys_when_cancelled() {
             &sense,
             input_for_loop.as_ref(),
             &super::pixel_party::PixelPartyConfig {
-                enabled: true,
-                auto_look: true,
+                    auto_look: true,
                 auto_walk: true,
             },
             &mut keys,
@@ -861,7 +1024,7 @@ fn the_pixel_party_loop_releases_its_keys_when_cancelled() {
 }
 
 #[test]
-fn all_five_bodies_start_on_their_own_threads_and_stop_together() {
+fn every_body_starts_on_its_own_thread_and_stops_together() {
     let clock = Arc::new(VirtualClock::new());
     let sense: Arc<dyn LoopSense> = Arc::new(StaticSense::new(Some(clicking_state())).inactive());
     let fake = Arc::new(FakeInput::new());
@@ -879,14 +1042,8 @@ fn all_five_bodies_start_on_their_own_threads_and_stop_together() {
         }
     };
 
-    let mut loops = super::ClickerLoops::start(
-        sense,
-        Arc::clone(&input),
-        sink,
-        super::ClickerLoopConfigs::defaults(),
-        make_runtime,
-    )
-    .expect("all five bodies start");
+    let mut loops = super::ClickerLoops::start(sense, Arc::clone(&input), sink, make_runtime)
+        .expect("all seven bodies start");
 
     assert_eq!(
         loops.names(),
@@ -895,10 +1052,12 @@ fn all_five_bodies_start_on_their_own_threads_and_stop_together() {
             "click-right",
             "aim-assist",
             "pixel-party",
-            "triggerbot"
+            "triggerbot",
+            "chest-stealer",
+            "refill"
         ]
     );
-    assert_eq!(loops.running(), 5);
+    assert_eq!(loops.running(), 7);
 
     loops.stop();
     assert_eq!(loops.running(), 0);
@@ -1018,7 +1177,6 @@ fn the_aim_loop_checks_the_gui_before_a_stale_state() {
         &sense,
         &input,
         &super::aim::AimLoopConfig {
-            enabled: true,
             params: crate::aim_assist::AimAssistParams {
                 width: 1600,
                 height: 900,
@@ -1064,7 +1222,6 @@ fn the_pixel_party_loop_checks_the_gui_before_a_stale_state() {
         &sense,
         &input,
         &super::pixel_party::PixelPartyConfig {
-            enabled: true,
             auto_look: true,
             auto_walk: true,
         },
@@ -1201,7 +1358,6 @@ fn aim_target_state() -> GameState {
 
 fn aim_config(auto_left_clicking: bool) -> super::aim::AimLoopConfig {
     super::aim::AimLoopConfig {
-        enabled: true,
         params: crate::aim_assist::AimAssistParams {
             width: 1600,
             height: 900,
@@ -1370,7 +1526,6 @@ fn triggerbot_target_state() -> GameState {
 
 fn triggerbot_config(require_click: bool) -> super::triggerbot::TriggerbotConfig {
     super::triggerbot::TriggerbotConfig {
-        enabled: true,
         require_click,
         only_crosshair: true,
         only_if_can_attack: true,

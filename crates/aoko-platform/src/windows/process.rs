@@ -82,10 +82,25 @@ impl ProcessInspector for WindowsProcessInspector {
             let name = wide_array_to_string(&entry.szExeFile);
             let pid = entry.th32ProcessID;
             if pid != 0 {
+                // The command line is read only for a JVM. `InjectionTargetDiscovery.ListTargets`
+                // filtered by `JavaProcessNames` before it touched the PEB
+                // (`InjectionTargetDiscovery.cs:66-84`), and the PEB read is the whole cost of this
+                // function: `OpenProcess` plus `NtQueryInformationProcess` plus three
+                // `ReadProcessMemory` calls per PID. Doing that for every process on the machine is
+                // several hundred syscalls per enumeration, and it fails outright for every
+                // protected process.
+                //
+                // A non-JVM entry therefore reports `command_line: None`, the same "not readable"
+                // answer a denied PEB read gives; see [`ProcessInfo::command_line`].
+                let command_line = if is_java_process_name(&name) {
+                    self.command_line(pid).ok()
+                } else {
+                    None
+                };
                 processes.push(ProcessInfo {
                     pid,
                     name,
-                    command_line: self.command_line(pid).ok(),
+                    command_line,
                 });
             }
 

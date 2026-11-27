@@ -39,6 +39,11 @@ pub struct Spec {
     pub hover_background: Color,
     pub hover_label: Color,
     pub hover_border: Option<Color>,
+    /// Whole-button opacity while hovered, for the variants whose template fades the shell
+    /// rather than recolouring it. `TabPrimaryButton` is the one that does
+    /// (`TabStyles.xaml:54`: `Opacity=0.88` on `IsMouseOver`), and it has to be the whole
+    /// button rather than an alpha fill because WPF fades the label with it.
+    pub hover_opacity: Option<f32>,
     pub pressed_opacity: f32,
 }
 
@@ -54,11 +59,13 @@ impl ButtonVariant {
                 padding_x: 14.0,
                 padding_y: 7.0,
                 font_size: metrics::text::BUTTON,
-                weight: FontWeight::MEDIUM,
+                // `TabStyles.xaml:34`: `FontWeight="SemiBold"`.
+                weight: FontWeight::SEMIBOLD,
                 hover_background: theme.accent,
                 hover_label: theme.background,
                 hover_border: None,
-                // `TabStyles.xaml:25` hover 0.88, `:28` pressed 0.72.
+                // `TabStyles.xaml:54` hover 0.88, `:57` pressed 0.72.
+                hover_opacity: Some(0.88),
                 pressed_opacity: 0.72,
             },
             Self::Secondary => Spec {
@@ -75,6 +82,7 @@ impl ButtonVariant {
                     .blend(theme.accent, metrics::wash::HOVER),
                 hover_label: theme.text,
                 hover_border: Some(theme.accent),
+                hover_opacity: None,
                 pressed_opacity: 0.8,
             },
             Self::Danger => Spec {
@@ -89,6 +97,7 @@ impl ButtonVariant {
                 hover_background: crate::theme::fixed::CRITICAL.with_alpha(0x1A),
                 hover_label: crate::theme::fixed::CRITICAL,
                 hover_border: None,
+                hover_opacity: None,
                 pressed_opacity: 0.8,
             },
             Self::Dark => Spec {
@@ -104,6 +113,10 @@ impl ButtonVariant {
                 hover_background: theme.accent,
                 hover_label: crate::theme::fixed::CONTRAST_LABEL,
                 hover_border: None,
+                hover_opacity: None,
+                // The C# scales to 0.96 on press and does not fade (`App.xaml:369-370`); with
+                // no transform at the pin, an opacity dip is the only press feedback this
+                // layer can give, so it stays.
                 pressed_opacity: 0.8,
             },
         }
@@ -117,6 +130,25 @@ impl ButtonVariant {
 /// (either axis); Rust has no default arguments, so each pin is its own entry point rather
 /// than a nullable parameter — adding one here would have rewritten all 32 call sites for
 /// a property one of them wants.
+///
+/// # What is still not the C#
+///
+/// Three managed behaviours need state this builder does not have, and they are recorded
+/// here rather than half-done:
+///
+/// - **The hover fade.** `DarkButton` fades its accent overlay in over 150 ms and back out
+///   over 200 ms (`App.xaml:352`, `:359`; `theme::motion::BUTTON_HOVER` /
+///   `BUTTON_HOVER_OUT`). The end state is what this paints — `hover()` is a style closure,
+///   applied the frame the pointer arrives, and a transition needs the hover bit *and* a
+///   clock. The hover bit lives in GPUI's element state, which a free function cannot
+///   reach, so animating it needs the caller to pass `hovered` in.
+/// - **The press scale.** `App.xaml:369-378` scales the shell to 0.96 over 80 ms and back
+///   over 120 ms. The pin has no transform on a layout element, so the pressed state is an
+///   opacity dip (`Spec::pressed_opacity`) — the same feedback the tab button templates get
+///   from their own `Opacity` setters.
+/// - **The focus ring.** `TabStyles.xaml:16-26` is a 1 px accent ring outside the control,
+///   and `track_focus` needs a `FocusHandle`, which needs a `Context`. [`super::KeybindCapture`]
+///   owns one and is the only button-shaped control in this layer that can draw it.
 pub fn button(
     id: impl Into<gpui::ElementId>,
     theme: &Theme,
@@ -205,6 +237,7 @@ fn build_button(
     let hover_background = spec.hover_background;
     let hover_label = spec.hover_label;
     let hover_border = spec.hover_border;
+    let hover_opacity = spec.hover_opacity;
     let pressed = spec.pressed_opacity;
 
     // `hover` and `active` take style closures, so the lift is declarative and the
@@ -212,8 +245,12 @@ fn build_button(
     let element = element
         .hover(move |style| {
             let style = style.bg(hover_background).text_color(hover_label);
-            match hover_border {
+            let style = match hover_border {
                 Some(border) => style.border_color(border),
+                None => style,
+            };
+            match hover_opacity {
+                Some(opacity) => style.opacity(opacity),
                 None => style,
             }
         })
@@ -248,6 +285,28 @@ mod tests {
         // Dark hover is the accent fill the C# storyboard reaches at opacity 1.
         let dark = ButtonVariant::Dark.spec(&theme);
         assert_eq!(dark.hover_background, theme.accent);
+    }
+
+    #[test]
+    fn the_primary_button_dims_on_hover_like_the_tab_style() {
+        let theme = Theme::slate();
+        let primary = ButtonVariant::Primary.spec(&theme);
+        // `TabStyles.xaml:54` fades the shell on hover. Before this existed the primary
+        // hover restated the rest fill and label, which is a hover a user cannot see.
+        assert_eq!(primary.hover_opacity, Some(0.88));
+        assert_eq!(primary.background, primary.hover_background);
+        assert_eq!(primary.label, primary.hover_label);
+        // `TabStyles.xaml:34`: SemiBold, not the body weight.
+        assert_eq!(primary.weight, FontWeight::SEMIBOLD);
+
+        // The other three carry hover in colour, so none of them also fades.
+        for variant in [
+            ButtonVariant::Secondary,
+            ButtonVariant::Danger,
+            ButtonVariant::Dark,
+        ] {
+            assert_eq!(variant.spec(&theme).hover_opacity, None, "{variant:?}");
+        }
     }
 
     #[test]

@@ -63,14 +63,32 @@
 //! command-search overlay's `supported` column shows. It is published once on entry as well, so a
 //! window opened before the handshake asks the codec's question rather than reading an empty list.
 //!
-//! What this deliberately does not do: no reconnect, no command frames, no injection and no
-//! module execution. A failed dial leaves the link down, and the reason is published into the
-//! runtime's `LinkReport` as well as logged, because the loader panel is what a user can act on
-//! and `connected` alone cannot say why it is false. Retry, backoff and socket teardown belong to
-//! a later slice. The reader thread is detached when `crate::ingest::Ingest` is dropped: a
-//! blocking `recv_line` on a live socket cannot be interrupted without closing it, and closing it
-//! is not this slice's job.
+//! What this deliberately does not do: no command frames, no injection and no module execution.
+//! A dial that never reaches the bridge retries for the window [`DIAL_ATTEMPTS`] describes and then
+//! leaves the link down, and the reason is published into the runtime's `LinkReport` as well as
+//! logged, because the loader panel is what a user can act on and `connected` alone cannot say why
+//! it is false.
+//!
+//! # The dial window
+//!
+//! A dial is retried inside the reader, because one attempt is not what the managed host did and
+//! not what the transport allows. The bridge's listener is bound by the DLL *after* `LoadLibrary`
+//! returns, so a dial issued by the press that injected it loses the race unless it is repeated:
+//! `GameStateClient.ConnectAsync(maxAttempts: 30)` retried every 500 ms on the injection path
+//! (`GameStateClient.cs:379-385`, `:486`) and the loader painted the wait as "Waiting for bridge
+//! startup". A reader that dialled once left the app connected to nothing for the rest of the
+//! session - the state store stayed empty, so every module gate that reads game state (aim assist,
+//! chest stealer, the HUD layout) saw a dead game rather than a slow one. See
+//! [`dial_with_retries`] for the numbers and [`DIAL_ATTEMPTS`] for the bound.
+//!
+//! What is still out of scope: the managed host also *re*connected after a live link dropped
+//! (`ScheduleAutoReconnectAsync`, `GameStateClient.cs:626-660`) and tore its socket down on close.
+//! Neither is here. The reader thread is detached when `crate::ingest::Ingest` is dropped, and a
+//! blocking `recv_line` on a live socket cannot be interrupted without closing it - closing it is
+//! the transport's job, not this module's. [`Ingest`]'s stop flag therefore ends a reader that is
+//! *waiting to dial*, which is the case a replaced reader is always in.
 
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -80,26 +98,153 @@ use aoko_platform::TcpBridgeTransport;
 use aoko_protocol::capabilities::BridgeCapabilities;
 use aoko_protocol::codec::{Decoder, Inbound, Pump, TransportClient};
 use aoko_protocol::diagnostics::ManagedTransportDiagnostics;
-use aoko_protocol::transport::{Transport, TransportError};
+use aoko_protocol::hud::HudLayout;
+use aoko_protocol::profile::Profile;
+use aoko_protocol::transport::{LineBuf, RecvOutcome, Transport, TransportError};
 
 /// Ticks per second the transport diagnostics are counted against.
 ///
-/// The managed host measures its read loop against the same rate. The counters are off
-/// unless `AOKO_PERF_DIAGNOSTICS` is set; the object is required by
-/// `aoko_protocol::codec::TransportClient`.
-const DIAGNOSTICS_TICKS_PER_SECOND: u64 = 20;
+/// **`1_000`, i.e. one tick per millisecond**, because the ticks this module feeds the counters are
+/// `Instant` elapsed milliseconds. The object converts its counters with
+/// `1000.0 / ticks_per_second`, so a rate that does not match the clock it is handed scales every
+/// `ms/s` column by the wrong factor; the value used to be `20`, which no clock in this crate
+/// produces and which would have misreported `parse=` and `configSerializeCpu=` five-fold.
+///
+/// The counters are off unless `AOKO_PERF_DIAGNOSTICS` is set; the object is required by
+/// `aoko_protocol::codec::TransportClient` whether or not it is enabled.
+const DIAGNOSTICS_TICKS_PER_SECOND: u64 = 1_000;
 
-/// A decoder over one transport, with diagnostics taken from the environment.
+/// How many dials one reader makes before it reports the failure.
+///
+/// `GameStateClient.ConnectAsync(maxAttempts: 30)` on the injection path
+/// (`GameStateClient.cs:379-385`). Thirty attempts half a second apart is a fifteen second
+/// window, which is the time the bridge needs between `LoadLibrary` returning and its listener
+/// accepting: the DLL starts a thread that does its JNI setup before `bind`, and the injector's
+/// `WaitForSingleObject` only waits for the module's entry point.
+const DIAL_ATTEMPTS: u32 = 30;
+
+/// Delay between dial attempts: the managed `await Task.Delay(500, token)`
+/// (`GameStateClient.cs:486`).
+const DIAL_RETRY: Duration = Duration::from_millis(500);
+
+/// Dials until `dial` answers, the window closes, or `stop` is raised.
+///
+/// `GameStateClient.ConnectAsync`'s retry loop (`GameStateClient.cs:464-489`) with the same
+/// numbers: [`DIAL_ATTEMPTS`] tries, [`DIAL_RETRY`] apart. It is a free function over a closure
+/// rather than a loop inside [`Ingest::spawn`] so the retry policy is exercised without a socket
+/// and without waiting: the tests drive it with a zero delay and a dial that refuses twice.
+///
+/// `None` means the link never came up inside the window, or `stop` was raised while waiting. The
+/// caller distinguishes the two by reading `stop`, because only one of them is a failure worth
+/// publishing: a reader whose handle was dropped is being *replaced*, and the reader that replaced
+/// it owns the next answer to "why is the link down".
+fn dial_with_retries<T>(
+    mut dial: impl FnMut() -> Result<T, TransportError>,
+    stop: &AtomicBool,
+    attempts: u32,
+    retry: Duration,
+) -> Option<T> {
+    for attempt in 1..=attempts {
+        if stop.load(Ordering::SeqCst) {
+            return None;
+        }
+        match dial() {
+            Ok(connected) => return Some(connected),
+            Err(error) => {
+                // Debug, not warn: a refused dial while the bridge is still starting is the
+                // expected case, and the outcome is logged by the caller. A warning per attempt
+                // would put thirty lines in the shipped log for one slow bridge.
+                tracing::debug!(%error, attempt = attempt, "bridge dial failed");
+                if attempt < attempts {
+                    thread::sleep(retry);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// A transport that counts the bytes it reads, for the transport diagnostics.
+///
+/// `TransportClient::pump` decodes one line and hands back a frame; it does not report how many
+/// characters that line held, and that count is the one number
+/// `ManagedTransportDiagnostics::record_inbound` records. The client keeps its line buffer private,
+/// so the count has to be taken one layer down, here, where every frame already passes through.
+///
+/// The counter is shared (`Arc<AtomicU64>`) rather than a field because the client owns the
+/// transport: the reader keeps the other handle and swaps the counter to zero after each read. One
+/// thread touches both, so the atomic is about ownership, not contention.
+///
+/// **Bytes, not characters.** The managed host counted `line.Length`, UTF-16 units. A frame is
+/// ASCII-dominant JSON, so the two agree except for a payload carrying a non-ASCII name; the
+/// `chars=` column of the summary is therefore bytes on this side. Counting characters would mean
+/// copying and decoding every frame a second time to make a diagnostic one percent more precise.
+struct Counted<T> {
+    inner: T,
+    bytes_read: Arc<AtomicU64>,
+}
+
+impl<T: Transport> Transport for Counted<T> {
+    fn recv_line(&mut self, out: &mut LineBuf) -> Result<RecvOutcome, TransportError> {
+        // `recv_line` appends to `out`, so the frame's length is the growth.
+        let before = out.len();
+        let outcome = self.inner.recv_line(out)?;
+        let read = out.len().saturating_sub(before);
+        self.bytes_read
+            .fetch_add(u64::try_from(read).unwrap_or(u64::MAX), Ordering::Relaxed);
+        Ok(outcome)
+    }
+
+    fn send_line(&mut self, line: &[u8]) -> Result<(), TransportError> {
+        self.inner.send_line(line)
+    }
+}
+
+/// The byte counter a [`Counted`] transport fills, from the reader's side.
+#[derive(Clone, Default)]
+struct ByteCount(Arc<AtomicU64>);
+
+impl ByteCount {
+    /// Takes the bytes read since the last call, leaving the counter at zero.
+    ///
+    /// A swap rather than a load-and-subtract: the reader is the only consumer, so this cannot
+    /// lose a count even if the transport gained another byte in between.
+    fn take(&self) -> u64 {
+        self.0.swap(0, Ordering::Relaxed)
+    }
+}
+
+/// A decoder over one transport, its byte counter, and diagnostics taken from the environment.
 ///
 /// `TransportClient` clears its line buffer before every read (`codec.rs:250-256`), which
 /// is the half of the `Transport` contract `4f50b00` restored; the reader is that client
 /// and nothing of our own.
-fn client<T: Transport>(transport: T) -> TransportClient<T> {
-    TransportClient::new(
-        transport,
+fn client<T: Transport>(transport: T) -> (TransportClient<Counted<T>>, ByteCount) {
+    let count = ByteCount::default();
+    let counted = Counted {
+        inner: transport,
+        bytes_read: Arc::clone(&count.0),
+    };
+    let client = TransportClient::new(
+        counted,
         Decoder::new(),
         ManagedTransportDiagnostics::from_environment(DIAGNOSTICS_TICKS_PER_SECOND, 0),
-    )
+    );
+    (client, count)
+}
+
+/// Flushes the transport window when it is due, as `LogTransportDiagnosticsIfReady` did
+/// (`GameStateClient.cs:1612-1619`).
+///
+/// A no-op unless `AOKO_PERF_DIAGNOSTICS` is set: a disabled instance records nothing and
+/// `try_take_snapshot` returns `None`, so a shipped session pays one atomic load per frame. `info!`
+/// rather than `debug!` because the environment variable is itself the opt-in - a user who set it
+/// wants the line with the default filter.
+fn log_transport_diagnostics<T: Transport>(client: &TransportClient<T>, epoch: Instant) {
+    let now = i64::try_from(epoch.elapsed().as_millis()).unwrap_or(i64::MAX);
+    if let Some(window) = client.diagnostics().try_take_snapshot(now) {
+        tracing::info!("{}", window.to_log_message(DIAGNOSTICS_TICKS_PER_SECOND));
+    }
 }
 
 /// What the bridge link currently reports.
@@ -181,13 +326,19 @@ impl LinkReport {
 pub struct Ingest {
     /// `None` only when the thread could not be started; the reason is logged.
     worker: Option<JoinHandle<()>>,
+    /// Raised when this handle is dropped, so a reader that is *waiting to dial again* stops
+    /// instead of racing the reader that replaced it. Shared with the worker, which reads it
+    /// before every attempt and between every frame.
+    stop: Arc<AtomicBool>,
 }
 
 impl Ingest {
     /// Dials the constant bridge endpoint on a worker thread and publishes what it reads.
     ///
     /// The dial happens inside the thread: a resolved-but-silent address can block for the
-    /// OS SYN timeout, and the startup path must not wait for it.
+    /// OS SYN timeout, and the startup path must not wait for it. It is also *retried* inside the
+    /// thread, up to [`DIAL_ATTEMPTS`] times [`DIAL_RETRY`] apart, because the press that injected
+    /// the bridge races the bridge's own listener: see the module header and [`dial_with_retries`].
     ///
     /// A test build returns a reader with no worker instead of dialling. That is the rule this
     /// module's header states — no test opens a socket, because a bridge genuinely listening on the
@@ -201,28 +352,60 @@ impl Ingest {
         advertised: Arc<RwLock<BridgeCapabilities>>,
         report: LinkReport,
     ) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
         if cfg!(test) {
-            return Self { worker: None };
+            return Self { worker: None, stop };
         }
 
-        Self::start("aoko-bridge-dial", move || {
-            match TcpBridgeTransport::connect_bridge() {
-                Ok(transport) => {
-                    tracing::info!("bridge connected on the loopback port");
-                    pump(client(transport), &controller, &advertised, &report);
-                    tracing::info!("bridge link closed");
-                }
-                Err(error) => {
-                    // Not fatal: the window is usable without a bridge. The reason is published
-                    // as well as logged, because the loader panel is what a user can act on and
-                    // `connected` alone cannot say why it is false.
-                    tracing::warn!("no bridge on the loopback port: {error}");
-                    report.publish(LinkFailure::ConnectFailed {
-                        port: aoko_protocol::BRIDGE_PORT,
-                    });
+        let reading = {
+            let stop = Arc::clone(&stop);
+            move || {
+                match dial_with_retries(
+                    TcpBridgeTransport::connect_bridge,
+                    stop.as_ref(),
+                    DIAL_ATTEMPTS,
+                    DIAL_RETRY,
+                ) {
+                    Some(transport) => {
+                        // A reason from an earlier attempt must not outlive the link that makes it
+                        // false: `Runtime::link_failure` reads this cell first, so a stale
+                        // `ConnectFailed` paints over a session that is already connected.
+                        report.clear();
+                        tracing::info!("bridge connected on the loopback port");
+                        let (reader, counts) = client(transport);
+                        pump(
+                            reader,
+                            counts,
+                            &controller,
+                            &advertised,
+                            &report,
+                            stop.as_ref(),
+                        );
+                        tracing::info!("bridge link closed");
+                    }
+                    None => {
+                        // A raised stop is this reader being replaced, not a failed dial. Publishing
+                        // here would overwrite the answer of the reader that replaced it.
+                        if stop.load(Ordering::SeqCst) {
+                            tracing::debug!("bridge dial abandoned: the reader was replaced");
+                            return;
+                        }
+                        // Not fatal: the window is usable without a bridge. The reason is published
+                        // as well as logged, because the loader panel is what a user can act on and
+                        // `connected` alone cannot say why it is false.
+                        tracing::warn!(
+                            "no bridge on the loopback port after {} dial attempts",
+                            DIAL_ATTEMPTS
+                        );
+                        report.publish(LinkFailure::ConnectFailed {
+                            port: aoko_protocol::BRIDGE_PORT,
+                        });
+                    }
                 }
             }
-        })
+        };
+
+        Self::start("aoko-bridge-dial", stop, reading)
     }
 
     /// Attaches an already-connected transport and starts the reader.
@@ -237,9 +420,22 @@ impl Ingest {
         advertised: Arc<RwLock<BridgeCapabilities>>,
         report: LinkReport,
     ) -> Self {
-        Self::start("aoko-bridge-read", move || {
-            pump(client(transport), &controller, &advertised, &report);
-        })
+        let stop = Arc::new(AtomicBool::new(false));
+        let reading = {
+            let stop = Arc::clone(&stop);
+            move || {
+                let (reader, counts) = client(transport);
+                pump(
+                    reader,
+                    counts,
+                    &controller,
+                    &advertised,
+                    &report,
+                    stop.as_ref(),
+                )
+            }
+        };
+        Self::start("aoko-bridge-read", stop, reading)
     }
 
     /// Waits for the reader to finish.
@@ -255,19 +451,30 @@ impl Ingest {
     }
 
     /// Starts the worker, logging rather than panicking when the OS refuses a thread.
-    fn start<F>(name: &str, body: F) -> Self
+    fn start<F>(name: &str, stop: Arc<AtomicBool>, body: F) -> Self
     where
         F: FnOnce() + Send + 'static,
     {
         match thread::Builder::new().name(name.to_owned()).spawn(body) {
             Ok(worker) => Self {
                 worker: Some(worker),
+                stop,
             },
             Err(error) => {
                 tracing::warn!("cannot start the bridge reader thread: {error}");
-                Self { worker: None }
+                Self { worker: None, stop }
             }
         }
+    }
+}
+
+impl Drop for Ingest {
+    fn drop(&mut self) {
+        // The one thing this handle can still do to a blocked worker: a reader that is between
+        // dial attempts reads this and returns, so replacing the reader does not leave two of them
+        // dialling the same port. A reader inside `recv_line` on a live socket is out of reach -
+        // interrupting it means closing the socket, which the transport owns and this type does not.
+        self.stop.store(true, Ordering::SeqCst);
     }
 }
 
@@ -285,14 +492,33 @@ impl Ingest {
 ///
 /// `advertised` is the cell [`crate::runtime::Runtime::module_supported`] reads. This thread
 /// is its only writer, because it is the thread that receives the capability frame.
+///
+/// `stop` is the owning [`Ingest`]'s stop flag. It cannot interrupt a blocked `recv_line`, so it is
+/// read between frames: a reader whose handle was dropped leaves at the next frame instead of
+/// decoding into a store nobody watches any more. Leaving that way writes nothing - not the reason,
+/// not `connected`, not the capability cell - because the reader that replaced it owns all three.
+/// A quiet socket holds the thread until the peer speaks or closes, which is the transport's limit
+/// and not something this loop can fix.
+///
+/// `counts` is the byte counter of `client`'s own transport. `TransportClient::pump` does not report
+/// how many bytes the frame it decoded held, so the reader takes that number from the layer the
+/// bytes passed through and feeds `ManagedTransportDiagnostics::record_inbound` - the counter that
+/// previously recorded nothing and left `AOKO_PERF_DIAGNOSTICS` silent.
 fn pump<T: Transport>(
-    mut client: TransportClient<T>,
+    mut client: TransportClient<Counted<T>>,
+    counts: ByteCount,
     controller: &AppController,
     advertised: &RwLock<BridgeCapabilities>,
     report: &LinkReport,
+    stop: &AtomicBool,
 ) {
     let store = controller.store();
     store.set_connected(true);
+
+    // The clock the diagnostics window is measured against: `MonitorTransportDiagnostics` was
+    // constructed with `Stopwatch.GetTimestamp()`, and this is the Rust equivalent for a window
+    // that only ever needs elapsed time.
+    let diagnostics_epoch = Instant::now();
 
     // What the link has been told. It lives on this thread, which is the only writer: see the
     // module docs. The frame carries the HUD layout as well as the payload, because a layout
@@ -306,6 +532,15 @@ fn pump<T: Transport>(
     }
 
     loop {
+        if stop.load(Ordering::SeqCst) {
+            // An abandoned reader owns nothing on the way out. Its handle was dropped because
+            // another reader replaced it, so that reader owns the store and the report cell now:
+            // publishing `Disconnected` or clearing `connected` here would mark a link that is up
+            // as down. Returning early is the whole rule.
+            tracing::debug!("bridge reader stopped: its handle was dropped");
+            return;
+        }
+
         // Before every read, so a config write can never land inside one. A profile edit made
         // on the UI thread is picked up here on the next iteration; while nothing changes
         // this is one guard on the controller's cached frame and a compare, not an encode.
@@ -314,12 +549,33 @@ fn pump<T: Transport>(
             break;
         }
 
-        match client.pump() {
-            Ok(Pump::Frame(Inbound::State { state, .. })) => {
+        // One read, timed and counted. The managed loop timed the same span
+        // (`Stopwatch.GetTimestamp() - parseStarted`, `GameStateClient.cs:595-600`) and recorded it
+        // for every line it consumed, including one it discarded: the `inbound=` and `parse=`
+        // columns are the read loop's own cost, not the decoded subset of it.
+        let started = Instant::now();
+        let outcome = client.pump();
+        let elapsed = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
+        let read = counts.take();
+
+        match outcome {
+            Ok(Pump::Frame(Inbound::State { state, hud_layout })) => {
+                // An in-game HUD drag arrives as the frame's own `hudLayout` echo, which the
+                // managed read loop applied before it published the state
+                // (`ApplyInboundHudLayout`, `GameStateClient.cs:573-589`, `:1624-1648`). The codec
+                // hands the layout out beside the state precisely so this is one `Option`, and
+                // dropping it - as this arm used to - made the HUD editor's work vanish on the
+                // next config push, because the profile still held the pre-drag layout.
+                if let Some(layout) = hud_layout {
+                    adopt_inbound_hud_layout(controller, &layout);
+                }
                 // `publish_shared`, not `publish`: the frame already arrives as an `Arc`
                 // (`codec.rs:51-54`), and handing it over unchanged is the zero-copy path
                 // `d8e23a4` added. `publish(*state, ..)` would be a move out of the `Arc`.
                 store.publish_shared(state, Instant::now());
+                // The `stateNotify=` column: one per published state, which is what the managed
+                // `RecordStateNotification` counted.
+                client.diagnostics().record_state_notification();
             }
             // Command results are decoded and dropped; the command request queue is a later
             // slice. A capability frame is not: the codec has already applied it to its own
@@ -340,12 +596,77 @@ fn pump<T: Transport>(
                 break;
             }
         }
+
+        // Recorded for every line the loop consumed, discarded ones included, which is what the
+        // managed `finally` did - then the window is flushed if its five seconds are up.
+        client
+            .diagnostics()
+            .record_inbound(i64::try_from(read).unwrap_or(i64::MAX), elapsed);
+        log_transport_diagnostics(&client, diagnostics_epoch);
     }
 
     // The reason first, then the flag: see this function's doc for why the order is a
     // correctness requirement rather than style.
     report.publish(LinkFailure::Disconnected);
     store.set_connected(false);
+
+    // The capability half, which the managed read loop also reset on its way out:
+    // `finally { Capabilities = BridgeCapabilities.ForVersionFallback(InjectedVersion); }`
+    // (`GameStateClient.cs:609`). Without it a dead link keeps advertising the modules the bridge
+    // that is gone claimed to support, which is worse than having no answer: every surface that
+    // gates a control on `module_supported` keeps the control enabled for a bridge that cannot
+    // answer. The fallback is the same table `Runtime::new` seeds the cell with, so "no link" reads
+    // exactly like "not connected yet".
+    if let Ok(mut cell) = advertised.write() {
+        *cell = BridgeCapabilities::for_version_fallback(None);
+    }
+}
+
+/// Stores an inbound `hudLayout` into the active profile, unless it is the echo of what is there.
+///
+/// `GameStateClient.ApplyInboundHudLayout` (`GameStateClient.cs:1624-1648`), in the three steps
+/// that function takes and in the same order:
+///
+/// 1. **Compare.** `inbound.EqualsLayout(Clicker.Instance.HudLayout)` returned early, and
+///    [`HudLayout::equals_layout`] is that comparison (per-axis float epsilon). The bridge repeats
+///    the layout on frames it sends, so the equal case is the common one and has to cost a compare:
+///    a profile write would invalidate the cached config frame and push the same bytes straight back
+///    at the bridge.
+/// 2. **Write.** `Clicker.Instance.HudLayout = inbound` is `Profile::hud_layout`, and
+///    `Profile::hud_layout_map` is the same conversion the HUD editor and the config frame use, so
+///    the drag survives a save and the next `config` frame carries the layout the user sees.
+/// 3. **Persist.** The managed host called `ProfileManager.SaveProfile` here because it owned the
+///    profile store. This reader does not: the shell is the only writer of the profile directory
+///    (`Shell::save_profile`), so the change lands in the controller and the shell's next save puts
+///    it on disk. That save is the half that only works if it takes `hud_layout` from the
+///    controller - see this module's note on `profile_for_save`.
+///
+/// No echo suppression is needed on this side: the sender compares the frame it last wrote with the
+/// controller's current frame, so a layout the bridge itself just pushed differs from `sent` once,
+/// goes out once, and then compares equal. Managed suppressed its push because it re-sent on a 2 s
+/// heartbeat rather than on change (`GameStateClient.cs:1632-1647`).
+///
+/// Returns whether the profile changed.
+fn adopt_inbound_hud_layout(controller: &AppController, inbound: &HudLayout) -> bool {
+    // `with_profile` holds the profile read lock for exactly this conversion; `update_profile`
+    // takes the frame cache first and then the profile, so the compare must not be made while that
+    // guard is alive or the two locks would be taken in the opposite order to every writer.
+    let unchanged = controller
+        .with_profile(|profile| profile.to_hud_layout())
+        .equals_layout(inbound);
+    if unchanged {
+        return false;
+    }
+
+    let changed = controller.update_profile(|profile| {
+        profile.hud_layout = Some(Profile::hud_layout_map(inbound));
+        true
+    });
+    tracing::debug!(
+        changed = changed,
+        "in-game HUD layout adopted from the bridge"
+    );
+    changed
 }
 
 /// Writes the `config` frame when the controller's frame differs from the one on the wire.
@@ -375,10 +696,20 @@ fn sync_config<T: Transport>(
         return Ok(());
     }
 
+    let encoded_at = Instant::now();
     let line = frame.to_line();
+    // The encode is timed on its own so a slow frame shows up separately from a slow socket: the
+    // `configSerialize=` and `configSerializeCpu=` columns against `configSend=`.
+    let encode_ticks = i64::try_from(encoded_at.elapsed().as_millis()).unwrap_or(i64::MAX);
     let keep = (*frame).clone();
     drop(frame);
+    client
+        .diagnostics()
+        .record_config_serialization(i64::try_from(line.len()).unwrap_or(i64::MAX), encode_ticks);
     client.send_line(&line)?;
+    client
+        .diagnostics()
+        .record_config_send(i64::try_from(line.len()).unwrap_or(i64::MAX));
     tracing::debug!(bytes = line.len(), "bridge config frame sent");
     *sent = Some(keep);
     Ok(())
@@ -866,5 +1197,221 @@ mod tests {
             capabilities.setting_count() > 0,
             "the sets the frame left empty came from the fallback"
         );
+    }
+
+    // ---- the dial window ---------------------------------------------------------------
+
+    /// A bridge that is not listening yet is dialled again rather than given up on.
+    ///
+    /// This is the regression that mattered: one dial issued from the press that injected the
+    /// bridge lost the race with the bridge's own `bind`, and nothing retried, so the app stayed
+    /// attached to nothing for the rest of the session and every state-driven control (aim assist,
+    /// chest stealer, the HUD layout send) behaved as if the game were dead.
+    #[test]
+    fn a_bridge_that_refuses_twice_is_still_dialled() {
+        let stop = AtomicBool::new(false);
+        let mut dials = 0u32;
+
+        let connected = dial_with_retries(
+            || {
+                dials += 1;
+                if dials < 3 {
+                    Err(TransportError::Closed)
+                } else {
+                    Ok(dials)
+                }
+            },
+            &stop,
+            30,
+            Duration::ZERO,
+        );
+
+        assert_eq!(
+            connected,
+            Some(3),
+            "the attempt that answered is the one returned"
+        );
+        assert_eq!(dials, 3, "two refusals and then the success, in that order");
+    }
+
+    /// An exhausted window answers `None` after exactly `attempts` dials, so a bridge that is
+    /// never coming costs a bounded number of syscalls and then one published failure.
+    #[test]
+    fn an_exhausted_dial_window_stops_at_the_last_attempt() {
+        let stop = AtomicBool::new(false);
+        let mut dials = 0u32;
+
+        let connected: Option<u32> = dial_with_retries(
+            || {
+                dials += 1;
+                Err(TransportError::Closed)
+            },
+            &stop,
+            4,
+            Duration::ZERO,
+        );
+
+        assert_eq!(connected, None);
+        assert_eq!(dials, 4, "one dial per attempt and not one more");
+    }
+
+    /// A reader that was replaced dials nothing at all, which is what keeps the replacement's
+    /// answer the only one published: `Runtime` shares one `LinkReport` across attempts.
+    #[test]
+    fn a_raised_stop_is_read_before_the_first_dial() {
+        let stop = AtomicBool::new(true);
+        let mut dials = 0u32;
+
+        let connected: Option<u32> = dial_with_retries(
+            || {
+                dials += 1;
+                Ok(dials)
+            },
+            &stop,
+            30,
+            Duration::ZERO,
+        );
+
+        assert_eq!(connected, None);
+        assert_eq!(
+            dials, 0,
+            "a stopped reader must not race the one that replaced it"
+        );
+    }
+
+    // ---- the transport diagnostics ------------------------------------------------------
+
+    /// The counting transport reports the bytes of the frame it read, and a `take` drains them.
+    ///
+    /// This is the number `AOKO_PERF_DIAGNOSTICS` prints as `chars=`/`inbound=`, and before this
+    /// wrapper it was never taken: `TransportClient::pump` returns a decoded frame and keeps its
+    /// line buffer private, so nothing in the shipped path ever called `record_inbound` and the
+    /// summary had no window to print.
+    #[test]
+    fn the_counted_transport_reports_the_bytes_it_read() {
+        let (transport, peer) = memory::duplex();
+        let count = ByteCount::default();
+        let mut counted = Counted {
+            inner: transport,
+            bytes_read: Arc::clone(&count.0),
+        };
+
+        peer.feed(b"{\"a\":1}\n");
+        let mut line = LineBuf::new();
+        assert_eq!(
+            counted.recv_line(&mut line).expect("read the frame"),
+            RecvOutcome::Line
+        );
+
+        assert_eq!(line.as_str(), "{\"a\":1}", "the frame itself is unchanged");
+        assert_eq!(count.take(), 7, "seven bytes, the terminator stripped");
+        assert_eq!(count.take(), 0, "a take leaves the counter at zero");
+    }
+
+    // ---- the inbound HUD layout ---------------------------------------------------------
+
+    /// The echo guard is what keeps a repeated layout from rewriting the profile every frame.
+    ///
+    /// `GameStateClient.ApplyInboundHudLayout` returned early on `EqualsLayout`
+    /// (`GameStateClient.cs:1629-1630`). Without the guard every state frame would write the
+    /// profile, each write would invalidate the cached config frame, and one bridge echo would
+    /// become one push per frame for the rest of the session.
+    #[test]
+    fn an_inbound_hud_layout_is_adopted_once_and_the_echo_is_ignored() {
+        use aoko_protocol::hud::{element_id, HudElementLayout, HudLayout};
+
+        let controller = AppController::default();
+
+        // A default profile already *is* the default layout, so the first echo changes nothing.
+        // The assertion is on the absence of a write, not on the value: a write would leave
+        // `Some(...)` where the profile started with `None`.
+        assert!(!adopt_inbound_hud_layout(&controller, &HudLayout::new()));
+        assert!(
+            controller.profile().hud_layout.is_none(),
+            "an equal layout must not touch the profile"
+        );
+
+        // One element dragged in game: adopted, and stored through the map the editor and the
+        // config frame both use.
+        let mut dragged = HudLayout::new();
+        dragged.set(
+            element_id::MODULE_LIST,
+            HudElementLayout::new(0.42, 0.11, 1.0),
+        );
+        assert!(adopt_inbound_hud_layout(&controller, &dragged));
+
+        let stored = controller
+            .profile()
+            .hud_layout
+            .expect("the drag is in the profile");
+        let element = stored.get(element_id::MODULE_LIST).expect("every known id");
+        assert_eq!((element.x, element.y, element.scale), (0.42, 0.11, 1.0));
+
+        // The echo of that same layout now equals the profile, so it is ignored too: one drag,
+        // one write, however many frames carry it.
+        assert!(!adopt_inbound_hud_layout(&controller, &dragged));
+    }
+
+    /// A HUD drag reported by the bridge reaches the profile *and* the next `config` frame.
+    ///
+    /// This is the path that was dead: the codec decoded the frame's `hudLayout`, handed it out
+    /// beside the state, and the reader dropped it. The profile kept the pre-drag layout, so the
+    /// next push reverted the drag the user had just made in game.
+    #[test]
+    fn a_hud_drag_in_game_reaches_the_profile_and_the_next_config_frame() {
+        use aoko_protocol::hud::element_id;
+
+        let controller = Arc::new(AppController::default());
+        let (peer, closed, ingest) = connect(&controller);
+        wait_for_lines(&peer, 1);
+
+        // A state frame carrying the layout the bridge says the user dragged to.
+        peer.feed(
+            format!(
+                "{{\"inWorld\":true,\"hudLayout\":{{\"{}\":{{\"x\":0.42,\"y\":0.25,\"scale\":1.0}}}}}}\n",
+                element_id::MODULE_LIST
+            )
+            .as_bytes(),
+        );
+
+        // The profile is the store the HUD editor and the save path read, so the drag has to land
+        // there and not only in the decoder.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let moved = controller.with_profile(|profile| {
+                profile
+                    .hud_layout
+                    .as_ref()
+                    .and_then(|layout| layout.get(element_id::MODULE_LIST).copied())
+                    .is_some_and(|element| (element.x - 0.42).abs() < 1e-12)
+            });
+            if moved {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the in-game drag never reached the profile"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+
+        // The adopted layout is a change, so the sender puts it on the live link in the next
+        // frame: the bridge and the profile end up agreeing instead of fighting.
+        let lines = wait_for_lines(&peer, 2);
+        assert_eq!(
+            lines.len(),
+            2,
+            "the connect frame and the adopted layout: {lines:?}"
+        );
+        let frame = json(&lines[1]);
+        assert_eq!(frame["type"].as_str(), Some("config"));
+        assert_eq!(
+            frame["hudLayout"][element_id::MODULE_LIST]["x"].as_f64(),
+            Some(0.42),
+            "the config frame carries the layout the user dragged to"
+        );
+
+        closed.store(true, Ordering::SeqCst);
+        ingest.join();
     }
 }

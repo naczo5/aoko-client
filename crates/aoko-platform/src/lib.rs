@@ -41,7 +41,7 @@ pub use discord::{
     DiscordTransportError, StreamDiscordTransport, FRAME_HEADER_LEN, MAX_FRAME_PAYLOAD,
 };
 pub use error::PlatformError;
-pub use input::{InputBackend, InputEvent, Key, MouseButton, MouseState};
+pub use input::{key_for_virtual_key, InputBackend, InputEvent, Key, MouseButton, MouseState};
 pub use netstat::{protocol_listener_pid, NetstatLineParser, TcpPortProbe};
 pub use open::{open_path, open_url};
 pub use process::{
@@ -50,8 +50,8 @@ pub use process::{
 };
 pub use profile::{app_data_directory, ProfileStore};
 pub use srv::{
-    Clock as SrvClock, SrvExchange, SrvLookupCache, SrvResolver, SrvTarget, UdpExchange, DNS_PORT,
-    SRV_FAILURE_TTL, SRV_SUCCESS_TTL, SRV_TIMEOUT,
+    Clock as SrvClock, ResolverProbe, SrvExchange, SrvLookupCache, SrvResolver, SrvTarget,
+    UdpExchange, DNS_PORT, SRV_FAILURE_TTL, SRV_SUCCESS_TTL, SRV_TIMEOUT,
 };
 pub use tcp::{TcpBridgeTransport, TcpBridgeWriter, BRIDGE_ADDRESS, SEND_TIMEOUT};
 pub use version::{normalize_detected_version, resolve_bridge_dll_name, try_parse_version};

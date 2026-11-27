@@ -7,10 +7,15 @@
 //!
 //! | Condition | Delay |
 //! | --- | --- |
-//! | not enabled / bridge lacks the module / not connected / window inactive | 8 ms |
+//! | the module's own switch is off | [`super::MODULE_OFF_POLL`] |
+//! | bridge lacks the module / not connected / window inactive | 8 ms |
 //! | GUI open *and* OS cursor visible | 16 ms |
 //! | state older than [`AIM_STATE_FRESH_MS`] | 8 ms |
 //! | normal tick | 8 ms |
+//!
+//! The first row has no managed antecedent: `AimAssistEnabled = false` cancelled the loop
+//! (`Clicker.cs:773-781`) instead of leaving it parked. The other four are the managed ones,
+//! and the 8 ms idle poll is preserved for every condition that used to share it.
 //!
 //! The motion controller is reset on every early return, which is what stops a
 //! stale filter state from flinging the crosshair when the module comes back.
@@ -29,10 +34,14 @@ pub const GUI_POLL: std::time::Duration = std::time::Duration::from_millis(16);
 pub const TICK_POLL: std::time::Duration = IDLE_POLL;
 
 /// Settings the loop reads each tick.
+///
+/// **`AimAssistEnabled` is not one of them.** The managed setter started or cancelled this
+/// loop (`Clicker.cs:773-781`), so its existence was the switch; a ported body that outlives
+/// the switch has to ask [`LoopSense::module_enabled`] every tick instead. Carrying a captured
+/// `enabled: false` here is what made aim assist do nothing in the shipped build even with the
+/// module switched on.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AimLoopConfig {
-    /// `AimAssistEnabled`.
-    pub enabled: bool,
     /// Configured FOV cone, range and strength. `width`/`height` are overwritten
     /// from the state each tick.
     pub params: AimAssistParams,
@@ -49,9 +58,25 @@ pub fn run(
     config: &AimLoopConfig,
     controller: &mut AimAssistMotionController,
 ) {
+    // The fallback settings, for a sense with no profile behind it (tests, captures).
+    let started = *config;
+
     while !runtime.is_cancelled() {
-        let should_run = config.enabled
-            && sense.supports_module("aimassist")
+        // `AimAssistEnabled`, read fresh. See [`AimLoopConfig`]: the managed switch owned this
+        // loop's lifetime, so the ported body is the one that has to notice it went off.
+        if sense.module_enabled(super::AIM_ASSIST_MODULE) == Some(false) {
+            controller.reset();
+            if !runtime.park(super::MODULE_OFF_POLL) {
+                break;
+            }
+            continue;
+        }
+
+        // `Clicker`'s FOV, range and strength were read inside the managed `while`
+        // (`:2712-2714`), so changing a slider took effect on the next tick.
+        let config = sense.loop_configs().map_or(started, |configs| configs.aim);
+
+        let should_run = sense.supports_module(super::AIM_ASSIST_MODULE)
             && sense.is_connected()
             && sense.minecraft_active();
 
@@ -118,7 +143,7 @@ pub fn run(
         };
 
         if left_held || config.auto_left_clicking {
-            apply(sense, input, config, controller, state);
+            apply(sense, input, &config, controller, state);
         } else {
             controller.reset();
         }

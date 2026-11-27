@@ -411,6 +411,14 @@ pub fn parse_cookies(text: &str) -> Result<ParsedCookies, CookieAuthError> {
     if looks_like_localts(&trimmed) {
         return from_localts(&trimmed);
     }
+    // `TryExtractMcaToken` refuses tab-separated input (`CookieParser.cs:401`), which is why
+    // the managed order sends a tabbed document to the netscape parser below rather than
+    // trying the token: a tabbed document is a cookie export, and that parser's error message
+    // is the one the user needs. Without this, a broken export that happened to contain a JWT
+    // was imported as an access-token account and the cookie file was never mentioned.
+    if trimmed.contains('\t') {
+        return from_netscape(&trimmed);
+    }
     if let Some(token) = extract_mca_token(&trimmed) {
         if is_minecraft_access_token(&token) {
             return Ok(ParsedCookies {
@@ -419,9 +427,6 @@ pub fn parse_cookies(text: &str) -> Result<ParsedCookies, CookieAuthError> {
                 access_token: token,
             });
         }
-    }
-    if trimmed.contains('\t') {
-        return from_netscape(&trimmed);
     }
 
     Err(CookieAuthError::new(UNRECOGNIZED_FORMAT))
@@ -441,54 +446,82 @@ fn normalize_input(text: &str) -> String {
     convert_space_separated_netscape(&text)
 }
 
+/// Whether the row carries the `#HttpOnly_` cookie prefix.
+///
+/// `IsCommentLine` and `StripHttpOnlyPrefix` both compared it with
+/// `StringComparison.OrdinalIgnoreCase` (`CookieParser.cs:491-496`). Comparing it exactly
+/// meant a re-exported or hand-edited file that spells the marker `#HTTPONLY_` lost its
+/// `__Host-MSAAUTHP` row to the comment filter, and the import failed with "Cookie file is
+/// missing __Host-MSAAUTHP or __Host-MSAAUTH" even though the file was well formed.
+fn has_http_only_prefix(line: &str) -> bool {
+    let prefix = HTTP_ONLY_PREFIX.as_bytes();
+    line.len() >= prefix.len() && line.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix)
+}
+
 fn is_comment_line(line: &str) -> bool {
-    line.starts_with('#') && !line.starts_with(HTTP_ONLY_PREFIX)
+    line.starts_with('#') && !has_http_only_prefix(line)
 }
 
 fn strip_http_only_prefix(line: &str) -> &str {
-    line.strip_prefix(HTTP_ONLY_PREFIX).unwrap_or(line)
+    if has_http_only_prefix(line) {
+        // The marker is ASCII, so its length is a char boundary in `line`.
+        &line[HTTP_ONLY_PREFIX.len()..]
+    } else {
+        line
+    }
 }
 
 /// Splits one space-separated Netscape row into its seven fields.
+///
+/// Equivalent to the managed `SpaceNetscapeLine` regex
+/// `^(\S+)\s+(TRUE|FALSE)\s+(\S+)\s+(TRUE|FALSE)\s+(\d+)\s+(\S+)(?:\s+(.*))?$`: the first six
+/// fields are single tokens and the seventh is whatever remains after them, because a cookie
+/// value may contain spaces.
+///
+/// The value is taken positionally. It used to be found by searching the row for the cookie
+/// name and taking everything after the hit, which picked the earlier occurrence whenever the
+/// name also appeared in the domain or the path: converting `.example.com ... example value`
+/// stored `om ... example value` as that cookie's value, so the SISU exchange sent a cookie
+/// the browser never wrote.
 fn split_space_netscape(line: &str) -> Option<Vec<String>> {
-    let mut parts = line.split_whitespace();
-    let domain = parts.next()?.to_owned();
-    let include_subdomains = parts.next()?;
+    let mut rest = line;
+    let domain = take_netscape_token(&mut rest)?;
+    let include_subdomains = take_netscape_token(&mut rest)?;
     if !include_subdomains.eq_ignore_ascii_case("TRUE")
         && !include_subdomains.eq_ignore_ascii_case("FALSE")
     {
         return None;
     }
-    let path = parts.next()?.to_owned();
-    let secure = parts.next()?;
+    let path = take_netscape_token(&mut rest)?;
+    let secure = take_netscape_token(&mut rest)?;
     if !secure.eq_ignore_ascii_case("TRUE") && !secure.eq_ignore_ascii_case("FALSE") {
         return None;
     }
-    let expiry = parts.next()?;
-    if !expiry.bytes().all(|byte| byte.is_ascii_digit()) {
+    let expiry = take_netscape_token(&mut rest)?;
+    if expiry.is_empty() || !expiry.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
-    let name = parts.next()?.to_owned();
+    let name = take_netscape_token(&mut rest)?;
+    let value = rest.trim_start().to_owned();
 
-    // The value is the rest of the line (it may contain spaces).
-    let mut value = String::new();
-    let consumed = line
-        .find(&name)
-        .map(|index| index + name.len())
-        .unwrap_or(line.len());
-    if let Some(rest) = line.get(consumed..) {
-        value = rest.trim_start().to_owned();
+    Some(vec![domain, include_subdomains, path, secure, expiry, name, value])
+}
+
+/// Takes the next whitespace-delimited token off the front of `rest`.
+///
+/// `None` when only whitespace is left, which is how a row runs out of fields.
+fn take_netscape_token(rest: &mut &str) -> Option<String> {
+    let trimmed = rest.trim_start();
+    let end = trimmed
+        .find(|character: char| character.is_whitespace())
+        .unwrap_or(trimmed.len());
+    if end == 0 {
+        return None;
     }
 
-    Some(vec![
-        domain,
-        include_subdomains.to_owned(),
-        path,
-        secure.to_owned(),
-        expiry.to_owned(),
-        name,
-        value,
-    ])
+    let token = trimmed[..end].to_owned();
+    *rest = &trimmed[end..];
+    Some(token)
 }
 
 fn looks_like_space_separated_netscape(text: &str) -> bool {
@@ -657,8 +690,14 @@ fn validate_auth_cookies(
     })
 }
 
+/// `CookieParser.LooksLikeLocaltsRefreshToken`: the `M.C` prefix, and nothing else.
+///
+/// A minimum length used to be required here (prefix plus eight bytes). The managed parser
+/// had no such rule, so a short token file was recognised by the C# host and rejected by
+/// this one, and the `text.find(MSA_TOKEN_PREFIX)` fallback below accepted the same token
+/// anyway once every line had been skipped.
 fn looks_like_localts_refresh_token(candidate: &str) -> bool {
-    candidate.starts_with(MSA_TOKEN_PREFIX) && candidate.len() > MSA_TOKEN_PREFIX.len() + 8
+    candidate.starts_with(MSA_TOKEN_PREFIX)
 }
 
 fn looks_like_localts(text: &str) -> bool {
