@@ -57,6 +57,20 @@ pub fn normalize_detected_version(raw: &str) -> Option<KnownVersion> {
 
 /// `GameStateClient.ResolveBridgeDllName`: 26.x and 1.21.x share the modern
 /// bridge, everything else gets the legacy one.
+///
+/// **Deliberate deviation: this trims before matching, the managed host did
+/// not.** `ResolveBridgeDllName` tested `resolvedVersion.StartsWith("26.", ...)`
+/// on whatever string it was handed, so `" 26.3 "` - a launcher value with
+/// padding - fell through to `bridge.dll` there. Trimming means a padded `26.*`
+/// or `1.21*` still selects `bridge_261.dll`, which is the bridge that matches
+/// the JVM actually running; the managed answer loaded the legacy DLL into a
+/// 26.x game. The empty and whitespace-only cases agree either way, because the
+/// managed function tested `string.IsNullOrWhiteSpace` first, so this is the one
+/// behaviour that differs.
+///
+/// Source: `GameStateClient.cs`, `ResolveBridgeDllName`, read with
+/// `git show 42d4072^:Aoko/Core/GameStateClient.cs` - the managed host is out of
+/// the tree, so the citation is the record.
 #[must_use]
 pub fn resolve_bridge_dll_name(resolved_version: &str) -> &'static str {
     let version = resolved_version.trim();
@@ -444,6 +458,10 @@ mod tests {
             ("26.1", "bridge_261.dll"),
             ("1.21", "bridge_261.dll"),
             ("1.8.9", "bridge.dll"),
+            // The recorded deviation: managed matched the untrimmed string and
+            // answered `bridge.dll` for both of these.
+            (" 26.3 ", "bridge_261.dll"),
+            (" 1.21.4 ", "bridge_261.dll"),
             ("auto", "bridge.dll"),
             ("", "bridge.dll"),
             ("   ", "bridge.dll"),

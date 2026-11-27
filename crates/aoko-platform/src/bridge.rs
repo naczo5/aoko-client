@@ -163,12 +163,19 @@ mod tests {
     #[test]
     fn bridge_library_path_maps_the_version_to_the_managed_name() {
         let exe_dir = Path::new("/opt/aoko");
-        let cases: [(Option<&str>, &str); 9] = [
+        let cases: [(Option<&str>, &str); 12] = [
             (Some("26.3"), "bridge_261.dll"),
             (Some("26.2"), "bridge_261.dll"),
             (Some("26.1"), "bridge_261.dll"),
             (Some("1.21"), "bridge_261.dll"),
             (Some("1.21.4"), "bridge_261.dll"),
+            // Padded values still select the modern bridge: the trim in
+            // `resolve_bridge_dll_name` is this port's deliberate deviation from
+            // managed, which matched the untrimmed string and answered
+            // `bridge.dll` for `" 26.3 "`.
+            (Some(" 26.3 "), "bridge_261.dll"),
+            (Some(" 26.3x "), "bridge_261.dll"),
+            (Some(" 1.21 "), "bridge_261.dll"),
             (Some("1.8.9"), "bridge.dll"),
             (None, "bridge.dll"),
             (Some(""), "bridge.dll"),
@@ -185,10 +192,16 @@ mod tests {
     }
 
     #[test]
-    fn an_unrecognised_version_takes_the_managed_fallback() {
-        // `ResolveBridgeDllName`'s caller falls back to "1.8.9", which also maps
-        // to the legacy bridge, so both routes agree.
-        for version in [Some("auto"), Some("26"), Some("latest"), Some(" 26.3x ")] {
+    fn an_unrecognised_version_takes_the_legacy_bridge() {
+        // None of these is a version. `26` has no dot, so managed's own
+        // `StartsWith("26.")` was false for it too, and the port agrees with
+        // managed on all three. Managed's caller-level fallback - "1.8.9", used
+        // when parsing is inconclusive - lands on the same name, so both routes
+        // reach the legacy bridge.
+        //
+        // A padded `26.*` is deliberately *not* here: the trim makes it modern,
+        // which is the recorded deviation on `resolve_bridge_dll_name`.
+        for version in [Some("auto"), Some("26"), Some("latest")] {
             assert_eq!(
                 bridge_library_path(version, Path::new("/opt/aoko")),
                 Path::new("/opt/aoko").join("bridge.dll"),
