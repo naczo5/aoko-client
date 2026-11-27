@@ -209,6 +209,25 @@ pub trait LoopSense: Send + Sync {
         None
     }
 
+    /// Which physical mouse buttons are down, sampled: `InputHooks.IsPhysicalLeftButtonDown`
+    /// and its right-button twin (`Aoko/Core/InputHooks.cs:239`, `:541-542`).
+    ///
+    /// **This is what makes the clicker a hold-to-click stream**, which is the managed
+    /// behaviour and the reason the two click engines exist at all: the mouse hook called
+    /// `StartClicking(button)` on the press and `StopClicking()` on the release
+    /// (`InputHooks.cs:565-585`, `:606-625`), so arming the module started nothing by itself.
+    /// A body that clicks on its own switch alone clicks with nobody touching the mouse, which
+    /// is the defect this method exists to close.
+    ///
+    /// `None` means this sense does not model physical input at all (test fixtures, the capture
+    /// harness), and the bodies then keep the switch-only behaviour they had. It is not
+    /// "nothing is held": a real sense always answers, and answers `MouseState::default()` when
+    /// it cannot see the mouse — fail-closed, because a clicker without a hold signal is a
+    /// clicker that fires while the user is typing.
+    fn physical_mouse(&self) -> Option<aoko_platform::MouseState> {
+        None
+    }
+
     /// Age of the current snapshot at `now`.
     fn state_age_ms(&self, now: Instant) -> Option<u64> {
         self.snapshot()
@@ -605,7 +624,8 @@ impl ClickerLoops {
     /// changed in the GUI was ignored until the whole bundle restarted.
     ///
     /// Whether a body may act is not decided here either: it asks
-    /// [`LoopSense::module_enabled`] about its own module every tick.
+    /// [`LoopSense::module_enabled`] about its own module every tick, and the two click engines
+    /// also ask [`LoopSense::physical_mouse`] whether their button is held.
     pub fn start(
         sense: Arc<dyn LoopSense>,
         input: Arc<dyn aoko_platform::InputBackend>,
@@ -616,6 +636,9 @@ impl ClickerLoops {
         // The started settings, resolved once: a `Profile::default()` clone per body would be
         // seven allocations of the same strings for the same values.
         let fallback = ClickerLoopConfigs::defaults();
+        // One cell for both click engines: `Clicker`'s `_activity`, so the button pressed first
+        // keeps the mouse and the other engine's press is refused (`Clicker.cs:470`).
+        let stream = Arc::new(crate::clicker::ClickStream::new());
 
         for (index, left_button) in [(0_u64, true), (1, false)] {
             let runtime = make_runtime(index);
@@ -628,6 +651,7 @@ impl ClickerLoops {
             let sense = Arc::clone(&sense);
             let input = Arc::clone(&input);
             let sink = Arc::clone(&sink);
+            let stream = Arc::clone(&stream);
             let started = LoopHandle::spawn(
                 if left_button {
                     "click-left"
@@ -640,13 +664,14 @@ impl ClickerLoops {
                         clock,
                         Box::new(crate::clock::SplitMix64::new(0xC1 + index)),
                     );
-                    click::run(
+                    click::run_with_stream(
                         runtime,
                         sense.as_ref(),
                         input.as_ref(),
                         sink.as_ref(),
                         &config,
                         &mut timing,
+                        Some(stream.as_ref()),
                     );
                 },
             );

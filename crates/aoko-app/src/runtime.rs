@@ -1215,7 +1215,8 @@ impl Runtime {
         };
         let sense: Arc<dyn LoopSense> = Arc::new(
             ControllerSense::new(Arc::clone(&self.controller), windows)
-                .with_advertised(self.advertised_handle()),
+                .with_advertised(self.advertised_handle())
+                .with_input(Some(Arc::clone(&input))),
         );
         // The one click feed: the sink the bodies record into, which is `StatsFeed`.
         let sink: Arc<dyn ClickSink> = self.stats.clone();
@@ -1732,6 +1733,13 @@ struct ControllerSense {
     /// Pixel Party assist or the triggerbot, all three of which gate on it
     /// (`Clicker.cs:2665`, `:2727-2729`, `:2853`).
     advertised: Option<Arc<RwLock<BridgeCapabilities>>>,
+    /// The platform input backend, shared with the loops.
+    ///
+    /// The click engines need it for one question: is the button held? In the managed client the
+    /// low-level mouse hook answered that by *starting* the click stream (`InputHooks.cs:565-585`),
+    /// so the port's loops have to ask the backend that owns the same observation. `None` for a
+    /// sense a test builds, which then models no hold at all.
+    input: Option<Arc<dyn InputBackend>>,
 }
 
 impl ControllerSense {
@@ -1740,6 +1748,7 @@ impl ControllerSense {
             controller,
             windows,
             advertised: None,
+            input: None,
         }
     }
 
@@ -1749,6 +1758,12 @@ impl ControllerSense {
     /// disagree about what the attached bridge implements.
     fn with_advertised(mut self, advertised: Arc<RwLock<BridgeCapabilities>>) -> Self {
         self.advertised = Some(advertised);
+        self
+    }
+
+    /// Hands the sense the input backend, so the click engines can see their button held.
+    fn with_input(mut self, input: Option<Arc<dyn InputBackend>>) -> Self {
+        self.input = input;
         self
     }
 
@@ -1775,6 +1790,35 @@ impl LoopSense for ControllerSense {
 
     fn is_injected(&self) -> bool {
         self.controller.store().is_injected()
+    }
+
+    /// `InputHooks.IsPhysicalLeftButtonDown` and its right twin, straight from the backend.
+    ///
+    /// Probed per tick rather than cached: the click engines sample this between clicks and
+    /// while they wait for one, and a cached flag would keep a stream alive after a release.
+    /// The backend's own probe already filters *injected* presses on both platforms — the
+    /// Windows hook skips `LLKHF_INJECTED`/`LLMHF_INJECTED` and the Linux observer skips the
+    /// client's own uinput device — which is the property that makes this safe to gate on: the
+    /// engine's own clicks never read back as a held button.
+    ///
+    /// A backend that cannot answer is treated as "nothing held". That is fail-closed on
+    /// purpose: the managed client had no way to click without its hook, and a clicker that
+    /// cannot see the mouse must not spray clicks into whatever window has focus.
+    fn physical_mouse(&self) -> Option<MouseState> {
+        let input = self.input.as_deref()?;
+        match input.probe_mouse_state() {
+            Some(state) => Some(state),
+            None => {
+                static WARNED: std::sync::Once = std::sync::Once::new();
+                WARNED.call_once(|| {
+                    tracing::warn!(
+                        "the input backend cannot sample the mouse: the click engines will not \
+                         click until it can, because a click stream needs a held button"
+                    );
+                });
+                Some(MouseState::default())
+            }
+        }
     }
 
     /// `WindowDetection.IsMinecraftActive()`.

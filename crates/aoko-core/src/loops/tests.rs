@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use aoko_platform::{InputBackend, Key, MouseButton};
+use aoko_platform::{InputBackend, Key, MouseButton, MouseState};
 use aoko_protocol::state::{EntityInfo, GameState};
 
 use super::{ClickSink, LoopHandle, LoopRuntime, LoopSense};
@@ -37,6 +37,49 @@ struct StaticSense {
     /// Live settings handed over through [`LoopSense::loop_configs`]; `None` keeps the settings
     /// the body was started with.
     configs: Option<super::ClickerLoopConfigs>,
+    /// The button the user is holding, when this fixture models a mouse at all.
+    mouse: Option<Arc<ScriptedMouse>>,
+}
+
+/// A mouse whose hold is scripted: down for the first `down_reads` samples, up after.
+///
+/// The click engines sample the button between clicks and while they wait for one, so a test
+/// that wants "pressed, then released" without depending on the virtual clock's arithmetic can
+/// simply let the first few reads report down and every later read report up.
+struct ScriptedMouse {
+    left: bool,
+    right: bool,
+    down_reads: usize,
+    reads: AtomicUsize,
+}
+
+impl ScriptedMouse {
+    /// A mouse that reports `left`/`right` down for the first `down_reads` samples.
+    fn held_for(down_reads: usize, left: bool, right: bool) -> Arc<Self> {
+        Arc::new(Self {
+            left,
+            right,
+            down_reads,
+            reads: AtomicUsize::new(0),
+        })
+    }
+
+    /// A mouse that is held for the whole run.
+    fn always_held(left: bool, right: bool) -> Arc<Self> {
+        Self::held_for(usize::MAX, left, right)
+    }
+
+    fn state(&self) -> MouseState {
+        let read = self.reads.fetch_add(1, Ordering::AcqRel);
+        if read < self.down_reads {
+            MouseState {
+                left_down: self.left,
+                right_down: self.right,
+            }
+        } else {
+            MouseState::default()
+        }
+    }
 }
 
 impl StaticSense {
@@ -57,6 +100,7 @@ impl StaticSense {
             framebuffer: Some((1600, 900)),
             switches: None,
             configs: None,
+            mouse: None,
         }
     }
 
@@ -79,6 +123,12 @@ impl StaticSense {
     /// Hands the bodies a live settings set instead of the one they were started with.
     fn with_configs(mut self, configs: super::ClickerLoopConfigs) -> Self {
         self.configs = Some(configs);
+        self
+    }
+
+    /// Models a held button, so the click engines' hold gate has something to read.
+    fn with_mouse(mut self, mouse: Arc<ScriptedMouse>) -> Self {
+        self.mouse = Some(mouse);
         self
     }
 }
@@ -115,6 +165,9 @@ impl LoopSense for StaticSense {
     }
     fn loop_configs(&self) -> Option<super::ClickerLoopConfigs> {
         self.configs
+    }
+    fn physical_mouse(&self) -> Option<MouseState> {
+        self.mouse.as_ref().map(|mouse| mouse.state())
     }
 }
 
@@ -309,6 +362,155 @@ fn the_click_loop_injects_exactly_until_it_is_cancelled() {
         .calls()
         .iter()
         .all(|call| matches!(call, InputCall::Click(MouseButton::Left))));
+}
+
+// ---------------------------------------------------------------------------
+// The hold gate (`InputHooks.cs:565-585`, `:606-625`).
+//
+// The managed click stream was started by the mouse hook, not by the module switch:
+// arming the AutoClicker only allowed the *next press* to start one
+// (`Clicker.cs:462-470`). A body that clicks on its own switch alone clicks with nobody
+// touching the mouse, which is what these pin.
+// ---------------------------------------------------------------------------
+
+/// Runs one click engine on the test thread with a virtual clock that cancels after `sleeps`.
+fn run_click_engine(
+    sense: &StaticSense,
+    input: &Arc<FakeInput>,
+    sink: &Arc<CountingSink>,
+    left: bool,
+    sleeps: u32,
+    stream: Option<&crate::clicker::ClickStream>,
+) {
+    let clock = Arc::new(VirtualClock::new());
+    let sleeper = Arc::new(CancelAfterSleeper::new(clock.clone(), sleeps));
+    let loop_runtime = LoopRuntime::new(
+        clock.clone(),
+        sleeper.clone(),
+        Box::new(SplitMix64::new(0x51 + u64::from(left))),
+    );
+    sleeper.attach(loop_runtime.token().clone());
+
+    let mut state = timing();
+    super::click::run_with_stream(
+        &loop_runtime,
+        sense,
+        input.as_ref(),
+        sink.as_ref(),
+        &click_config(left),
+        &mut state,
+        stream,
+    );
+}
+
+#[test]
+fn an_armed_clicker_does_not_click_until_the_button_is_held() {
+    let input = Arc::new(FakeInput::new());
+    let sink = Arc::new(CountingSink::default());
+    let sense = StaticSense::new(Some(clicking_state()))
+        .with_switches(&[super::AUTOCLICKER_MODULE])
+        .with_mouse(ScriptedMouse::held_for(0, true, false));
+
+    // Three 8 ms polls of a loop that would otherwise click every 100 ms.
+    run_click_engine(&sense, &input, &sink, true, 3, None);
+
+    assert_eq!(
+        input.click_count(),
+        0,
+        "the module is armed and the cursor is in the game, but nothing is held"
+    );
+    assert_eq!(sink.clicks.load(Ordering::Acquire), 0);
+}
+
+#[test]
+fn a_press_starts_the_stream_and_the_release_cancels_the_click_already_scheduled() {
+    let input = Arc::new(FakeInput::new());
+    let sink = Arc::new(CountingSink::default());
+    // Down for the press and for the first look at the wait, up from then on: exactly one click
+    // lands, and the one the schedule had already placed at +100 ms never does.
+    let sense = StaticSense::new(Some(clicking_state()))
+        .with_switches(&[super::AUTOCLICKER_MODULE])
+        .with_mouse(ScriptedMouse::held_for(2, true, false));
+
+    run_click_engine(&sense, &input, &sink, true, 6, None);
+
+    assert_eq!(
+        input.click_count(),
+        1,
+        "one press is one click; the release cancelled the next one, as StopClicking cancelled \
+         the managed Task.Delay"
+    );
+}
+
+#[test]
+fn the_second_button_never_starts_while_the_first_stream_owns_the_mouse() {
+    let input = Arc::new(FakeInput::new());
+    let sink = Arc::new(CountingSink::default());
+    let stream = crate::clicker::ClickStream::new();
+    assert!(
+        stream.claim(true),
+        "the left button is already held and streaming"
+    );
+
+    let sense = StaticSense::new(Some(clicking_state()))
+        .with_switches(&[super::RIGHT_CLICK_MODULE])
+        .with_mouse(ScriptedMouse::always_held(false, true));
+
+    run_click_engine(&sense, &input, &sink, false, 3, Some(&stream));
+
+    assert_eq!(
+        input.click_count(),
+        0,
+        "`if (Activity != ClickerActivity.None) return;` — the right press is refused"
+    );
+    assert_eq!(
+        stream.activity(),
+        crate::clicker::ClickActivity::Left,
+        "and the refused press did not take the mouse from the running stream"
+    );
+}
+
+#[test]
+fn a_released_stream_hands_the_mouse_to_the_other_button() {
+    let stream = crate::clicker::ClickStream::new();
+    assert!(stream.claim(true));
+    // What `StreamHold` does on every path out of the left engine.
+    stream.release(true);
+
+    let input = Arc::new(FakeInput::new());
+    let sink = Arc::new(CountingSink::default());
+    let sense = StaticSense::new(Some(clicking_state()))
+        .with_switches(&[super::RIGHT_CLICK_MODULE])
+        .with_mouse(ScriptedMouse::always_held(false, true));
+
+    run_click_engine(&sense, &input, &sink, false, 4, Some(&stream));
+
+    assert_eq!(
+        input.click_count(),
+        1,
+        "with the mouse free, the right press starts its own stream"
+    );
+    assert_eq!(
+        stream.activity(),
+        crate::clicker::ClickActivity::None,
+        "and the engine gives it back when its body ends"
+    );
+}
+
+#[test]
+fn a_modelled_mouse_that_is_never_held_never_clicks_even_when_the_switch_flips_on() {
+    // The shape of the reported bug, from the other side: the switch is on for the whole run,
+    // the game is focused, and the engine still does nothing, because a stream needs a press.
+    let input = Arc::new(FakeInput::new());
+    let sink = Arc::new(CountingSink::default());
+    let sense = StaticSense::new(Some(clicking_state()))
+        .with_switches(&[super::AUTOCLICKER_MODULE, super::RIGHT_CLICK_MODULE])
+        .with_mouse(ScriptedMouse::held_for(0, true, true));
+
+    run_click_engine(&sense, &input, &sink, true, 4, None);
+    run_click_engine(&sense, &input, &sink, false, 4, None);
+
+    assert_eq!(input.click_count(), 0);
 }
 
 #[test]
