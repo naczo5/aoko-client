@@ -1,0 +1,121 @@
+name: package windows
+
+# Builds the Windows binary and a zip that can be run: `aoko.exe` plus the two
+# native bridges, which have to sit beside it because the loader picks between
+# them from the detected Minecraft version.
+#
+# This is deliberately its own workflow rather than `release.yml`'s publish step.
+# That file also builds the C++ bridges with a JDK and a hand-unpacked MinGW, and
+# it stops on purpose (see MIGRATION_ARCHITECTURE.md §9 item 3) rather than
+# package an artifact nothing built. Here the bridges are the committed DLLs in
+# `McInjector/`, so the job needs nothing but a Windows runner and the pinned
+# toolchain from `rust-toolchain.toml`.
+#
+# Fonts and the GTB wordlist are `include_bytes!`/`include_str!` in `aoko-app`,
+# so the zip carries no `Data/` directory: a missing asset is a compile error
+# rather than a runtime surprise.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to attach the zip to (blank: upload an artifact only)'
+        required: false
+        type: string
+      ref:
+        description: 'Git ref to build'
+        required: false
+        default: rust
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: package-windows
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  package:
+    name: windows zip
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: check out the ref to package
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      # Registry and git caches only: a `target` cache for gpui is several
+      # gigabytes and would be evicted between runs anyway, so the one cold build
+      # per package is cheaper than a cache that never hits.
+      - name: cache cargo caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-package-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-package-
+
+      - name: toolchain
+        run: rustup show
+
+      - name: build
+        run: cargo build -p aoko-app --release --bin aoko
+
+      - name: stage the runnable directory
+        shell: pwsh
+        run: |
+          $stage = Join-Path $env:RUNNER_TEMP 'stage'
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+
+          Copy-Item 'target\release\aoko.exe' $stage
+          # Both bridges ship: the loader selects `bridge_261.dll` for a 26.x or
+          # 1.21 client and `bridge.dll` for everything else, and a game that
+          # names no version falls back to the legacy one. Removing either would
+          # break injection for half the supported versions.
+          Copy-Item 'McInjector\bridge.dll' $stage
+          Copy-Item 'McInjector\bridge_261.dll' $stage
+
+          $readme = @'
+          aoko — Rust/GPUI host
+
+          Run aoko.exe. Keep bridge.dll and bridge_261.dll beside it: they are the
+          native bridges, and which one loads is decided by the Minecraft version
+          detected in the client's command line.
+
+          The first launch writes its profile under %APPDATA%\Aoko. No installer, no
+          runtime to install: the fonts and the word list are compiled into the exe.
+          '@
+          Set-Content -LiteralPath (Join-Path $stage 'README.txt') -Value $readme -Encoding utf8
+
+          Get-ChildItem $stage | Format-Table Name, Length
+
+      - name: zip
+        shell: pwsh
+        run: |
+          $label = if ('${{ inputs.tag }}') { '${{ inputs.tag }}' } else { 'dev' }
+          $zip = Join-Path $env:GITHUB_WORKSPACE "aoko-$label-windows.zip"
+          Compress-Archive -Path (Join-Path $env:RUNNER_TEMP 'stage\*') -DestinationPath $zip
+          Get-Item $zip | Format-Table Name, Length
+          "AOKO_ZIP=$zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: upload the artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aoko-windows-zip
+          path: ${{ env.AOKO_ZIP }}
+          if-no-files-found: error
+
+      - name: attach the zip to the release
+        if: inputs.tag != ''
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload '${{ inputs.tag }}' $env:AOKO_ZIP --clobber
