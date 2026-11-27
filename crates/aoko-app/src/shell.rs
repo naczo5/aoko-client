@@ -7406,10 +7406,9 @@ mod tests {
         cx.update(|cx| shell.update(cx, |shell, _| drop(shell.save_profile())));
 
         let saved = read_auto_save(&root);
-        assert_eq!(
-            saved["killAuraEnabled"],
-            serde_json::json!(true),
-            "the switch the user closed is on in the file: {saved}"
+        assert!(
+            saved.kill_aura_enabled,
+            "the switch the user closed is on when the file is loaded back"
         );
 
         // And the inverse, which a save that only ever wrote `true` would fail.
@@ -7417,19 +7416,22 @@ mod tests {
         cx.update(|cx| shell.update(cx, |shell, _| drop(shell.save_profile())));
 
         let saved = read_auto_save(&root);
-        assert_eq!(
-            saved["killAuraEnabled"],
-            serde_json::json!(false),
-            "and a switch turned off is off in it: {saved}"
+        assert!(
+            !saved.kill_aura_enabled,
+            "and a switch turned off is off when it is loaded back"
         );
     }
 
-    /// The auto-save slot as the last save left it, parsed.
-    fn read_auto_save(root: &std::path::Path) -> serde_json::Value {
+    /// The auto-save slot as a restart reads it, through the app's own loader.
+    ///
+    /// `load_profile_from_json` rather than indexing the JSON: the symptom this pins is a switch
+    /// that comes back off after a restart, so the test should read the file the way the restart
+    /// does.
+    fn read_auto_save(root: &std::path::Path) -> aoko_protocol::profile::Profile {
         let json = aoko_platform::ProfileStore::new(root)
             .read_profile(crate::views::profiles::AUTO_SAVE_NAME)
             .expect("the save wrote the auto-save slot");
-        serde_json::from_str(&json).expect("the profile file is JSON")
+        aoko_protocol::profile::load_profile_from_json(&json).expect("the saved profile loads")
     }
 
     #[gpui::test]
