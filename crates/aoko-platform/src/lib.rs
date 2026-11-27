@@ -43,7 +43,7 @@ pub use discord::{
 pub use error::PlatformError;
 pub use input::{InputBackend, InputEvent, Key, MouseButton, MouseState};
 pub use netstat::{protocol_listener_pid, NetstatLineParser, TcpPortProbe};
-pub use open::open_path;
+pub use open::{open_path, open_url};
 pub use process::{
     compare_ignore_case, describe_target, is_java_process_name, select_best_window, sort_targets,
     ClientType, DiscoveryTarget, InstanceCandidate, ProcessInfo, ProcessInspector,

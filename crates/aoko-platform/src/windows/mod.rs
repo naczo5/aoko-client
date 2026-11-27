@@ -20,7 +20,7 @@ pub use appdata::app_data_directory;
 pub use discord::WindowsDiscordTransport;
 pub use injector::WindowsBridgeInjector;
 pub use input::{install_hooks, uninstall_hooks, HookGuard, WindowsInputBackend};
-pub use open::{open_path, opener_available};
+pub use open::{open_path, open_url, opener_available};
 pub use process::{read_command_line, WindowsProcessInspector};
 pub use window::{process_image_name, window_title, WindowsWindowInspector};
 

@@ -26,7 +26,7 @@ pub use appdata::app_data_directory;
 pub use discord::LinuxDiscordTransport;
 pub use injector::LinuxBridgeInjector;
 pub use input::LinuxInputBackend;
-pub use open::{open_path, opener_available};
+pub use open::{open_path, open_url, opener_available};
 pub use process::{parse_proc_cmdline, LinuxProcessInspector};
 pub use window::LinuxWindowInspector;
 

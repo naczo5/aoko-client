@@ -15,7 +15,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::error::PlatformError;
-use crate::open::{open_with, PathLauncher};
+use crate::open::{open_url_with, open_with, PathLauncher, UrlLauncher};
 
 /// Program the freedesktop specification names for "open this".
 pub const XDG_OPEN: &str = "xdg-open";
@@ -29,29 +29,55 @@ pub fn open_path(path: &Path) -> Result<(), PlatformError> {
     open_with(path, &XdgOpen)
 }
 
+/// Opens `url` with `xdg-open`, the same program and the same child handling.
+///
+/// The update control's press: the host has no HTTP client, so the releases page is
+/// handed to the desktop's browser. Only `https://` is accepted, and reachability is
+/// neither checked nor implied.
+///
+/// # Errors
+/// See [`crate::open_url`]; additionally [`PlatformError::Unsupported`] when
+/// `xdg-open` is not on `PATH`.
+pub fn open_url(url: &str) -> Result<(), PlatformError> {
+    open_url_with(url, &XdgOpen)
+}
+
 struct XdgOpen;
 
 impl PathLauncher for XdgOpen {
     fn launch(&self, path: &Path) -> Result<(), PlatformError> {
-        // The child's output would otherwise land in the host's terminal, where a file
-        // manager's warnings are noise nobody asked for.
-        let child = Command::new(XDG_OPEN)
-            .arg(path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(classify_spawn_error)?;
-
-        std::thread::spawn(move || {
-            // Only here to reap the child; the exit status carries nothing the caller
-            // can act on once the launcher has started.
-            let mut child = child;
-            let _ = child.wait();
-        });
-
-        Ok(())
+        spawn_launcher(path.as_os_str())
     }
+}
+
+impl UrlLauncher for XdgOpen {
+    fn launch_url(&self, url: &str) -> Result<(), PlatformError> {
+        // `xdg-open` takes a URL in exactly the same argument as a path.
+        spawn_launcher(std::ffi::OsStr::new(url))
+    }
+}
+
+/// Runs `xdg-open` on `target` and reaps it on a short-lived thread.
+///
+/// The child's output would otherwise land in the host's terminal, where a file
+/// manager's or a browser's warnings are noise nobody asked for.
+fn spawn_launcher(target: &std::ffi::OsStr) -> Result<(), PlatformError> {
+    let child = Command::new(XDG_OPEN)
+        .arg(target)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(classify_spawn_error)?;
+
+    std::thread::spawn(move || {
+        // Only here to reap the child; the exit status carries nothing the caller can
+        // act on once the launcher has started.
+        let mut child = child;
+        let _ = child.wait();
+    });
+
+    Ok(())
 }
 
 /// Whether a usable `xdg-open` exists, without running it.
@@ -171,6 +197,28 @@ mod tests {
     fn any_other_spawn_failure_is_an_os_error() {
         let err = classify_spawn_error(io::Error::from(io::ErrorKind::OutOfMemory));
         assert!(matches!(err, PlatformError::Os { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn a_refused_url_never_reaches_the_desktop_launcher() {
+        // Safe to call for real: the scheme check runs before `xdg-open` is spawned,
+        // so none of these can open anything on the machine running the test.
+        for url in [
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "/etc/passwd",
+            "http://example.com/releases",
+        ] {
+            let err = open_url(url).expect_err("not an https address");
+            assert!(
+                matches!(err, PlatformError::InvalidArgument { .. }),
+                "{err:?}"
+            );
+            assert!(
+                err.user_facing().contains(url),
+                "{err:?} must name the string it refused"
+            );
+        }
     }
 
     #[test]
