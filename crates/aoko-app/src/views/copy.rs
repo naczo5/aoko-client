@@ -247,6 +247,36 @@ pub enum Control {
         /// Palette name, verbatim.
         name: &'static str,
     },
+    /// The saved palettes, one 180 px card per entry (`MainWindow.xaml:1910-1937`, an
+    /// `ItemsControl` over `CustomPalettesItems` with a `WrapPanel` panel).
+    ///
+    /// The cards are the store's, not the table's: [`PaletteStore::rows`] yields each entry's name
+    /// and the four preview hexes (`BackgroundSwatch` `:1933`, `PanelSwatch`, `SliderSwatch`,
+    /// `AccentSwatch` `:1936`), and every press is a store call, so nothing per-palette lives here.
+    /// What a `DataTemplate` cannot carry is copy — it has no card entry to hang a doc on — so the
+    /// two strings each row paints are the variant's.
+    ///
+    /// [`PaletteStore::rows`]: crate::views::palette_store::PaletteStore::rows
+    PaletteRows {
+        /// The remove button's tooltip, `:1926` — [`PALETTE_DELETE_TOOLTIP`]. Its content is
+        /// [`REMOVE_GLYPH`], and the sentence is what distinguishes this cap from the
+        /// tracked-block row's.
+        delete_tooltip: &'static str,
+        /// The apply button's tooltip, `:1931` — [`PALETTE_APPLY_TOOLTIP`] — the whole card is
+        /// the button, and the four swatches sit inside it.
+        apply_tooltip: &'static str,
+    },
+    /// The create box's name row (`MainWindow.xaml:1949-1956`): a `TextBlock` caption and
+    /// `NewPaletteNameBox` beside it.
+    ///
+    /// The typed name is not store state — `save_draft` takes it as an argument and the store's
+    /// four drafts are the hex boxes — so the field itself is the shell's entity, the way the
+    /// configs card's name box is. The markup gives the box no placeholder or hint, so there is
+    /// no copy for one here.
+    PaletteNameBox {
+        /// The caption, `:1951`.
+        label: &'static str,
+    },
 }
 
 /// One `ControlCardStyle` card.
@@ -1008,16 +1038,21 @@ pub const SETTINGS: &[Card] = &[
             },
             PalettePreview { name: "Snowy Sky" },
             Note {
-                text: "Custom Palettes",
+                text: PALETTE_HEADING_SAVED,
+            },
+            // `:1910-1937`: the saved cards sit between the two headings, one per store entry.
+            PaletteRows {
+                delete_tooltip: PALETTE_DELETE_TOOLTIP,
+                apply_tooltip: PALETTE_APPLY_TOOLTIP,
             },
             Note {
-                text: "Create custom palette",
+                text: PALETTE_HEADING_CREATE,
             },
             Note {
-                text: "Pick four base colors as hex (e.g. #1A2B3C). The remaining shades are derived automatically.",
+                text: PALETTE_DESCRIPTION,
             },
-            Note {
-                text: "Name",
+            PaletteNameBox {
+                label: PALETTE_NAME_LABEL,
             },
             ColorField {
                 label: "Background",
@@ -1036,7 +1071,7 @@ pub const SETTINGS: &[Card] = &[
                 bind: "PaletteTextBox",
             },
             Button {
-                label: "Add palette",
+                label: PALETTE_ADD,
                 tooltip: "",
             },
             Note {
@@ -1694,6 +1729,8 @@ pub fn count_controls(cards: &[Card]) -> ControlCounts {
                 | Control::BlockEspAdd { .. }
                 | Control::ColorField { .. }
                 | Control::PalettePreview { .. }
+                | Control::PaletteRows { .. }
+                | Control::PaletteNameBox { .. }
                 | Control::Preference { .. } => {}
             }
         }
