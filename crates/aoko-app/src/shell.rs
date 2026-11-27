@@ -118,7 +118,7 @@ pub struct Shell {
     /// The session override for every `bind` path: the capture harness seeds it and a
     /// press writes it. A value here wins over the profile snapshot below.
     ///
-    /// It is an override *on top of* one profile, so [`Shell::adopt_profile`] clears it whenever the
+    /// It is an override *on top of* one profile, so `Shell::adopt_profile` clears it whenever the
     /// profile underneath is replaced wholesale — a config load. Without that, the panel would keep
     /// painting the value the user last touched while the profile, the controller and the wire all
     /// said something else, and the next touch would write the stale value back over the load.
@@ -640,7 +640,7 @@ impl Shell {
         match self.profiles.load_named(name) {
             Ok(profile) => {
                 // The load-time half of the action-bind rule, and the override reset, are the
-                // replacement's own business; see [`Shell::adopt_profile`].
+                // replacement's own business; see `Shell::adopt_profile`.
                 self.adopt_profile(profile);
                 // The palette travels in the profile, so applying a config has to
                 // repaint with the theme it names (`ApplyLoadedProfile`,
@@ -1978,7 +1978,7 @@ impl Shell {
     ///
     /// The override only exists for a value the session set on *this* profile; a wholesale
     /// replacement drops it, so a load cannot leave the panel painting a value the profile no
-    /// longer holds. See [`Shell::adopt_profile`].
+    /// longer holds. See `Shell::adopt_profile`.
     #[must_use]
     pub fn value(&self, bind: &'static str, default: f64) -> f64 {
         if let Some(value) = self.draft.get(bind) {
