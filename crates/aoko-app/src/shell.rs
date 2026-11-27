@@ -300,6 +300,12 @@ pub struct Shell {
     /// paint. `None` is "not read yet": [`Shell::ensure_palette_rows`] fills it, and every press that
     /// changes the file clears it again.
     palette_rows: Option<Vec<palette_store::PaletteRow>>,
+    /// The live-palette line above those rows, `PALETTE_CURRENT_PREFIX` plus the applied name.
+    ///
+    /// Cached on the same invalidation as [`Shell::palette_rows`], for the same reason: the name
+    /// changes only when the store does, and the card paints every frame, so composing it in the
+    /// render would be one `format!` per frame in the section-6 budget. `None` is "not read yet".
+    palette_current: Option<SharedString>,
     /// The palette card's name box (`NewPaletteNameBox`, `MainWindow.xaml:1953`).
     ///
     /// The typed name is not store state — [`PaletteStore::save_draft`] takes it as an argument and
@@ -696,6 +702,7 @@ impl Shell {
             swatches: HashMap::new(),
             // Both read on the first frame: the rows are a file read and the box needs a context.
             palette_rows: None,
+            palette_current: None,
             palette_name: None,
             // Closed: a picker exists only between a swatch press and the report that ends it.
             picker: None,
@@ -861,6 +868,8 @@ impl Shell {
         self.palette = PaletteStore::at(path);
         // A new file is a new list: the cards paint the cache, not the store.
         self.palette_rows = None;
+        // And a new list has a new applied entry, so the line above it is stale too.
+        self.palette_current = None;
     }
 
     /// The profile as the JSON `aoko-protocol` writes, ready to save.
@@ -1113,6 +1122,15 @@ impl Shell {
     fn ensure_palette_rows(&mut self) {
         if self.palette_rows.is_none() {
             self.palette_rows = Some(self.palette.rows());
+        }
+        // The live-palette line comes from the same read, because it is the same fact: which palette
+        // this file says is applied. Composing it here keeps the `format!` out of the paint.
+        if self.palette_current.is_none() {
+            self.palette_current = Some(SharedString::from(format!(
+                "{}{}",
+                copy::PALETTE_CURRENT_PREFIX,
+                self.palette.current_name()
+            )));
         }
     }
 
@@ -1803,7 +1821,7 @@ impl Shell {
     /// the name and the four roles [`palette_store::PaletteRow`] carries — so nothing here derives a
     /// shade.
     fn render_palette_rows(&self, theme: &Theme) -> AnyElement {
-        let mut rows = div()
+        let mut cards = div()
             .flex()
             .flex_row()
             .flex_wrap()
@@ -1825,7 +1843,7 @@ impl Shell {
                 );
             }
 
-            rows = rows.child(
+            cards = cards.child(
                 div()
                     .id(crate::reuse::indexed("saved-palette", index))
                     .debug_selector(move || format!("saved-palette-{index}"))
@@ -1846,7 +1864,26 @@ impl Shell {
             );
         }
 
-        rows.into_any_element()
+        // The live-palette line, `MainWindow.xaml:1904`: a `Run` inside the sentence with the name
+        // after it, which is why the cached text is the prefix and the name together rather than two
+        // children. Above the cards because that is where the markup puts it, and the empty string
+        // before the first read paints no line rather than a lone colon.
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(metrics::palette_card::PREVIEW_GAP))
+            .child(
+                div()
+                    .debug_selector(|| String::from("palette-current"))
+                    .text_size(px(metrics::text::CAPTION))
+                    .text_color(theme.dim_text)
+                    .child(match &self.palette_current {
+                        Some(line) => SharedString::clone(line),
+                        None => SharedString::from(""),
+                    }),
+            )
+            .child(cards)
+            .into_any_element()
     }
 
     /// The create box's name row (`MainWindow.xaml:1949-1956`): the caption, then the box.
@@ -9256,6 +9293,44 @@ mod tests {
     /// — `render_palette_rows` says why — but the data on screen is the store's, which is what the
     /// mount had to prove, and the box's text is the draft's `name`, which is what the Add press
     /// reads.
+    /// The live-palette line above the cards names the palette the store says is applied.
+    ///
+    /// `MainWindow.xaml:1904` is a `Run` inside one sentence with the name after it, which is why the
+    /// cached text is the prefix and the name together rather than two children. GPUI exposes no text
+    /// readback, so the assertion is the two halves the paint is made of — the line is in the frame,
+    /// and its source is `PALETTE_CURRENT_PREFIX` plus the store's current name, not the prefix alone.
+    #[gpui::test]
+    fn the_palette_card_names_the_applied_palette(cx: &mut gpui::TestAppContext) {
+        let root = scratch_root();
+        let palettes = root.join("palettes.json");
+
+        let (shell, _handle, mut visual) = shell_in_window(cx, &root);
+        cx.update(|cx| shell.update(cx, |shell, _| shell.set_palette_path(palettes)));
+        cx.update(|cx| shell.update(cx, |shell, cx| shell.select_tab_named("settings", cx)));
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        scroll_into_view(&mut visual, "palette-current");
+        assert!(
+            visual.debug_bounds("palette-current").is_some(),
+            "the line above the cards is in the frame"
+        );
+
+        let expected = cx.read(|cx| {
+            format!(
+                "{}{}",
+                copy::PALETTE_CURRENT_PREFIX,
+                shell.read(cx).palette.current_name()
+            )
+        });
+        assert_eq!(
+            cx.read(|cx| shell.read(cx).palette_current.clone()),
+            Some(SharedString::from(expected)),
+            "the cached text is the prefix and the applied name together"
+        );
+    }
+
     #[gpui::test]
     fn the_palette_card_paints_the_saved_rows_and_the_name_box(cx: &mut gpui::TestAppContext) {
         use gpui::Keystroke;
