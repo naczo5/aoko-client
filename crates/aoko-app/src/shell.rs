@@ -96,6 +96,28 @@ enum PickerTarget {
     Block(String),
 }
 
+/// The attach call behind one accepted target, as a value.
+///
+/// `aoko_platform::inject_bridge` is resolve-then-load: the library named for the target's version
+/// beside the host's own executable, loaded into the target's pid. It is a field rather than a
+/// direct call because `host_executable_dir()` answers with the *test harness's* directory under
+/// `TestAppContext`, where no bridge library exists — so a press test hands in the same call over a
+/// directory it owns, and the resolver, the name and the refusal all stay the platform's.
+/// [`Shell::from_system`] builds the production one; [`Shell::set_inject_bridge`] is the seam.
+///
+/// `version` is the target's detected version, which is the argument
+/// `aoko_platform::bridge_library_path` maps onto `bridge_*.dll`; `None` is the managed fallback to
+/// the legacy bridge. It is `&'static str` rather than a borrow because the only version this
+/// crate can name is [`aoko_platform::normalize_detected_version`]'s answer, which is one of five
+/// canonical labels — so the seam cannot hold a borrow of the window title it was read from.
+pub type InjectBridge = dyn Fn(u32, Option<&'static str>) -> InjectOutcome;
+
+/// What one attach answers: the platform's report, or the error that refused it.
+///
+/// Named so [`InjectBridge`] stays one line — the full paths twice in the return position is what
+/// rustfmt breaks across six, and the seam is one sentence.
+pub type InjectOutcome = Result<aoko_platform::InjectionReport, aoko_platform::PlatformError>;
+
 /// The root view.
 pub struct Shell {
     theme: Theme,
@@ -231,16 +253,16 @@ pub struct Shell {
     /// The loader's state machine: `InjectButton_Click` and the status line it paints
     /// (`MainWindow.xaml.cs:1431-1503`).
     ///
-    /// The *transient* half only — idle, detecting, connecting, and a refusal. Whether injection
-    /// has actually landed is the controller's answer, read on every frame by
-    /// [`InjectionView::resolve`] through [`Shell::injection_view`] and never stored here: a
-    /// second `connected` flag is the defect this branch keeps deleting.
+    /// The *transient* half only — idle, detecting, connecting, a refusal, and an attach the
+    /// platform would not perform. Whether injection has actually landed is the controller's answer,
+    /// read on every frame by [`InjectionView::resolve`] through [`Shell::injection_view`] and never
+    /// stored here: a second `connected` flag is the defect this branch keeps deleting.
     injection: InjectionStatus,
     /// The windows the last detection found, in the platform's own order.
     ///
-    /// Every row here satisfies at least one half of the injection gate, so the panel's list is
-    /// the enumeration filtered by the same rules the press applies — never a title list of its
-    /// own. Empty until the first press.
+    /// Every row here satisfies at least one half of the injection gate and names its owning
+    /// process, so the panel's list is the enumeration filtered by the same rules the press applies
+    /// — never a title list of its own. Empty until the first press.
     injection_targets: Vec<WindowInfo>,
     /// Which of [`Shell::injection_targets`] the press acts on.
     injection_selected: Option<usize>,
@@ -263,6 +285,16 @@ pub struct Shell {
     /// never opens a display connection. [`Shell::set_windows`] is the seam a test drives the
     /// loader through.
     windows: Option<Arc<dyn WindowInspector>>,
+    /// The attach call, [`aoko_platform::inject_bridge`] with the host's directory resolved, or
+    /// `None` in a build with no injector.
+    ///
+    /// Built by [`Shell::from_system`] from the platform's own injector and left `None` under
+    /// `cfg(test)` and `capture`, the same rule [`Shell::windows`] keeps and for a related reason: a
+    /// test harness's executable directory holds no bridge library, and a press in a test must not
+    /// load one into anything. A `None` seam is a press that dials without attaching, which is the
+    /// shape every test built before this seam existed relies on; [`Shell::set_inject_bridge`] is how
+    /// a test supplies its own.
+    inject_bridge: Option<Arc<InjectBridge>>,
     /// The new-config name box's text (`NewConfigNameBox`, `MainWindow.xaml:1552`).
     config_name: String,
     /// Whether the session can hand a folder to the file manager
@@ -407,6 +439,21 @@ impl Shell {
         shell.set_windows(Some(windows));
         shell.loader_visible = true;
 
+        // The attach behind the Inject press, as the platform spells it: resolve the bridge library
+        // named for the target's version beside *this* executable, then load it into the target's
+        // pid. Composing it here rather than in the press is what keeps the library name out of this
+        // crate — `aoko_platform::inject_bridge` owns the version-to-name mapping and
+        // `host_executable_dir` owns where the host ships the file, so a wrong name is fixed there.
+        //
+        // The two calls are the whole seam, in the order that lets a missing file fail before the
+        // injector is touched: `host_executable_dir` first, because it is the OS call that can fail
+        // on its own, then `inject_bridge`, whose `NotFound` names the path it looked for.
+        let injector = services.injector;
+        shell.set_inject_bridge(Some(Arc::new(move |pid, version| {
+            let directory = aoko_platform::host_executable_dir()?;
+            aoko_platform::inject_bridge(injector.as_ref(), pid, version, &directory)
+        })));
+
         // Before the link dials: the `config` frame is built from the controller's profile,
         // and the profile `start` loaded above went into the controller this line replaces.
         // Pushing first means the first frame the bridge sees already carries the saved
@@ -531,6 +578,10 @@ impl Shell {
             injection_selected: None,
             loader_visible: false,
             windows: None,
+            // No injector either: `from_system` is the only session that may load a bridge library,
+            // and a press in a test or a capture therefore dials without attaching. See the field's
+            // own docs.
+            inject_bridge: None,
             // Seeded without reading the file: `from_system` only resolves the path, and `at`
             // touches nothing. The reads are `palettes()`/`resolve()`, the write is
             // `save_draft()`, and no constructor calls any of them — which is what keeps a unit
@@ -1193,6 +1244,18 @@ impl Shell {
         self.windows = windows;
     }
 
+    /// Replaces the attach call, which is the seam a test drives the Inject press's injection
+    /// through.
+    ///
+    /// `None` is what a `cfg(test)` and a `capture` build get: the production call resolves the
+    /// bridge library beside `current_exe`, which under `TestAppContext` is the test harness, so a
+    /// test hands in [`aoko_platform::inject_bridge`] over a directory it owns instead of reaching
+    /// for the filesystem the shipped build reads. Same shape as [`Shell::set_windows`]: a
+    /// caller-supplied dependency the production constructor fills in.
+    pub fn set_inject_bridge(&mut self, inject: Option<Arc<InjectBridge>>) {
+        self.inject_bridge = inject;
+    }
+
     /// Replaces the runtime, which is how a test hands the loader a clock it can advance.
     ///
     /// `Shell::new` builds a headless runtime on the system clock, so nothing else in a unit test
@@ -1226,7 +1289,7 @@ impl Shell {
     #[must_use]
     pub fn injection_view(&self) -> InjectionView {
         InjectionView::resolve(
-            self.injection,
+            &self.injection,
             self.runtime.ingest_status().connected,
             self.runtime.link_failure(),
         )
@@ -1306,25 +1369,52 @@ impl Shell {
         self.attach(index, cx);
     }
 
-    /// Gates one target and starts the attach, or records which rule refused it.
+    /// Gates one target, attaches the bridge, and only then starts the reader.
     ///
-    /// The port's attach is the bridge reader. `aoko_platform` has the native injector managed's
-    /// `InjectAsync` calls — `NativeBridgeInjector::inject(pid, library)` — but nothing in this
-    /// crate resolves a bridge library path, so calling it would mean inventing one. The half that
-    /// does exist is dialling the bridge, and the controller reports when it answers; the
-    /// injector's missing path is reported rather than stubbed with a wrong file name.
+    /// The order is managed's and it is what makes a failure arrive before anything touches the
+    /// game: the gate first, so a window the rules refuse never reaches the injector; then
+    /// [`aoko_platform::inject_bridge`], which resolves the bridge library for the target's version
+    /// beside the host's executable and loads it into its pid; then the dial, because the bridge the
+    /// injector just started is what the reader connects to. A refusal or a failed attach therefore
+    /// leaves the reader untouched — which is the assertion the press's tests make, because a dial
+    /// is the one observable effect [`Shell::dial`] counts.
+    ///
+    /// The version is read off the window's title with the platform's own parser: a `WindowInfo`
+    /// carries a window, not a launcher command line, so the title is the whole of the evidence this
+    /// half has — `aoko_platform::describe_target` reads the same three inputs and normalises the
+    /// title for exactly this case.
     fn attach(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(target) = self.injection_targets.get(index) else {
             return;
         };
 
-        match injection_target_gate(target) {
-            Err(refusal) => self.injection = InjectionStatus::Refused(refusal),
-            Ok(()) => {
-                self.dial();
-                self.injection = InjectionStatus::Connecting;
+        if let Err(refusal) = injection_target_gate(target) {
+            self.injection = InjectionStatus::Refused(refusal);
+            cx.notify();
+            return;
+        }
+
+        // The list holds only windows that name their owner (`target_is_candidate`), so this case is
+        // unreachable rather than a silent press: a window with no pid has nothing to load into.
+        let Some(pid) = target.pid else {
+            return;
+        };
+        let version = aoko_platform::normalize_detected_version(&target.title);
+        let inject = self.inject_bridge.clone();
+
+        if let Some(inject) = inject {
+            if let Err(error) = inject(pid, version) {
+                // A state, not a panic: the platform refused, and its sentence names the path it
+                // looked for. The press stays pressable, so a user who drops the library beside the
+                // executable retries without restarting the host.
+                self.injection = InjectionStatus::Failed(error.user_facing());
+                cx.notify();
+                return;
             }
         }
+
+        self.dial();
+        self.injection = InjectionStatus::Connecting;
         cx.notify();
     }
 
@@ -4630,8 +4720,9 @@ static DIALS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::n
 /// `Connected` is deliberately **not** a variant here: whether injection landed is the
 /// controller's answer, read every frame by [`InjectionView::resolve`], and a variant for it
 /// would be the second copy this branch keeps deleting. What is left is the transient half the
-/// controller has no opinion about — the press's own progress, and the port's refusals.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// controller has no opinion about — the press's own progress, an attach the platform would not
+/// perform, and the port's refusals.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum InjectionStatus {
     /// `Status: Not Injected` — at rest, before any press and after a refused one.
     #[default]
@@ -4646,6 +4737,19 @@ pub enum InjectionStatus {
     /// [`crate::runtime::CONNECT_DEADLINE_MS`]. So `Connecting` is never a state the panel is
     /// stuck in, which is what [`InjectionView::resolve`] paints.
     Connecting,
+    /// The platform would not attach the bridge, so the reader was never started.
+    ///
+    /// Holds the platform's own sentence ([`aoko_platform::PlatformError::user_facing`]), because
+    /// that is what names the library path it looked for: [`aoko_platform::inject_bridge`] resolves
+    /// `bridge_*.dll` beside the host's executable and refuses before the injector is touched, so
+    /// the answer is there before the panel says `Connecting...` and it names the file a user has to
+    /// drop. `String` rather than a `&'static str` rule label is that path, which is why this enum
+    /// is not `Copy`: a refusal is a fixed rule, an attach failure is a place on disk.
+    ///
+    /// It is not the exit `Connecting` has: that one is a dialled attempt nobody answered, this one
+    /// is an attach that never got as far as dialling. Both leave the button pressable, and that is
+    /// the only thing a user can do about either.
+    Failed(String),
     /// A press the platform's rules refused before anything was attempted.
     Refused(Refusal),
 }
@@ -4720,7 +4824,7 @@ impl InjectionView {
     /// *failure* is a resolution and does re-enable — and the test
     /// `a_press_in_flight_is_not_re_enabled_by_a_tick` pins that.
     #[must_use]
-    pub fn resolve(state: InjectionStatus, connected: bool, failure: Option<LinkFailure>) -> Self {
+    pub fn resolve(state: &InjectionStatus, connected: bool, failure: Option<LinkFailure>) -> Self {
         if connected {
             return Self {
                 status: copy::LOADER_STATUS_CONNECTED.to_owned(),
@@ -4752,6 +4856,14 @@ impl InjectionView {
                     false,
                 ),
             },
+            // The attach's own failure, in the same shape as the dial's: the panel's prefix plus
+            // one sentence, and a pressable button. The sentence is the platform's — it names the
+            // library path — which is why nothing is composed here but the prefix.
+            InjectionStatus::Failed(sentence) => (
+                format!("{}{}", copy::LOADER_STATUS_PREFIX, sentence),
+                copy::LOADER_INJECT,
+                true,
+            ),
             InjectionStatus::Refused(refusal) => (
                 format!("{}{}", copy::LOADER_STATUS_PREFIX, refusal.message()),
                 copy::LOADER_INJECT,
@@ -4791,8 +4903,12 @@ fn link_failure_line(failure: LinkFailure) -> String {
 /// window that satisfies *either* half of the injection gate, so every row is a plausible target
 /// and the press can name the half that is missing. A window that satisfies neither is not a
 /// target at all and is not offered.
+///
+/// Neither is a window that names no owning process: the bridge is loaded into a pid, so a row
+/// without one would be a press with nothing to attach to. Dropping it here rather than at the
+/// press is what lets [`Shell::attach`] read the pid as a fact about every row it can see.
 fn target_is_candidate(info: &WindowInfo) -> bool {
-    info.is_jvm() || aoko_platform::is_game_window(info)
+    info.pid.is_some() && (info.is_jvm() || aoko_platform::is_game_window(info))
 }
 
 /// The injection gate over one window: the pair [`crate::runtime::game_is_foreground`] composes
@@ -8879,6 +8995,59 @@ mod tests {
         format!("{}{}", copy::LOADER_STATUS_PREFIX, sentence)
     }
 
+    /// An injector that records what it was asked to load and loads nothing.
+    ///
+    /// The platform's `inject_bridge` is resolve-then-load, so a press whose library is on disk
+    /// reaches `inject`. Recording the pid together with the resolved path is what proves both
+    /// halves arrived: the target's owner, and the name the version selected.
+    #[derive(Default)]
+    struct RecordingInjector {
+        seen: std::sync::Mutex<Vec<(u32, std::path::PathBuf)>>,
+    }
+
+    impl RecordingInjector {
+        fn calls(&self) -> Vec<(u32, std::path::PathBuf)> {
+            self.seen.lock().expect("lock").clone()
+        }
+    }
+
+    impl aoko_platform::NativeBridgeInjector for RecordingInjector {
+        fn inject(
+            &self,
+            pid: u32,
+            library: &std::path::Path,
+        ) -> Result<aoko_platform::InjectionReport, aoko_platform::PlatformError> {
+            self.seen
+                .lock()
+                .expect("lock")
+                .push((pid, library.to_path_buf()));
+            Ok(aoko_platform::InjectionReport {
+                pid,
+                library: library.display().to_string(),
+                remote_base: None,
+            })
+        }
+
+        fn support(&self) -> aoko_platform::BridgeSupport {
+            aoko_platform::BridgeSupport::Supported
+        }
+    }
+
+    /// The production attach over a directory the test owns, and an injector it can read.
+    ///
+    /// `Shell::from_system` composes `host_executable_dir()` with `inject_bridge`, and the first of
+    /// those answers with the *test harness's* directory — no place a bridge library is ever going
+    /// to be. The directory is therefore the seam, and `inject_bridge` itself is the call the press
+    /// makes: the resolution, the name and the refusal stay the platform's.
+    fn attach_over(
+        directory: std::path::PathBuf,
+        injector: Arc<RecordingInjector>,
+    ) -> Arc<InjectBridge> {
+        Arc::new(move |pid, version| {
+            aoko_platform::inject_bridge(injector.as_ref(), pid, version, &directory)
+        })
+    }
+
     /// A shell with no window surface still names a status; it just cannot reach a target.
     ///
     /// This is the shipped shape of a test or capture build (`cfg(test)`, `cfg(feature =
@@ -9119,6 +9288,190 @@ mod tests {
         assert_eq!(dials(), before);
     }
 
+    /// The attach's failure is a state the panel can act on, not a press that does nothing.
+    ///
+    /// `inject_bridge` refuses before the injector is touched, and its `NotFound` names the full
+    /// path it looked for — which is the line a user acts on, because the fix is to drop the library
+    /// there. The dial is the proof that the attach failed *first*: a press that failed has not
+    /// started the reader, and the button is pressable so the retry is real.
+    #[gpui::test]
+    fn a_press_with_no_bridge_library_names_the_path_it_looked_for(cx: &mut gpui::TestAppContext) {
+        // A directory this test owns and never fills, so the resolution is the platform's own call
+        // over a directory with nothing in it.
+        let empty = scratch_root();
+        let expected = aoko_platform::bridge_library_path(Some("1.8.9"), &empty);
+        let refusal = aoko_platform::inject_bridge(
+            &RecordingInjector::default(),
+            4242,
+            Some("1.8.9"),
+            &empty,
+        )
+        .expect_err("no library is on disk");
+
+        let injector = Arc::new(RecordingInjector::default());
+        let seam = attach_over(empty, injector.clone());
+        let handle = cx.update(|cx| {
+            cx.new(move |_| {
+                let mut shell = Shell::new(Theme::slate());
+                shell.set_windows(Some(window_surface(vec![game_window()])));
+                shell.set_inject_bridge(Some(seam));
+                shell
+            })
+        });
+
+        let before = dials();
+        cx.update(|cx| handle.update(cx, |shell, cx| shell.inject(cx)));
+
+        let view = cx.read(|cx| handle.read(cx).injection_view());
+        assert_eq!(
+            view.status,
+            format!("{}{}", copy::LOADER_STATUS_PREFIX, refusal.user_facing()),
+            "the panel paints the platform's sentence, which is the one that names the path"
+        );
+        let expected_path = expected.display().to_string();
+        assert!(
+            view.status.contains(expected_path.as_str()),
+            "and that path is the library the target's version selected: {}",
+            view.status
+        );
+        assert_eq!(view.button, copy::LOADER_INJECT, "the press is the retry");
+        assert!(
+            view.enabled,
+            "a missing library is a state to fix, not a dead end"
+        );
+        assert!(!view.accent, "the accent line is the connected one");
+        assert_eq!(
+            dials(),
+            before,
+            "the attach failed before the reader was started"
+        );
+        assert!(
+            injector.calls().is_empty(),
+            "and the injector was never touched"
+        );
+    }
+
+    /// A library that is on disk reaches the injector, and only then does the reader dial.
+    #[gpui::test]
+    fn a_press_with_the_library_on_disk_reaches_the_injector(cx: &mut gpui::TestAppContext) {
+        let directory = scratch_root();
+        let library = aoko_platform::bridge_library_path(Some("1.8.9"), &directory);
+        std::fs::write(&library, b"not a real library").expect("write the bridge");
+
+        let injector = Arc::new(RecordingInjector::default());
+        let seam = attach_over(directory, injector.clone());
+        let handle = cx.update(|cx| {
+            cx.new(move |_| {
+                let mut shell = Shell::new(Theme::slate());
+                shell.set_windows(Some(window_surface(vec![game_window()])));
+                shell.set_inject_bridge(Some(seam));
+                shell
+            })
+        });
+
+        let before = dials();
+        cx.update(|cx| handle.update(cx, |shell, cx| shell.inject(cx)));
+
+        assert_eq!(
+            injector.calls(),
+            vec![(4242, library)],
+            "the injector was asked for the resolved path and the target's own pid"
+        );
+        let view = cx.read(|cx| handle.read(cx).injection_view());
+        assert_eq!(
+            view.status,
+            copy::LOADER_STATUS_CONNECTING,
+            "the attach succeeded, so the reader owns the panel"
+        );
+        assert!(!view.enabled, "and the press waits on the link");
+        assert_eq!(
+            dials(),
+            before + 1,
+            "the dial follows the attach; it does not replace it"
+        );
+    }
+
+    /// The library name follows the target, and the mapping stays the platform's.
+    ///
+    /// Two titles, two names: `1.8.9` is the legacy `bridge.dll` and `26.3` is `bridge_261.dll`. A
+    /// shell that joined a file name of its own would pass with one version and fail here, which is
+    /// why the expectation is written out as the name and then resolved by the platform's own
+    /// function rather than spelled twice.
+    #[gpui::test]
+    fn the_library_name_follows_the_targets_detected_version(cx: &mut gpui::TestAppContext) {
+        let directory = scratch_root();
+        let cases = [
+            ("Minecraft 1.8.9", "1.8.9", "bridge.dll"),
+            ("Minecraft 26.3", "26.3", "bridge_261.dll"),
+        ];
+        for (_, version, name) in cases {
+            std::fs::write(directory.join(name), b"not a real library").expect("write the bridge");
+            assert_eq!(
+                aoko_platform::bridge_library_path(Some(version), &directory)
+                    .file_name()
+                    .and_then(|name| name.to_str()),
+                Some(name),
+                "{version} is the name the platform maps it to"
+            );
+        }
+
+        for (title, version, _) in cases {
+            let injector = Arc::new(RecordingInjector::default());
+            let seam = attach_over(directory.clone(), injector.clone());
+            let handle = cx.update(|cx| {
+                cx.new(move |_| {
+                    let mut shell = Shell::new(Theme::slate());
+                    shell.set_windows(Some(window_surface(vec![window(title, "javaw.exe")])));
+                    shell.set_inject_bridge(Some(seam));
+                    shell
+                })
+            });
+            cx.update(|cx| handle.update(cx, |shell, cx| shell.inject(cx)));
+
+            assert_eq!(
+                injector.calls(),
+                vec![(
+                    4242,
+                    aoko_platform::bridge_library_path(Some(version), &directory)
+                )],
+                "{title} selects the library its version names"
+            );
+        }
+    }
+
+    /// A window with no owning process is not offered, because there is nothing to load into.
+    ///
+    /// [`Shell::attach`] reads the pid as a fact about every row it can see, and this is the filter
+    /// that makes it one: an enumeration whose only client names no process is an empty list, and an
+    /// empty list is a refusal the panel already has words for.
+    #[gpui::test]
+    fn a_window_without_an_owning_process_is_not_offered(cx: &mut gpui::TestAppContext) {
+        let mut ownerless = game_window();
+        ownerless.pid = None;
+        let handle = cx.update(|cx| {
+            cx.new(|_| {
+                let mut shell = Shell::new(Theme::slate());
+                shell.set_windows(Some(window_surface(vec![ownerless])));
+                shell
+            })
+        });
+
+        let before = dials();
+        cx.update(|cx| handle.update(cx, |shell, cx| shell.inject(cx)));
+
+        let (view, targets) = cx.read(|cx| {
+            let shell = handle.read(cx);
+            (shell.injection_view(), shell.injection_targets().len())
+        });
+        assert_eq!(
+            targets, 0,
+            "a window the bridge cannot be loaded into is not a target"
+        );
+        assert_eq!(view.status, refusal_line(Refusal::NoWindow));
+        assert!(view.enabled, "an empty list is a state to retry from");
+        assert_eq!(dials(), before, "and nothing dialled");
+    }
+
     /// `UpdateGameStateUI`'s re-enable wart is not ported: a press in flight stays disabled.
     ///
     /// Managed re-enabled the button on any tick where the bridge was disconnected and the client
@@ -9131,17 +9484,17 @@ mod tests {
     fn a_press_in_flight_is_not_re_enabled_by_a_tick() {
         for state in [InjectionStatus::Detecting, InjectionStatus::Connecting] {
             assert!(
-                !InjectionView::resolve(state, false, None).enabled,
+                !InjectionView::resolve(&state, false, None).enabled,
                 "{state:?} is in flight and must not be pressable"
             );
         }
 
         assert!(
-            InjectionView::resolve(InjectionStatus::NotInjected, false, None).enabled,
+            InjectionView::resolve(&InjectionStatus::NotInjected, false, None).enabled,
             "and an idle panel is pressable, or the wart would have been ported too far"
         );
         assert!(
-            !InjectionView::resolve(InjectionStatus::Detecting, true, None).enabled,
+            !InjectionView::resolve(&InjectionStatus::Detecting, true, None).enabled,
             "a connected link wins over the machine, whichever state it left behind"
         );
     }
@@ -9290,12 +9643,19 @@ mod tests {
         use std::collections::BTreeSet;
 
         let lines = [
-            InjectionView::resolve(InjectionStatus::NotInjected, false, None).status,
-            InjectionView::resolve(InjectionStatus::Detecting, false, None).status,
-            InjectionView::resolve(InjectionStatus::Connecting, false, None).status,
-            InjectionView::resolve(InjectionStatus::Refused(Refusal::NoWindow), false, None).status,
+            InjectionView::resolve(&InjectionStatus::NotInjected, false, None).status,
+            InjectionView::resolve(&InjectionStatus::Detecting, false, None).status,
+            InjectionView::resolve(&InjectionStatus::Connecting, false, None).status,
+            InjectionView::resolve(&InjectionStatus::Refused(Refusal::NoWindow), false, None)
+                .status,
             InjectionView::resolve(
-                InjectionStatus::Connecting,
+                &InjectionStatus::Failed("bridge library not found at /nowhere".to_owned()),
+                false,
+                None,
+            )
+            .status,
+            InjectionView::resolve(
+                &InjectionStatus::Connecting,
                 false,
                 Some(LinkFailure::ConnectFailed {
                     port: aoko_protocol::BRIDGE_PORT,
@@ -9303,7 +9663,7 @@ mod tests {
             )
             .status,
             InjectionView::resolve(
-                InjectionStatus::Connecting,
+                &InjectionStatus::Connecting,
                 false,
                 Some(LinkFailure::Disconnected),
             )
@@ -9318,16 +9678,24 @@ mod tests {
         );
         assert_eq!(
             lines[4],
+            format!(
+                "{}bridge library not found at /nowhere",
+                copy::LOADER_STATUS_PREFIX
+            ),
+            "an attach failure is the panel's prefix plus the platform's sentence"
+        );
+        assert_eq!(
+            lines[5],
             failure_line(LinkFailure::ConnectFailed {
                 port: aoko_protocol::BRIDGE_PORT
             })
         );
         assert!(
-            !lines[4].contains("{port}"),
+            !lines[5].contains("{port}"),
             "the template's placeholder is filled, not painted: {}",
-            lines[4]
+            lines[5]
         );
-        assert_eq!(lines[5], failure_line(LinkFailure::Disconnected));
+        assert_eq!(lines[6], failure_line(LinkFailure::Disconnected));
     }
 
     /// The connected line is the controller's answer, not a state the panel stores.
