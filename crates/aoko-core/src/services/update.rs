@@ -14,11 +14,11 @@
 //! WinHTTP bindings written against the `windows` crate blind, and both are new, unverifiable
 //! defence surface added for a version banner. So the port stays whole: the tag rules, the
 //! ordering and the trait are exercised below, and the shipped surface paints only what a real
-//! event produces — the running version, and no status line, because no check runs. That leaves
-//! `views/copy.rs`'s `UPDATE_STATUS_*` sentences with no reader here until something can fetch,
-//! and it leaves the release link unreachable for a second reason: `aoko_platform`'s only
-//! launcher is `open_path`, which is path-typed and refuses anything not on disk, so a URL cannot
-//! pass through it. Either mechanism is a platform-layer commit, not a shell one.
+//! event produces — the running version, and no status line, because no check runs. The four
+//! `SetUpdateStatus` sentences that would have said otherwise were deleted rather than kept
+//! readerless (`16d1030`), and the outcome the check existed for survives on its own: the rail's
+//! version line opens the releases page through `aoko_platform::open_url` (`705e936`), which landed
+//! as the platform-layer commit this note used to say was missing.
 //!
 //! Behaviour being preserved:
 //!
