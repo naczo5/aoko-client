@@ -1335,6 +1335,47 @@ pub const SEARCH_QUERY_HINT: &str = "Type to filter. Up and down move the select
 /// where that sentence lived.
 pub const SEARCH_CLOSE_TOOLTIP: &str = "Close (Esc)";
 
+// ── The update button ───────────────────────────────────────────────────────────
+//
+// The rail's `UpdateStatusButton` (`MainWindow.xaml:260-285`) paints two lines that
+// `SetUpdateStatus` (`MainWindow.xaml.cs:1935-1941`) rewrites on every check: a status on top and
+// a version line under it. `CheckForUpdatesAsync` (`:1898-1928`) is the only writer, and it has
+// four states — checking, a newer release, already current, and the check failing — so the pairs
+// below are every combination it can draw. There is no painted release URL: the URL is handed to
+// `Process.Start` (`:1885`) and never reaches a `TextBlock`; what the user sees is the
+// `click to view` half of the version line, which says the press will open it.
+//
+// `{version}` is filled with `str::replace`, like the other templates here, because this copy is
+// data and `format!` needs a literal format string.
+
+/// The button's tooltip, `MainWindow.xaml:270`.
+pub const UPDATE_TOOLTIP: &str = "Check for a newer aoko release";
+
+/// The status line while the check runs — the markup's default text (`:272`) and the first thing
+/// `CheckForUpdatesAsync` sets (`:1907`).
+pub const UPDATE_STATUS_CHECKING: &str = "Checking for updates...";
+
+/// The status line when a newer release exists, `MainWindow.xaml.cs:1912`, with
+/// `UpdateCheckResult.LatestVersion` in the `{version}` slot.
+pub const UPDATE_STATUS_AVAILABLE: &str = "Update v{version} available";
+
+/// The status line when the running build is the newest, `MainWindow.xaml.cs:1915`.
+pub const UPDATE_STATUS_UP_TO_DATE: &str = "Up to date";
+
+/// The status line when the check failed, `MainWindow.xaml.cs:1924` — the catch arm, which logged
+/// the reason and told the user only that the check was unavailable.
+pub const UPDATE_STATUS_UNAVAILABLE: &str = "Update check unavailable";
+
+/// The version line under a status that offers no press, `MainWindow.xaml.cs:1907` and `:1915` —
+/// the checking and up-to-date states.
+pub const UPDATE_CURRENT: &str = "Current v{version}";
+
+/// The version line when the press opens the release page, `MainWindow.xaml.cs:1912`.
+pub const UPDATE_CURRENT_VIEW: &str = "Current v{version} \u{2022} click to view";
+
+/// The version line when the press retries the check, `MainWindow.xaml.cs:1924`.
+pub const UPDATE_CURRENT_RETRY: &str = "Current v{version} \u{2022} click to retry";
+
 /// A title with no managed source, kept flagged rather than deleted.
 ///
 /// `MainWindow.xaml` contains no "Aoko" text: the window is titled `aoko client` (`:7`) and
