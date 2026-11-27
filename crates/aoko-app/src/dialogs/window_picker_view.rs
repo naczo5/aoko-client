@@ -235,6 +235,10 @@ impl Render for WindowPickerView {
                     "window-picker-version",
                     &theme,
                     SharedString::from(version),
+                    // The wrapper above already carries the selector, so naming the
+                    // component's own bounds would give the test two handles on one
+                    // control.
+                    None,
                     move |_, _, cx| {
                         handle.update(cx, |view, cx| {
                             let next = (view.state.version_index() + 1) % VERSION_CHOICES.len();
