@@ -13,9 +13,10 @@
 //!   `Clicker` property changed. `armed` is one of these: the managed `Clicker.IsArmed` is
 //!   this port's `LeftClick` switch. The frame used to send the profile's saved boolean here,
 //!   which meant a module the user switched on told the bridge it was off. The set is written
-//!   back into the profile by [`set_switch`] on save and nowhere else — the managed save sites
-//!   rebuilt the profile from the `Clicker` (`MainWindow.xaml.cs:956-958`), so a module left
-//!   on survived a restart;
+//!   back into the profile by [`set_switch`] on save, and read back out of it when a profile is
+//!   adopted, and nowhere else — the managed save sites rebuilt the profile from the `Clicker`
+//!   (`MainWindow.xaml.cs:956-958`), so a module left on survived a restart. The profile's
+//!   `*_enabled` fields are that saved copy, never a second source for the frame;
 //! * everything else comes from the profile, including the sub-settings a module owns
 //!   (`pixelPartyAutoLook`, `nametagHideVanilla`, `left`, ...).
 //!
@@ -182,7 +183,8 @@ pub(crate) fn set_switch(profile: &mut Profile, flag: EnabledFlag, on: bool) {
 /// The read half of the apply step: `AppController` seeds its set from here when a profile is
 /// built or adopted, and [`set_switch`] is the only writer that runs the other way — on save
 /// (`AppController::profile_for_save`), so a module the user switched on is the module the file
-/// keeps. Between a save and the next load the set is the only truth.
+/// keeps. Between a save and the next load the set is the only truth, which is why the frame
+/// reads the set and not these fields.
 ///
 /// A profile that does not serialise yields no switches rather than a panic — the caller then
 /// reports every module as off, which is the truth about an app that failed to read its own
@@ -212,6 +214,12 @@ pub(crate) fn profile_switches(profile: &Profile) -> Vec<EnabledFlag> {
 /// and a save, which copies it back into the profile it is saved from
 /// (`AppController::profile_for_save`) — so nothing else can move a module behind the frame's
 /// back.
+///
+/// The profile's `*_enabled` fields are **not** a second source for the module keys: they are
+/// the saved copy of the set. A save writes them from the set, an adopted profile seeds the set
+/// from them ([`profile_switches`]), and between those two moments the frame neither reads them
+/// nor writes them. A test that flipped `Profile::fight_status_enabled` and expected
+/// `fightStatus` to move was describing the mapping this one replaced.
 pub(crate) fn payload(
     profile: &Profile,
     modules: &[EnabledFlag],

@@ -362,23 +362,28 @@ impl AppController {
         self.profile.read().clone()
     }
 
-    /// The profile as it should be saved: the settings the user last wrote, with every module
-    /// switch copied into the field that stores it.
+    /// `working` with every module switch copied into the field that stores it, ready to save.
     ///
-    /// A save is the only place the switch set flows back into the profile, and it is what the
-    /// managed save sites did: each of them rebuilt the profile from the live clicker
+    /// `working` is the caller's copy, not this controller's. The app owns the profile it is
+    /// editing — settings pending a push, a just-loaded palette — and a save has to write those,
+    /// while the switches are this controller's and a press never touches the profile. Taking
+    /// the caller's copy is what keeps one writer of the profile (the shell) and one writer of
+    /// the switches (here), instead of two views of the same state.
+    ///
+    /// A save is the only place the switch set flows back into a profile, and it is what the
+    /// managed save sites did: each rebuilt the profile from the live clicker
     /// (`ProfileManager.CreateFromClicker()` then `SaveProfile(...)`,
     /// `MainWindow.xaml.cs:956-958`, `:1386-1388`, `:1414`, `:1867-1869`) instead of writing a
     /// copy the buttons never touched. Without it a module switched on and then quit came back
-    /// off, because the shell saves its own profile and a press writes only the set.
+    /// off, because a press writes only the set.
     ///
     /// One table drives the copy (`crate::config_map::SWITCH_PROFILE_KEYS`), so a switch added
     /// there needs no second edit here. `isArmed` is in that table, so the left clicker follows
     /// the same rule as every other module.
     #[must_use]
-    pub fn profile_for_save(&self) -> Profile {
+    pub fn profile_for_save(&self, working: &Profile) -> Profile {
         let modules = self.modules.read();
-        let mut profile = self.profile.read().clone();
+        let mut profile = working.clone();
         for (flag, _) in crate::config_map::SWITCH_PROFILE_KEYS {
             crate::config_map::set_switch(&mut profile, flag, modules.contains(&flag));
         }
@@ -1075,10 +1080,12 @@ mod tests {
     /// what runs, and the file has to keep what runs. The managed save sites rebuilt the
     /// profile from the `Clicker` for this reason.
     ///
-    /// The property, not the shape: a profile that disagrees with the switches must come back
-    /// agreeing with them, through the file's own format and back.
+    /// The property, not the shape, and it has two halves: a profile that disagrees with the
+    /// switches must come back agreeing with them, and the caller's copy must win over the
+    /// controller's — the shell holds edits the controller has not seen, and a save that read
+    /// the controller's copy would write the settings the user just changed away.
     #[test]
-    fn saving_writes_the_live_switches_into_the_profile() {
+    fn saving_writes_the_live_switches_into_the_working_profile() {
         // The stored profile says the opposite of the switches below: armed and aim assist
         // off, fight status on.
         let mut stored = Profile::default();
@@ -1097,12 +1104,21 @@ mod tests {
         assert!(app.set_module_enabled(EnabledFlag::AimAssist, true));
         assert!(app.set_module_enabled(EnabledFlag::FightStatus, false));
 
-        let saved = app.profile_for_save();
+        // The caller's copy, carrying an edit the controller has not been told about. A save
+        // that cloned the controller's profile instead would write the old theme back.
+        let mut working = app.profile();
+        working.gui_theme = "Ember".to_owned();
+
+        let saved = app.profile_for_save(&working);
         assert!(saved.is_armed, "the left clicker was on when the save ran");
         assert!(saved.aim_assist_enabled, "and so was aim assist");
         assert!(
             !saved.fight_status_enabled,
             "fight status was switched off before the save"
+        );
+        assert_eq!(
+            saved.gui_theme, "Ember",
+            "the working copy is what a save writes, not the controller's copy"
         );
 
         let reloaded = load_profile_from_json(&to_profile_json(&saved))
@@ -1115,9 +1131,9 @@ mod tests {
             vec![EnabledFlag::LeftClick, EnabledFlag::AimAssist],
             "every switch the table carries is the switch the file keeps"
         );
-        // The rest of the profile is the user's settings, untouched by the save.
-        assert_eq!(reloaded.min_cps, app.profile().min_cps);
-        assert_eq!(reloaded.gui_theme, app.profile().gui_theme);
+        // The rest of the profile is the user's settings, untouched by the overlay.
+        assert_eq!(reloaded.min_cps, working.min_cps);
+        assert_eq!(reloaded.gui_theme, "Ember");
     }
 
     /// `reloadMappingsNonce` is how "Reload Mappings" reaches the bridge: the host bumps a
