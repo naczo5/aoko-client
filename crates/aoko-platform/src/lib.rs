@@ -11,6 +11,7 @@
 use std::fmt;
 use std::path::Path;
 
+mod bridge;
 mod capabilities;
 mod discord;
 mod error;
@@ -33,6 +34,7 @@ mod windows;
 #[cfg(target_os = "linux")]
 mod linux;
 
+pub use bridge::{bridge_library_path, host_executable_dir, inject_bridge, resolve_bridge_library};
 pub use capabilities::{BridgeSupport, CapabilityReport, SessionKind};
 pub use discord::{
     handshake_payload, op, read_frame_from, write_frame_to, DiscordFrame, DiscordRpcTransport,
@@ -101,7 +103,13 @@ pub const fn compiled_platform() -> Platform {
 /// On Windows this is `LoadLibrary` inside the target PID, matching
 /// `Aoko/Core/NativeInjector.cs`. On Linux there is no bridge yet, so the
 /// implementation must report [`BridgeSupport::UnsupportedOnLinuxYet`] instead
-/// of failing at call time.
+/// of failing at call time, and its `inject` answers
+/// [`PlatformError::Unsupported`] rather than a panic.
+///
+/// `library` comes from [`bridge_library_path`], which maps the detected game
+/// version onto the name the managed build shipped beside its executable.
+/// [`inject_bridge`] is the two together - resolve, then attach - and is what a
+/// shell should call, so a name that is not on disk cannot reach this method.
 pub trait NativeBridgeInjector: Send + Sync {
     /// Attaches and loads `library` into `pid`.
     fn inject(&self, pid: u32, library: &Path) -> Result<InjectionReport, PlatformError>;
