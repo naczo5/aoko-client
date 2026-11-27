@@ -68,10 +68,11 @@ use crate::views::copy as card_copy;
 
 /// The tab's copy that the tracker does not supply, verbatim from the markup.
 ///
-/// The three captions, "No samples yet" and "Reset Stats" are also in
-/// [`card_copy::STATS`] as `Note`s and a `Button`; the drift test below asserts these
-/// spellings equal those, so the table stays the single source and this module is the
-/// view's reading of it.
+/// The three captions and "No samples yet" are also in [`card_copy::STATS`] as `Note`s; the
+/// drift test below asserts these spellings equal those, so the table stays the single source
+/// and this module is the view's reading of it. The reset button's label is not here at all:
+/// it is [`card_copy::STATS_RESET_LABEL`], which the table's `Button` and this view both read,
+/// so there is nothing left to drift.
 pub mod copy {
     /// `MainWindow.xaml:1444`.
     pub const PLAYTIME: &str = "Playtime";
@@ -79,8 +80,6 @@ pub mod copy {
     pub const CLICKS: &str = "Clicks";
     /// `:1459`.
     pub const AVERAGE: &str = "Avg CPS";
-    /// `:1466`.
-    pub const RESET: &str = "Reset Stats";
     /// `:1501`.
     pub const EMPTY: &str = "No samples yet";
 }
@@ -266,7 +265,7 @@ fn reset_button(
             "stats-reset",
             theme,
             ButtonVariant::Dark,
-            copy::RESET,
+            card_copy::STATS_RESET_LABEL,
             None,
             Some(metrics::stats::RESET_HEIGHT),
             on_reset,
@@ -476,6 +475,9 @@ mod tests {
             Some("CPS Distribution"),
             "the heading is the table's, so the view must read it there"
         );
+        // The action row is the one card this view paints from the table's own control: the
+        // label is a constant the table and the painter share, so the assertion is that the
+        // card still carries it rather than that two spellings agree.
         let reset = card_copy::STATS
             .iter()
             .find(|card| card.id == "StatsActionsCard")
@@ -484,7 +486,7 @@ mod tests {
                 card_copy::Control::Button { label, .. } => Some(*label),
                 _ => None,
             });
-        assert_eq!(reset, Some(copy::RESET));
+        assert_eq!(reset, Some(card_copy::STATS_RESET_LABEL));
     }
 
     #[test]

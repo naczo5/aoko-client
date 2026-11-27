@@ -1082,6 +1082,16 @@ pub const MODULE_LIST_PREVIEW_NAME: &str = "Autoclicker";
 /// The live sample row in the markup.
 pub const MODULE_LIST_PREVIEW_SAMPLE: &str = "autoclicker 12-16";
 
+/// The Stats action row's button, `MainWindow.xaml:1466-1467` — the label managed painted and
+/// `views::stats_view` paints.
+///
+/// A constant rather than a literal in the table's [`Control::Button`] because the table is not
+/// the only reader: the Stats tab is a view (`views::stats_view`), so the row's label is read
+/// from here by both the card data and the painter. The two spellings this replaces — the
+/// table's and `stats_view::copy::RESET` — were guarded by a drift test; one constant cannot
+/// drift.
+pub const STATS_RESET_LABEL: &str = "Reset Stats";
+
 /// Stats, `MainWindow.xaml:1438-1521`.
 pub const STATS: &[Card] = &[
     Card {
@@ -1099,7 +1109,7 @@ pub const STATS: &[Card] = &[
     Card {
         id: "StatsActionsCard",
         controls: &[Button {
-            label: "Reset Stats",
+            label: STATS_RESET_LABEL,
             tooltip: "",
         }],
     },
