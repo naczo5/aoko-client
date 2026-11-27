@@ -759,6 +759,33 @@ static void ParseConfig(const std::string& line) {
     }
 }
 
+// JSON has no NaN or Infinity literal, so one such value makes the whole line
+// unparsable and the host drops every state line until it goes away. A NaN
+// coordinate happens (a bad velocity packet, a broken plugin, a teleport
+// mid-move), so a value that cannot be written is published as the neutral one
+// instead of taking the session's telemetry down with it.
+static double JsonFiniteNumber(double value, double fallback) {
+    return std::isfinite(value) ? value : fallback;
+}
+
+// Escapes the five characters a JSON string cannot carry raw. A literal LF or CR
+// is the one that costs a session: it ends the frame early inside the host's line
+// reader, so the two halves are both unparsable documents and the state update is
+// lost - and a plugin can put anything in an action bar. `JsonEscape` in the legacy
+// bridge covers the same set.
+static void AppendJsonEscapedString(std::string& out, const std::string& value) {
+    for (char c : value) {
+        switch (c) {
+        case '"':  out += "\\\""; break;
+        case '\\': out += "\\\\"; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        default:   out += c; break;
+        }
+    }
+}
+
 // Returns 1 when the complete line is queued, 0 when the caller should retry
 // after backpressure, and -1 for a terminal socket failure.
 static int TrySendCapabilities(SOCKET sock, bool newConnection) {
@@ -21207,6 +21234,14 @@ BOOL WINAPI hwglSwapBuffers(HDC hDc) {
             logged = true;
             Log("AOKO_BRIDGE261_NO_OVERLAY set; overlay rendering disabled.");
         }
+        // The overlay is off, so nothing below runs - but the viewport the state
+        // line publishes is this window, and the panel is the only place it comes
+        // from. Without this the published viewport stays at the 1920x1080 fallback
+        // and aim assist projects into the wrong space for the whole session.
+        if (hDc) {
+            HWND viewportWindow = WindowFromDC(hDc);
+            if (viewportWindow && IsWindow(viewportWindow)) g_hwnd = viewportWindow;
+        }
         return o_wglSwapBuffers(hDc);
     }
     TRACE261_PATH("enter");
@@ -21535,9 +21570,20 @@ glfw_done:;
     // setSession() writes into the game, so it must not be reachable from the LAN.
     // The loader always connects to 127.0.0.1:25590.
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK); addr.sin_port = htons(25590);
-    bind(srv, (sockaddr*)&addr, sizeof(addr));
-    listen(srv, 1);
-    Log("TCP server listening on 127.0.0.1:25590.");
+    // The port is a single resource: a second client that injects while the first
+    // one still holds 25590 gets WSAEADDRINUSE here and never becomes reachable.
+    // Report that once, by name, instead of leaving a silent bridge whose HUD never
+    // appears - the log is the only evidence a user can send us.
+    const int bindResult = bind(srv, (sockaddr*)&addr, sizeof(addr));
+    const int listenResult = (bindResult == SOCKET_ERROR) ? SOCKET_ERROR : listen(srv, 1);
+    if (bindResult == SOCKET_ERROR) {
+        Log("ERROR: bind 127.0.0.1:25590 failed, err=" + std::to_string(WSAGetLastError())
+            + ". Another process already owns the bridge port; this client cannot be reached.");
+    } else if (listenResult == SOCKET_ERROR) {
+        Log("ERROR: listen 127.0.0.1:25590 failed, err=" + std::to_string(WSAGetLastError()));
+    } else {
+        Log("TCP server listening on 127.0.0.1:25590.");
+    }
 
     setlocale(LC_NUMERIC, "C");
 
@@ -21671,11 +21717,11 @@ glfw_done:;
                 killAuraReasonEsc.clear();
                 if (sendFullState) {
                     snEsc.reserve(sn.size() + 8);
-                    for (char c : sn) { if (c == '"' || c == '\\') snEsc += '\\'; snEsc += c; }
+                    AppendJsonEscapedString(snEsc, sn);
                     actionEsc.reserve(actionBar.size() + 8);
-                    for (char c : actionBar) { if (c == '"' || c == '\\') actionEsc += '\\'; actionEsc += c; }
+                    AppendJsonEscapedString(actionEsc, actionBar);
                     killAuraReasonEsc.reserve(killAuraUnavailableReason.size() + 8);
-                    for (char c : killAuraUnavailableReason) { if (c == '"' || c == '\\') killAuraReasonEsc += '\\'; killAuraReasonEsc += c; }
+                    AppendJsonEscapedString(killAuraReasonEsc, killAuraUnavailableReason);
                 }
 
                 const bool includeEntities = sendFullState || includeFastEntities;
@@ -21713,14 +21759,24 @@ glfw_done:;
                     state += actionEsc;
                     state += "\",\"health\":";
                     char healthBuf[32];
-                    snprintf(healthBuf, sizeof(healthBuf), "%.1f", healthVal);
+                    snprintf(healthBuf, sizeof(healthBuf), "%.1f",
+                             JsonFiniteNumber(healthVal, 20.0));
                     state += healthBuf;
                     char posBuf[96];
+                    // A camera frame that has not been polled yet holds zeroes, and a
+                    // world change clears it again: a zero FOV is not a usable FOV, so
+                    // publish the game default until the real one arrives.
+                    const double publishedFov = camState.fov > 0.0f
+                        ? JsonFiniteNumber(camState.fov, 70.0)
+                        : 70.0;
                     snprintf(posBuf, sizeof(posBuf), ",\"posX\":%.3f,\"posY\":%.3f,\"posZ\":%.3f,\"pitch\":%.2f",
-                             camState.camX, camState.camY, camState.camZ, camState.pitch);
+                             JsonFiniteNumber(camState.camX, 0.0),
+                             JsonFiniteNumber(camState.camY, 0.0),
+                             JsonFiniteNumber(camState.camZ, 0.0),
+                             JsonFiniteNumber(camState.pitch, 0.0));
                     state += posBuf;
                     char fovBuf[32];
-                    snprintf(fovBuf, sizeof(fovBuf), "%.2f", camState.fov);
+                    snprintf(fovBuf, sizeof(fovBuf), "%.2f", publishedFov);
                     state += ",\"fov\":";
                     state += fovBuf;
                     state += ",\"viewportWidth\":";
@@ -21750,11 +21806,13 @@ glfw_done:;
                 state += ",\"stateMs\":";
                 state += stateMsBuf;
                 char attackCooldownBuf[32];
-                snprintf(attackCooldownBuf, sizeof(attackCooldownBuf), "%.3f", attackCooldown);
+                snprintf(attackCooldownBuf, sizeof(attackCooldownBuf), "%.3f",
+                         JsonFiniteNumber(attackCooldown, 1.0));
                 state += ",\"attackCooldown\":";
                 state += attackCooldownBuf;
                 char attackCooldownPerTickBuf[32];
-                snprintf(attackCooldownPerTickBuf, sizeof(attackCooldownPerTickBuf), "%.3f", attackCooldownPerTick);
+                snprintf(attackCooldownPerTickBuf, sizeof(attackCooldownPerTickBuf), "%.3f",
+                         JsonFiniteNumber(attackCooldownPerTick, 0.08));
                 state += ",\"attackCooldownPerTick\":";
                 state += attackCooldownPerTickBuf;
                 if (sendFullState) {

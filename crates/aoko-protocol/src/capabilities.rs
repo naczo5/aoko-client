@@ -7,9 +7,17 @@
 //!
 //! Two rules are load-bearing and come from the arbitration record:
 //!
-//! 1. `for_version_fallback` preserves the *managed* tables exactly as shipped,
-//!    quirks included (155/143 settings, 27/29 state fields). They intentionally
-//!    disagree with the native headers. Do not "fix" them.
+//! 1. `for_version_fallback` preserves the *managed* module and setting tables
+//!    exactly as shipped, quirks included (155/143 settings). Those are
+//!    deliberately stale against the native headers, so a module or setting a
+//!    bridge adds later stays invisible until that bridge's own `capabilities`
+//!    frame names it. Do not "fix" them.
+//!
+//!    `state` is the one array kept in step with the bridges: `LEGACY_STATE_FIELDS`
+//!    carries the managed list **plus** the three fields the 1.8.9 bridge started
+//!    publishing (`fov`, `viewportwidth`, `viewportheight`). A field the bridge
+//!    actually puts on the wire must not answer "unknown" before its handshake
+//!    frame arrives (27/32 state fields).
 //! 2. Decoding is never gated on the `state` list (architecture decision 2).
 //!    Capabilities gate writes and UI affordances, not deserialization.
 
@@ -460,11 +468,21 @@ pub const LEGACY_SETTINGS: &[&str] = &[
     "hudeditor",
 ];
 
+/// State fields the 1.8.9 bridge publishes.
+///
+/// The managed list plus `fov`, `viewportwidth` and `viewportheight`: the legacy
+/// bridge emits the camera FOV and the client-rect viewport it projects entities in
+/// (`ReadCameraState18` and `GetClientRect` in `bridge.cpp`) on every state line, and
+/// its own `capabilities` frame advertises all three, so the answer before that
+/// frame arrives must not be "unknown" for a field that is already on the wire.
 pub const LEGACY_STATE_FIELDS: &[&str] = &[
     "inworld",
     "actionbar",
     "holdingblock",
     "lookingatblock",
+    "fov",
+    "viewportwidth",
+    "viewportheight",
     "lookingatentity",
     "lookingatentitylatched",
     "breakingblock",
@@ -516,7 +534,9 @@ impl BridgeCapabilities {
     ///
     /// `1.21*` and `26.*` select the modern table; everything else, including an
     /// absent version, selects legacy. This mirrors `GameStateClient`, which
-    /// starts with `ForVersionFallback("1.8.9")`.
+    /// starts with `ForVersionFallback("1.8.9")`. Module and setting ids are the
+    /// managed tables verbatim; the legacy `state` list is the managed list plus the
+    /// three fields its bridge publishes, as the module note records.
     #[must_use]
     pub fn for_version_fallback(injected_version: Option<&str>) -> Self {
         let version = injected_version.unwrap_or("").trim();

@@ -306,6 +306,48 @@ impl Transport for TcpBridgeTransport {
 
             let read = self.stream.read(&mut chunk)?;
             if read == 0 {
+                // End of stream. `RecvOutcome::EndOfStream` means "closed and no
+                // partial line was pending", so anything already buffered has to be
+                // reported first - the same two rules `BoundedLineReader` applies at
+                // EOF, and the reason a frame that lost its final newline is not
+                // silently dropped here while the in-memory transport delivers it.
+                if self.discard_until_newline {
+                    self.discard_until_newline = false;
+                    self.received.clear();
+                    self.consumed = 0;
+                    out.clear();
+                    return Ok(RecvOutcome::TooLong);
+                }
+
+                let pending_len = self.pending().len();
+                if pending_len > 0 {
+                    let line_start = self.consumed;
+                    let ends_with_carriage_return =
+                        self.received.get(line_start + pending_len - 1) == Some(&b'\r');
+                    let content_len = pending_len - usize::from(ends_with_carriage_return);
+                    let content_end = line_start + content_len;
+                    let content_too_long = content_len > MAX_INBOUND_LINE_BYTES;
+
+                    // Copy before advancing: `compact` may empty the buffer, and the
+                    // bytes have to survive the cursor move that makes the next call
+                    // report `EndOfStream` instead of handing the same frame out twice.
+                    if content_too_long {
+                        out.clear();
+                    } else {
+                        out.extend_from_slice(
+                            self.received.get(line_start..content_end).unwrap_or_default(),
+                        );
+                    }
+                    self.consumed = self.received.len();
+                    self.compact();
+
+                    return Ok(if content_too_long {
+                        RecvOutcome::TooLong
+                    } else {
+                        RecvOutcome::Line
+                    });
+                }
+
                 return Ok(RecvOutcome::EndOfStream);
             }
             let read_chunk = chunk.get(..read).unwrap_or_default();
@@ -417,6 +459,61 @@ mod tests {
         let mut transport = TcpBridgeTransport::connect(addr).expect("connect");
         assert_eq!(read_line(&mut transport), "{\"type\":\"state\"}");
         let mut line = LineBuf::new();
+        assert_eq!(
+            transport.recv_line(&mut line).expect("recv eof"),
+            RecvOutcome::EndOfStream
+        );
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn a_final_frame_without_a_newline_is_delivered_before_end_of_stream() {
+        // `RecvOutcome::EndOfStream` is documented as "the peer closed and no partial
+        // line was pending", so the last frame has to be handed out even when its
+        // terminator never arrived: `BoundedLineReader` does the same at EOF, and a
+        // socket that dropped it would disagree with the transport the seam tests use.
+        let (listener, addr) = listener();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept");
+            // One terminated frame, then one whose LF never arrives; dropping the
+            // socket is the close.
+            socket
+                .write_all(b"{\"a\":1}\n{\"b\":2}\r")
+                .expect("write frames");
+        });
+
+        let mut transport = TcpBridgeTransport::connect(addr).expect("connect");
+        assert_eq!(read_line(&mut transport), "{\"a\":1}");
+        // The single trailing `\r` is framing on the last frame too, not content.
+        assert_eq!(read_line(&mut transport), "{\"b\":2}");
+
+        let mut line = LineBuf::new();
+        assert_eq!(
+            transport.recv_line(&mut line).expect("recv eof"),
+            RecvOutcome::EndOfStream
+        );
+        assert!(line.is_empty(), "the frame is not replayed at the close");
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn an_oversized_line_without_a_newline_is_reported_once_at_end_of_stream() {
+        let (listener, addr) = listener();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accept");
+            let oversized = vec![b'x'; MAX_INBOUND_LINE_BYTES + 64];
+            socket.write_all(&oversized).expect("write oversized");
+            // No newline follows it: the close has to report the oversize instead of
+            // looking like a clean end of stream.
+        });
+
+        let mut transport = TcpBridgeTransport::connect(addr).expect("connect");
+        let mut line = LineBuf::new();
+        assert_eq!(
+            transport.recv_line(&mut line).expect("recv oversized"),
+            RecvOutcome::TooLong
+        );
+        assert!(line.is_empty(), "a discarded line must not leak bytes");
         assert_eq!(
             transport.recv_line(&mut line).expect("recv eof"),
             RecvOutcome::EndOfStream

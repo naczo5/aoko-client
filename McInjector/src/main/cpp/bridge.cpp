@@ -1555,10 +1555,30 @@ std::string JsonEscape(const std::string& s) {
         case '\n': out += "\\n"; break;
         case '\r': out += "\\r"; break;
         case '\t': out += "\\t"; break;
-        default: out += c; break;
+        default:
+            // A JSON string cannot carry a raw control byte: the host's parser
+            // rejects the whole document, so one stray byte from a server's action
+            // bar would stop every state update until it scrolled away.
+            if (static_cast<unsigned char>(c) < 0x20) {
+                char escaped[8];
+                snprintf(escaped, sizeof(escaped), "\\u%04x", (unsigned)(unsigned char)c);
+                out += escaped;
+            } else {
+                out += c;
+            }
+            break;
         }
     }
     return out;
+}
+
+// JSON has no NaN or Infinity literal, so one such value makes the whole line
+// unparsable and the host drops every state line until it goes away. A NaN
+// coordinate happens in 1.8.9 (a bad velocity packet, a broken plugin, a
+// teleport mid-move), so a value that cannot be written is published as the
+// neutral one instead of taking the session's telemetry down with it.
+static double JsonFiniteNumber(double value, double fallback) {
+    return std::isfinite(value) ? value : fallback;
 }
 
 // ===================== JNI HELPERS =====================
@@ -11199,24 +11219,31 @@ GameState ReadGameState(JNIEnv* env) {
 
     if (g_currentScreenField) {
         jobject scr = env->GetObjectField(g_mcInstance, g_currentScreenField);
+        if (env->ExceptionCheck()) { env->ExceptionClear(); scr = nullptr; }
         s.guiOpen = (scr != nullptr);
         if (scr) {
             jclass c = env->GetObjectClass(scr);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); c = nullptr; }
             jclass classClass = env->FindClass("java/lang/Class");
-            if (classClass) {
+            if (c && classClass) {
                 jmethodID m = env->GetMethodID(classClass, "getSimpleName", "()Ljava/lang/String;");
                 if (m) {
                     jstring jn = (jstring)env->CallObjectMethod(c, m);
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); jn = nullptr; }
                     if (jn) {
-                        const char* cn = env->GetStringUTFChars(jn, nullptr); 
-                        s.screenName = cn;
-                        env->ReleaseStringUTFChars(jn, cn);
+                        const char* cn = env->GetStringUTFChars(jn, nullptr);
+                        if (cn) {
+                            s.screenName = cn;
+                            env->ReleaseStringUTFChars(jn, cn);
+                        } else if (env->ExceptionCheck()) {
+                            env->ExceptionClear();
+                        }
                         env->DeleteLocalRef(jn);
                     }
                 }
                 env->DeleteLocalRef(classClass);
             }
-            env->DeleteLocalRef(c);
+            if (c) env->DeleteLocalRef(c);
             env->DeleteLocalRef(scr);
         } else {
             s.screenName = "none";
@@ -11239,6 +11266,11 @@ GameState ReadGameState(JNIEnv* env) {
             if (g_posZField) s.posZ = env->GetDoubleField(player, g_posZField);
             if (g_rotationPitchField) s.pitch = env->GetFloatField(player, g_rotationPitchField);
             if (g_rotationYawField) s.rotationYaw = env->GetFloatField(player, g_rotationYawField);
+            // A field id that stopped resolving (a remap, an unloaded class) throws
+            // here. Left pending it would silently turn every later call in this
+            // function into a no-op, so the session would keep publishing a state
+            // that never changes and never says why.
+            if (env->ExceptionCheck()) { env->ExceptionClear(); }
 
             // Check current item
             s.holdingBlock = false;
@@ -11264,12 +11296,16 @@ GameState ReadGameState(JNIEnv* env) {
 
                     if (g_getCurrentItemMethod) {
                         jobject itemStack = env->CallObjectMethod(inventory, g_getCurrentItemMethod);
+                        if (env->ExceptionCheck()) { env->ExceptionClear(); itemStack = nullptr; }
                         if (itemStack) {
                             jclass stackClass = env->GetObjectClass(itemStack);
-                            jmethodID getItem = env->GetMethodID(stackClass, "getItem", "()Lnet/minecraft/item/Item;");
-                            if (!getItem) { env->ExceptionClear(); getItem = env->GetMethodID(stackClass, "func_77973_b", "()Lnet/minecraft/item/Item;"); }
+                            if (env->ExceptionCheck()) { env->ExceptionClear(); stackClass = nullptr; }
+                            jmethodID getItem = stackClass
+                                ? env->GetMethodID(stackClass, "getItem", "()Lnet/minecraft/item/Item;")
+                                : nullptr;
+                            if (!getItem) { env->ExceptionClear(); getItem = stackClass ? env->GetMethodID(stackClass, "func_77973_b", "()Lnet/minecraft/item/Item;") : nullptr; }
                             if (!getItem) env->ExceptionClear();
-                            env->DeleteLocalRef(stackClass);
+                            if (stackClass) env->DeleteLocalRef(stackClass);
                             
                             if (getItem) {
                                 jobject item = env->CallObjectMethod(itemStack, getItem);
@@ -14575,7 +14611,10 @@ void RenderNametags(
     }
 }
 
-static void RenderFightStatus(int w, int h) {
+// `config` is the render thread's lock-copied snapshot, not the live global: the
+// theme name is a std::string the socket thread reassigns under g_configMutex, and
+// reading it here unserialized is a torn read of its buffer.
+static void RenderFightStatus(int w, int h, const Config& config) {
     FightStatusDrawSnapshot18 snapshot;
     { LockGuard lk(g_fightStatusMutex18); snapshot = g_fightStatusDrawSnapshot18; }
     if (!snapshot.valid || snapshot.distance > 16.0f || !snapshot.hasWorldPos) return;
@@ -14596,7 +14635,7 @@ static void RenderFightStatus(int w, int h) {
         headY >= 0.0f && headY <= h;
     if (!onScreen) return;
 
-    OverlayTheme fightTheme = ResolveOverlayTheme(g_config.guiTheme);
+    OverlayTheme fightTheme = ResolveOverlayTheme(config.guiTheme);
     ImDrawList* fg = ImGui::GetForegroundDrawList();
     const float rawHeight = std::fabs(feetY - headY);
     const float barHeight = (std::max)(48.0f, (std::min)(110.0f, rawHeight));
@@ -17138,7 +17177,7 @@ BOOL WINAPI HookedSwapBuffers(HDC hdc) {
                 h,
                 renderConfig,
                 &closestPlayerSnapshot);
-            RenderFightStatus(w, h);
+            RenderFightStatus(w, h, renderConfig);
             RenderClosestPlayerInfo(
                 w,
                 h,
@@ -17839,8 +17878,18 @@ void ServerLoop() {
     // setSession() writes into the game, so it must not be reachable from the LAN.
     // The loader always connects to 127.0.0.1:25590.
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK); addr.sin_port = htons(25590);
-    bind(serverSocket, (sockaddr*)&addr, sizeof(addr));
-    listen(serverSocket, 1);
+    // The port is a single resource: a second client that injects while the first
+    // one still holds 25590 gets WSAEADDRINUSE here and never becomes reachable.
+    // Report that once, by name, instead of leaving a silent bridge whose HUD never
+    // appears - the log is the only evidence a user can send us.
+    const int bindResult = bind(serverSocket, (sockaddr*)&addr, sizeof(addr));
+    const int listenResult = (bindResult == SOCKET_ERROR) ? SOCKET_ERROR : listen(serverSocket, 1);
+    if (bindResult == SOCKET_ERROR) {
+        Log("ERROR: bind 127.0.0.1:25590 failed, err=" + std::to_string(WSAGetLastError())
+            + ". Another process already owns the bridge port; this client cannot be reached.");
+    } else if (listenResult == SOCKET_ERROR) {
+        Log("ERROR: listen 127.0.0.1:25590 failed, err=" + std::to_string(WSAGetLastError()));
+    }
 
     // FIX: Force C locale for correct JSON float formatting (dots not commas)
     setlocale(LC_NUMERIC, "C"); 
@@ -17859,11 +17908,20 @@ void ServerLoop() {
     bool mapped = DiscoverMappings(env);
     Log(mapped ? "Discovery OK" : "Discovery FAILED");
 
+    // One "waiting" line per accept cycle, not per failed accept: when the port
+    // was never taken accept() fails immediately, and a line here would both spin
+    // a core and flood the log.
+    if (listenResult != SOCKET_ERROR) Log("Waiting for client...");
     while (IsBridgeRunning()) {
-        Log("Waiting for client...");
         SOCKET clientSocket = accept(serverSocket, nullptr, nullptr);
         AtomicSocketStore(&g_clientSocket, clientSocket);
-        if (clientSocket == INVALID_SOCKET) { if (!IsBridgeRunning()) break; continue; }
+        if (clientSocket == INVALID_SOCKET) {
+            if (!IsBridgeRunning()) break;
+            // Never retry an accept that cannot succeed without pausing: a socket
+            // that is not listening fails instantly.
+            Sleep(100);
+            continue;
+        }
         Log("Client connected");
         ResetLastActionState();
         AccountCommandRouter::ClearReplies();
@@ -18118,19 +18176,23 @@ void ServerLoop() {
                 jsonToSend += "\"guiOpen\":" + std::string(state.guiOpen ? "true" : "false") + ",";
                 jsonToSend += "\"screenName\":\"" + JsonEscape(state.screenName) + "\",";
                 jsonToSend += "\"actionBar\":\"" + JsonEscape(state.actionBar) + "\",";
-                jsonToSend += "\"health\":" + std::to_string(state.health) + ",";
-                jsonToSend += "\"posX\":" + std::to_string(state.posX) + ",";
-                jsonToSend += "\"posY\":" + std::to_string(state.posY) + ",";
-                jsonToSend += "\"posZ\":" + std::to_string(state.posZ) + ",";
-                jsonToSend += "\"pitch\":" + std::to_string(state.pitch) + ",";
+                jsonToSend += "\"health\":" + std::to_string(JsonFiniteNumber(state.health, 20.0)) + ",";
+                jsonToSend += "\"posX\":" + std::to_string(JsonFiniteNumber(state.posX, 0.0)) + ",";
+                jsonToSend += "\"posY\":" + std::to_string(JsonFiniteNumber(state.posY, 0.0)) + ",";
+                jsonToSend += "\"posZ\":" + std::to_string(JsonFiniteNumber(state.posZ, 0.0)) + ",";
+                jsonToSend += "\"pitch\":" + std::to_string(JsonFiniteNumber(state.pitch, 0.0)) + ",";
                 // Aim assist needs the camera FOV and the viewport it projects in. The
                 // host's controller sizes its step from both and otherwise assumes 70
                 // degrees and the OS window rect. RenderNametags projects entities with
                 // GetClientRect(w, h) on this window, so publish that same space, and
                 // the FOV the camera poll already captured (BgCamState18::fov, filled in
                 // ReadCameraState18 from gameSettings.fovSetting). No extra JNI call.
+                // Until the first camera poll (and for one tick after a world change
+                // clears it) the snapshot still holds 0, which is not a usable FOV.
                 char fovBuf[32];
-                snprintf(fovBuf, sizeof(fovBuf), "%.2f", SnapshotBgCam18().fov);
+                float publishedFov = SnapshotBgCam18().fov;
+                if (!(publishedFov > 0.0f) || !std::isfinite(publishedFov)) publishedFov = 70.0f;
+                snprintf(fovBuf, sizeof(fovBuf), "%.2f", publishedFov);
                 jsonToSend += "\"fov\":";
                 jsonToSend += fovBuf;
                 jsonToSend += ",";
@@ -18324,6 +18386,7 @@ void ServerLoop() {
         SOCKET ownedClient = AtomicSocketTake(&g_clientSocket);
         if (ownedClient != INVALID_SOCKET) closesocket(ownedClient);
         Log("Client disconnected");
+        Log("Waiting for client...");
     }
     {
         LockGuard jniLk(g_stateJniMutex);
