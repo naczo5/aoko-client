@@ -2802,6 +2802,19 @@ impl Shell {
         }
     }
 
+    /// The Esc chip's click: the same close Escape runs, focus included.
+    ///
+    /// `CloseChip_Click` (`CommandSearchOverlay.xaml.cs:245-250`) called the overlay's own `Close`,
+    /// which is why this is not a second rule — it is the `WindowKeyOutcome::Closed` half of
+    /// [`Shell::handle_window_key`] with a pointer instead of a key. The blur is not optional: a box
+    /// that keeps focus after its overlay is gone makes [`Shell::any_text_field_focused`] report a
+    /// focused field for a field nobody can see, and Ctrl+K and type-to-open are refused for the
+    /// rest of the session.
+    fn close_search_at_pointer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_search(cx);
+        self.blur_search_query(window, cx);
+    }
+
     /// Mirrors the query box into the search state, which is the owner of the query.
     ///
     /// The field is the keyboard, not a second copy: every keystroke lands here and the state
@@ -3156,6 +3169,9 @@ impl Shell {
         }
 
         let handle = entity.clone();
+        // A second handle because the two callbacks are separate `'static` closures: the row press
+        // jumps, the chip closes, and neither can borrow the other's.
+        let close = entity.clone();
         // The live field when it exists, the static query line otherwise. The two shapes are
         // `OverlayQuery`'s, so which one paints is this expression and nothing inside the overlay.
         let query: crate::overlay::OverlayQuery<'_> = match &self.search_query {
@@ -3169,6 +3185,9 @@ impl Shell {
             query,
             move |index, _event, _window, cx| {
                 handle.update(cx, |shell, cx| shell.jump_to_row(index, cx));
+            },
+            move |_event, window, cx| {
+                close.update(cx, |shell, cx| shell.close_search_at_pointer(window, cx));
             },
         ))
     }
@@ -7862,6 +7881,68 @@ mod tests {
         assert!(
             visual.debug_bounds("command-search-card").is_none(),
             "and closing it takes the card off screen"
+        );
+    }
+
+    /// The Esc chip is a button, not a painted box: a click closes the card and hands focus back.
+    ///
+    /// Managed's chip was `CloseChip_Click` (`CommandSearchOverlay.xaml.cs:245-250`), and it called
+    /// the same `Close` the key did. The blur half is the one worth pinning: a close that left the
+    /// query box focused makes [`Shell::any_text_field_focused`] report a field nobody can see, and
+    /// Ctrl+K and type-to-open are refused for the rest of the session.
+    #[gpui::test]
+    fn a_click_on_the_esc_chip_closes_the_card_and_hands_focus_back(cx: &mut gpui::TestAppContext) {
+        use gpui::Keystroke;
+
+        let root = scratch_root();
+        let (shell, handle, mut visual) = shell_in_window(cx, &root);
+
+        visual
+            .cx
+            .dispatch_keystroke(handle, Keystroke::parse("ctrl-k").expect("keystroke"));
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let chip = visual
+            .debug_bounds("command-search-close-chip")
+            .expect("the chip paints while the card is open");
+
+        // The open path focuses the box, which is what makes the release observable below.
+        let focused = visual.update(|window, cx| {
+            shell
+                .read(cx)
+                .search_query
+                .as_ref()
+                .is_some_and(|field| field.read(cx).focus_handle().is_focused(window))
+        });
+        assert!(
+            focused,
+            "the open path focuses the box the close has to release"
+        );
+
+        visual.simulate_click(chip.center(), gpui::Modifiers::default());
+
+        assert!(
+            !cx.read(|cx| shell.read(cx).search().is_open()),
+            "the click closed the overlay"
+        );
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            visual.debug_bounds("command-search-card").is_none(),
+            "and the card is off the frame, not only out of the state"
+        );
+        let still_focused = visual.update(|window, cx| {
+            shell
+                .read(cx)
+                .search_query
+                .as_ref()
+                .is_some_and(|field| field.read(cx).focus_handle().is_focused(window))
+        });
+        assert!(
+            !still_focused,
+            "and the box no longer owns the keyboard, or the gate stays shut"
         );
     }
 

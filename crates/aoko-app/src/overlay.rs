@@ -125,7 +125,7 @@ const PULSE_RING_INSET: f32 = 0.5;
 /// one expression at the call site:
 ///
 /// ```ignore
-/// crate::overlay::overlay(theme, &self.search, motion, (&self.search_query, window.viewport_size()), on_row)
+/// crate::overlay::overlay(theme, &self.search, motion, (&self.search_query, window.viewport_size()), on_row, on_close)
 /// ```
 ///
 /// The entity itself has to be created and focused where a `Context` and a `&mut Window`
@@ -182,6 +182,11 @@ pub fn focus_query(field: &Entity<TextInput>, seed: &str, window: &mut Window, c
 /// `on_row` receives the clicked row index; the caller owns what a click means (select,
 /// jump, or toggle), and whether the overlay closes.
 ///
+/// `on_close` is the Esc chip's click (`CloseChip_Click`, `CommandSearchOverlay.xaml.cs:245-250`),
+/// which called the same `Close` the Escape key did. The chip is a button in managed and an inert
+/// painted box here until this callback arrived, so the caller supplies the one close path rather
+/// than the overlay inventing a second one.
+///
 /// `_motion` is the animation gate, accepted and not read: this view has no entrance
 /// animation to gate, and the module docs say what the mount must do with it. It is named
 /// with a leading underscore so the signature does not promise a behaviour the file does
@@ -192,6 +197,7 @@ pub fn overlay<'a>(
     _motion: Motion,
     query: impl Into<OverlayQuery<'a>>,
     on_row: impl Fn(usize, &ClickEvent, &mut Window, &mut App) + 'static,
+    on_close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let query = query.into();
     let viewport = query.viewport;
@@ -240,7 +246,7 @@ pub fn overlay<'a>(
         // Decision 2: opaque card. `search_glass()` exists for the record only.
         .bg(theme.panel)
         .child(accent_line(theme))
-        .child(query_row(theme, state, query.entity))
+        .child(query_row(theme, state, query.entity, on_close))
         .child(
             div()
                 .h(px(metrics::HAIRLINE))
@@ -291,6 +297,7 @@ fn query_row(
     theme: &Theme,
     state: &CommandSearchState,
     input: Option<&Entity<TextInput>>,
+    on_close: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let placeholder = if state.placeholder_visible() {
         copy::SEARCH_QUERY_NAME
@@ -339,6 +346,7 @@ fn query_row(
             // that turns accent on hover, 10 px monospace cap.
             div()
                 .id("command-search-close-chip")
+                .debug_selector(|| String::from("command-search-close-chip"))
                 .ml(px(10.0))
                 .rounded(px(metrics::radius::CHIP))
                 .border_1()
@@ -349,6 +357,11 @@ fn query_row(
                 .text_size(px(metrics::text::ESC))
                 .font_family(MONO_FAMILY)
                 .text_color(theme.search_subtle_text())
+                .cursor_pointer()
+                // `CloseChip_Click` (`CommandSearchOverlay.xaml.cs:245-250`): a `Button` whose
+                // handler called the same `Close` the Escape key did. The callback is the
+                // caller's, so both routes end in one close path rather than two.
+                .on_click(move |event, window, cx| on_close(event, window, cx))
                 .hover(move |style| style.border_color(theme.accent))
                 .tooltip(components::tooltip(theme, copy::SEARCH_CLOSE_TOOLTIP))
                 .child(glyph::ESC),
@@ -643,6 +656,7 @@ mod tests {
                 self.motion,
                 window.viewport_size(),
                 |_, _, _, _| {},
+                |_, _, _| {},
             )
         }
     }
@@ -938,6 +952,7 @@ mod tests {
                 Motion::STILL,
                 (&self.query, window.viewport_size()),
                 |_, _, _, _| {},
+                |_, _, _| {},
             )
         }
     }
