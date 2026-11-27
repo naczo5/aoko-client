@@ -276,6 +276,8 @@ Recorded here rather than hidden.
 
 23. **The MP4/GIF media pipeline is not ported.** `scripts/New-GuiScreenshots.ps1` builds the deleted WPF project and drives `Aoko.MainWindow` by reflection, so it cannot run and there is nothing left to fix in it; `scripts/New-GitHubRelease.ps1` and `scripts/Test-ScoopManifest.ps1` still describe an `Aoko.exe` inside `Aoko_Release/`, which is the packaging gap in item 3. The Rust harness produces PNGs only (`cargo run -p aoko-app --features capture -- --capture-screenshots <dir>`) and CI smoke-tests that it does. Rebuilding the video tour means feeding those PNGs to a video tool outside the workspace; it is marketing tooling, not the application, and it is recorded here so a future release does not discover it at a tag.
 
+24. **Managed's per-control tooltips are mostly not painted.** The managed XAML carries an explanation on many sliders, checkboxes and combos — the randomization-mode slider's three-mode sentence (`MainWindow.xaml:381-383`), the `Click in Chests` paragraph (`:385`), and the rest of that family — and none of those strings exist in the crate. What the port paints is three: the palette swatch's, the rail's version line, and the keybind capture button's, each through `components::tooltip`. So this is a queue of one `.tooltip(..)` call plus one string per control, not machinery to build — recorded rather than painted in the last round because every control involved already works and its behaviour is asserted; only the hover is missing. Adding a dozen of them is also a frame change, and the allocation pin had just been measured on the frame that does not carry them, which is an argument for the next round rather than this one.
+
 ## 10. Verification commands
 
 ```bash
