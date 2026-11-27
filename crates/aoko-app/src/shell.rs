@@ -8499,6 +8499,8 @@ mod tests {
     /// check itself has no fetcher in this tree, which is why the press is the whole of the surface.
     #[gpui::test]
     fn the_version_lines_press_opens_the_releases_page(cx: &mut gpui::TestAppContext) {
+        use gpui::Modifiers;
+
         let root = scratch_root();
         let (shell, _handle, mut visual) = shell_in_window(cx, &root);
 
