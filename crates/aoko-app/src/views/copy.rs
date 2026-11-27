@@ -1289,6 +1289,16 @@ pub const LOADER_INJECT_CONNECTED: &str = "Connected";
 pub const LOADER_AUTODETECT: &str =
     "The Java/Minecraft client is detected automatically. If multiple clients are running, you can select one.";
 
+/// The sentence above the target list when more than one client was found,
+/// `WindowPickerDialog.xaml:28`.
+///
+/// Managed put this in the modal picker; the port lists the targets in the panel instead
+/// (`shell.rs`'s loader, which names each row), so the sentence is kept and the modal's frame
+/// is not. The rest of that dialog has no port surface, which is why no other string from it
+/// is here: see the panel's report.
+pub const LOADER_TARGETS_PROMPT: &str =
+    "Multiple Java/Minecraft processes were found. Select the client process to inject into.";
+
 /// The status line at rest, `MainWindow.xaml:329-332` (12 px, dim, centred), and the text a
 /// cancelled picker restores at `MainWindow.xaml.cs:1464`.
 pub const LOADER_STATUS_NOT_INJECTED: &str = "Status: Not Injected";
@@ -1303,15 +1313,49 @@ pub const LOADER_STATUS_CONNECTING: &str = "Status: Connecting...";
 /// accent colour (`:1529`) instead of the dim one.
 pub const LOADER_STATUS_CONNECTED: &str = "Status: Connected & Injected";
 
-/// The prefix of every other status line, `MainWindow.xaml.cs:1539`:
+/// The prefix of every status line that carries a message, `MainWindow.xaml.cs:1539`:
 /// `$"Status: {gs.StatusMessage}"`.
 ///
-/// **There is no fixed failure string to add here.** Every failure is this prefix plus
-/// `GameStateClient.StatusMessage`, and those messages are set in `GameStateClient.cs`
-/// (`:304`, `:355`, `:369`, `:395`, `:411`, `:493`), not in the loader. A Rust `Failed`
-/// state therefore carries the message it was given; naming a constant here would be
-/// wording the managed app never draws.
+/// Managed's tail is `GameStateClient.StatusMessage`, whose values are capitalised sentences
+/// with a full stop (`"Already connected/injected"` `:259`, `"ERROR: Injection failed. Check
+/// logs."` `:369`, `"Disconnected from agent."` `:615`, `"Reconnecting to agent..."` `:637`),
+/// plus a progress form at `:235`. The port has no channel for those: its loader state names one
+/// rule per refusal, and each rule owns one sentence below. So this prefix is used with those
+/// four and with nothing dynamic — a bridge message managed would show here has no line in the
+/// port, which is a loader gap to record rather than wording to invent.
 pub const LOADER_STATUS_PREFIX: &str = "Status: ";
+
+// New copy, and the only block on this panel that is: managed's `InjectButton_Click`
+// (`MainWindow.xaml.cs:1431-1467`) had no gate, so it refused nothing and there is no sentence
+// to port. Each rule below has a managed analogue cited in its own doc, and the port's line is
+// that claim in the panel's shape: [`LOADER_STATUS_PREFIX`] plus one capitalised sentence with a
+// full stop, which is how every managed `StatusMessage` reads.
+
+/// The platform cannot enumerate windows, so no target can be confirmed at all.
+///
+/// No managed analogue: managed assumed the enumeration always worked and fell through to an
+/// injection attempt that produced `"ERROR: …"` (`GameStateClient.cs:304`, `:355`, `:369`).
+pub const LOADER_REFUSAL_NO_WINDOW_SENSE: &str =
+    "This session cannot inspect windows, so a target cannot be confirmed.";
+
+/// The enumeration listed nothing that could be injected into.
+///
+/// Managed's nearest sentence is the picker's `Select a Java process from the list.`
+/// (`WindowPickerDialog.xaml.cs:40`), which refused a press made with no row chosen.
+pub const LOADER_REFUSAL_NO_WINDOW: &str = "No Java client window was found.";
+
+/// The window's title does not name the game.
+///
+/// Managed's nearest sentence is the picker's warning that no client marker was found
+/// (`WindowPickerDialog.xaml.cs:50`), which asked before attempting instead of refusing.
+pub const LOADER_REFUSAL_NOT_GAME_TITLE: &str = "The window's title does not name the game.";
+
+/// The window belongs to a process that is not a Java launcher.
+///
+/// The other half of that warning (`WindowPickerDialog.xaml.cs:50`): managed named a Java process
+/// whose Minecraft marker was missing, where this rule is the reverse — the title may look right
+/// and the process is not a JVM.
+pub const LOADER_REFUSAL_NOT_JAVA_PROCESS: &str = "The window's process is not a Java launcher.";
 
 // ── The palette editor ──────────────────────────────────────────────────────────
 
