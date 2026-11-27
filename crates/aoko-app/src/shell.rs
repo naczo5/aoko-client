@@ -8612,10 +8612,28 @@ mod tests {
         window("Minecraft 1.8.9", "javaw.exe")
     }
 
-    /// A Java process whose title is not the game — a mod workspace, the case `is_game_window`'s
-    /// own doc calls out.
+    /// A Java process whose title names the game while an editor owns it.
+    ///
+    /// This is the blind spot [`aoko_platform::is_game_window`]'s own doc records, not a refusal:
+    /// managed's rule is title-only (`GameTitles`, `Contains(…, OrdinalIgnoreCase)`, ported at
+    /// `aoko-platform/src/window.rs:69-85`), so a title containing `Minecraft` is the game whatever
+    /// owns it — and this window is also a JVM, so **both** halves of the gate accept it. It is in
+    /// the list test as a second JVM entry. The platform suite pins the same window and says why it
+    /// passes (`the_jvm_composition_rejects_an_editor_whose_title_names_minecraft`,
+    /// `window.rs:322-334`); a refusal fixture has to be [`java_ide_window`].
     fn editor_window() -> WindowInfo {
         window("Minecraft mod workspace", "javaw.exe")
+    }
+
+    /// A Java process whose title names no game: a Java IDE, which is the window the *title* rule
+    /// refuses.
+    ///
+    /// It is offered by the discovery filter because it is a JVM (`target_is_candidate` accepts
+    /// either half), and it cannot pass the gate for the reason the fixture beside it cannot fail
+    /// it: the title carries none of the three markers. This is the `Refusal::NotGameTitle`
+    /// fixture.
+    fn java_ide_window() -> WindowInfo {
+        window("IntelliJ IDEA", "javaw.exe")
     }
 
     /// A game title in a process that is not a launcher.
@@ -8815,33 +8833,40 @@ mod tests {
     ///
     /// The pair this asserts is the point: the *same* window, through both entries, yields the same
     /// refusal and dials nothing. Row order is the platform's, so the indices are found by title.
+    ///
+    /// The window is a JVM whose title names no game, and that is the whole of the rule the gate
+    /// can refuse on the title half: managed's test is `GameTitles` matched as substrings, ordinal
+    /// and case-insensitive (`aoko-platform/src/window.rs:69-85`), so a JVM titled
+    /// `Minecraft mod workspace` is *accepted* — the blind spot that rule's own doc records. A
+    /// `NotGameTitle` fixture therefore cannot be the workspace editor; it has to be a window whose
+    /// title is not nameable as the game at all, which is the Java IDE below.
     #[gpui::test]
     fn a_row_press_and_the_button_press_refuse_for_the_same_reason(cx: &mut gpui::TestAppContext) {
         // Through the row: two candidates, so the machine waits for a choice.
         let list = cx.update(|cx| cx.new(|_| Shell::new(Theme::slate())));
         cx.update(|cx| {
             list.update(cx, |shell, _| {
-                shell.set_windows(Some(window_surface(vec![editor_window(), game_window()])));
+                shell.set_windows(Some(window_surface(vec![java_ide_window(), game_window()])));
             })
         });
         cx.update(|cx| list.update(cx, |shell, cx| shell.inject(cx)));
 
         let before = dials();
-        let editor = cx.read(|cx| {
+        let ide = cx.read(|cx| {
             list.read(cx)
                 .injection_targets()
                 .iter()
-                .position(|target| target.title == "Minecraft mod workspace")
-                .expect("the workspace is offered")
+                .position(|target| target.title == "IntelliJ IDEA")
+                .expect("the IDE is offered")
         });
-        cx.update(|cx| list.update(cx, |shell, cx| shell.select_injection_target(editor, cx)));
+        cx.update(|cx| list.update(cx, |shell, cx| shell.select_injection_target(ide, cx)));
         let by_row = cx.read(|cx| list.read(cx).injection_view()).status;
 
         // Through the button: the same window alone, so the press takes it without asking.
         let single = cx.update(|cx| cx.new(|_| Shell::new(Theme::slate())));
         cx.update(|cx| {
             single.update(cx, |shell, _| {
-                shell.set_windows(Some(window_surface(vec![editor_window()])));
+                shell.set_windows(Some(window_surface(vec![java_ide_window()])));
             })
         });
         cx.update(|cx| single.update(cx, |shell, cx| shell.inject(cx)));
