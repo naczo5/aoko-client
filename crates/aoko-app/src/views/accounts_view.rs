@@ -609,11 +609,25 @@ pub fn render(
     body.into_any_element()
 }
 
+/// The validation line's text, or `None` when there is nothing to paint.
+///
+/// Split out of [`validation_line`] so the absence is a value a test can assert. The line is an
+/// `AnyElement`, and an element with no children is not something a test can tell from an
+/// element with a child; the decision has to be a function that answers, not a branch inside a
+/// painter.
+fn validation_copy(text: &str) -> Option<&str> {
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
 /// The red validation line, collapsed when empty (`SetInlineValidation`, `:1113`).
 fn validation_line(text: &str) -> AnyElement {
-    if text.is_empty() {
+    let Some(text) = validation_copy(text) else {
         return div().into_any_element();
-    }
+    };
 
     div()
         .text_size(px(metrics::text::CAPTION))
@@ -639,11 +653,18 @@ mod tests {
 
     #[test]
     fn an_empty_validation_line_draws_nothing() {
-        let theme = Theme::slate();
-        let empty = validation_line("");
-        let message = validation_line("Paste a token first.");
-        let _ = &theme;
-        // Both are `AnyElement`s; the check is that neither panics while building.
-        let _ = (empty, message);
+        // The property in the name, as a value: an empty line has nothing to paint, and any
+        // other line is painted as itself. A banner rendered for `""` fails the first
+        // assertion; a painter that dropped a real message fails the second.
+        assert_eq!(
+            validation_copy(""),
+            None,
+            "an empty line must paint nothing"
+        );
+        assert_eq!(
+            validation_copy("Paste a token first."),
+            Some("Paste a token first."),
+            "a message must reach the painter unchanged"
+        );
     }
 }
