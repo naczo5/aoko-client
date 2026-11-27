@@ -1006,14 +1006,22 @@ impl Runtime {
         true
     }
 
-    /// `Clicker.IsArmed`.
+    /// `Clicker.IsArmed` — as far as this port models it, which is one flag where managed had two.
     ///
-    /// The catalog models the AutoClicker's armed state as
-    /// [`EnabledFlag::LeftClick`]: its entry's overlay probe is `cfg.armed`
-    /// (`module_catalog.rs:228-233`), which is the string the injected bridge reports
-    /// for `IsArmed`. There is no separate armed bit on the controller, so this flag is
-    /// the only honest source and a second copy would be exactly the split this slice
-    /// removes.
+    /// The catalog models the AutoClicker's armed state as [`EnabledFlag::LeftClick`]: its entry's
+    /// overlay probe is `cfg.armed` (`module_catalog.rs:228-233`), which is the string the injected
+    /// bridge reports for `IsArmed`. There is no separate armed bit on the controller, so this flag
+    /// is the only honest source and a second copy would be exactly the split this slice removes.
+    ///
+    /// **This is a recorded deviation, not a bug to fix here.** Managed held two bits —
+    /// `IsArmed` and `LeftClickEnabled` (`Clicker.cs`) — so its `Disarm()` left the clicker
+    /// disarmed with left click still enabled, and its chip could say one thing while the other was
+    /// true. The port holds one. Two consequences follow and both are accepted: the title chip's
+    /// `armed` reports the left clicker rather than a separate arm state, and `PANIC_ON` turning this
+    /// flag on is the panic's own definition — it disarms by ending the session, not by clearing a
+    /// second bit that does not exist. Inventing that bit at this stage, to change what an existing
+    /// label counts, would be the larger change; the frame's `armed` is being moved onto this same
+    /// flag, so the chip and the wire will agree with each other even where both differ from managed.
     #[must_use]
     pub fn armed(&self) -> bool {
         self.controller.is_module_enabled(EnabledFlag::LeftClick)
