@@ -2586,6 +2586,43 @@ impl Shell {
         cx.notify();
     }
 
+    /// The Panic press (`PanicButton_Click`, `MainWindow.xaml.cs:1393-1396`).
+    ///
+    /// `Clicker.TriggerPanicAsync` (`Clicker.cs:536-609`) is the work: every module but the left
+    /// clicker off, the overlay, logo and Discord flags cleared, then the link dropped and the app
+    /// shut down. The reset is [`AppController::panic_reset`]'s — the switches are the controller's
+    /// state, and a second table here would be the copy this branch keeps deleting.
+    ///
+    /// The exit is [`Shell::close`], the same two steps the title bar's close runs, so a panic and a
+    /// normal exit cannot diverge. The profile is taken back from the controller first, because
+    /// `close` saves *this* shell's copy and the reset changed the controller's: saving the
+    /// pre-panic flags would persist exactly what the press exists to clear. Managed's shutdown ran
+    /// the same `OnClosed` that saved a profile built from the panicked `Clicker`
+    /// (`MainWindow.xaml.cs:1861-1876`), which is the same ordering.
+    ///
+    /// Two managed steps are recorded rather than faked. `EnterPanicStealthMode` hid the window and
+    /// dropped it from the taskbar before the shutdown, which a quit makes invisible here; and the
+    /// `await Task.Delay(250)` before `Disconnect()` gave the bridge a beat to take the config,
+    /// where this port's quit closes the socket from under the reader — a sleep on the UI thread
+    /// would freeze the frame the button was pressed in.
+    pub fn panic(&mut self, cx: &mut Context<Self>) {
+        self.runtime.controller().panic_reset();
+        let reset = self.runtime.controller().profile();
+        self.adopt_profile(reset);
+        self.close(cx);
+    }
+
+    /// The window's close: save the profile, then quit.
+    ///
+    /// `CloseButton_Click` (`MainWindow.xaml.cs:1384-1392`) is `SaveProfile` then
+    /// `Application.Current.Shutdown()`, and `OnClosed` (`:1861-1876`) saves again on the way out.
+    /// One function for both exits — the title bar's button and [`Shell::panic`] — so the save and
+    /// the quit cannot drift apart.
+    pub fn close(&mut self, cx: &mut Context<Self>) {
+        let _ = self.save_profile();
+        cx.quit();
+    }
+
     /// Whether animated sites run, from decision 3's client setting.
     #[must_use]
     pub fn animations(&self) -> bool {
@@ -3502,11 +3539,9 @@ impl Shell {
                         let handle = self_handle.clone();
                         move |_, _, cx| {
                             // Our own close is `CloseButton_Click`
-                            // (`MainWindow.xaml.cs:1384-1392`): save, then quit.
-                            handle.update(cx, |shell, _cx| {
-                                let _ = shell.save_profile();
-                            });
-                            cx.quit();
+                            // (`MainWindow.xaml.cs:1384-1392`): save, then quit. The panic press
+                            // ends in the same function, so the two exits cannot diverge.
+                            handle.update(cx, |shell, cx| shell.close(cx));
                         }
                     })
                     .child("\u{00d7}"),
@@ -4225,9 +4260,8 @@ impl Shell {
                 // The configs card's buttons are real actions: Load and Save
                 // (`LoadConfigButton_Click` `:813-831`, `SaveConfigButton_Click`
                 // `:847-862`), Delete and Create with their confirmations, and Open
-                // Configs Folder (`:969-985`). Every other card button still needs the
-                // command surface it would call, so it stays inert rather than
-                // pretending.
+                // Configs Folder (`:969-985`). The three the review named as inert are wired
+                // here; the stats card's reset is the one still to come.
                 let action: fn(&mut Shell, &mut Context<Shell>) = match (card.id, *label) {
                     ("ConfigsCard", "Load") => Shell::configs_load,
                     ("ConfigsCard", "Save") => Shell::configs_save,
@@ -4241,6 +4275,9 @@ impl Shell {
                     // `ReloadMappingsButton_Click` (`:1397-1404`): the bridge's own setting is the
                     // gate, and the nonce in the frame is the request.
                     ("ReloadMappingsCard", "Reload Mappings") => Shell::reload_mappings,
+                    // `PanicButton_Click` (`:1393-1396`): the reset, then the exit the title bar's
+                    // close runs. Not a reset-only button — managed's shutdown is half of it.
+                    ("PanicCard", "Trigger Panic Now") => Shell::panic,
                     _ => |_, _| {},
                 };
                 let handle = entity.clone();
@@ -5928,6 +5965,82 @@ mod tests {
         );
     }
 
+    /// The panic press resets the state, saves it, and ends in the close path.
+    ///
+    /// `PanicButton_Click` (`MainWindow.xaml.cs:1393-1396`) is one call, and `TriggerPanicAsync`
+    /// (`Clicker.cs:536-609`) is the work: every module but the left clicker off, the profile flags
+    /// cleared, then the app shut down. `quit` is GPUI's, and the test platform's is a no-op, so what
+    /// this pins is the half the port owns — the state the exit saves, and the fact that the press
+    /// ends in [`Shell::close`], which is also what the title bar's button calls.
+    #[gpui::test]
+    fn the_panic_press_resets_the_state_and_saves_what_the_exit_would(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use aoko_protocol::module_catalog::EnabledFlag;
+
+        let root = scratch_root();
+        let handle = cx.update(|cx| {
+            cx.new(|_| Shell::with_store(Theme::slate(), aoko_platform::ProfileStore::new(&root)))
+        });
+
+        // A live state for the panic to clear, written through the shell so the controller, the
+        // frame and the file all hold it before the press.
+        cx.update(|cx| {
+            handle.update(cx, |shell, _| {
+                shell.profile.discord_rpc_enabled = true;
+                shell.profile.show_module_list = true;
+                shell.push_profile();
+                let _ = shell.save_profile();
+                shell
+                    .runtime()
+                    .controller()
+                    .set_module_enabled(EnabledFlag::RightClick, true);
+                shell
+                    .runtime()
+                    .controller()
+                    .set_module_enabled(EnabledFlag::KillAura, true);
+            })
+        });
+
+        cx.update(|cx| handle.update(cx, |shell, cx| shell.panic(cx)));
+
+        let (modules_reset, left_clicker_on) = cx.read(|cx| {
+            let controller = handle.read(cx).runtime().controller();
+            (
+                !controller.is_module_enabled(EnabledFlag::RightClick)
+                    && !controller.is_module_enabled(EnabledFlag::KillAura),
+                controller.is_module_enabled(EnabledFlag::LeftClick),
+            )
+        });
+        assert!(modules_reset, "every module but the left clicker is off");
+        assert!(
+            left_clicker_on,
+            "and the one switch a panic turns on is on (`Clicker.cs:543`)"
+        );
+
+        let adopted = cx.read(|cx| {
+            let shell = handle.read(cx);
+            (
+                shell.profile.discord_rpc_enabled,
+                shell.profile.show_module_list,
+            )
+        });
+        assert_eq!(
+            adopted,
+            (false, false),
+            "the shell's copy is the controller's, so the exit saves the reset rather than the flags"
+        );
+
+        // The save is `Shell::close`'s first step — the same one the title bar's close runs.
+        let (_, reloaded) =
+            crate::views::profiles::Profiles::with_store(aoko_platform::ProfileStore::new(&root));
+        assert!(
+            !reloaded.discord_rpc_enabled,
+            "the exit's save wrote the cleared flag"
+        );
+        assert!(!reloaded.show_module_list, "and the other one");
+    }
+
     /// Every button the shell wires by `(card id, label)` exists in the copy table under that pair.
     ///
     /// `Control::Button`'s action match keys on two strings that `views/copy.rs` owns, so a rename
@@ -5943,6 +6056,7 @@ mod tests {
             ("ConfigsCard", "Open Configs Folder"),
             ("HudEditorCard", "Reset layout"),
             ("ReloadMappingsCard", "Reload Mappings"),
+            ("PanicCard", "Trigger Panic Now"),
         ];
 
         let cards: Vec<&Card> = copy::TABS
