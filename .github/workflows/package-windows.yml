@@ -7,13 +7,13 @@ name: package windows
 # This is deliberately its own workflow rather than `release.yml`'s publish step.
 # That file also builds the C++ bridges with a JDK and a hand-unpacked MinGW, and
 # it stops on purpose (see MIGRATION_ARCHITECTURE.md §9 item 3) rather than
-# package an artifact nothing built. Here the bridges are the committed DLLs in
-# `McInjector/`, so the job needs nothing but a Windows runner and the pinned
-# toolchain from `rust-toolchain.toml`.
+# package an artifact nothing built. Here the bridges are compiled by the steps
+# below: `*.dll` is in `.gitignore`, so a checkout has none.
 #
-# Fonts and the GTB wordlist are `include_bytes!`/`include_str!` in `aoko-app`,
-# so the zip carries no `Data/` directory: a missing asset is a compile error
-# rather than a runtime surprise.
+# The GUI fonts and the GTB wordlist are `include_bytes!`/`include_str!` in
+# `aoko-app`, so the zip carries no `Data/` directory. The one exception is the
+# in-game overlay face: the C++ bridge rasterises its own ImGui atlas at runtime
+# and can only read a file, so `Manrope-Medium.ttf` ships beside the DLLs.
 
 # `workflow_dispatch` is only registered once this file is on the default branch,
 # so the push trigger is what makes it runnable from `rust` today. It fires only
@@ -122,6 +122,15 @@ jobs:
           Copy-Item 'McInjector\bridge.dll' $stage
           Copy-Item 'McInjector\bridge_261.dll' $stage
 
+          # The overlay face. Both bridges look for `Manrope-Medium.ttf` beside the
+          # DLL before falling back to ImGui's built-in bitmap font, and without it
+          # the in-game HUD, nametags and module list render in that 13 px fallback:
+          # `bridge_debug.log` said "No overlay font found (Manrope/Minecraftia),
+          # using default ImGui font." The OFL requires the licence to travel with
+          # the font, so `Manrope-OFL.md` ships too.
+          Copy-Item 'McInjector\assets\Manrope-Medium.ttf' $stage
+          Copy-Item 'McInjector\assets\Manrope-OFL.md' $stage
+
           $readme = @'
           aoko — Rust/GPUI host
 
@@ -129,8 +138,14 @@ jobs:
           native bridges, and which one loads is decided by the Minecraft version
           detected in the client's command line.
 
+          Keep Manrope-Medium.ttf beside them too. The in-game overlay loads it by
+          name from the bridge's own folder; without it the HUD, nametags and module
+          list fall back to ImGui's small bitmap face. Manrope-OFL.md is its licence
+          and has to travel with it.
+
           The first launch writes its profile under %APPDATA%\Aoko. No installer, no
-          runtime to install: the fonts and the word list are compiled into the exe.
+          runtime to install: the GUI fonts and the word list are compiled into the
+          exe.
           '@
           Set-Content -LiteralPath (Join-Path $stage 'README.txt') -Value $readme -Encoding utf8
 

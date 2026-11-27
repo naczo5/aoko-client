@@ -632,8 +632,16 @@ implementation must keep the two spellings distinct mapping targets.
   corresponds to `attackcooldownpertick`. Note that some wire keys have no advertised
   counterpart at all: `screenName`, `guiOpen`, `entities`.
 
-Union across both bridges: **36** top-level state fields. 32 shared, 1 legacy-only
-(`mapped`), 3 modern-only (`fov`, `viewportWidth`, `viewportHeight`).
+Union across both bridges: **36** top-level state fields. 33 shared, 1 legacy-only
+(`mapped`), and `screenName`, `actionBar`, `health`, `posX`, `posY`, `posZ`, `pitch` are
+"full only" on the modern bridge, so a modern payload without `full` carries fewer keys than
+a legacy one. The table below is the authority.
+
+`fov`, `viewportWidth` and `viewportHeight` used to be modern-only: the legacy bridge kept
+its camera FOV in `BgCamState18::fov` and never published it, so aim assist on 1.8.9 scaled
+its step against a 70° fallback and its viewport fell back to the OS window rect. `bridge.cpp`
+now emits all three and advertises them, so those rows read `yes` on both sides. The host
+already decoded them (`state.rs`), so nothing changed on this end.
 
 `legacy` = emitted by `bridge.cpp`. `modern` = emitted by `bridge_261.cpp`. "cap" = appears
 in that bridge's `state` capability array.
@@ -650,9 +658,9 @@ in that bridge's `state` capability array.
 | `posY` | double | World block Y | yes | full only | no | `posy` |
 | `posZ` | double | World block Z | yes | full only | no | `posz` |
 | `pitch` | float | Camera pitch, degrees. Legacy 6 dp, modern 2 dp | yes | full only | `pitch` | `pitch` |
-| `fov` | float | Vertical FOV, degrees, modern 2 dp | no | full only | no | `fov` |
-| `viewportWidth` | int | Client window width in pixels | no | full only | no | `viewportwidth` |
-| `viewportHeight` | int | Client window height in pixels | no | full only | no | `viewportheight` |
+| `fov` | float | Vertical FOV, degrees; both bridges print 2 dp | yes | full only | `fov` | `fov` |
+| `viewportWidth` | int | Client window width in pixels | yes | full only | `viewportwidth` | `viewportwidth` |
+| `viewportHeight` | int | Client window height in pixels | yes | full only | `viewportheight` | `viewportheight` |
 | `holdingBlock` | bool | Held item is a block | yes | yes | `holdingblock` | `holdingblock` |
 | `lookingAtBlock` | bool | Crosshair over a block | yes | yes | `lookingatblock` | `lookingatblock` |
 | `lookingAtEntity` | bool | Crosshair over a living entity | yes | yes | `lookingatentity` | `lookingatentity` |
