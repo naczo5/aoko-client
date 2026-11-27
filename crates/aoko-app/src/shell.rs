@@ -772,8 +772,15 @@ impl Shell {
 
     /// Writes the auto-save slot. The managed app does this on exit
     /// (`MainWindow.xaml.cs:1866-1869`), which is why the close paths call it.
+    ///
+    /// The profile it writes is the controller's
+    /// ([`AppController::profile_for_save`]), not this view's `self.profile` copy: a switch press
+    /// writes the controller's flag set and never touches that copy, so saving it wrote the state
+    /// from before the press — which is how a module switched on came back off after a restart.
+    /// Managed rebuilt the profile from the clicker at every save
+    /// (`ProfileManager.CreateFromClicker()`, `:956-958`, `:1867-1869`), which is the same rule.
     pub fn save_profile(&mut self) -> Result<(), String> {
-        let mut profile = self.profile.clone();
+        let mut profile = self.controller().profile_for_save();
         let result = self.profiles.save_auto(&mut profile);
         self.profile = profile;
         // The store stamps the profile's name before it writes (`save_auto`), so the copy it
@@ -784,8 +791,11 @@ impl Shell {
     }
 
     /// The Settings card's Save: writes the selected config name.
+    ///
+    /// Starts from the controller's profile for the same reason [`Shell::save_profile`] does: the
+    /// live switches are the controller's, and a copy of `self.profile` never carries them.
     pub fn save_config(&mut self, name: &str) -> Result<(), String> {
-        let mut profile = self.profile.clone();
+        let mut profile = self.controller().profile_for_save();
         let result = self.profiles.save_named(name, &mut profile);
         self.profile = profile;
         // Same as [`Shell::save_profile`]: `save_named` sets `profile.name` on the way through.
@@ -2995,7 +3005,9 @@ impl Shell {
     /// the card's field and the profile is the same live snapshot Save writes.
     pub fn configs_create(&mut self, cx: &mut Context<Self>) {
         let raw = self.config_name.clone();
-        let mut profile = self.profile.clone();
+        // The controller's profile, as in [`Shell::save_profile`]: `create` writes a file, and a
+        // second write site that saved the view's copy would forget every switch the user closed.
+        let mut profile = self.controller().profile_for_save();
         let outcome = self.profiles.create(&raw, &mut profile, false);
         self.profile = profile;
         // `create` stamps `profile.name`; the controller's copy has to follow, as in
@@ -3012,7 +3024,9 @@ impl Shell {
         let Some(name) = self.profiles.create_pending_name().map(str::to_owned) else {
             return;
         };
-        let mut profile = self.profile.clone();
+        // The controller's profile again: the overwrite path writes the same file, so it is the same
+        // rule — see [`Shell::save_profile`].
+        let mut profile = self.controller().profile_for_save();
         let _ = self.profiles.create(&name, &mut profile, true);
         self.profile = profile;
         // The overwrite path stamps the name too; see [`Shell::configs_create`].
@@ -7375,6 +7389,49 @@ mod tests {
             "a click on the switch must flip the module it names"
         );
     }
+    /// A module switch reaches the file, both ways round.
+    ///
+    /// The press writes the controller's flag set and never touches `Shell::profile`, so a save that
+    /// wrote the view's copy wrote the state from before the press — a module switched on came back
+    /// off after a restart. Both assertions read the file the save wrote rather than the shell's
+    /// copy, because a test that read `self.profile` would pass against the defect.
+    #[gpui::test]
+    fn a_module_switch_reaches_the_saved_file(cx: &mut gpui::TestAppContext) {
+        let root = scratch_root();
+        let (shell, _handle, _visual) = shell_in_window(cx, &root);
+
+        // The call the switch's own handler runs — `clicking_the_module_switch_arms_the_module`
+        // pins that a click reaches it — and then the real save the close path runs.
+        cx.update(|cx| shell.update(cx, |shell, cx| shell.toggle_module("killaura", cx)));
+        cx.update(|cx| shell.update(cx, |shell, _| drop(shell.save_profile())));
+
+        let saved = read_auto_save(&root);
+        assert_eq!(
+            saved["killAuraEnabled"],
+            serde_json::json!(true),
+            "the switch the user closed is on in the file: {saved}"
+        );
+
+        // And the inverse, which a save that only ever wrote `true` would fail.
+        cx.update(|cx| shell.update(cx, |shell, cx| shell.toggle_module("killaura", cx)));
+        cx.update(|cx| shell.update(cx, |shell, _| drop(shell.save_profile())));
+
+        let saved = read_auto_save(&root);
+        assert_eq!(
+            saved["killAuraEnabled"],
+            serde_json::json!(false),
+            "and a switch turned off is off in it: {saved}"
+        );
+    }
+
+    /// The auto-save slot as the last save left it, parsed.
+    fn read_auto_save(root: &std::path::Path) -> serde_json::Value {
+        let json = aoko_platform::ProfileStore::new(root)
+            .read_profile(crate::views::profiles::AUTO_SAVE_NAME)
+            .expect("the save wrote the auto-save slot");
+        serde_json::from_str(&json).expect("the profile file is JSON")
+    }
+
     #[gpui::test]
     fn clicking_the_autoclicker_switch_flips_the_module(cx: &mut gpui::TestAppContext) {
         use gpui::{Modifiers, WindowOptions};
