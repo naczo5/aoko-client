@@ -34,17 +34,28 @@ pub mod copy {
     pub const PING_ALL: &str = "Ping all";
     /// `:451`.
     pub const DELETE: &str = "Delete";
-    /// `:1` header: the tab's own subtitle, above the direct-join row.
-    pub const SUBTITLE: &str = "Save a server once, then join it from here.";
-    /// `:1` add form's labels, from the two `TextBlock`s above the boxes.
+    /// `:191`, the tab's subtitle above the direct-join row.
+    pub const SUBTITLE: &str = "Join a server without leaving aoko.";
+    /// `:365`, the add form's name caption.
+    ///
+    /// The port passes the two captions to `TextInput` as the box's hint rather than painting a
+    /// caption above it, because its form has one row per field and no caption line.
     pub const NAME_LABEL: &str = "Name";
-    /// `:373` add form's address label.
-    pub const ADDRESS_LABEL: &str = "Address";
-    /// `:1` empty state title.
-    pub const EMPTY_TITLE: &str = "No servers yet";
-    /// `:1` empty state body.
-    pub const EMPTY_BODY: &str = "Add a server, then join it from here.";
-    /// `:1` delete confirmation title.
+    /// `:372`, the add form's address caption.
+    ///
+    /// `Host or host:port`, not "Address": the markup's caption is the pair of accepted forms,
+    /// and the box takes either. Folded into the box's hint for the same reason as
+    /// [`NAME_LABEL`].
+    pub const ADDRESS_LABEL: &str = "Host or host:port";
+    /// `:333`, the empty state's title.
+    pub const EMPTY_TITLE: &str = "No saved servers";
+    /// `:334`, the empty state's body.
+    pub const EMPTY_BODY: &str = "Join a server above, or add one to ping and join it later.";
+    /// The delete confirmation's caption, `ServersView.xaml.cs:457-458`.
+    ///
+    /// From the code-behind, not the markup: managed asked the question in a `MessageBox` whose
+    /// title argument is this string, so there is no XAML line to cite. The port draws the same
+    /// question in a form of its own and keeps the caption managed would have shown.
     pub const DELETE_TITLE: &str = "Delete server";
 }
 

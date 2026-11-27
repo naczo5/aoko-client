@@ -62,6 +62,7 @@ use crate::components::{
 };
 use crate::dialogs::color_picker::{Channel, ColorPickerState, Hsv, PickResult, Rgb};
 use crate::theme::{metrics, Theme};
+use crate::views::copy;
 
 /// `ColorPickerDialog.xaml` window width (`:5`).
 pub const DIALOG_WIDTH: f32 = 360.0;
@@ -192,9 +193,9 @@ impl ColorPickerView {
         self.hex_notice = if accepted {
             None
         } else {
-            Some(SharedString::from(format!(
-                "Not a hex colour; kept {current}."
-            )))
+            Some(SharedString::from(
+                copy::COLOR_PICKER_HEX_REFUSED.replace("{value}", &current),
+            ))
         };
         cx.notify();
         accepted
@@ -216,17 +217,17 @@ impl ColorPickerView {
         [
             ChannelRow {
                 channel: Channel::Red,
-                caption: "R",
+                caption: copy::COLOR_PICKER_CHANNEL_LABELS[0],
                 value: color.r,
             },
             ChannelRow {
                 channel: Channel::Green,
-                caption: "G",
+                caption: copy::COLOR_PICKER_CHANNEL_LABELS[1],
                 value: color.g,
             },
             ChannelRow {
                 channel: Channel::Blue,
-                caption: "B",
+                caption: copy::COLOR_PICKER_CHANNEL_LABELS[2],
                 value: color.b,
             },
         ]
@@ -371,7 +372,7 @@ impl Render for ColorPickerView {
                 div()
                     .text_size(px(metrics::text::SECTION_TITLE))
                     .text_color(theme.dim_text)
-                    .child("Hex"),
+                    .child(copy::COLOR_PICKER_HEX_LABEL),
             )
             .child(
                 div()
@@ -403,7 +404,7 @@ impl Render for ColorPickerView {
                     "color-picker-cancel",
                     &theme,
                     ButtonVariant::Dark,
-                    SharedString::from("Cancel"),
+                    SharedString::from(copy::COLOR_PICKER_CANCEL),
                     BUTTON_WIDTH,
                     move |_, window, cx| {
                         handle.update(cx, |view, cx| view.finish(false, window, cx));
@@ -418,7 +419,7 @@ impl Render for ColorPickerView {
                     "color-picker-ok",
                     &theme,
                     ButtonVariant::Dark,
-                    SharedString::from("OK"),
+                    SharedString::from(copy::COLOR_PICKER_OK),
                     BUTTON_WIDTH,
                     move |_, window, cx| {
                         handle.update(cx, |view, cx| view.finish(true, window, cx));

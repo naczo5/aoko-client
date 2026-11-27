@@ -1235,14 +1235,31 @@ pub const TABS: [Tab; 9] = [
     },
 ];
 
-/// Rail entry for the update status button (`UpdateStatusButton`).
-pub const UPDATE_STATUS_TITLE: &str = "Update status";
-
 /// The rail search button's tooltip.
 pub const SEARCH_BUTTON_TOOLTIP: &str = "Search modules and tabs (Ctrl+K)";
 
 /// The rail search button's chord hint.
 pub const SEARCH_BUTTON_CHORD: &str = "ctrl k";
+
+// The overlay's footer legend and the unavailable chip, `CommandSearchOverlay.xaml`. Each of the
+// three legend entries is a bold key and a dim word, and the markup's word is a `Run` that begins
+// with a space (`:449`, `:453`, `:460`), so the space lives here rather than in the painter.
+
+/// `:448` — the first legend entry's key.
+pub const SEARCH_LEGEND_UP_DOWN: &str = "up/down";
+/// `:449` — the word after it, leading space and all.
+pub const SEARCH_LEGEND_NAVIGATE: &str = " navigate";
+/// `:452` — the second entry's key.
+pub const SEARCH_LEGEND_ENTER: &str = "enter";
+/// `:453`.
+pub const SEARCH_LEGEND_JUMP: &str = " jump";
+/// `:459` — the third entry's key, `F2` rather than Ctrl+Space because Microsoft's CJK IMEs claim
+/// that chord (`:456-458`).
+pub const SEARCH_LEGEND_F2: &str = "f2";
+/// `:460`.
+pub const SEARCH_LEGEND_TOGGLE: &str = " toggle";
+/// The chip an unreachable row carries instead of a switch, `:387`.
+pub const SEARCH_ROW_UNAVAILABLE: &str = "UNAVAILABLE";
 
 /// A title with no managed source, kept flagged rather than deleted.
 ///
@@ -1391,6 +1408,35 @@ pub const LOADER_REASON_CONNECT_FAILED: &str = "Could not connect to agent on po
 /// thing this panel's audit went after.
 pub const LOADER_REASON_DISCONNECTED: &str = "Disconnected from agent.";
 
+// ── The colour picker dialog ────────────────────────────────────────────────────
+//
+// `ColorPickerDialog.xaml`. The window's `Title="Pick a color"` (`:4`) is deliberately absent:
+// the port draws the dialog as a child of the shell's only window (`MIGRATION_ARCHITECTURE.md`
+// section 12 decision 4), so there is no title bar for it to appear in.
+
+/// The hex box's caption, `ColorPickerDialog.xaml:82` — 12 px, dim, 8 px before the box.
+pub const COLOR_PICKER_HEX_LABEL: &str = "Hex";
+
+/// The three channel captions, `ColorPickerDialog.xaml:92`, `:97` and `:102`, in the dialog's
+/// R/G/B order.
+pub const COLOR_PICKER_CHANNEL_LABELS: [&str; 3] = ["R", "G", "B"];
+
+/// The cancel button, `ColorPickerDialog.xaml:109` — 90 wide, 8 px before the accept button,
+/// `IsCancel` in the markup.
+pub const COLOR_PICKER_CANCEL: &str = "Cancel";
+
+/// The accept button, `ColorPickerDialog.xaml:110` — 90 wide, `IsDefault` in the markup.
+pub const COLOR_PICKER_OK: &str = "OK";
+
+/// A hex entry the parser refused, and the value the dialog kept instead.
+///
+/// New copy. Managed's `CommitHex` (`ColorPickerDialog.xaml.cs:181-191`) called `RefreshAll()`
+/// when `TryParseHex` failed, which rewrote the box to the last valid value and said nothing, so
+/// the entry disappeared under the user's cursor. The port keeps the same value and says why.
+/// `{value}` is that value, `#RRGGBB` with its `#`, filled with `str::replace` the way
+/// [`MODULE_BIND_CONFLICT_NAMED`] fills its three placeholders.
+pub const COLOR_PICKER_HEX_REFUSED: &str = "Not a hex colour; kept {value}.";
+
 // ── The palette editor ──────────────────────────────────────────────────────────
 
 /// `Custom Palettes`, the heading above the saved cards, `MainWindow.xaml:1908`.
@@ -1513,6 +1559,12 @@ pub const BLOCK_ESP_ID_TOOLTIP: &str = "Block id, e.g. minecraft:diamond_ore or 
 pub const BLOCK_ESP_ADD_LABEL: &str = "Add";
 
 /// The client-drawn title bar's minimise/maximise/close accessible names.
+///
+/// New copy, and accessibility rather than appearance: managed kept WPF's OS chrome
+/// (`MainWindow.xaml:9`, `WindowStyle="SingleBorderWindow"`), so the three controls were the
+/// window manager's and their names came from the platform. The port draws its own bar
+/// (`shell.rs`'s `render_title_bar`), which means it also has to name the three buttons, and a
+/// custom-drawn button with no accessible name is invisible to a screen reader.
 pub const TITLE_BAR_MINIMISE: &str = "Minimise";
 /// Maximise.
 pub const TITLE_BAR_MAXIMISE: &str = "Maximise";

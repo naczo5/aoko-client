@@ -101,6 +101,7 @@ use crate::components::{field, glyph, highlight_text, scroll, switch::switch_sta
 use crate::theme::motion::{self, Motion};
 use crate::theme::{fixed, metrics, Theme};
 use crate::views::command_search::{self, CommandSearchState, Row};
+use crate::views::copy;
 
 /// Header (accent line, query row, divider, footer) height taken off the results area.
 const CHROME: f32 = 108.0;
@@ -535,7 +536,7 @@ pub fn row_element(
                 .py(px(2.0))
                 .text_size(px(9.0))
                 .text_color(fixed::CRITICAL)
-                .child("UNAVAILABLE"),
+                .child(copy::SEARCH_ROW_UNAVAILABLE),
         );
     }
 
@@ -585,22 +586,22 @@ fn legend(theme: &Theme, state: &CommandSearchState) -> AnyElement {
                     div()
                         .flex()
                         .gap(px(4.0))
-                        .child(key("up/down"))
-                        .child(rest(" navigate")),
+                        .child(key(copy::SEARCH_LEGEND_UP_DOWN))
+                        .child(rest(copy::SEARCH_LEGEND_NAVIGATE)),
                 )
                 .child(
                     div()
                         .flex()
                         .gap(px(4.0))
-                        .child(key("enter"))
-                        .child(rest(" jump")),
+                        .child(key(copy::SEARCH_LEGEND_ENTER))
+                        .child(rest(copy::SEARCH_LEGEND_JUMP)),
                 )
                 .child(
                     div()
                         .flex()
                         .gap(px(4.0))
-                        .child(key("f2"))
-                        .child(rest(" toggle")),
+                        .child(key(copy::SEARCH_LEGEND_F2))
+                        .child(rest(copy::SEARCH_LEGEND_TOGGLE)),
                 ),
         )
         .child(

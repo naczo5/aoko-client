@@ -75,7 +75,11 @@ pub mod copy {
     pub const LUNAR_ACCOUNTS: &str = "Write saved accounts into Lunar";
     /// `:507`.
     pub const STORAGE_WARNING: &str = "Saved credentials are stored unencrypted on this PC.";
-    /// `:1` division label: the panel the delete question is asked in.
+    /// The delete confirmation's caption, `AccountsView.xaml.cs:899-900`.
+    ///
+    /// From the code-behind, not the markup: managed asked the question in a `MessageBox` whose
+    /// title argument is this string, so there is no XAML line to cite. The port draws the same
+    /// question in a form of its own and keeps the caption managed would have shown.
     pub const DELETE_TITLE: &str = "Delete account";
 }
 

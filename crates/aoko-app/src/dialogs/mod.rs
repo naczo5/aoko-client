@@ -1,12 +1,13 @@
 //! The two modal surfaces, the state machines behind them, and their views.
 //!
-//! **The views are built and tested, but nothing mounts them** (section 12 decision 7):
-//! [`color_picker_view::ColorPickerView`] and [`window_picker_view::WindowPickerView`] each
-//! implement `Render` and are exercised in a window by their own tests, but no route in the
-//! running app opens either one — the managed call sites
-//! (`MainWindow.xaml.cs:1075-1085`, `:2030-2036` for the colour picker and `:1477-1489`
-//! for the target picker) have no Rust equivalent yet. Mounting one means an overlay child
-//! of the shell, which is the shell's wiring.
+//! **The colour picker is mounted; the target picker is not.** `Shell::open_color_picker`
+//! (`shell.rs:993`) builds a [`color_picker_view::ColorPickerView`], `shell.rs:2954` renders it
+//! as an overlay child of the shell's one window, and the swatch on a palette row or a
+//! block-ESP row opens it (`shell.rs:1508`). [`window_picker_view::WindowPickerView`] still has
+//! no route into the running app: managed opened it from `MainWindow.xaml.cs:1470-1486` when
+//! more than one client was running, and the port lists those targets inside the loader panel
+//! instead (`shell.rs`'s `render_loader`), which is why that view is built and tested but
+//! unreachable.
 //!
 //! Each view's header says what is and is not interactive: the colour picker's square and
 //! hue bar take a press and a drag through [`crate::picker`]'s window-and-app callbacks;
