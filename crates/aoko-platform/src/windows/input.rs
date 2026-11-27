@@ -493,7 +493,7 @@ fn mouse_input(flags: MOUSE_EVENT_FLAGS, data: i32, dx: i32, dy: i32) -> INPUT {
             mi: MOUSEINPUT {
                 dx,
                 dy,
-                mouseData: data,
+                mouseData: data as u32,
                 dwFlags: flags,
                 time: 0,
                 dwExtraInfo: 0,

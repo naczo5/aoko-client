@@ -154,7 +154,7 @@ impl Failure {
 
 /// One wall-clock budget, read before every read so a slow peer cannot outlast it.
 #[derive(Debug, Clone, Copy)]
-struct Deadline {
+pub(crate) struct Deadline {
     expires: Instant,
 }
 

@@ -64,6 +64,8 @@ impl PrefsFile {
     pub fn from_system() -> Result<Self, PlatformError> {
         app_data_directory().map(|dir| Self {
             path: dir.join(FILE_NAME),
+            reply: reply(),
+            failure: String::new(),
         })
     }
 
