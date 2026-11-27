@@ -6246,34 +6246,39 @@ mod tests {
         assert_eq!(shell.profile().kill_aura_settings.cps_mode(), "record");
     }
 
-    /// A checkbox that is the saved copy of a switch moves the switch, not only the file.
+    /// A painted checkbox that is the saved copy of a switch moves the switch, not only the file.
     ///
     /// `"Pause when breaking"` writes `breakBlocksEnabled`, and the frame's `breakBlocks` reads
     /// `EnabledFlag::BreakBlocks`, so a press that wrote only the profile left the module off in
-    /// the loops and on the wire until a save and a reload. Driven through [`Shell::set_checked`],
-    /// which is what the painted checkbox's `on_click` runs: `components::checkbox` carries an
-    /// `ElementId` and no `debug_selector`, and a wrapper to get one would land in the Combat
-    /// frame the allocation pin measures.
+    /// the loops and on the wire until a save and a reload. Clicked on its painted bounds, which
+    /// is the rule the surface owes §12 decision 7: the selector rides
+    /// `components::checkbox`'s own root, never a wrapper, so the press is a hit test rather than
+    /// a call to the body the closure runs.
     #[gpui::test]
     fn a_checkbox_that_is_a_switch_reaches_the_frame(cx: &mut gpui::TestAppContext) {
-        let shell = cx.update(|cx| cx.new(|_| Shell::new(Theme::slate())));
+        use gpui::Modifiers;
 
-        cx.update(|cx| {
-            shell.update(cx, |shell, cx| {
-                shell.set_checked("BreakBlocksEnabled", true, cx);
-            });
-        });
+        let root = scratch_root();
+        let (shell, _handle, mut visual) = shell_in_window(cx, &root);
+        scroll_into_view(&mut visual, "check-BreakBlocksEnabled");
+
+        let bounds = visual
+            .debug_bounds("check-BreakBlocksEnabled")
+            .expect("the checkbox renders with its selector");
+        visual.simulate_click(bounds.center(), Modifiers::default());
+
         let line = cx.read(|cx| shell.read(cx).controller().config_frame().to_line());
         assert!(
             line.contains("\"breakBlocks\":true"),
-            "the press reaches the switch the frame reads: {line}"
+            "the click reaches the switch the frame reads: {line}"
         );
 
-        cx.update(|cx| {
-            shell.update(cx, |shell, cx| {
-                shell.set_checked("BreakBlocksEnabled", false, cx);
-            });
-        });
+        // The same painted bounds again, which is the inverse press.
+        let bounds = visual
+            .debug_bounds("check-BreakBlocksEnabled")
+            .expect("the checkbox is still there");
+        visual.simulate_click(bounds.center(), Modifiers::default());
+
         let line = cx.read(|cx| shell.read(cx).controller().config_frame().to_line());
         assert!(
             line.contains("\"breakBlocks\":false"),
@@ -6285,33 +6290,40 @@ mod tests {
     ///
     /// `PixelPartyAutoLookEnabled` and `PixelPartyAutoWalkEnabled` are the profile's own fields
     /// and the frame reads them from the profile, which is why the wiring is a table lookup and
-    /// not "any bind ending in `Enabled`".
+    /// not "any bind ending in `Enabled`". Clicked, like the checkbox above.
     #[gpui::test]
     fn a_sub_setting_checkbox_stays_on_the_profile_path(cx: &mut gpui::TestAppContext) {
-        let shell = cx.update(|cx| cx.new(|_| Shell::new(Theme::slate())));
-        let before = cx.read(|cx| shell.read(cx).controller().count_enabled_modules());
+        use gpui::Modifiers;
 
-        cx.update(|cx| {
-            shell.update(cx, |shell, cx| {
-                shell.set_checked("PixelPartyAutoLookEnabled", true, cx);
-            });
+        let root = scratch_root();
+        let (shell, _handle, mut visual) = shell_in_window(cx, &root);
+        let controller = cx.read(|cx| Arc::clone(shell.read(cx).controller()));
+        let before = controller.count_enabled_modules();
+
+        // The card is on Utility, so the tab is selected and drawn before the bounds exist.
+        cx.update(|cx| shell.update(cx, |shell, cx| shell.select_tab_named("utility", cx)));
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
         });
+        scroll_into_view(&mut visual, "check-PixelPartyAutoLookEnabled");
+
+        let bounds = visual
+            .debug_bounds("check-PixelPartyAutoLookEnabled")
+            .expect("the checkbox renders with its selector");
+        visual.simulate_click(bounds.center(), Modifiers::default());
 
         let line = cx.read(|cx| shell.read(cx).controller().config_frame().to_line());
         assert!(
             line.contains("\"pixelPartyAutoLook\":true"),
             "the profile carries it to the frame, as before: {line}"
         );
-        let after = cx.read(|cx| shell.read(cx).controller().count_enabled_modules());
         assert_eq!(
-            after, before,
+            controller.count_enabled_modules(),
+            before,
             "no switch moved, so the new call answered `None` for this bind"
         );
         assert_eq!(
-            cx.read(|cx| shell
-                .read(cx)
-                .controller()
-                .set_switch_for_profile_key("PixelPartyAutoLookEnabled", true)),
+            controller.set_switch_for_profile_key("PixelPartyAutoLookEnabled", true),
             None,
             "and the bind names no switch, which is what the shell relies on"
         );
