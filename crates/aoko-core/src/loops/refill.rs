@@ -89,7 +89,9 @@ pub fn run(
 
         // `RefillDelayMs` was read on every iteration (`RefillController.cs:230`), so it comes
         // from the live profile rather than from the value the bundle started with.
-        let config = sense.loop_configs().map_or(started, |configs| configs.refill);
+        let config = sense
+            .loop_configs()
+            .map_or(started, |configs| configs.refill);
 
         // The slot geometry is mapped through the window's client rect
         // (`RefillController.cs:167-172`, `:241-247`).
@@ -165,13 +167,7 @@ pub fn run(
         let slot = refill.slots[choice.index];
 
         let plan = runtime.with_rng(|rng| {
-            plan_click(
-                refill.screen_width,
-                refill.screen_height,
-                &slot,
-                rect,
-                rng,
-            )
+            plan_click(refill.screen_width, refill.screen_height, &slot, rect, rng)
         });
         let Some(plan) = plan else {
             // `ClickSlotAsync` returns `-1` for an unmappable slot (`:243-245`), which records

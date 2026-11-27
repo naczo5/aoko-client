@@ -429,7 +429,8 @@ pub fn render(
                             {
                                 let handle = entity.clone();
                                 move |_, _, cx| {
-                                    handle.update(cx, |shell, cx| shell.accounts_refresh_session(cx));
+                                    handle
+                                        .update(cx, |shell, cx| shell.accounts_refresh_session(cx));
                                 }
                             },
                         )),

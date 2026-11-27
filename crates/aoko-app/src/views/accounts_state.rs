@@ -557,10 +557,8 @@ impl AccountsState {
                     accounts_logic::is_current_session(row_uuid(row), session_uuid.as_deref());
                 let mut next = row.clone();
                 next.is_current = is_current;
-                next.last_used_label = accounts_logic::last_used_label(
-                    next.last_used_at.as_deref(),
-                    now_ms,
-                );
+                next.last_used_label =
+                    accounts_logic::last_used_label(next.last_used_at.as_deref(), now_ms);
                 next.automation_name =
                     accounts_logic::card_automation_name(&row.name, row.source_label, is_current);
                 next
@@ -1423,7 +1421,8 @@ mod tests {
             "the stamp is re-aged against the caller's clock, not against zero"
         );
         assert_eq!(
-            state.rows()[1].last_used_label, "Never used",
+            state.rows()[1].last_used_label,
+            "Never used",
             "a card with no stamp keeps its own sentence"
         );
     }

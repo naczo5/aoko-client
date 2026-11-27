@@ -24,7 +24,7 @@
 //! switch the trigger for `aoko_core::loops::ClickerLoops`, which owns the seven automation
 //! threads, so enabling a loop-driving module starts them and turning the last one off
 //! stops them. It is off until the shipped path turns it on. The bundle is not the gate: each
-//! body asks [`ControllerSense`] about its **own** module switch on every tick, so the left
+//! body asks `ControllerSense` about its **own** module switch on every tick, so the left
 //! clicker stops when the AutoClicker is switched off even while aim assist keeps the bundle
 //! alive, and enabling aim assist no longer starts a click stream. The same sense carries the
 //! live profile, so a settings edit reaches the engine on the next click instead of at the
@@ -720,7 +720,9 @@ impl Runtime {
         // The binds are read from the live profile, not cached: a capture that just recorded a
         // new key must be in force on the next press, and the table is small.
         let binds: Vec<(String, Key)> = {
-            let profile = self.controller.with_profile(|profile| profile.module_keys.clone());
+            let profile = self
+                .controller
+                .with_profile(|profile| profile.module_keys.clone());
             profile
                 .into_iter()
                 .filter_map(|(module, code)| {
@@ -2127,7 +2129,7 @@ mod tests {
     /// The session timer counts the seconds the clock moves, and only those.
     ///
     /// The clock is [`StepClock`], so nothing here waits: `advance` is what crosses a second.
-    /// The game is reported foreground through the same [`ControllerSense`] the click bodies
+    /// The game is reported foreground through the same `ControllerSense` the click bodies
     /// read, over a fake window inspector — no window is opened and nothing is injected.
     #[test]
     fn the_session_timer_counts_playtime_from_the_clock() {
@@ -2628,7 +2630,9 @@ mod tests {
         controller.set_module_enabled(EnabledFlag::LeftClick, true);
         let sense = ControllerSense::new(Arc::clone(&controller), None);
 
-        let first = sense.loop_configs().expect("the controller holds a profile");
+        let first = sense
+            .loop_configs()
+            .expect("the controller holds a profile");
         assert_eq!(first.left.min_cps, 8.0);
         assert_eq!(first.left.max_cps, 12.0);
         assert!(!first.left.guards.click_in_chests);

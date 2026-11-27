@@ -504,7 +504,15 @@ fn split_space_netscape(line: &str) -> Option<Vec<String>> {
     let name = take_netscape_token(&mut rest)?;
     let value = rest.trim_start().to_owned();
 
-    Some(vec![domain, include_subdomains, path, secure, expiry, name, value])
+    Some(vec![
+        domain,
+        include_subdomains,
+        path,
+        secure,
+        expiry,
+        name,
+        value,
+    ])
 }
 
 /// Takes the next whitespace-delimited token off the front of `rest`.

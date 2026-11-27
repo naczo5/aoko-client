@@ -980,7 +980,7 @@ fn the_pixel_party_loop_releases_its_keys_when_cancelled() {
             &sense,
             input_for_loop.as_ref(),
             &super::pixel_party::PixelPartyConfig {
-                    auto_look: true,
+                auto_look: true,
                 auto_walk: true,
             },
             &mut keys,

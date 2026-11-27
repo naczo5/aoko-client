@@ -314,7 +314,7 @@ pub fn slider(
                     style
                         .w(px(grown))
                         .h(px(
-                            metrics::slider::THUMB_HEIGHT * metrics::slider::HOVER_SCALE_Y,
+                            metrics::slider::THUMB_HEIGHT * metrics::slider::HOVER_SCALE_Y
                         ))
                         .ml(px(-(grown - thumb) / 2.0))
                         .mr(px(-(grown - thumb) / 2.0))

@@ -220,7 +220,9 @@ pub fn run(
         // `TriggerbotRequireClick`, the cooldown threshold, the hit chance and the shared
         // break-blocks flag were all read inside the managed `while` (`:2898-2966`), so they
         // come from the live profile rather than from the value the bundle started with.
-        let config = sense.loop_configs().map_or(started, |configs| configs.triggerbot);
+        let config = sense
+            .loop_configs()
+            .map_or(started, |configs| configs.triggerbot);
 
         let should_run = sense.supports_module(super::TRIGGERBOT_MODULE)
             && sense.is_connected()

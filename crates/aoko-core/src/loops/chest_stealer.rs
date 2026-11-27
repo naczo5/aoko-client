@@ -97,7 +97,9 @@ pub fn run(
 
         // `ChestStealerDelayMs` and `ChestStealerMenuCheck` were read inside the managed loop
         // (`ChestStealerController.cs:156-166`, `:203`), so they come from the live profile.
-        let config = sense.loop_configs().map_or(started, |configs| configs.chest_stealer);
+        let config = sense
+            .loop_configs()
+            .map_or(started, |configs| configs.chest_stealer);
 
         // The slot geometry is mapped through the window's client rect, so a session that
         // cannot report one parks instead of clicking at a guessed position
@@ -171,15 +173,8 @@ pub fn run(
         // `ChestStealerSlot` is `Copy`, so the slot outlives the borrow of the snapshot.
         let slot = chest.slots[choice.index];
 
-        let plan = runtime.with_rng(|rng| {
-            plan_click(
-                chest.screen_width,
-                chest.screen_height,
-                &slot,
-                rect,
-                rng,
-            )
-        });
+        let plan = runtime
+            .with_rng(|rng| plan_click(chest.screen_width, chest.screen_height, &slot, rect, rng));
         let Some(plan) = plan else {
             // `ClickSlotAsync` returns `-1` when the slot cannot be mapped (`:301-303`), which
             // records no cooldown; a poll rather than a click is the port's answer to a slot
@@ -251,7 +246,8 @@ pub fn run(
             millis(runtime),
         )
         .map_or(0.0, |next| next.distance);
-        let interval = runtime.with_rng(|rng| next_interval_ms(config.delay_ms, next_distance, rng));
+        let interval =
+            runtime.with_rng(|rng| next_interval_ms(config.delay_ms, next_distance, rng));
         let wait_ms = u64::try_from((interval - elapsed_ms).max(1)).unwrap_or(1);
 
         if !runtime.park(Duration::from_millis(wait_ms)) {

@@ -576,10 +576,7 @@ mod tests {
 
         // Sub-pixel tolerance: the property under test is that the host's box was not inherited,
         // not that taffy rounded a definite 620 px the same way twice.
-        let laid_out = (
-            f32::from(bounds.size.width),
-            f32::from(bounds.size.height),
-        );
+        let laid_out = (f32::from(bounds.size.width), f32::from(bounds.size.height));
         assert!(
             (laid_out.0 - width).abs() < 0.5 && (laid_out.1 - height).abs() < 0.5,
             "the dialog laid out at {laid_out:?}, not at the managed {width}x{height}"

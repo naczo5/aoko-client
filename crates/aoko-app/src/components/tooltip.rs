@@ -20,7 +20,7 @@
 //! without a line of XAML saying so — a fade that the port owed and did not have. A
 //! tooltip view is created when the tooltip is shown and dropped when it hides, so the
 //! fade is an entrance on a fresh element and needs no state anywhere: the id is fixed,
-//! the animation runs once, and [`Motion`](crate::theme::motion::Motion) /
+//! the animation runs once, and [`Motion`] /
 //! `App::reduce_motion` both collapse it to the settled frame.
 //!
 //! Usage — the builder is a value so a caller chains it once per element:

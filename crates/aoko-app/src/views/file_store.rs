@@ -52,7 +52,7 @@
 //! # Reads never panic and never lie about what they read
 //!
 //! A missing file, an empty one, `null`, invalid JSON, a number out of range, a row of the
-//! wrong type, a file larger than [`MAXIMUM_FILE_BYTES`]: none of these can reach a panic
+//! wrong type, a file larger than `MAXIMUM_FILE_BYTES`: none of these can reach a panic
 //! or a defaulted date. Rows are parsed one at a time, so one bad row is skipped while the
 //! rest of the list still loads, and a row that is missing a field keeps the managed
 //! property initializers' value instead of failing the file.
@@ -73,7 +73,7 @@
 //!   migration exists to keep. The file itself is never touched, and
 //!   [`crate::views::store_recovery::READ_BLOCKED_MESSAGE`] explains it to the user.
 //! * **An oversized file is treated as unparsable.** Managed had no ceiling and would try
-//!   to materialize whatever was on disk. A file above [`MAXIMUM_FILE_BYTES`] is quarantined
+//!   to materialize whatever was on disk. A file above `MAXIMUM_FILE_BYTES` is quarantined
 //!   instead, which is the same outcome as corrupt JSON: the bytes are kept, the store starts
 //!   empty, and no allocation is sized by a file this app could not have written.
 //! * **One stamp format for both files.** `AccountStore` stamps `yyyyMMdd-HHmmss` (`:354`)
@@ -588,7 +588,9 @@ fn write_atomically(path: &Path, contents: &str) -> io::Result<()> {
     // `<app data>/Aoko` appears with the first save (the managed `AccountStore` created it in
     // its constructor, `AccountStore.cs:65-67`); an empty parent is the working directory,
     // which needs no creating.
-    let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty());
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty());
     if let Some(directory) = parent {
         fs::create_dir_all(directory)?;
     }
@@ -765,7 +767,9 @@ fn same_uuid(left: &str, right: &str) -> bool {
 fn now_millis() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX))
+        .map_or(0, |elapsed| {
+            i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+        })
 }
 
 /// The round-trip form `System.Text.Json` writes for a `DateTimeOffset`:
@@ -973,7 +977,10 @@ mod tests {
             .expect("the same host and port is the same bookmark");
         assert_eq!(same_port.id, first.id);
         assert_eq!(same_port.name, "Fancy", "a blank name never renames");
-        assert_eq!(same_port.address, "play.hypixel.net", "nor rewrites the address");
+        assert_eq!(
+            same_port.address, "play.hypixel.net",
+            "nor rewrites the address"
+        );
         assert_eq!(store.servers().len(), 1);
 
         let other = store
@@ -1049,7 +1056,10 @@ mod tests {
 
         assert!(store.accounts().is_empty());
         assert!(store.servers().is_empty());
-        assert!(!store.accounts_path().exists(), "reading must not create the file");
+        assert!(
+            !store.accounts_path().exists(),
+            "reading must not create the file"
+        );
         assert!(!store.servers_path().exists());
         assert!(!store.directory().exists());
         assert!(!store.remove_account("missing"));
@@ -1111,7 +1121,10 @@ mod tests {
         assert_eq!(accounts.len(), 2, "the two usable rows survive");
         assert_eq!(accounts[0].name, "NoId");
         assert_eq!(accounts[0].id.len(), 32, "a missing id gets a local key");
-        assert_eq!(accounts[0].source, "unknown", "and the managed default source");
+        assert_eq!(
+            accounts[0].source, "unknown",
+            "and the managed default source"
+        );
         assert_eq!(accounts[1].id, "kept");
         assert_eq!(accounts[1].name, "Kept");
     }
@@ -1134,7 +1147,10 @@ mod tests {
         assert_eq!(servers.len(), 2);
         assert_eq!(servers[0].address, "blank.example.net");
         assert_eq!(servers[0].id.len(), 32, "`ServerStore.cs:231`");
-        assert!(servers[0].added_at.is_none(), "an absent stamp stays absent");
+        assert!(
+            servers[0].added_at.is_none(),
+            "an absent stamp stays absent"
+        );
         assert_eq!(servers[1].name, "Kept");
     }
 
@@ -1164,7 +1180,10 @@ mod tests {
         fs::write(store.accounts_path(), "null").expect("a null file");
         let reopened = FileStore::open(root);
         assert!(reopened.accounts().is_empty());
-        assert!(reopened.accounts_path().exists(), "a null file is left alone");
+        assert!(
+            reopened.accounts_path().exists(),
+            "a null file is left alone"
+        );
         assert!(reopened.accounts_notice().recovered_from.is_none());
     }
 
@@ -1252,7 +1271,10 @@ mod tests {
         let dashed = "069a79f4-44e9-4726-a5be-fca90e38aaf5";
         let compact = "069A79F444E94726A5BEFCA90E38AAF5";
 
-        assert!(same_uuid(compact, dashed), "dashes and case do not distinguish");
+        assert!(
+            same_uuid(compact, dashed),
+            "dashes and case do not distinguish"
+        );
         assert!(!same_uuid("", ""));
         assert!(!same_uuid("aa", "bb"));
     }

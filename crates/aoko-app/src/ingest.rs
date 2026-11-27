@@ -64,7 +64,7 @@
 //! window opened before the handshake asks the codec's question rather than reading an empty list.
 //!
 //! What this deliberately does not do: no command frames, no injection and no module execution.
-//! A dial that never reaches the bridge retries for the window [`DIAL_ATTEMPTS`] describes and then
+//! A dial that never reaches the bridge retries for the window `DIAL_ATTEMPTS` describes and then
 //! leaves the link down, and the reason is published into the runtime's `LinkReport` as well as
 //! logged, because the loader panel is what a user can act on and `connected` alone cannot say why
 //! it is false.
@@ -79,13 +79,13 @@
 //! startup". A reader that dialled once left the app connected to nothing for the rest of the
 //! session - the state store stayed empty, so every module gate that reads game state (aim assist,
 //! chest stealer, the HUD layout) saw a dead game rather than a slow one. See
-//! [`dial_with_retries`] for the numbers and [`DIAL_ATTEMPTS`] for the bound.
+//! `dial_with_retries` for the numbers and `DIAL_ATTEMPTS` for the bound.
 //!
 //! What is still out of scope: the managed host also *re*connected after a live link dropped
 //! (`ScheduleAutoReconnectAsync`, `GameStateClient.cs:626-660`) and tore its socket down on close.
 //! Neither is here. The reader thread is detached when `crate::ingest::Ingest` is dropped, and a
 //! blocking `recv_line` on a live socket cannot be interrupted without closing it - closing it is
-//! the transport's job, not this module's. [`Ingest`]'s stop flag therefore ends a reader that is
+//! the transport's job, not this module's. `Ingest`'s stop flag therefore ends a reader that is
 //! *waiting to dial*, which is the case a replaced reader is always in.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -337,8 +337,8 @@ impl Ingest {
     ///
     /// The dial happens inside the thread: a resolved-but-silent address can block for the
     /// OS SYN timeout, and the startup path must not wait for it. It is also *retried* inside the
-    /// thread, up to [`DIAL_ATTEMPTS`] times [`DIAL_RETRY`] apart, because the press that injected
-    /// the bridge races the bridge's own listener: see the module header and [`dial_with_retries`].
+    /// thread, up to `DIAL_ATTEMPTS` times `DIAL_RETRY` apart, because the press that injected
+    /// the bridge races the bridge's own listener: see the module header and `dial_with_retries`.
     ///
     /// A test build returns a reader with no worker instead of dialling. That is the rule this
     /// module's header states — no test opens a socket, because a bridge genuinely listening on the

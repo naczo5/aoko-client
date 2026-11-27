@@ -202,7 +202,9 @@ pub fn run(
         // The two sub-switches were read inside the managed `while` too
         // (`Clicker.cs:2731-2733`), so they come from the live profile rather than from the
         // value the bundle started with.
-        let config = sense.loop_configs().map_or(started, |configs| configs.pixel_party);
+        let config = sense
+            .loop_configs()
+            .map_or(started, |configs| configs.pixel_party);
 
         let module_ok = sense.supports_module(super::PIXEL_PARTY_MODULE)
             && sense.supports_state_field("pixelpartyyawdelta")

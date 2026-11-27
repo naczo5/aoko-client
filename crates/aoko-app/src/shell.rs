@@ -4366,15 +4366,11 @@ impl Shell {
         let animation =
             Animation::new(motion.duration(TAB_ENTER)).with_easing(motion::cubic_ease_out);
         frame
-            .with_animation(
-                ("tab-body", self.tab_epoch),
-                animation,
-                |element, t| {
-                    // `with_easing` already shaped `t`, so this is the eased progress
-                    // rather than a second pass over it.
-                    element.opacity(t).relative().top(px(6.0 * (1.0 - t)))
-                },
-            )
+            .with_animation(("tab-body", self.tab_epoch), animation, |element, t| {
+                // `with_easing` already shaped `t`, so this is the eased progress
+                // rather than a second pass over it.
+                element.opacity(t).relative().top(px(6.0 * (1.0 - t)))
+            })
             .into_any_element()
     }
 
