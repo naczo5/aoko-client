@@ -37,7 +37,12 @@ Do **not** run `build_release.bat` or the GitHub release script for ordinary PRs
 `scripts\New-GitHubRelease.ps1` is the shared build/publish path: it
 checks the release branch is clean and matches origin, runs
 `build_release.bat` (which already builds both bridges then publishes), zips
-`Aoko_Release` as `Aoko.zip`, and creates the GitHub release with `gh`.
+`Aoko_Release` as `Aoko.zip`, and creates a **draft** GitHub release with `gh`.
+
+**Nothing automated publishes a release.** The script and the workflow always create
+drafts and cannot do otherwise (there is no `-Draft` switch to forget, and no tag
+trigger). The release owner publishes by hand from the GitHub releases page; that
+manual publish is also what refreshes the docs and, for stable, the Scoop manifest.
 
 ```powershell
 .\McInjector\run_tests.bat
@@ -45,20 +50,19 @@ dotnet test .\Aoko.Tests\Aoko.Tests.csproj
 .\scripts\New-GitHubRelease.ps1 -Version 0.x.y
 ```
 
-Optional: `-Draft` for a draft release. Requires `gh` authenticated, and a
-stable **must run on `main`**. Do not create stable releases from `dev`. Do not
+Requires `gh` authenticated, and a stable **must run on `main`**. Do not create stable releases from `dev`. Do not
 merge or push `main` unless the user explicitly asked.
 
 ### Beta releases from `dev`
 
-Use `-Beta` to publish the current `dev` branch as an opt-in pre-release:
+Use `-Beta` to draft a pre-release from the current `dev` branch:
 
 ```powershell
 .\scripts\New-GitHubRelease.ps1 -Version 0.x.y -Beta
 ```
 
 The script requires `dev` to be clean and match `origin/dev`, tags the release
-`v0.x.y-beta`, sets the GitHub prerelease flag, and targets `dev`. The Scoop
+`v0.x.y-beta`, sets the GitHub prerelease flag on the draft, and targets `dev`. The Scoop
 workflow skips prereleases, so the stable channel is unaffected. Bump `-Version`
 for each new beta; an existing tag fails the release.
 
@@ -68,26 +72,16 @@ for each new beta; an existing tag fails the release.
 C# tests, then calls `New-GitHubRelease.ps1`. Prefer it for releases so the
 artifacts are built and tested on Windows.
 
-- Manual: **Actions → Build and publish release**, choose `beta` (builds `dev`)
-  or `stable` (builds `main`), version, draft, and optional notes.
-- Tag: create an **annotated** tag whose message is the release body, then push
-  it. The workflow uses the tag message as the notes; a lightweight tag falls
-  back to generated notes. Tag `v<version>-beta` on `dev` or `v<version>` on
-  `main`. The tag must contain the workflow file; the script accepts detached
-  CI tag checkouts when the commit is reachable from the release branch. Tag
-  pushes publish immediately; set the repository variable
-  `RELEASE_DRAFT_OVERRIDE=true` (then delete it) to create the release as a
-  draft instead.
-
-  ```powershell
-  git tag -a v0.x.y-beta -F notes.md
-  git push origin v0.x.y-beta
-  ```
+- **Actions → Build and publish release** (`workflow_dispatch` only): choose `beta`
+  (builds `dev`) or `stable` (builds `main`), version, and optional notes. The result is
+  always a draft. Publish it manually in the GitHub UI after downloading and checking
+  `Aoko.zip`.
+- Pushing a tag does nothing. The workflow has no tag trigger on purpose, because a tag push
+  once published a release unintentionally.
 - `workflow_dispatch` only appears after the workflow exists on the default
-  branch. Tag pushes work from `dev` immediately.
-- Releases created with the default `GITHUB_TOKEN` do not emit a `release`
-  event, so the workflow explicitly dispatches `docs.yml` and `scoop.yml` after
-  publishing. Scoop skips prereleases.
+  branch, but `gh workflow run release.yml --ref dev` runs the `dev` copy.
+- Docs and Scoop refresh when you publish the draft (their `release: published`
+  triggers). The release workflow does not dispatch them. Scoop skips prereleases.
 
 ### Release notes style
 
@@ -121,9 +115,9 @@ them.
 Do not call `build_release.bat` yourself when using this script; the script
 already invokes it.
 
-The published `Aoko.zip` is enough. The release workflow dispatches the docs
-and Scoop workflows after publishing (bot-created releases do not emit release
-events). Do not run bucket/manifest scripts as part of the release.
+The published `Aoko.zip` is enough. Publishing the draft in the GitHub UI emits the
+`release` event that refreshes the docs and Scoop workflows. Do not run
+bucket/manifest scripts as part of the release.
 
 ---
 

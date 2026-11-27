@@ -4,10 +4,8 @@ param(
     [ValidatePattern('^\d+(\.\d+){1,3}$')]
     [string]$Version,
 
-    [switch]$Draft,
-
-    # Publish from dev as a GitHub pre-release (tagged v<Version>-beta). Stable
-    # releases still require main and a numeric tag.
+    # Build from dev and tag v<Version>-beta, flagged as a pre-release once published.
+    # Stable releases still require main and a numeric tag.
     [switch]$Beta,
 
     # Optional markdown file with the release body. When omitted, GitHub
@@ -124,10 +122,13 @@ if (-not (Test-Path -LiteralPath $zipPath -PathType Leaf)) {
     throw "Could not create release archive: $zipPath"
 }
 
+# Releases are always created as drafts. This script cannot publish: that is a manual step in
+# the GitHub UI, so an unintended run can never produce a public release or pre-release.
 $releaseArguments = @(
     'release', 'create', $tag, "$zipPath#Aoko.zip",
     '--repo', $repository,
-    '--title', $title
+    '--title', $title,
+    '--draft'
 )
 if ($tagExists) {
     $releaseArguments += '--verify-tag'
@@ -143,9 +144,6 @@ if ($Beta) {
     $releaseArguments += '--prerelease'
     $releaseArguments += '--latest=false'
 }
-if ($Draft) {
-    $releaseArguments += '--draft'
-}
 
 if (-not $PSCmdlet.ShouldProcess("$repository $tag", 'Create GitHub release')) {
     return
@@ -153,5 +151,11 @@ if (-not $PSCmdlet.ShouldProcess("$repository $tag", 'Create GitHub release')) {
 
 Invoke-RequiredCommand -FilePath 'gh' -Arguments $releaseArguments -FailureMessage "GitHub release creation failed for $tag."
 
-$releaseKind = if ($Draft) { 'draft' } else { 'published' }
-Write-Host "Created $releaseKind GitHub release $tag with Aoko.zip."
+# Defence in depth: confirm GitHub really holds a draft.
+# (gh release view cannot look up a draft by tag, so read it from the list.)
+$releaseList = ((& gh release list --repo $repository --limit 100 --json tagName,isDraft) -join "") | ConvertFrom-Json
+$created = @($releaseList | Where-Object { $_.tagName -eq $tag }) | Select-Object -First 1
+if ($LASTEXITCODE -ne 0 -or -not $created -or $created.isDraft -ne $true) {
+    throw "Release $tag is not a draft. Check it in the GitHub UI immediately."
+}
+Write-Host "Created draft GitHub release $tag with Aoko.zip. Publish it manually from the GitHub releases page."
