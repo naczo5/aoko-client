@@ -112,11 +112,63 @@ enum PickerTarget {
 /// canonical labels — so the seam cannot hold a borrow of the window title it was read from.
 pub type InjectBridge = dyn Fn(u32, Option<&'static str>) -> InjectOutcome;
 
-/// What one attach answers: the platform's report, or the error that refused it.
+/// What one attach answers: the platform's report, or the refusal that stopped it.
 ///
 /// Named so [`InjectBridge`] stays one line — the full paths twice in the return position is what
 /// rustfmt breaks across six, and the seam is one sentence.
-pub type InjectOutcome = Result<aoko_platform::InjectionReport, aoko_platform::PlatformError>;
+pub type InjectOutcome = Result<aoko_platform::InjectionReport, InjectRefusal>;
+
+/// Why an attach did not load the bridge, in the two shapes the panel can tell apart.
+///
+/// A [`aoko_platform::PlatformError`] cannot travel as far as the panel unchanged: `user_facing`
+/// prefixes its own kind to the sentence (`error.rs:64-71`), so painting one puts the marker of an
+/// enum — a type the user has no business knowing about — at the front of a status line, and the
+/// resolver's `NotFound` detail adds the version-selection reasoning behind it. The arms are
+/// therefore split where the classification is still possible: where the executable's directory is
+/// known, which is the production seam.
+pub enum InjectRefusal {
+    /// The resolver found no library at `path`.
+    ///
+    /// The sentence is [`copy::LOADER_REASON_BRIDGE_LIBRARY_MISSING`]'s, filled at the paint: `path`
+    /// is the absolute path the resolver looked at, which is the one fact the user acts on.
+    MissingLibrary { path: std::path::PathBuf },
+    /// A platform refusal with no better sentence than its own.
+    ///
+    /// A permission error, an `Os` error, a process that vanished mid-attach: each names nothing
+    /// this crate can say more usefully, so `user_facing`'s sentence is what the panel shows.
+    Platform(String),
+}
+
+impl InjectRefusal {
+    /// The sentence after [`copy::LOADER_STATUS_PREFIX`].
+    fn sentence(&self) -> String {
+        match self {
+            Self::MissingLibrary { path } => copy::LOADER_REASON_BRIDGE_LIBRARY_MISSING
+                .replace("{path}", &path.display().to_string()),
+            Self::Platform(sentence) => sentence.clone(),
+        }
+    }
+}
+
+/// Classifies a platform attach failure into a refusal the panel can paint.
+///
+/// `NotFound` is two different answers at this seam and only the file on disk tells them apart:
+/// `aoko_platform::inject_bridge` resolves the library first, while the injector reports a pid it
+/// cannot open (`windows/injector.rs:47`), and both arrive as the same variant. The path is the
+/// platform's own pure mapping for this version and directory — never a name joined here — so the
+/// check asks the resolver's own question rather than parsing a sentence for the path inside it.
+fn classify_inject(
+    error: aoko_platform::PlatformError,
+    version: Option<&str>,
+    directory: &std::path::Path,
+) -> InjectRefusal {
+    let library = aoko_platform::bridge_library_path(version, directory);
+    if matches!(&error, aoko_platform::PlatformError::NotFound { .. }) && !library.exists() {
+        InjectRefusal::MissingLibrary { path: library }
+    } else {
+        InjectRefusal::Platform(error.user_facing())
+    }
+}
 
 /// The root view.
 pub struct Shell {
@@ -465,8 +517,12 @@ impl Shell {
         // on its own, then `inject_bridge`, whose `NotFound` names the path it looked for.
         let injector = services.injector;
         shell.set_inject_bridge(Some(Arc::new(move |pid, version| {
-            let directory = aoko_platform::host_executable_dir()?;
+            // A directory that cannot be found is its own refusal: there is no path to name, so the
+            // platform's sentence is the only one available.
+            let directory = aoko_platform::host_executable_dir()
+                .map_err(|error| InjectRefusal::Platform(error.user_facing()))?;
             aoko_platform::inject_bridge(injector.as_ref(), pid, version, &directory)
+                .map_err(|error| classify_inject(error, version, &directory))
         })));
 
         // Before the link dials: the `config` frame is built from the controller's profile,
@@ -1461,11 +1517,13 @@ impl Shell {
         let inject = self.inject_bridge.clone();
 
         if let Some(inject) = inject {
-            if let Err(error) = inject(pid, version) {
-                // A state, not a panic: the platform refused, and its sentence names the path it
-                // looked for. The press stays pressable, so a user who drops the library beside the
-                // executable retries without restarting the host.
-                self.injection = InjectionStatus::Failed(error.user_facing());
+            if let Err(refusal) = inject(pid, version) {
+                // A state, not a panic: the platform refused, and the sentence is the one the panel
+                // owes — the copy line naming the resolved path for a missing library, the
+                // platform's own only where there is nothing more useful to say. The press stays
+                // pressable, so a user who drops the library beside the executable retries without
+                // restarting the host.
+                self.injection = InjectionStatus::Failed(refusal.sentence());
                 cx.notify();
                 return;
             }
@@ -5013,12 +5071,14 @@ pub enum InjectionStatus {
     Connecting,
     /// The platform would not attach the bridge, so the reader was never started.
     ///
-    /// Holds the platform's own sentence ([`aoko_platform::PlatformError::user_facing`]), because
-    /// that is what names the library path it looked for: [`aoko_platform::inject_bridge`] resolves
-    /// `bridge_*.dll` beside the host's executable and refuses before the injector is touched, so
-    /// the answer is there before the panel says `Connecting...` and it names the file a user has to
-    /// drop. `String` rather than a `&'static str` rule label is that path, which is why this enum
-    /// is not `Copy`: a refusal is a fixed rule, an attach failure is a place on disk.
+    /// Holds the sentence the panel paints, which is one of two: for a library the resolver could
+    /// not find, [`copy::LOADER_REASON_BRIDGE_LIBRARY_MISSING`] filled with the path it looked at —
+    /// because that path is the thing a user acts on, and `PlatformError::user_facing` would put
+    /// `Not found:` and the version-selection reasoning in front of it; for every other refusal, the
+    /// platform's own sentence, because a permission or `Os` error names nothing this crate can say
+    /// better. [`InjectRefusal`] is where that split happens, one layer before the paint.
+    /// `String` rather than a `&'static str` rule label is that path, which is why this enum is not
+    /// `Copy`: a refusal is a fixed rule, an attach failure is a place on disk.
     ///
     /// It is not the exit `Connecting` has: that one is a dialled attempt nobody answered, this one
     /// is an attach that never got as far as dialling. Both leave the button pressable, and that is
@@ -9674,8 +9734,11 @@ mod tests {
         directory: std::path::PathBuf,
         injector: Arc<RecordingInjector>,
     ) -> Arc<InjectBridge> {
+        // The production seam, over a directory this test owns: the same call and the same
+        // classification, so a test cannot assert a sentence `from_system` would not produce.
         Arc::new(move |pid, version| {
             aoko_platform::inject_bridge(injector.as_ref(), pid, version, &directory)
+                .map_err(|error| classify_inject(error, version, &directory))
         })
     }
 
@@ -9919,25 +9982,20 @@ mod tests {
         assert_eq!(dials(), before);
     }
 
-    /// The attach's failure is a state the panel can act on, not a press that does nothing.
+    /// The attach's failure is a state the panel can act on, and its sentence is the copy's.
     ///
-    /// `inject_bridge` refuses before the injector is touched, and its `NotFound` names the full
-    /// path it looked for — which is the line a user acts on, because the fix is to drop the library
-    /// there. The dial is the proof that the attach failed *first*: a press that failed has not
-    /// started the reader, and the button is pressable so the retry is real.
+    /// `inject_bridge` refuses before the injector is touched, and the only fact the line owes is
+    /// the resolved path — not the platform's `Not found:` marker, and not the version-selection
+    /// reasoning behind it. Both of those are our types talking, and the rule is that neither
+    /// reaches a status line. The dial is the proof that the attach failed *first*: a press that
+    /// failed has not started the reader, and the button is pressable so the retry is real.
     #[gpui::test]
     fn a_press_with_no_bridge_library_names_the_path_it_looked_for(cx: &mut gpui::TestAppContext) {
         // A directory this test owns and never fills, so the resolution is the platform's own call
         // over a directory with nothing in it.
         let empty = scratch_root();
         let expected = aoko_platform::bridge_library_path(Some("1.8.9"), &empty);
-        let refusal = aoko_platform::inject_bridge(
-            &RecordingInjector::default(),
-            4242,
-            Some("1.8.9"),
-            &empty,
-        )
-        .expect_err("no library is on disk");
+        assert!(!expected.exists(), "the test's directory holds no library");
 
         let injector = Arc::new(RecordingInjector::default());
         let seam = attach_over(empty, injector.clone());
@@ -9956,13 +10014,17 @@ mod tests {
         let view = cx.read(|cx| handle.read(cx).injection_view());
         assert_eq!(
             view.status,
-            format!("{}{}", copy::LOADER_STATUS_PREFIX, refusal.user_facing()),
-            "the panel paints the platform's sentence, which is the one that names the path"
+            format!(
+                "{}{}",
+                copy::LOADER_STATUS_PREFIX,
+                copy::LOADER_REASON_BRIDGE_LIBRARY_MISSING
+                    .replace("{path}", &expected.display().to_string())
+            ),
+            "the panel paints the copy line, filled with the path the resolver looked at"
         );
-        let expected_path = expected.display().to_string();
         assert!(
-            view.status.contains(expected_path.as_str()),
-            "and that path is the library the target's version selected: {}",
+            !view.status.contains("Not found") && !view.status.contains("selects"),
+            "neither the enum's marker nor the selection reasoning reaches the panel: {}",
             view.status
         );
         assert_eq!(view.button, copy::LOADER_INJECT, "the press is the retry");
@@ -10280,7 +10342,9 @@ mod tests {
             InjectionView::resolve(&InjectionStatus::Refused(Refusal::NoWindow), false, None)
                 .status,
             InjectionView::resolve(
-                &InjectionStatus::Failed("bridge library not found at /nowhere".to_owned()),
+                &InjectionStatus::Failed(
+                    copy::LOADER_REASON_BRIDGE_LIBRARY_MISSING.replace("{path}", "/nowhere"),
+                ),
                 false,
                 None,
             )
@@ -10310,10 +10374,11 @@ mod tests {
         assert_eq!(
             lines[4],
             format!(
-                "{}bridge library not found at /nowhere",
-                copy::LOADER_STATUS_PREFIX
+                "{}{}",
+                copy::LOADER_STATUS_PREFIX,
+                copy::LOADER_REASON_BRIDGE_LIBRARY_MISSING.replace("{path}", "/nowhere")
             ),
-            "an attach failure is the panel's prefix plus the platform's sentence"
+            "an attach failure is the panel's prefix plus the sentence the press stored"
         );
         assert_eq!(
             lines[5],
