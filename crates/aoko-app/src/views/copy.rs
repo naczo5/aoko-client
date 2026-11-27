@@ -387,6 +387,8 @@ pub const COMBAT: &[Card] = &[
             Keybind { module: "autoheal" },
             Switch { label: "AutoHeal", bind: "AutoHealEnabled" },
             Availability { text: "Available", bind: "AutoHealAvailabilityText" },
+            // `:554`: the card's explanation, between the availability line and the two sliders.
+            Note { text: "Automatically throws the first healing splash potion (Instant Health / Regeneration) in your hotbar when your health drops to or below the threshold. Only heals while you are looking steeply down, so the splash lands at your feet and not on an opponent." },
             Slider { label: "Health threshold (HP)", bind: "AutoHealHealth", min: 1.0, max: 20.0, snap: true },
             Slider { label: "Re-throw cooldown (ms)", bind: "AutoHealDelayMs", min: 50.0, max: 2000.0, snap: true },
     ],
@@ -423,6 +425,8 @@ pub const RENDER: &[Card] = &[
         controls: &[
             Keybind { module: "nickhider" },
             Switch { label: "Nick Hider", bind: "NickHiderEnabled" },
+            // `:626`: the card's explanation, above the "Shown as" row.
+            Note { text: "Replaces your local account name in supported client HUD text only." },
             Note { text: "Shown as" },
     ],
     },
@@ -537,6 +541,8 @@ pub const UTILITY: &[Card] = &[
         id: "DiscordRpcCard",
         controls: &[
             Switch { label: "Discord Rich Presence", bind: "DiscordRpcEnabled" },
+            // `:833`: the card's explanation, above the repository-button sentence.
+            Note { text: "Shows your current client version, armed/clicking state, and in-game status on Discord." },
             Note { text: "The Discord activity includes a Repository button linking to this project." },
     ],
     },
@@ -553,6 +559,12 @@ pub const UTILITY: &[Card] = &[
         controls: &[
             Keybind { module: "pixelpartyassist" },
             Switch { label: "Pixel Party Assist", bind: "PixelPartyAssistEnabled" },
+            // `:868`: the availability line, whose default text is the card's explanation — the
+            // same slot `AutoHeal` and `Refill` carry, with a sentence in place of "Available".
+            Availability {
+                text: "Hypixel Pixel Party: finds the closest matching terracotta on the floor.",
+                bind: "PixelPartyAssistAvailabilityText",
+            },
             Slider { label: "Scan radius (blocks)", bind: "PixelPartyScanRadius", min: 8.0, max: 48.0, snap: true },
             Check { label: "Auto-look toward target", bind: "PixelPartyAutoLookEnabled", tooltip: "" },
             Check { label: "Auto-walk toward target (W + jump far, walk close)", bind: "PixelPartyAutoWalkEnabled", tooltip: "" },
@@ -581,6 +593,8 @@ pub const UTILITY: &[Card] = &[
             Note { text: "Refill" },
             Availability { text: "Available", bind: "RefillAvailabilityText" },
             Switch { label: "Enable Refill", bind: "RefillEnabled" },
+            // `:944`: the card's explanation, above the delay slider.
+            Note { text: "Moves potions and golden apples from your backpack into empty hotbar slots while your inventory is open." },
             Slider { label: "Delay (ms)", bind: "RefillDelayMs", min: 50.0, max: 500.0, snap: true },
     ],
     },
@@ -591,6 +605,8 @@ pub const UTILITY: &[Card] = &[
             Note { text: "AutoTool" },
             Availability { text: "Available", bind: "AutoToolAvailabilityText" },
             Switch { label: "Enable AutoTool", bind: "AutoToolEnabled" },
+            // `:968`: the card's explanation, above the swap-delay slider.
+            Note { text: "Automatically swaps to the best tool in your hotbar when breaking blocks." },
             Slider { label: "Swap delay (ms)", bind: "AutoToolSwapToDelay", min: 0.0, max: 500.0, snap: true },
             Check { label: "Swap back to original item", bind: "AutoToolSwapBack", tooltip: "" },
             Slider { label: "Swap back delay (ms)", bind: "AutoToolSwapBackDelay", min: 0.0, max: 1000.0, snap: true },
@@ -752,6 +768,10 @@ pub const RISKY: &[Card] = &[
                 bind: "AutoTotemBehaviorMode",
                 options: &["Ghost (inventory only)", "Anarchy (may flag on servers)"],
             },
+            // `:1172`: the orange warning under the Behaviour combo, which the markup paints in
+            // `#FFA500` rather than the dim note colour. The table carries the sentence; the
+            // accent is the card's business.
+            Note { text: "Anarchy works without opening inventory but may trigger anticheat flags on servers with GrimAC or Matrix." },
         ],
     },
 ];
@@ -772,6 +792,9 @@ pub const BETA: &[Card] = &[
             Keybind { module: "killaura" },
             Switch { label: "Kill Aura", bind: "KillAuraEnabled" },
             Availability { text: "Available", bind: "KillAuraAvailabilityText" },
+            // `:1221-1224`: the red warning box under the availability line — `#33E0533D` fill,
+            // `#F0A090` text — which the port carries as a note and colours at paint time.
+            Note { text: "OpenMyau-Plus behavior port. Native game calls and packet ordering; no OS-click fallback. Modern auto-block requires a genuinely block-capable sword." },
             Expand { header: "Combat and targeting" },
             Combo { label: "CPS mode", bind: "KillAuraSettings.CpsMode", options: &["Normal", "Record", ] },
             Combo { label: "Target mode", bind: "KillAuraSettings.Mode", options: &["Single", "Switch", ] },
@@ -803,6 +826,9 @@ pub const BETA: &[Card] = &[
             Slider { label: "Accel / decel", bind: "KillAuraSettings.Acceleration", min: 0.1, max: 10.0, snap: false },
             Slider { label: "", bind: "KillAuraSettings.Deceleration", min: 0.1, max: 10.0, snap: false },
             Slider { label: "Noise", bind: "KillAuraSettings.NoiseStrength", min: 0.0, max: 2.0, snap: false },
+            // `:1257`, inside the Grok-rotation panel: the sentence managed shows under the
+            // sliders that only appear for that rotation.
+            Note { text: "Face the target; silent stamp stays inside this cone of your camera (prediction-safe)." },
             Expand { header: "LiquidBounce controls" },
             Slider { label: "Dead zone", bind: "KillAuraSettings.DeadZoneSize", min: 0.0, max: 2.0, snap: false },
             Slider { label: "Min / max speed", bind: "KillAuraSettings.MinTurnSpeed", min: 1.0, max: 90.0, snap: false },
