@@ -1218,6 +1218,23 @@ impl Shell {
             );
         }
 
+        // `WindowPickerDialog.xaml:28`: the managed sentence above a multi-target list. Only the
+        // modal's frame is not ported — the sentence that explains the choice is, and it shows in
+        // exactly the state the modal opened in.
+        let mut list = div().flex().flex_col().items_center().gap(px(4.0));
+        if self.injection_targets.len() > 1 {
+            list = list.child(
+                div()
+                    .max_w(px(520.0))
+                    .text_size(px(11.0))
+                    .text_color(theme.dim_text)
+                    .text_center()
+                    .debug_selector(|| "loader-targets-prompt".to_owned())
+                    .child(copy::LOADER_TARGETS_PROMPT),
+            );
+        }
+        list = list.child(targets);
+
         div()
             .flex()
             .flex_col()
@@ -1271,7 +1288,7 @@ impl Shell {
                     .text_center()
                     .child(SharedString::from(view.status)),
             )
-            .child(div().mt(px(8.0)).child(targets))
+            .child(div().mt(px(8.0)).child(list))
             .into_any_element()
     }
 
@@ -4376,8 +4393,8 @@ impl InjectionStatus {
 ///
 /// The two gate rules are port-only: managed's `InjectButton_Click` trusted the discovery list
 /// and had no gate to fail (`MainWindow.xaml.cs:1431-1467`), so there is no XAML line to cite for
-/// their wording. They are named here, with the two platform cases, so the copy owner can adopt
-/// them into `views/copy.rs` the way [`copy::LOADER_STATUS_PREFIX`] is already written there.
+/// their wording. The four sentences live in `views/copy.rs` with their managed analogues cited —
+/// this enum names the rule, and [`Refusal::message`] is the one place the two meet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
     /// The session cannot inspect windows, so a target cannot be confirmed at all.
@@ -4392,15 +4409,16 @@ pub enum Refusal {
 
 impl Refusal {
     /// The sentence after [`copy::LOADER_STATUS_PREFIX`], naming the rule that refused.
+    ///
+    /// Read from `views/copy.rs` rather than written here: the copy owner's sentence is the one
+    /// the panel paints, and a literal beside it would be a second copy of it.
     #[must_use]
     pub fn message(self) -> &'static str {
         match self {
-            Self::NoWindowSense => {
-                "this session cannot inspect windows, so a target cannot be confirmed"
-            }
-            Self::NoWindow => "no Java client window was found",
-            Self::NotGameTitle => "the window's title does not name the game",
-            Self::NotJavaProcess => "the window's process is not a Java launcher",
+            Self::NoWindowSense => copy::LOADER_REFUSAL_NO_WINDOW_SENSE,
+            Self::NoWindow => copy::LOADER_REFUSAL_NO_WINDOW,
+            Self::NotGameTitle => copy::LOADER_REFUSAL_NOT_GAME_TITLE,
+            Self::NotJavaProcess => copy::LOADER_REFUSAL_NOT_JAVA_PROCESS,
         }
     }
 }
@@ -8126,12 +8144,9 @@ mod tests {
             let shell = handle.read(cx);
             (shell.injection_view(), shell.injection_targets().len())
         });
+        // The exact line, so the sentence the panel paints is the copy owner's and the rule it
+        // names is this one; a `contains` beside it would only restate the equality.
         assert_eq!(view.status, refusal_line(Refusal::NoWindowSense));
-        assert!(
-            view.status.contains("cannot inspect windows"),
-            "the line names the missing condition, which is what the user has to act on: {}",
-            view.status
-        );
         assert!(
             view.enabled,
             "the press is repeatable; nothing is in flight"
@@ -8199,9 +8214,11 @@ mod tests {
     /// lets the row press name the missing half instead of hiding the window.
     #[gpui::test]
     fn several_clients_are_listed_in_the_platforms_order_and_wait(cx: &mut gpui::TestAppContext) {
-        let handle = cx.update(|cx| cx.new(|_| Shell::new(Theme::slate())));
+        let root = scratch_root();
+        let (handle, _rail, mut visual) = shell_in_window(cx, &root);
         cx.update(|cx| {
             handle.update(cx, |shell, _| {
+                shell.loader_visible = true;
                 shell.set_windows(Some(window_surface(vec![
                     plain_process_window(),
                     editor_window(),
@@ -8212,6 +8229,9 @@ mod tests {
         });
 
         cx.update(|cx| handle.update(cx, |shell, cx| shell.inject(cx)));
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
 
         let (view, selection, titles) = cx.read(|cx| {
             let shell = handle.read(cx);
@@ -8235,6 +8255,24 @@ mod tests {
         assert_eq!(selection, None, "the user has to choose");
         assert_eq!(view.status, copy::LOADER_STATUS_DETECTING);
         assert!(!view.enabled, "the list is what the press waits on now");
+
+        // The paint carries the managed sentence and one row per target, which is the half the
+        // state assertions cannot see. `WindowPickerDialog.xaml:28` is the sentence; the modal's
+        // frame is the part the port does not have.
+        assert!(
+            visual.debug_bounds("loader-targets-prompt").is_some(),
+            "the multi-target prompt paints in exactly the state the modal opened in"
+        );
+        for selector in ["loader-target-0", "loader-target-1", "loader-target-2"] {
+            assert!(
+                visual.debug_bounds(selector).is_some(),
+                "{selector} is a control, not just a string in the state"
+            );
+        }
+        assert!(
+            visual.debug_bounds("loader-target-3").is_none(),
+            "and the window that failed both halves is not offered at all"
+        );
     }
 
     /// A row press and the button press run the same gate, so the two cannot disagree.
@@ -8278,7 +8316,6 @@ mod tests {
             by_press, by_row,
             "one gate: the row press and the button press refuse in the same words"
         );
-        assert!(by_row.contains("title does not name the game"), "{by_row}");
         assert_eq!(dials(), before, "a refused target never dials");
     }
 
@@ -8297,10 +8334,11 @@ mod tests {
 
         let view = cx.read(|cx| handle.read(cx).injection_view());
         assert_eq!(view.status, refusal_line(Refusal::NotJavaProcess));
+        // The fixture is what makes that the *process* rule and not the title: the title half
+        // passes for this window, which is why the other half had to be the one to refuse.
         assert!(
-            view.status.contains("not a Java launcher"),
-            "the title rule passed and the process rule is what refused: {}",
-            view.status
+            aoko_platform::is_game_window(&plain_process_window()),
+            "the title rule passes for this window"
         );
         assert_eq!(dials(), before);
     }
