@@ -13491,9 +13491,9 @@ void RenderHUD(
     if (cfg.trajectories)      pushMod("Trajectories");
     if (cfg.murderMystery)     pushMod("Murder Mystery");
     if (cfg.breakProgress)     pushMod("Break Progress");
-    if (cfg.hitDelayFixEnabled) pushMod("Hit Delay Fix");
     if (cfg.cosmeticsEnabled)  pushMod("Cosmetics");
     if (cfg.skyEnabled)        pushMod("Sky");
+    if (cfg.hitDelayFixEnabled) pushMod("Hit Delay Fix");
 
     std::sort(modEntries.begin(), modEntries.end(),
         [](const aoko::ui::ModuleEntry& a, const aoko::ui::ModuleEntry& b) {
