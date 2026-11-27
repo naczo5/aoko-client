@@ -6329,6 +6329,44 @@ mod tests {
         );
     }
 
+    /// A painted combo writes the setting it shows, and the frame moves with it.
+    ///
+    /// The trigger opens no list: a press selects the next option (`set_selected_index`), so the
+    /// painted bounds are the whole interaction and a value that never reached the frame would be
+    /// a control that paints a promise. `KillAuraSettings.CpsMode` feeds `killAuraCpsMode`, which
+    /// is in `CONFIG_KEYS`, so the change is one the bridge reads.
+    #[gpui::test]
+    fn a_combo_press_reaches_the_frame(cx: &mut gpui::TestAppContext) {
+        use gpui::Modifiers;
+
+        let root = scratch_root();
+        let (shell, _handle, mut visual) = shell_in_window(cx, &root);
+
+        // The card is on Beta; the tab is selected and drawn before the bounds exist.
+        cx.update(|cx| shell.update(cx, |shell, cx| shell.select_tab_named("beta", cx)));
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        scroll_into_view(&mut visual, "combo-KillAuraSettings.CpsMode");
+
+        let line = cx.read(|cx| shell.read(cx).controller().config_frame().to_line());
+        assert!(
+            line.contains("\"killAuraCpsMode\":\"normal\""),
+            "the frame starts on the default the profile holds: {line}"
+        );
+
+        let bounds = visual
+            .debug_bounds("combo-KillAuraSettings.CpsMode")
+            .expect("the combo renders with its selector");
+        visual.simulate_click(bounds.center(), Modifiers::default());
+
+        let line = cx.read(|cx| shell.read(cx).controller().config_frame().to_line());
+        assert!(
+            line.contains("\"killAuraCpsMode\":\"record\""),
+            "the click selects the next option and the frame carries it: {line}"
+        );
+    }
+
     #[test]
     fn formatted_values_drop_useless_decimals() {
         assert_eq!(format_value(12.0), "12");
