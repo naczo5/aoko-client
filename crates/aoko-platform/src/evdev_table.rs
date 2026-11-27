@@ -4,6 +4,11 @@
 //! 30 but `KEY_B` is 48. The three row tables below are the whole mapping, shared
 //! by the observer (code to key) and the uinput synthesizer (key to code), so the
 //! two directions cannot drift.
+//!
+//! The OEM punctuation is observed as the character a US layout types there
+//! (`KEY_SEMICOLON` is `;`), because that is the name [`Key::virtual_key`] answers
+//! `VK_OEM_1` from: a bound `;` then reads the same on both platforms instead of
+//! arriving as a raw evdev number that names no key.
 
 use crate::input::Key;
 
@@ -112,6 +117,31 @@ pub(crate) const KEY_RIGHTCTRL: u16 = 97;
 pub(crate) const KEY_RIGHTALT: u16 = 100;
 pub(crate) const KEY_RIGHTSHIFT: u16 = 54;
 
+/// The navigation cluster, `KEY_HOME`..`KEY_DELETE`.
+pub(crate) const KEY_HOME: u16 = 102;
+pub(crate) const KEY_PAGEUP: u16 = 104;
+pub(crate) const KEY_END: u16 = 107;
+pub(crate) const KEY_PAGEDOWN: u16 = 109;
+pub(crate) const KEY_INSERT: u16 = 110;
+pub(crate) const KEY_DELETE: u16 = 111;
+
+/// The OEM punctuation, the keys the `VK_OEM_*` codes name. Each is observed as the
+/// character a US layout types there, which is the name `Key::virtual_key` answers from.
+pub(crate) const KEY_MINUS: u16 = 12;
+pub(crate) const KEY_EQUAL: u16 = 13;
+pub(crate) const KEY_LEFTBRACE: u16 = 26;
+pub(crate) const KEY_RIGHTBRACE: u16 = 27;
+pub(crate) const KEY_SEMICOLON: u16 = 39;
+pub(crate) const KEY_APOSTROPHE: u16 = 40;
+pub(crate) const KEY_GRAVE: u16 = 41;
+pub(crate) const KEY_BACKSLASH: u16 = 43;
+pub(crate) const KEY_COMMA: u16 = 51;
+pub(crate) const KEY_DOT: u16 = 52;
+pub(crate) const KEY_SLASH: u16 = 53;
+/// The extra key left of `Z` on a 102-key ISO keyboard, which types `\` where it exists
+/// and has no key of its own on a US one.
+pub(crate) const KEY_102ND: u16 = 86;
+
 /// `linux/input-event-codes.h` to [`Key`], for events read from evdev.
 #[must_use]
 pub fn key_from_code(code: u16) -> Key {
@@ -134,11 +164,32 @@ pub fn key_from_code(code: u16) -> Key {
         KEY_LEFT => Key::Left,
         KEY_RIGHT => Key::Right,
         KEY_DOWN => Key::Down,
+        KEY_HOME => Key::Home,
+        KEY_END => Key::End,
+        KEY_PAGEUP => Key::PageUp,
+        KEY_PAGEDOWN => Key::PageDown,
+        KEY_INSERT => Key::Insert,
+        KEY_DELETE => Key::Delete,
+        // The OEM keys, named by the character a US layout types there.
+        KEY_MINUS => Key::Char('-'),
+        KEY_EQUAL => Key::Char('='),
+        KEY_LEFTBRACE => Key::Char('['),
+        KEY_RIGHTBRACE => Key::Char(']'),
+        KEY_SEMICOLON => Key::Char(';'),
+        KEY_APOSTROPHE => Key::Char('\''),
+        KEY_GRAVE => Key::Char('`'),
+        KEY_BACKSLASH | KEY_102ND => Key::Char('\\'),
+        KEY_COMMA => Key::Char(','),
+        KEY_DOT => Key::Char('.'),
+        KEY_SLASH => Key::Char('/'),
         other => Key::Other(u32::from(other)),
     }
 }
 
 /// [`Key`] to `linux/input-event-codes.h`, for the uinput synthesizer.
+///
+/// The OEM punctuation answers `None`: [`code_for_char`] is the letters-and-digits map, and
+/// the only codes this names are the ones the virtual device declares.
 pub fn code_for_key(key: Key) -> Option<u16> {
     let code = match key {
         Key::Char(character) => code_for_char(character)?,
@@ -158,6 +209,12 @@ pub fn code_for_key(key: Key) -> Option<u16> {
         Key::Left => KEY_LEFT,
         Key::Right => KEY_RIGHT,
         Key::Down => KEY_DOWN,
+        Key::Home => KEY_HOME,
+        Key::End => KEY_END,
+        Key::PageUp => KEY_PAGEUP,
+        Key::PageDown => KEY_PAGEDOWN,
+        Key::Insert => KEY_INSERT,
+        Key::Delete => KEY_DELETE,
         Key::Other(code) => u16::try_from(code).ok()?,
     };
     Some(code)
@@ -202,10 +259,42 @@ mod tests {
         assert_eq!(key_from_code(108), Key::Down);
         assert_eq!(key_from_code(105), Key::Left);
         assert_eq!(key_from_code(106), Key::Right);
+        assert_eq!(key_from_code(102), Key::Home);
+        assert_eq!(key_from_code(107), Key::End);
+        assert_eq!(key_from_code(104), Key::PageUp);
+        assert_eq!(key_from_code(109), Key::PageDown);
+        assert_eq!(key_from_code(110), Key::Insert);
+        assert_eq!(key_from_code(111), Key::Delete);
         assert_eq!(key_from_code(59), Key::F(1));
         assert_eq!(key_from_code(68), Key::F(10));
         assert_eq!(key_from_code(87), Key::F(11));
         assert_eq!(key_from_code(88), Key::F(12));
+    }
+
+    #[test]
+    fn the_oem_keys_are_named_by_the_character_a_us_layout_types() {
+        for (code, character) in [
+            (KEY_MINUS, '-'),
+            (KEY_EQUAL, '='),
+            (KEY_LEFTBRACE, '['),
+            (KEY_RIGHTBRACE, ']'),
+            (KEY_SEMICOLON, ';'),
+            (KEY_APOSTROPHE, '\''),
+            (KEY_GRAVE, '`'),
+            (KEY_BACKSLASH, '\\'),
+            (KEY_COMMA, ','),
+            (KEY_DOT, '.'),
+            (KEY_SLASH, '/'),
+            // The ISO extra key types the character the US layout's `KEY_BACKSLASH` does.
+            (KEY_102ND, '\\'),
+        ] {
+            assert_eq!(key_from_code(code), Key::Char(character), "code {code}");
+        }
+        // The character is what `Key::virtual_key` answers a virtual-key code from, which is
+        // what makes a bound `;` fire here instead of arriving as a raw evdev number.
+        assert_eq!(Key::Char(';').virtual_key(), Some(0xBA));
+        // Punctuation is still not synthesizable: the uinput device declares no key for it.
+        assert_eq!(code_for_key(Key::Char(';')), None);
     }
 
     #[test]
@@ -218,11 +307,27 @@ mod tests {
     fn the_two_directions_agree_for_every_primary_key() {
         // The right-hand modifier variants collapse onto the logical key
         // (`KEY_RIGHTSHIFT` -> `Key::Shift` -> `KEY_LEFTSHIFT`), so they are the
-        // documented exception to a clean round trip.
+        // documented exception to a clean round trip. The OEM punctuation is the other one,
+        // and only in this direction: the observer names it as the character a US layout
+        // types, and [`code_for_key`] answers no code for punctuation.
         const RIGHT_HAND: [u16; 3] = [KEY_RIGHTSHIFT, KEY_RIGHTCTRL, KEY_RIGHTALT];
+        const OEM: [u16; 12] = [
+            KEY_MINUS,
+            KEY_EQUAL,
+            KEY_LEFTBRACE,
+            KEY_RIGHTBRACE,
+            KEY_SEMICOLON,
+            KEY_APOSTROPHE,
+            KEY_GRAVE,
+            KEY_BACKSLASH,
+            KEY_COMMA,
+            KEY_DOT,
+            KEY_SLASH,
+            KEY_102ND,
+        ];
         for code in 1..=255u16 {
             let key = key_from_code(code);
-            if matches!(key, Key::Other(_)) || RIGHT_HAND.contains(&code) {
+            if matches!(key, Key::Other(_)) || RIGHT_HAND.contains(&code) || OEM.contains(&code) {
                 continue;
             }
             assert_eq!(code_for_key(key), Some(code), "round trip for code {code}");

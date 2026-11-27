@@ -44,28 +44,32 @@ pub struct CapabilityReport {
     /// Global input **events** are delivered: a low-level hook is attached, or the
     /// evdev reader can open the input nodes.
     ///
-    /// This is about the event stream only. It does **not** imply that current
-    /// pointer and key state can be sampled - see
-    /// [`CapabilityReport::pointer_state_sampling`], which is the flag that answers
-    /// that question and the only one `probe_mouse_state`/`probe_key_state` agree
-    /// with. On Wayland with readable `/dev/input` this is `true` while sampling is
-    /// unavailable, because evdev needs no display but `XQueryPointer` does.
+    /// This is about the event stream only. It does **not** say whether a held button can be
+    /// sampled - see [`CapabilityReport::pointer_state_sampling`], which is the flag a hold
+    /// guard reads and the one [`crate::InputBackend::probe_mouse_state`] agrees with.
     pub input_observation: bool,
-    /// The automation loops can sample current pointer and key state, i.e.
-    /// [`crate::InputBackend::probe_mouse_state`] and
-    /// [`crate::InputBackend::probe_key_state`] return `Some` rather than `None`.
+    /// The automation loops can sample the current pointer state: a hold guard can tell a held
+    /// button from a released one, because [`crate::InputBackend::probe_mouse_state`] returns
+    /// `Some` rather than `None`.
     ///
-    /// This is the flag a hold guard should consult. On Linux it needs an X11
-    /// display; a Wayland-only session reports `false` even when
-    /// [`CapabilityReport::input_observation`] is `true`, so the UI must not claim it
-    /// can see a held button when the loops cannot.
+    /// This is the flag a hold guard should consult. On Linux the button half needs no display:
+    /// the evdev reader latches the user's own button transitions whenever it can open an input
+    /// node, and the X11 pointer mask answers only when it is watching none. A session with
+    /// neither - a Wayland-only desktop whose `/dev/input` nodes are unreadable - reports
+    /// `false`, so the UI must not claim it can see a held button when the loops cannot.
+    ///
+    /// A held *key* is the narrower question, and it is the one that still needs a display on
+    /// Linux: [`crate::InputBackend::probe_key_state`] reads the `XQueryKeymap` bitmap, so a
+    /// Wayland session with readable evdev reports this flag `true` while a per-key probe
+    /// answers `None`.
     pub pointer_state_sampling: bool,
     /// Synthetic clicks, key presses, relative mouse movement, and absolute pointer placement
     /// ([`crate::InputBackend::move_to`], which the chest stealer needs to land a slot click).
     ///
-    /// One flag for the whole surface, because every shipped backend that can synthesize can do
-    /// all four: a backend that could click but not place a pointer would be a partial claim the
-    /// loops cannot use, and `move_to`'s own refusal is what reports it per call.
+    /// One flag for the whole surface, because a session that cannot synthesize must not claim
+    /// part of it: absolute placement is the one operation that can still refuse on its own, so
+    /// a session whose only synthesis is `/dev/uinput` reports this `true` and answers
+    /// [`crate::InputBackend::move_to`] with `Unsupported` per call.
     pub input_synthesis: bool,
     /// Discord IPC reachability.
     pub discord_rpc: bool,

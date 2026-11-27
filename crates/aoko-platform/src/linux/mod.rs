@@ -51,10 +51,12 @@ pub struct Detected {
     pub dns_servers: usize,
     /// An executable `xdg-open` is on `PATH`.
     pub file_manager: bool,
-    /// An X11 connection exists *and* `XQueryPointer` answered, which is exactly what
-    /// [`crate::InputBackend::probe_mouse_state`] gates on. This is deliberately not
-    /// the same question as `evdev_devices > 0`: a Wayland session can deliver
-    /// global events through evdev while no pointer state can be sampled.
+    /// An X11 connection exists *and* `XQueryPointer` answered, which is what the pointer's
+    /// *position* and the X11 button mask need.
+    ///
+    /// Deliberately not the same question as `evdev_devices > 0`: the evdev reader latches the
+    /// user's physical button transitions with no display at all, so a held button is
+    /// observable either way, while `XQueryPointer` still needs a display for the position.
     pub pointer_state: bool,
 }
 
@@ -121,10 +123,13 @@ impl Detected {
                     .to_string(),
             );
         } else if !self.pointer_state {
+            // The reader answers the button half with no display at all, so what is left is the
+            // other half of the same question: the key bitmap and the pointer's own position,
+            // which are X11 requests with no evdev counterpart.
             notes.push(
-                "input events are observed through /dev/input, but held-button state needs an \
-                 X11 display: without one the automation loops cannot tell a held button from \
-                 a released one"
+                "input events and held mouse buttons are observed through /dev/input, but a \
+                 held key and the pointer's position still need an X11 display: XQueryKeymap \
+                 and XQueryPointer are X11 requests, so a held Shift reads as released here"
                     .to_string(),
             );
         }
@@ -170,12 +175,11 @@ impl Detected {
             session,
             process_inspection: self.procfs,
             window_inspection: self.x11,
-            // Events and sampling are different questions: evdev reports whether the
-            // event stream can be read, `pointer_state` whether the loops can sample a
-            // held button. Conflating them is how a UI ends up claiming it can see a
-            // mouse the clicker refuses to trust.
+            // Events and sampling stay separate questions, but both are answered from the
+            // reader now: it latches the user's own button transitions with no display, and the
+            // X11 mask is only the fallback for when it is watching no device.
             input_observation: self.evdev_devices > 0,
-            pointer_state_sampling: self.pointer_state,
+            pointer_state_sampling: self.pointer_state || self.evdev_devices > 0,
             input_synthesis: self.x11 || self.uinput,
             discord_rpc: self.discord_sockets > 0,
             // UDP DNS needs no session at all, so a host with no display and no
@@ -247,10 +251,11 @@ mod tests {
     }
 
     #[test]
-    fn a_wayland_session_with_readable_evdev_reports_events_without_sampling() {
-        // The case that made one boolean a lie: evdev needs no display, so the event
-        // stream works, while `XQueryPointer` needs X11, so a held button cannot be
-        // sampled. The two flags must disagree here, deliberately.
+    fn a_wayland_session_with_readable_evdev_can_still_sample_a_held_button() {
+        // evdev needs no display, and the reader latches the user's physical button
+        // transitions from it, so a held button is observable in a Wayland-only session with
+        // no XWayland. What is still missing without X11 is the key bitmap and the pointer's
+        // own position, which is the gap the note names.
         let report = Detected {
             x11: false,
             wayland: true,
@@ -270,13 +275,13 @@ mod tests {
             "evdev delivers events without a display"
         );
         assert!(
-            !report.pointer_state_sampling,
-            "and nothing can be sampled, which is what the probes answer"
+            report.pointer_state_sampling,
+            "and it latches the held button, so a hold guard has an answer"
         );
         assert!(report
             .notes
             .iter()
-            .any(|note| note.contains("held-button state needs an X11 display")));
+            .any(|note| note.contains("a held key and the pointer's position")));
     }
 
     #[test]

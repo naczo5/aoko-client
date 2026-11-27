@@ -7,7 +7,10 @@
 //! [`PlatformError`]; nothing silently no-ops.
 //!
 //! State sampling uses `XQueryKeymap`/`XQueryPointer`, which are round trips but
-//! cheap, and are what the managed host's `GetAsyncKeyState` equivalent costs.
+//! cheap, and are what the managed host's `GetAsyncKeyState` equivalent costs. The one
+//! question the pointer mask answers wrongly is *who* pressed: XTest and `uinput`
+//! presses are in it too, so a held button is read from the evdev reader's own
+//! transitions whenever it is watching a device, and the mask answers only when it is not.
 
 use std::sync::Mutex;
 
@@ -19,7 +22,7 @@ use crate::input::{InputBackend, InputEvent, Key, MouseButton, MouseState};
 
 use crate::evdev_table::{all_letter_codes, code_for_key};
 
-use super::evdev::EvdevObserver;
+use super::evdev::{EvdevObserver, VIRTUAL_DEVICE_NAME};
 use super::uinput::{self, UinputDevice};
 use super::x11::X11;
 
@@ -33,6 +36,14 @@ const XK_UP: u32 = 0xff52;
 const XK_DOWN: u32 = 0xff54;
 const XK_LEFT: u32 = 0xff51;
 const XK_RIGHT: u32 = 0xff53;
+const XK_HOME: u32 = 0xff50;
+const XK_END: u32 = 0xff57;
+/// `XK_Prior`, which is the keysym Page Up is on.
+const XK_PRIOR: u32 = 0xff55;
+/// `XK_Next`, which is the keysym Page Down is on.
+const XK_NEXT: u32 = 0xff56;
+const XK_INSERT: u32 = 0xff63;
+const XK_DELETE: u32 = 0xffff;
 const XK_SHIFT_L: u32 = 0xffe1;
 const XK_CONTROL_L: u32 = 0xffe3;
 const XK_ALT_L: u32 = 0xffe9;
@@ -53,6 +64,9 @@ const XTEST_MOTION_ABSOLUTE: u8 = 0;
 const BUTTON_LEFT: u8 = 1;
 const BUTTON_MIDDLE: u8 = 2;
 const BUTTON_RIGHT: u8 = 3;
+/// Buttons 4 and 5 are the scroll wheel; a desktop numbers the two side buttons 8 and 9.
+const BUTTON_X1: u8 = 8;
+const BUTTON_X2: u8 = 9;
 
 /// Keycodes the virtual uinput device declares up front: every letter, digit and
 /// named key this backend can synthesize.
@@ -79,10 +93,54 @@ fn uinput_keys() -> Vec<u16> {
         crate::evdev_table::KEY_LEFT,
         crate::evdev_table::KEY_RIGHT,
         crate::evdev_table::KEY_DOWN,
+        crate::evdev_table::KEY_HOME,
+        crate::evdev_table::KEY_END,
+        crate::evdev_table::KEY_PAGEUP,
+        crate::evdev_table::KEY_PAGEDOWN,
+        crate::evdev_table::KEY_INSERT,
+        crate::evdev_table::KEY_DELETE,
     ]);
     keys.sort_unstable();
     keys.dedup();
     keys
+}
+
+/// The `BTN_*` codes the virtual device declares: the three display buttons and the two side
+/// ones, so no synthesised press names a code the device never advertised.
+fn uinput_buttons() -> [u16; 5] {
+    [
+        super::uinput::BTN_LEFT,
+        super::uinput::BTN_RIGHT,
+        super::uinput::BTN_MIDDLE,
+        super::evdev::BTN_SIDE,
+        super::evdev::BTN_EXTRA,
+    ]
+}
+
+/// The X11 button number one [`MouseButton`] is.
+///
+/// 1, 2 and 3 are the display buttons. Buttons 4 and 5 are the scroll wheel's two directions,
+/// which leaves 8 and 9 for the side buttons - the numbering a desktop's back and forward
+/// buttons arrive as.
+fn x11_button(button: MouseButton) -> u8 {
+    match button {
+        MouseButton::Left => BUTTON_LEFT,
+        MouseButton::Middle => BUTTON_MIDDLE,
+        MouseButton::Right => BUTTON_RIGHT,
+        MouseButton::X1 => BUTTON_X1,
+        MouseButton::X2 => BUTTON_X2,
+    }
+}
+
+/// The `linux/input-event-codes.h` `BTN_*` code one [`MouseButton`] is.
+fn evdev_button(button: MouseButton) -> u16 {
+    match button {
+        MouseButton::Left => super::uinput::BTN_LEFT,
+        MouseButton::Right => super::uinput::BTN_RIGHT,
+        MouseButton::Middle => super::uinput::BTN_MIDDLE,
+        MouseButton::X1 => super::evdev::BTN_SIDE,
+        MouseButton::X2 => super::evdev::BTN_EXTRA,
+    }
 }
 
 pub struct LinuxInputBackend {
@@ -146,6 +204,12 @@ impl LinuxInputBackend {
         self.xtest
     }
 
+    /// The physical buttons the evdev reader has seen held, or `None` when it is watching no
+    /// device and so is maintaining nothing.
+    fn observed_buttons(&self) -> Option<MouseState> {
+        self.observer.as_ref()?.physical_mouse_state()
+    }
+
     #[must_use]
     pub fn has_uinput(&self) -> bool {
         uinput::is_available()
@@ -198,15 +262,7 @@ impl LinuxInputBackend {
                 }
             }
             let keys = uinput_keys();
-            let device = UinputDevice::create(
-                "aoko virtual input",
-                &keys,
-                &[
-                    super::uinput::BTN_LEFT,
-                    super::uinput::BTN_RIGHT,
-                    super::uinput::BTN_MIDDLE,
-                ],
-            );
+            let device = UinputDevice::create(VIRTUAL_DEVICE_NAME, &keys, &uinput_buttons());
             match device {
                 Ok(device) => *guard = Some(device),
                 Err(err) => {
@@ -245,25 +301,15 @@ impl LinuxInputBackend {
 
     fn synthesize_button(&self, button: MouseButton, pressed: bool) -> Result<(), PlatformError> {
         if self.has_xtest() {
-            let detail = match button {
-                MouseButton::Left => BUTTON_LEFT,
-                MouseButton::Middle => BUTTON_MIDDLE,
-                MouseButton::Right => BUTTON_RIGHT,
-            };
             let type_ = if pressed {
                 XTEST_BUTTON_PRESS
             } else {
                 XTEST_BUTTON_RELEASE
             };
-            return self.xtest(type_, detail, 0, 0);
+            return self.xtest(type_, x11_button(button), 0, 0);
         }
 
-        let code = match button {
-            MouseButton::Left => super::uinput::BTN_LEFT,
-            MouseButton::Right => super::uinput::BTN_RIGHT,
-            MouseButton::Middle => super::uinput::BTN_MIDDLE,
-        };
-        self.with_uinput(|device| device.emit_key(code, pressed))
+        self.with_uinput(|device| device.emit_key(evdev_button(button), pressed))
     }
 }
 
@@ -275,7 +321,15 @@ impl Default for LinuxInputBackend {
 
 impl InputBackend for LinuxInputBackend {
     fn probe_mouse_state(&self) -> Option<MouseState> {
-        // No display means no way to see buttons at all; that is `None`, not idle.
+        // The reader is the better observer: it saw every press and release of the user's and
+        // none this process synthesised, because its own `uinput` node is filtered out by name.
+        // The X11 mask answers for both, so a click of ours read back as the user holding the
+        // button and the hold guards stood down over their own input.
+        if let Some(held) = self.observed_buttons() {
+            return Some(held);
+        }
+        // Nothing is watching a device, so the mask is all there is. No display means no way to
+        // see buttons at all; that is `None`, not idle.
         let x11 = self.x11.as_ref()?;
         let (_, _, mask) = x11.pointer()?;
         Some(MouseState {
@@ -424,6 +478,12 @@ fn keysym_for(key: Key) -> Option<u32> {
         Key::Right => Some(XK_RIGHT),
         Key::Up => Some(XK_UP),
         Key::Down => Some(XK_DOWN),
+        Key::Home => Some(XK_HOME),
+        Key::End => Some(XK_END),
+        Key::PageUp => Some(XK_PRIOR),
+        Key::PageDown => Some(XK_NEXT),
+        Key::Insert => Some(XK_INSERT),
+        Key::Delete => Some(XK_DELETE),
         Key::F(number) if (1..=12).contains(&number) => Some(XK_F1 + u32::from(number) - 1),
         Key::F(_) => None,
         Key::Other(code) => Some(code),
@@ -445,6 +505,33 @@ mod tests {
         assert_eq!(keysym_for(Key::F(12)), Some(XK_F1 + 11));
         assert_eq!(keysym_for(Key::F(13)), None);
         assert_eq!(keysym_for(Key::Char('!')), None);
+        // The navigation cluster's keysyms are `XK_Prior` and `XK_Next` for the two paging
+        // keys, and `XK_Delete` is 0xffff rather than next to the arrows.
+        assert_eq!(keysym_for(Key::Home), Some(0xff50));
+        assert_eq!(keysym_for(Key::End), Some(0xff57));
+        assert_eq!(keysym_for(Key::PageUp), Some(0xff55));
+        assert_eq!(keysym_for(Key::PageDown), Some(0xff56));
+        assert_eq!(keysym_for(Key::Insert), Some(0xff63));
+        assert_eq!(keysym_for(Key::Delete), Some(0xffff));
+    }
+
+    #[test]
+    fn every_button_has_its_own_x11_number_and_evdev_code() {
+        // The side buttons are the regression: a capture could store `Mouse X1`/`X2` while
+        // nothing on either platform could produce the press.
+        assert_eq!(x11_button(MouseButton::Left), 1);
+        assert_eq!(x11_button(MouseButton::Middle), 2);
+        assert_eq!(x11_button(MouseButton::Right), 3);
+        assert_eq!(x11_button(MouseButton::X1), 8);
+        assert_eq!(x11_button(MouseButton::X2), 9);
+        assert_eq!(evdev_button(MouseButton::Left), 0x110);
+        assert_eq!(evdev_button(MouseButton::Right), 0x111);
+        assert_eq!(evdev_button(MouseButton::Middle), 0x112);
+        assert_eq!(evdev_button(MouseButton::X1), 0x113);
+        assert_eq!(evdev_button(MouseButton::X2), 0x114);
+        // The virtual device declares every code a press can carry, or a synthesised click
+        // would name a button the device never advertised.
+        assert_eq!(uinput_buttons(), [0x110, 0x111, 0x112, 0x113, 0x114]);
     }
 
     #[test]
@@ -457,6 +544,11 @@ mod tests {
         );
         assert!(keys.contains(&30), "letter codes are declared");
         assert!(keys.contains(&59), "F1 is declared");
+        // The navigation cluster is synthesizable too: the Wayland path has to be able to
+        // emit the keys a bind can now carry.
+        for code in [102, 104, 107, 109, 110, 111] {
+            assert!(keys.contains(&code), "code {code} is declared");
+        }
     }
 
     #[test]

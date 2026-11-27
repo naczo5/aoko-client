@@ -6,6 +6,13 @@
 //! that [`InputBackend::poll_events`] drains, so the hook thread never allocates
 //! per keystroke and never blocks on the consumer.
 //!
+//! Both hooks drop the events this process injected (`LLKHF_INJECTED`, `LLMHF_INJECTED`), so
+//! synthesis cannot be mistaken for the user: without the keyboard filter every synthesised
+//! press - a loop's walk keys, the chest stealer's held Shift - came back as a press and
+//! toggled whichever module is bound to the same key. The sampled button state follows the
+//! same filtered stream while the hooks are up, because `GetAsyncKeyState` reports injected
+//! events too.
+//!
 //! Synthesis matches `Clicker.PerformClick`, `Clicker.SetPixelPartyWalkKey` and
 //! `Clicker.TryApplyAimAssist`: a click is one `SendInput` of two `INPUT`s, a
 //! relative move is one `MOUSEEVENTF_MOVE` `INPUT`, and a key is a down or up
@@ -15,6 +22,7 @@
 //! what it can before reporting it, so a failed click cannot leave the game holding the
 //! attack button.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
@@ -23,16 +31,17 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, SendInput, VkKeyScanW, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE,
     KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN,
     MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE,
-    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT,
-    MOUSE_EVENT_FLAGS, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_F1, VK_LBUTTON,
-    VK_LEFT, VK_MENU, VK_RBUTTON, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
+    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_XDOWN,
+    MOUSEEVENTF_XUP, MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_DELETE,
+    VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_HOME, VK_INSERT, VK_LBUTTON, VK_LEFT, VK_MENU, VK_NEXT,
+    VK_PRIOR, VK_RBUTTON, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetSystemMetrics, SetWindowsHookExW, UnhookWindowsHookEx, HHOOK,
     KBDLLHOOKSTRUCT, MSLLHOOKSTRUCT, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
     SM_YVIRTUALSCREEN, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
     WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP,
-    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
+    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1, XBUTTON2,
 };
 
 use crate::error::PlatformError;
@@ -45,8 +54,30 @@ const EVENT_CAPACITY: usize = 4096;
 /// `LLMHF_INJECTED`: our own synthesized events, which the managed hook ignored.
 const LLMHF_INJECTED: u32 = 0x0000_0001;
 
+/// `LLKHF_INJECTED`: the keyboard's half of [`LLMHF_INJECTED`], `KBDLLHOOKSTRUCT_FLAGS(16)`.
+///
+/// The loops synthesise keys of their own - Pixel Party holds its walk keys, the chest stealer
+/// and refill hold Shift - and a low-level hook sees those exactly as it sees the user's, so
+/// without this filter every synthesised press comes back as a press and toggles whatever module
+/// is bound to the same key.
+const LLKHF_INJECTED: u32 = 0x0000_0010;
+
 static EVENTS: Mutex<Vec<InputEvent>> = Mutex::new(Vec::new());
 static HOOKS: Mutex<Option<HookGuard>> = Mutex::new(None);
+
+/// Whether a *physical* left button is down, as last reported by [`mouse_proc`].
+///
+/// `GetAsyncKeyState` answers for injected events too, so a synthesised `LEFTDOWN` - the chest
+/// stealer holds the button, a click of ours is in flight - reads back as the user holding it,
+/// and the click and trigger guards stand down over our own input. These flags are written only
+/// by the branch of [`mouse_proc`] that has already rejected [`LLMHF_INJECTED`], and are read
+/// only while the hooks are installed; [`InputBackend::probe_mouse_state`] keeps
+/// `GetAsyncKeyState` for the no-hook case rather than reporting a state nothing maintains.
+///
+/// They are as fresh as the hook thread's message pump, which is the same thread that drains the
+/// event queue: a pump that stalls already costs every keybind, and this is no worse.
+static LEFT_DOWN: AtomicBool = AtomicBool::new(false);
+static RIGHT_DOWN: AtomicBool = AtomicBool::new(false);
 
 pub struct WindowsInputBackend;
 
@@ -144,13 +175,22 @@ impl Drop for HookGuard {
 /// concurrent callers serialise on the mutex instead of both passing the empty
 /// check and leaking the handle that loses the race.
 pub fn install_hooks() -> Result<(), PlatformError> {
-    let mut installed = HOOKS
-        .lock()
-        .map_err(|_| PlatformError::os("input hooks", "poisoned"))?;
+    // A poisoned lock still owns the guard, so recover rather than refuse to install for the
+    // rest of the process - the same recovery `uninstall_hooks` and `hooks_installed` make.
+    let mut installed = match HOOKS.lock() {
+        Ok(slot) => slot,
+        Err(poisoned) => poisoned.into_inner(),
+    };
     if installed.is_some() {
         return Ok(());
     }
-    *installed = Some(HookGuard::install()?);
+    let guard = HookGuard::install()?;
+    // A fresh observation window: nothing has been seen pressed through this hook yet. A flag
+    // left over from an earlier install would report a button the user is not holding, which is
+    // the direction that silently disables the clicker.
+    LEFT_DOWN.store(false, Ordering::Release);
+    RIGHT_DOWN.store(false, Ordering::Release);
+    *installed = Some(guard);
     Ok(())
 }
 
@@ -164,11 +204,102 @@ pub fn uninstall_hooks() {
     drop(taken);
 }
 
+/// Whether the process-wide hook pair is installed, and so whether the observed button flags
+/// are being maintained.
+fn hooks_installed() -> bool {
+    match HOOKS.lock() {
+        Ok(slot) => slot.is_some(),
+        // A poisoned lock still owns the guard, so the hooks are still delivering.
+        Err(poisoned) => poisoned.into_inner().is_some(),
+    }
+}
+
+/// Queues one event, losing the thing the consumer can most afford to lose.
+///
+/// Pointer motion is a *sample*, not a record: a newer position supersedes an older one and
+/// nothing consumes them yet (`Runtime::poll_module_keys` skips them), so a burst of
+/// `WM_MOUSEMOVE` folds into the move already queued instead of taking a slot per message. That
+/// is what stops a moving mouse from filling the ring ahead of the keys behind it.
+///
+/// A key or button event outranks a queued sample when the ring is full, because a dropped
+/// `KeyUp` is not a lost sample: the consumer keeps the key in its held set, so the release it
+/// never saw keeps that key's bind dead for the rest of the session.
 fn push_event(event: InputEvent) {
-    if let Ok(mut queue) = EVENTS.lock() {
-        if queue.len() < EVENT_CAPACITY {
-            queue.push(event);
+    let Ok(mut queue) = EVENTS.lock() else {
+        return;
+    };
+
+    let is_move = matches!(event, InputEvent::MouseMove { .. });
+    if is_move {
+        let trailing_move = queue
+            .last()
+            .is_some_and(|queued| matches!(queued, InputEvent::MouseMove { .. }));
+        if trailing_move {
+            if let Some(slot) = queue.last_mut() {
+                *slot = event;
+            }
+            return;
         }
+    }
+
+    if queue.len() < EVENT_CAPACITY {
+        queue.push(event);
+        return;
+    }
+
+    if is_move {
+        return;
+    }
+    // Full, and this is a key or a button: the slot comes from a pending pointer sample if
+    // there is one, and otherwise the overflow is dropped as before.
+    let pending_move = queue
+        .iter()
+        .position(|queued| matches!(queued, InputEvent::MouseMove { .. }));
+    if let Some(index) = pending_move {
+        queue.remove(index);
+        queue.push(event);
+    }
+}
+
+/// The [`InputEvent`] one low-level keyboard message reports, from the hook's own fields.
+///
+/// `None` for a message the hook does not report, and for an event carrying [`LLKHF_INJECTED`]:
+/// a synthesised key is this process's own input coming back, not the user's. The hook still
+/// passes it on - it observes, it never consumes - the event is only kept out of the queue.
+fn keyboard_event(vk_code: u32, flags: u32, message: u32) -> Option<InputEvent> {
+    if flags & LLKHF_INJECTED != 0 {
+        return None;
+    }
+    let key = Key::Other(vk_code);
+    match message {
+        WM_KEYDOWN | WM_SYSKEYDOWN => Some(InputEvent::KeyDown(key)),
+        WM_KEYUP | WM_SYSKEYUP => Some(InputEvent::KeyUp(key)),
+        _ => None,
+    }
+}
+
+/// Records a physical button transition for [`InputBackend::probe_mouse_state`], which reads
+/// [`LEFT_DOWN`] and [`RIGHT_DOWN`]. A message that is not a button does nothing.
+fn note_button(message: u32) {
+    let (flag, down) = match message {
+        WM_LBUTTONDOWN => (&LEFT_DOWN, true),
+        WM_LBUTTONUP => (&LEFT_DOWN, false),
+        WM_RBUTTONDOWN => (&RIGHT_DOWN, true),
+        WM_RBUTTONUP => (&RIGHT_DOWN, false),
+        _ => return,
+    };
+    flag.store(down, Ordering::Release);
+}
+
+/// The [`MouseButton`] one `WM_XBUTTONDOWN`/`WM_XBUTTONUP` names.
+///
+/// The high word of `MSLLHOOKSTRUCT.mouseData` is the `XBUTTON` identifier, which is the only
+/// thing that distinguishes the two side buttons: unlike the others they share a flag pair.
+fn xbutton(mouse_data: u32) -> Option<MouseButton> {
+    match (mouse_data >> 16) as u16 {
+        XBUTTON1 => Some(MouseButton::X1),
+        XBUTTON2 => Some(MouseButton::X2),
+        _ => None,
     }
 }
 
@@ -178,13 +309,12 @@ fn push_event(event: InputEvent) {
 unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code >= 0 {
         let data = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
-        let key = Key::Other(data.vkCode);
-        match wparam.0 as u32 {
-            WM_KEYDOWN | WM_SYSKEYDOWN => push_event(InputEvent::KeyDown(key)),
-            WM_KEYUP | WM_SYSKEYUP => push_event(InputEvent::KeyUp(key)),
-            _ => {}
+        if let Some(event) = keyboard_event(data.vkCode, data.flags.0, wparam.0 as u32) {
+            push_event(event);
         }
     }
+    // Every event is passed on, injected or not: the key the loops synthesised still has to
+    // reach the game, and a keystroke of the user's is never this hook's to consume.
     CallNextHookEx(HHOOK::default(), code, wparam, lparam)
 }
 
@@ -197,6 +327,10 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
         // Ignore injected events so our own clicks are not observed as input.
         if data.flags & LLMHF_INJECTED == 0 {
             let message = wparam.0 as u32;
+            // The observed button state follows the same rule, and has to: it is what tells the
+            // click and trigger guards the user is holding a button, and our own `LEFTDOWN` is
+            // not the user.
+            note_button(message);
             let event = match message {
                 WM_MOUSEMOVE => Some(InputEvent::MouseMove {
                     x: data.pt.x,
@@ -208,9 +342,8 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 WM_RBUTTONUP => Some(InputEvent::ButtonUp(MouseButton::Right)),
                 WM_MBUTTONDOWN => Some(InputEvent::ButtonDown(MouseButton::Middle)),
                 WM_MBUTTONUP => Some(InputEvent::ButtonUp(MouseButton::Middle)),
-                // `InputEvent` has no extra-button variant, so X1/X2 are not
-                // surfaced rather than being reported as a keyboard key.
-                WM_XBUTTONDOWN | WM_XBUTTONUP => None,
+                WM_XBUTTONDOWN => xbutton(data.mouseData).map(InputEvent::ButtonDown),
+                WM_XBUTTONUP => xbutton(data.mouseData).map(InputEvent::ButtonUp),
                 _ => None,
             };
             if let Some(event) = event {
@@ -251,6 +384,12 @@ fn virtual_key(key: Key) -> VIRTUAL_KEY {
         Key::Right => VK_RIGHT,
         Key::Up => VK_UP,
         Key::Down => VK_DOWN,
+        Key::Home => VK_HOME,
+        Key::End => VK_END,
+        Key::PageUp => VK_PRIOR,
+        Key::PageDown => VK_NEXT,
+        Key::Insert => VK_INSERT,
+        Key::Delete => VK_DELETE,
         Key::F(number) if (1..=24).contains(&number) => {
             VIRTUAL_KEY(VK_F1.0 + u16::from(number) - 1)
         }
@@ -262,11 +401,24 @@ fn virtual_key(key: Key) -> VIRTUAL_KEY {
 /// `(down, up)` mouse flags for one button. Each button has its own pair, so
 /// reporting the middle button as a left click would make this backend and the
 /// Linux one disagree about the same [`InputBackend`] method.
+///
+/// The two side buttons share one pair, which is why [`mouse_data`] says which of them it is.
 const fn mouse_flags(button: MouseButton) -> (MOUSE_EVENT_FLAGS, MOUSE_EVENT_FLAGS) {
     match button {
         MouseButton::Left => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
         MouseButton::Right => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
         MouseButton::Middle => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
+        MouseButton::X1 | MouseButton::X2 => (MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP),
+    }
+}
+
+/// The `mouseData` one button's event carries: `XBUTTON1`/`XBUTTON2` for the side buttons,
+/// and zero for the three that their flags name on their own.
+const fn mouse_data(button: MouseButton) -> i32 {
+    match button {
+        MouseButton::Left | MouseButton::Right | MouseButton::Middle => 0,
+        MouseButton::X1 => XBUTTON1 as i32,
+        MouseButton::X2 => XBUTTON2 as i32,
     }
 }
 
@@ -334,14 +486,14 @@ fn normalise_axis(coordinate: i32, span: i32) -> i32 {
     ((i64::from(clamped) * 65535) / i64::from(span - 1)) as i32
 }
 
-fn mouse_input(flags: MOUSE_EVENT_FLAGS, dx: i32, dy: i32) -> INPUT {
+fn mouse_input(flags: MOUSE_EVENT_FLAGS, data: i32, dx: i32, dy: i32) -> INPUT {
     INPUT {
         r#type: INPUT_MOUSE,
         Anonymous: INPUT_0 {
             mi: MOUSEINPUT {
                 dx,
                 dy,
-                mouseData: 0,
+                mouseData: data,
                 dwFlags: flags,
                 time: 0,
                 dwExtraInfo: 0,
@@ -400,7 +552,17 @@ fn vk_down(vk: VIRTUAL_KEY) -> bool {
 
 impl InputBackend for WindowsInputBackend {
     fn probe_mouse_state(&self) -> Option<MouseState> {
-        // `GetAsyncKeyState` always has a definite answer on Windows.
+        // With the hook installed, the hook is the better observer: it saw every press and
+        // release of the user's and rejected every one this process injected, which is the
+        // distinction `GetAsyncKeyState` cannot make.
+        if hooks_installed() {
+            return Some(MouseState {
+                left_down: LEFT_DOWN.load(Ordering::Acquire),
+                right_down: RIGHT_DOWN.load(Ordering::Acquire),
+            });
+        }
+        // No hook, so nothing maintains the flags and the OS is the only answer there is.
+        // It is the lossy one: our own synthesis reads back as a press.
         Some(MouseState {
             left_down: vk_down(VK_LBUTTON),
             right_down: vk_down(VK_RBUTTON),
@@ -427,8 +589,9 @@ impl InputBackend for WindowsInputBackend {
 
     fn click(&self, button: MouseButton) -> Result<(), PlatformError> {
         let (down, up) = mouse_flags(button);
+        let data = mouse_data(button);
         // One call for the pair, like `Clicker.PerformClick`.
-        if let Err(error) = send(&[mouse_input(down, 0, 0), mouse_input(up, 0, 0)]) {
+        if let Err(error) = send(&[mouse_input(down, data, 0, 0), mouse_input(up, data, 0, 0)]) {
             // A batch can be *partly* queued: `SendInput` returns how many of the two events it
             // inserted, so a refused or half-inserted pair can leave `LEFTDOWN` in the input
             // stream with nothing to release it. The game would then see the attack button held
@@ -439,25 +602,25 @@ impl InputBackend for WindowsInputBackend {
             // The compensation is best effort and cannot make the stream worse: an `UP` for a
             // button that is already up is a release event the game has nothing to release,
             // while a missing `UP` is a held button. The original error is what the caller sees.
-            let _ = send(&[mouse_input(up, 0, 0)]);
+            let _ = send(&[mouse_input(up, data, 0, 0)]);
             return Err(error);
         }
         Ok(())
     }
 
     fn button_down(&self, button: MouseButton) -> Result<(), PlatformError> {
-        send(&[mouse_input(mouse_flags(button).0, 0, 0)])
+        send(&[mouse_input(mouse_flags(button).0, mouse_data(button), 0, 0)])
     }
 
     fn button_up(&self, button: MouseButton) -> Result<(), PlatformError> {
-        send(&[mouse_input(mouse_flags(button).1, 0, 0)])
+        send(&[mouse_input(mouse_flags(button).1, mouse_data(button), 0, 0)])
     }
 
     fn move_relative(&self, dx: i32, dy: i32) -> Result<(), PlatformError> {
         if (dx, dy) == (0, 0) {
             return Ok(());
         }
-        send(&[mouse_input(MOUSE_MOVE_FLAGS, dx, dy)])
+        send(&[mouse_input(MOUSE_MOVE_FLAGS, 0, dx, dy)])
     }
 
     /// Absolute placement: the managed `SetCursorPos` (`ChestStealerController.cs:303-306`),
@@ -492,6 +655,7 @@ impl InputBackend for WindowsInputBackend {
 
         send(&[mouse_input(
             absolute_move_flags(),
+            0,
             normalise_axis(pixel_x.saturating_sub(screen.left), screen.width),
             normalise_axis(pixel_y.saturating_sub(screen.top), screen.height),
         )])
@@ -556,12 +720,13 @@ mod tests {
 
     #[test]
     fn mouse_input_uses_the_documented_flags() {
-        let input = mouse_input(MOUSEEVENTF_LEFTDOWN, 0, 0);
+        let input = mouse_input(MOUSEEVENTF_LEFTDOWN, 0, 0, 0);
         assert_eq!(input.r#type, INPUT_MOUSE);
         // SAFETY: the value was built with `r#type == INPUT_MOUSE`, so reading the
         // `mi` arm of the union is the arm that was initialised.
         let mi = unsafe { input.Anonymous.mi };
         assert_eq!(mi.dwFlags, MOUSEEVENTF_LEFTDOWN);
+        assert_eq!(mi.mouseData, 0);
     }
 
     #[test]
@@ -580,6 +745,33 @@ mod tests {
             mouse_flags(MouseButton::Middle),
             (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP)
         );
+        // The side buttons share one flag pair and are told apart by `mouseData`, which is the
+        // only way `MOUSEEVENTF_XDOWN` names which of the two it is.
+        assert_eq!(
+            mouse_flags(MouseButton::X1),
+            (MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP)
+        );
+        assert_eq!(
+            mouse_flags(MouseButton::X2),
+            (MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP)
+        );
+        assert_eq!(mouse_data(MouseButton::X1), i32::from(XBUTTON1));
+        assert_eq!(mouse_data(MouseButton::X2), i32::from(XBUTTON2));
+        for button in [MouseButton::Left, MouseButton::Right, MouseButton::Middle] {
+            assert_eq!(mouse_data(button), 0, "{button:?} needs no identifier");
+        }
+    }
+
+    #[test]
+    fn the_xbutton_messages_are_told_apart_by_the_high_word() {
+        // `MSLLHOOKSTRUCT.mouseData`: the `XBUTTON` identifier is its high word, which is what
+        // makes `WM_XBUTTONDOWN` say which side button it is.
+        assert_eq!(xbutton(u32::from(XBUTTON1) << 16), Some(MouseButton::X1));
+        assert_eq!(xbutton(u32::from(XBUTTON2) << 16), Some(MouseButton::X2));
+        // The identifier is the *high* word only: a low-word value is not one.
+        assert_eq!(xbutton(u32::from(XBUTTON1)), None);
+        assert_eq!(xbutton(0), None);
+        assert_eq!(xbutton(0xFFFF_0000), None);
     }
 
     #[test]
@@ -662,6 +854,14 @@ mod tests {
         assert_eq!(virtual_key(Key::Alt), VK_MENU);
         assert_eq!(virtual_key(Key::Left), VK_LEFT);
         assert_eq!(virtual_key(Key::Down), VK_DOWN);
+        // The navigation cluster: a bind can now carry these, so the synthesizer has to name
+        // them.
+        assert_eq!(virtual_key(Key::Home), VK_HOME);
+        assert_eq!(virtual_key(Key::End), VK_END);
+        assert_eq!(virtual_key(Key::PageUp), VK_PRIOR);
+        assert_eq!(virtual_key(Key::PageDown), VK_NEXT);
+        assert_eq!(virtual_key(Key::Insert), VK_INSERT);
+        assert_eq!(virtual_key(Key::Delete), VK_DELETE);
         assert_eq!(virtual_key(Key::F(1)), VK_F1);
         assert_eq!(virtual_key(Key::F(12)).0, VK_F1.0 + 11);
         assert_eq!(virtual_key(Key::Other(0x57)).0, 0x57);
@@ -676,25 +876,129 @@ mod tests {
         ));
     }
 
+    /// Serialises the tests that share the process-global event ring.
+    static QUEUE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Empties the ring and answers everything it held, in order.
+    fn drain_queue() -> Vec<InputEvent> {
+        let mut out = Vec::new();
+        WindowsInputBackend::new()
+            .poll_events(&mut out)
+            .expect("drain");
+        out
+    }
+
     #[test]
     fn the_event_queue_respects_its_capacity() {
-        if let Ok(mut queue) = EVENTS.lock() {
-            queue.clear();
-        }
+        let _serialised = QUEUE_TEST_LOCK.lock().ok();
+        drain_queue();
         for _ in 0..(EVENT_CAPACITY + 8) {
             push_event(InputEvent::KeyDown(Key::Other(0x41)));
         }
-        let drained = {
-            let mut out = Vec::new();
-            WindowsInputBackend::new()
-                .poll_events(&mut out)
-                .expect("drain");
-            out
-        };
+        let drained = drain_queue();
         assert_eq!(drained.len(), EVENT_CAPACITY);
         assert!(drained
             .iter()
             .all(|event| *event == InputEvent::KeyDown(Key::Other(0x41))));
+    }
+
+    #[test]
+    fn a_burst_of_pointer_motion_folds_into_one_pending_sample() {
+        // Pointer traffic is the bulk of what the hook sees and nothing reads the position, so a
+        // run of moves must cost one slot rather than one slot per message: otherwise a moving
+        // mouse fills the ring and the keys behind it are dropped.
+        let _serialised = QUEUE_TEST_LOCK.lock().ok();
+        drain_queue();
+        for step in 0..64 {
+            push_event(InputEvent::MouseMove { x: step, y: -step });
+        }
+        push_event(InputEvent::KeyDown(Key::Other(0x57)));
+        push_event(InputEvent::MouseMove { x: 900, y: 100 });
+        assert_eq!(
+            drain_queue(),
+            vec![
+                // The last position of the burst, then the key, then the sample after it.
+                InputEvent::MouseMove { x: 63, y: -63 },
+                InputEvent::KeyDown(Key::Other(0x57)),
+                InputEvent::MouseMove { x: 900, y: 100 },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_key_takes_the_slot_of_a_pointer_sample_when_the_ring_is_full() {
+        // A full ring is a stalled consumer, and what it must not lose is the release that frees
+        // a key: a withheld `KeyUp` keeps the key in the consumer's held set, so its bind stays
+        // dead for the rest of the session. A pointer sample is superseded by the next one.
+        let _serialised = QUEUE_TEST_LOCK.lock().ok();
+        drain_queue();
+        for _ in 0..(EVENT_CAPACITY - 1) {
+            push_event(InputEvent::KeyDown(Key::Other(0x41)));
+        }
+        push_event(InputEvent::MouseMove { x: 1, y: 1 });
+        // Full: the newer sample folds into the queued one, and a further sample is dropped.
+        push_event(InputEvent::MouseMove { x: 2, y: 2 });
+        push_event(InputEvent::MouseMove { x: 3, y: 3 });
+        push_event(InputEvent::KeyUp(Key::Other(0x41)));
+
+        let drained = drain_queue();
+        assert_eq!(drained.len(), EVENT_CAPACITY);
+        assert_eq!(drained.last(), Some(&InputEvent::KeyUp(Key::Other(0x41))));
+        assert!(
+            !drained
+                .iter()
+                .any(|event| matches!(event, InputEvent::MouseMove { .. })),
+            "the sample is the event that gives way"
+        );
+    }
+
+    #[test]
+    fn a_synthesised_key_is_not_reported_as_a_press() {
+        // `LLKHF_INJECTED`, from `KBDLLHOOKSTRUCT.dwFlags`: `SendInput`-synthesised events carry
+        // it, and the loops' own walk keys and Shift must not come back as the user's.
+        assert_eq!(LLKHF_INJECTED, 16);
+        assert_eq!(keyboard_event(0x57, LLKHF_INJECTED, WM_KEYDOWN), None);
+        assert_eq!(keyboard_event(0x57, LLKHF_INJECTED, WM_KEYUP), None);
+        assert_eq!(
+            keyboard_event(0x57, LLKHF_INJECTED | 0x0000_0002, WM_KEYDOWN),
+            None,
+            "the other flag bits say nothing about who injected it"
+        );
+
+        assert_eq!(
+            keyboard_event(0x57, 0, WM_KEYDOWN),
+            Some(InputEvent::KeyDown(Key::Other(0x57)))
+        );
+        assert_eq!(
+            keyboard_event(0x57, 0, WM_SYSKEYUP),
+            Some(InputEvent::KeyUp(Key::Other(0x57)))
+        );
+        // A message that reports no key at all is not an event either.
+        assert_eq!(keyboard_event(0x57, 0, WM_MOUSEMOVE), None);
+    }
+
+    #[test]
+    fn only_a_physical_button_transition_moves_the_observed_state() {
+        // The flags `probe_mouse_state` reads while the hook is installed: written here and
+        // nowhere else, so an injected `LEFTDOWN` cannot report the user holding the button.
+        let _serialised = QUEUE_TEST_LOCK.lock().ok();
+        LEFT_DOWN.store(false, Ordering::Release);
+        RIGHT_DOWN.store(false, Ordering::Release);
+
+        note_button(WM_MOUSEMOVE);
+        assert!(!LEFT_DOWN.load(Ordering::Acquire));
+        note_button(WM_LBUTTONDOWN);
+        assert!(LEFT_DOWN.load(Ordering::Acquire));
+        note_button(WM_LBUTTONUP);
+        assert!(!LEFT_DOWN.load(Ordering::Acquire));
+        note_button(WM_RBUTTONDOWN);
+        assert!(RIGHT_DOWN.load(Ordering::Acquire));
+        assert!(
+            !LEFT_DOWN.load(Ordering::Acquire),
+            "the buttons keep separate state"
+        );
+        note_button(WM_RBUTTONUP);
+        assert!(!RIGHT_DOWN.load(Ordering::Acquire));
     }
 
     /// Serialises the tests that share the process-global hook slot, so they do not
@@ -789,10 +1093,11 @@ mod tests {
         // held down is not something a test can stage: with the desktop idle,
         // `default()` equals the truth, so asserting on the value cannot tell a
         // real read from a hardcoded one. What is observable is that the probe
-        // answers at all, which is what this pins.
+        // answers at all - through the hook's flags when it is installed, through
+        // `GetAsyncKeyState` when it is not - which is what this pins.
         assert!(
             WindowsInputBackend::new().probe_mouse_state().is_some(),
-            "GetAsyncKeyState always has a definite answer on Windows"
+            "a Windows session always has a definite answer"
         );
     }
 

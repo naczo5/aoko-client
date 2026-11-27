@@ -335,7 +335,9 @@ impl Transport for TcpBridgeTransport {
                         out.clear();
                     } else {
                         out.extend_from_slice(
-                            self.received.get(line_start..content_end).unwrap_or_default(),
+                            self.received
+                                .get(line_start..content_end)
+                                .unwrap_or_default(),
                         );
                     }
                     self.consumed = self.received.len();
