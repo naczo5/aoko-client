@@ -2612,6 +2612,17 @@ impl Shell {
         self.close(cx);
     }
 
+    /// The Stats card's Reset Stats (`ResetStatsButton_Click`, `MainWindow.xaml.cs:1976-1979`).
+    ///
+    /// One call in managed (`StatsTracker.Instance.Reset()`) and one here: the tracker is
+    /// [`Runtime::reset_stats`]'s, so the press cannot clear a second copy of the numbers. The
+    /// repaint follows a real clear, because a press on an empty tracker changes nothing.
+    pub fn reset_stats(&mut self, cx: &mut Context<Self>) {
+        if self.runtime.reset_stats() {
+            cx.notify();
+        }
+    }
+
     /// The window's close: save the profile, then quit.
     ///
     /// `CloseButton_Click` (`MainWindow.xaml.cs:1384-1392`) is `SaveProfile` then
@@ -4260,8 +4271,9 @@ impl Shell {
                 // The configs card's buttons are real actions: Load and Save
                 // (`LoadConfigButton_Click` `:813-831`, `SaveConfigButton_Click`
                 // `:847-862`), Delete and Create with their confirmations, and Open
-                // Configs Folder (`:969-985`). The three the review named as inert are wired
-                // here; the stats card's reset is the one still to come.
+                // Configs Folder (`:969-985`). The four the review named as inert are wired here
+                // too, so no rendered button is a decoration; each maps to the one call managed's
+                // handler made.
                 let action: fn(&mut Shell, &mut Context<Shell>) = match (card.id, *label) {
                     ("ConfigsCard", "Load") => Shell::configs_load,
                     ("ConfigsCard", "Save") => Shell::configs_save,
@@ -4278,6 +4290,8 @@ impl Shell {
                     // `PanicButton_Click` (`:1393-1396`): the reset, then the exit the title bar's
                     // close runs. Not a reset-only button — managed's shutdown is half of it.
                     ("PanicCard", "Trigger Panic Now") => Shell::panic,
+                    // `ResetStatsButton_Click` (`:1976-1979`): the tracker's own reset.
+                    ("StatsActionsCard", copy::STATS_RESET_LABEL) => Shell::reset_stats,
                     _ => |_, _| {},
                 };
                 let handle = entity.clone();
@@ -6041,6 +6055,40 @@ mod tests {
         assert!(!reloaded.show_module_list, "and the other one");
     }
 
+    /// The Stats card's reset clears the one tracker the runtime owns.
+    ///
+    /// `ResetStatsButton_Click` (`MainWindow.xaml.cs:1976-1979`) is `StatsTracker.Instance.Reset()`,
+    /// so the press has to move the numbers the Stats tab draws and nothing else. The click is
+    /// recorded through the same sink the automation loops hold, which is what makes this the real
+    /// tracker rather than a second set of counters.
+    #[gpui::test]
+    fn the_stats_reset_press_clears_the_trackers_numbers(cx: &mut gpui::TestAppContext) {
+        use crate::views::stats_view::StatsTexts;
+
+        let handle = cx.update(|cx| cx.new(|_| Shell::new(Theme::slate())));
+        cx.update(|cx| {
+            handle.update(cx, |shell, _| {
+                let sink = shell.runtime().click_sink();
+                sink.record_click(8.5, true);
+                sink.record_click(11.0, false);
+            })
+        });
+        assert_eq!(
+            cx.read(|cx| handle.read(cx).runtime().stats().total_clicks()),
+            2,
+            "the clicks reached the tracker the tab reads"
+        );
+
+        cx.update(|cx| handle.update(cx, |shell, cx| shell.reset_stats(cx)));
+
+        let (total, split) = cx.read(|cx| {
+            let stats = handle.read(cx).runtime().stats();
+            (stats.total_clicks(), StatsTexts::of(&stats).clicks_split)
+        });
+        assert_eq!(total, 0, "the press cleared the tracker");
+        assert_eq!(split, "L 0  R 0", "and the split the tab paints with it");
+    }
+
     /// Every button the shell wires by `(card id, label)` exists in the copy table under that pair.
     ///
     /// `Control::Button`'s action match keys on two strings that `views/copy.rs` owns, so a rename
@@ -6057,6 +6105,7 @@ mod tests {
             ("HudEditorCard", "Reset layout"),
             ("ReloadMappingsCard", "Reload Mappings"),
             ("PanicCard", "Trigger Panic Now"),
+            ("StatsActionsCard", copy::STATS_RESET_LABEL),
         ];
 
         let cards: Vec<&Card> = copy::TABS
