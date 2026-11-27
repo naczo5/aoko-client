@@ -362,6 +362,29 @@ impl AppController {
         self.profile.read().clone()
     }
 
+    /// The profile as it should be saved: the settings the user last wrote, with every module
+    /// switch copied into the field that stores it.
+    ///
+    /// A save is the only place the switch set flows back into the profile, and it is what the
+    /// managed save sites did: each of them rebuilt the profile from the live clicker
+    /// (`ProfileManager.CreateFromClicker()` then `SaveProfile(...)`,
+    /// `MainWindow.xaml.cs:956-958`, `:1386-1388`, `:1414`, `:1867-1869`) instead of writing a
+    /// copy the buttons never touched. Without it a module switched on and then quit came back
+    /// off, because the shell saves its own profile and a press writes only the set.
+    ///
+    /// One table drives the copy (`crate::config_map::SWITCH_PROFILE_KEYS`), so a switch added
+    /// there needs no second edit here. `isArmed` is in that table, so the left clicker follows
+    /// the same rule as every other module.
+    #[must_use]
+    pub fn profile_for_save(&self) -> Profile {
+        let modules = self.modules.read();
+        let mut profile = self.profile.read().clone();
+        for (flag, _) in crate::config_map::SWITCH_PROFILE_KEYS {
+            crate::config_map::set_switch(&mut profile, flag, modules.contains(&flag));
+        }
+        profile
+    }
+
     /// Mutates the active profile in place, returning whether the mutation
     /// reported a change.
     ///
@@ -665,6 +688,7 @@ mod tests {
     use aoko_platform::Rect;
     use aoko_platform::WindowHandle;
     use aoko_protocol::hud::{element_id, HudElementLayout};
+    use aoko_protocol::profile::{load_profile_from_json, to_profile_json};
     use serde_json::Value;
 
     fn transport_only() -> CapabilityReport {
@@ -1045,6 +1069,55 @@ mod tests {
             !app.set_module_enabled(EnabledFlag::AimAssist, true),
             "a press that changes nothing reports nothing"
         );
+    }
+
+    /// A save carries the live switches, which is the other half of the ownership: the set is
+    /// what runs, and the file has to keep what runs. The managed save sites rebuilt the
+    /// profile from the `Clicker` for this reason.
+    ///
+    /// The property, not the shape: a profile that disagrees with the switches must come back
+    /// agreeing with them, through the file's own format and back.
+    #[test]
+    fn saving_writes_the_live_switches_into_the_profile() {
+        // The stored profile says the opposite of the switches below: armed and aim assist
+        // off, fight status on.
+        let mut stored = Profile::default();
+        stored.is_armed = false;
+        stored.aim_assist_enabled = false;
+        stored.fight_status_enabled = true;
+        let app = AppController::default();
+        app.replace_profile(stored);
+        assert_eq!(
+            crate::config_map::profile_switches(&app.profile()),
+            vec![EnabledFlag::FightStatus],
+            "adopting the profile seeds its one live module"
+        );
+
+        assert!(app.set_module_enabled(EnabledFlag::LeftClick, true));
+        assert!(app.set_module_enabled(EnabledFlag::AimAssist, true));
+        assert!(app.set_module_enabled(EnabledFlag::FightStatus, false));
+
+        let saved = app.profile_for_save();
+        assert!(saved.is_armed, "the left clicker was on when the save ran");
+        assert!(saved.aim_assist_enabled, "and so was aim assist");
+        assert!(
+            !saved.fight_status_enabled,
+            "fight status was switched off before the save"
+        );
+
+        let reloaded = load_profile_from_json(&to_profile_json(&saved))
+            .expect("the saved profile loads again");
+        assert!(reloaded.is_armed);
+        assert!(reloaded.aim_assist_enabled);
+        assert!(!reloaded.fight_status_enabled);
+        assert_eq!(
+            crate::config_map::profile_switches(&reloaded),
+            vec![EnabledFlag::LeftClick, EnabledFlag::AimAssist],
+            "every switch the table carries is the switch the file keeps"
+        );
+        // The rest of the profile is the user's settings, untouched by the save.
+        assert_eq!(reloaded.min_cps, app.profile().min_cps);
+        assert_eq!(reloaded.gui_theme, app.profile().gui_theme);
     }
 
     /// `reloadMappingsNonce` is how "Reload Mappings" reaches the bridge: the host bumps a

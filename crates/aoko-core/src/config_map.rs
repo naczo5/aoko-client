@@ -12,7 +12,10 @@
 //!   [`module_catalog::MODULE_WIRE_KEYS`], because a switch press is what the managed
 //!   `Clicker` property changed. `armed` is one of these: the managed `Clicker.IsArmed` is
 //!   this port's `LeftClick` switch. The frame used to send the profile's saved boolean here,
-//!   which meant a module the user switched on told the bridge it was off;
+//!   which meant a module the user switched on told the bridge it was off. The set is written
+//!   back into the profile by [`set_switch`] on save and nowhere else — the managed save sites
+//!   rebuilt the profile from the `Clicker` (`MainWindow.xaml.cs:956-958`), so a module left
+//!   on survived a restart;
 //! * everything else comes from the profile, including the sub-settings a module owns
 //!   (`pixelPartyAutoLook`, `nametagHideVanilla`, `left`, ...).
 //!
@@ -117,12 +120,73 @@ pub(crate) const SWITCH_PROFILE_KEYS: [(EnabledFlag, &str); 39] = [
     (EnabledFlag::BreakProgress, "breakProgressEnabled"),
 ];
 
+/// Writes one switch into the profile field that stores it.
+///
+/// The write half of [`SWITCH_PROFILE_KEYS`], used only by
+/// `AppController::profile_for_save`: a save has to carry the live modules, the way the managed
+/// save sites rebuilt the profile from the `Clicker` (`MainWindow.xaml.cs:956-958`,
+/// `:1386-1388`, `:1414`, `:1867-1869`) instead of writing a stale copy. Nothing else writes
+/// these fields from the set, so a running module and a saved one can only differ between saves.
+///
+/// The match is exhaustive so a new switch is a compile error, and the round-trip test in
+/// `aoko-core` proves each arm writes the field [`profile_switches`] reads back.
+pub(crate) fn set_switch(profile: &mut Profile, flag: EnabledFlag, on: bool) {
+    match flag {
+        EnabledFlag::LeftClick => profile.is_armed = on,
+        EnabledFlag::RightClick => profile.right_click_enabled = on,
+        EnabledFlag::BreakBlocks => profile.break_blocks_enabled = on,
+        EnabledFlag::ClickInChests => profile.click_in_chests = on,
+        EnabledFlag::AimAssist => profile.aim_assist_enabled = on,
+        EnabledFlag::Triggerbot => profile.triggerbot_enabled = on,
+        EnabledFlag::KillAura => profile.kill_aura_enabled = on,
+        EnabledFlag::SpeedBridge => profile.speed_bridge_enabled = on,
+        EnabledFlag::GtbHelper => profile.gtb_helper_enabled = on,
+        EnabledFlag::PixelPartyAssist => profile.pixel_party_assist_enabled = on,
+        EnabledFlag::Nametags => profile.nametags_enabled = on,
+        EnabledFlag::NickHider => profile.nick_hider_enabled = on,
+        EnabledFlag::ClosestPlayerInfo => profile.closest_player_info_enabled = on,
+        EnabledFlag::FightStatus => profile.fight_status_enabled = on,
+        EnabledFlag::ChestEsp => profile.chest_esp_enabled = on,
+        EnabledFlag::ChestStealer => profile.chest_stealer_enabled = on,
+        EnabledFlag::Refill => profile.refill_enabled = on,
+        EnabledFlag::BlockEsp => profile.block_esp_enabled = on,
+        EnabledFlag::BedPlates => profile.bed_plates_enabled = on,
+        EnabledFlag::Reach => profile.reach_enabled = on,
+        EnabledFlag::Velocity => profile.velocity_enabled = on,
+        EnabledFlag::AutoTotem => profile.auto_totem_enabled = on,
+        EnabledFlag::AutoRod => profile.auto_rod_enabled = on,
+        EnabledFlag::Throwpot => profile.throwpot_enabled = on,
+        EnabledFlag::AutoHeal => profile.auto_heal_enabled = on,
+        EnabledFlag::AutoTool => profile.auto_tool_enabled = on,
+        EnabledFlag::AntiDebuff => profile.anti_debuff_enabled = on,
+        EnabledFlag::HitDelayFix => profile.hit_delay_fix_enabled = on,
+        EnabledFlag::FireballWarning => profile.fireball_warning_enabled = on,
+        EnabledFlag::FastPlace => profile.fast_place_enabled = on,
+        EnabledFlag::NoHurtCam => profile.no_hurt_cam_enabled = on,
+        EnabledFlag::Sprint => profile.sprint_enabled = on,
+        EnabledFlag::TntTimer => profile.tnt_timer_enabled = on,
+        EnabledFlag::WTap => profile.wtap_enabled = on,
+        EnabledFlag::JumpReset => profile.jump_reset_enabled = on,
+        EnabledFlag::HitSelect => profile.hit_select_enabled = on,
+        EnabledFlag::Trajectories => profile.trajectories_enabled = on,
+        EnabledFlag::MurderMystery => profile.murder_mystery_enabled = on,
+        EnabledFlag::BreakProgress => profile.break_progress_enabled = on,
+        // No stored field: `panic` is a keybind, `Jitter` is the randomization mode's shadow
+        // and `HudEditorActive` is the controller's mode. See `MODULE_WIRE_KEY_EXCEPTIONS`.
+        EnabledFlag::Never | EnabledFlag::Jitter | EnabledFlag::HudEditorActive => {}
+    }
+}
+
 /// The switches a profile carries, as the controller's switch set holds them.
 ///
-/// One direction only: the profile is the saved state, the returned set is what the app is
-/// running, and nothing writes the set back. A profile that does not serialise yields no
-/// switches rather than a panic — the caller then reports every module as off, which is the
-/// truth about an app that failed to read its own settings.
+/// The read half of the apply step: `AppController` seeds its set from here when a profile is
+/// built or adopted, and [`set_switch`] is the only writer that runs the other way — on save
+/// (`AppController::profile_for_save`), so a module the user switched on is the module the file
+/// keeps. Between a save and the next load the set is the only truth.
+///
+/// A profile that does not serialise yields no switches rather than a panic — the caller then
+/// reports every module as off, which is the truth about an app that failed to read its own
+/// settings.
 pub(crate) fn profile_switches(profile: &Profile) -> Vec<EnabledFlag> {
     let Ok(settings) = serde_json::to_value(profile) else {
         return Vec::new();
@@ -141,10 +205,13 @@ pub(crate) fn profile_switches(profile: &Profile) -> Vec<EnabledFlag> {
 
 /// The frame the profile and the controller's switches produce.
 ///
-/// Two sources, both one direction: the profile owns the settings, the switch set owns which
-/// modules are live. The managed host had a `Clicker` property for each, filled from the
-/// profile on apply and changed by the switches at runtime, so the frame read live state; this
-/// port has the two halves apart, and the frame reads the same two.
+/// Two sources: the profile owns the settings, the switch set owns which modules are live. The
+/// managed host had a `Clicker` property for each, filled from the profile on apply and changed
+/// by the switches at runtime, so the frame read live state; this port has the two halves
+/// apart, and the frame reads the same two. The set has exactly two writers — a switch press,
+/// and a save, which copies it back into the profile it is saved from
+/// (`AppController::profile_for_save`) — so nothing else can move a module behind the frame's
+/// back.
 pub(crate) fn payload(
     profile: &Profile,
     modules: &[EnabledFlag],
@@ -641,6 +708,26 @@ mod tests {
                 profile_switches(&profile),
                 vec![flag],
                 "{key} has to seed exactly {flag:?}"
+            );
+        }
+    }
+
+    /// The write half: every arm of [`set_switch`] has to land on the field
+    /// [`profile_switches`] reads back, or a save silently drops a module.
+    #[test]
+    fn every_switch_writes_the_field_it_reads() {
+        for (flag, _) in SWITCH_PROFILE_KEYS {
+            let mut profile = Profile::default();
+            set_switch(&mut profile, flag, true);
+            assert_eq!(
+                profile_switches(&profile),
+                vec![flag],
+                "{flag:?} must write the field it is saved to"
+            );
+            set_switch(&mut profile, flag, false);
+            assert!(
+                profile_switches(&profile).is_empty(),
+                "{flag:?} must clear the same field"
             );
         }
     }
