@@ -311,6 +311,14 @@ pub struct PaletteStore {
     path: PathBuf,
     current: String,
     draft: PaletteDraft,
+    /// The row a remove press is waiting to confirm, `Profiles::delete_armed`'s shape.
+    ///
+    /// The managed app asked in a `MessageBox` (`MainWindow.xaml.cs:1178-1181`); the card asks in
+    /// place, so the armed name is state — which is also what makes the confirmation testable.
+    delete_armed: Option<String>,
+    /// The name a save press would replace, waiting for its own confirmation
+    /// (`MainWindow.xaml.cs:1120-1127`), armed by [`PaletteStore::save_draft`] itself.
+    overwrite_pending: Option<String>,
 }
 
 impl PaletteStore {
@@ -330,6 +338,9 @@ impl PaletteStore {
             path: path.into(),
             current: DEFAULT_PALETTE.to_owned(),
             draft: PaletteDraft::default(),
+            // Nothing is armed until a press asks a question.
+            delete_armed: None,
+            overwrite_pending: None,
         }
     }
 
@@ -453,6 +464,52 @@ impl PaletteStore {
         self.current = name.to_owned();
     }
 
+    /// The row a remove press is waiting to confirm, if any.
+    #[must_use]
+    pub fn delete_armed(&self) -> Option<&str> {
+        self.delete_armed.as_deref()
+    }
+
+    /// Arms the remove confirmation for one row's cap.
+    pub fn request_delete(&mut self, name: &str) {
+        self.delete_armed = Some(name.to_owned());
+    }
+
+    /// Disarms the confirmation without deleting: the file is untouched.
+    pub fn cancel_delete(&mut self) {
+        self.delete_armed = None;
+    }
+
+    /// The confirmation's own Delete.
+    ///
+    /// `None` when no cap was pressed. The card cannot reach that — it paints the confirmation only
+    /// while one is armed — and it is deliberately not an error, because a refusal would have to
+    /// name a palette in a status line for a press that never happened.
+    pub fn confirm_delete(&mut self) -> Option<Result<DeleteOutcome, DeleteError>> {
+        let name = self.delete_armed.take()?;
+        Some(self.delete(&name))
+    }
+
+    /// The name a save press would replace, if one is waiting for its own confirmation.
+    #[must_use]
+    pub fn overwrite_pending(&self) -> Option<&str> {
+        self.overwrite_pending.as_deref()
+    }
+
+    /// Forgets a pending overwrite, for Cancel on the in-card prompt. Nothing is written.
+    pub fn cancel_overwrite(&mut self) {
+        self.overwrite_pending = None;
+    }
+
+    /// The overwrite prompt's confirm: the `MessageBox` answer, in place
+    /// (`MainWindow.xaml.cs:1120-1127`).
+    ///
+    /// # Errors
+    /// As [`PaletteStore::save_draft`].
+    pub fn confirm_overwrite(&mut self) -> Result<DraftOutcome, DraftError> {
+        self.save_draft(true)
+    }
+
     /// The Add-palette press.
     ///
     /// The managed order (`MainWindow.xaml.cs:1095-1171`), step for step: validate the
@@ -477,11 +534,15 @@ impl PaletteStore {
 
         let mut palettes = self.palettes();
         if !overwrite && palettes.iter().any(|stored| same_name(&stored.name, &name)) {
+            // Stored as well as returned: the card paints the prompt from this field, which is what
+            // lets Cancel forget the question without the caller keeping a second copy of the name.
+            self.overwrite_pending = Some(name.clone());
             return Ok(DraftOutcome::ConfirmOverwrite {
                 prompt: copy::PALETTE_OVERWRITE_PROMPT.replace("{name}", &name),
                 title: copy::PALETTE_OVERWRITE_TITLE,
             });
         }
+        self.overwrite_pending = None;
 
         upsert(&mut palettes, palette.clone());
         write_palettes(&self.path, &palettes).map_err(DraftError::Write)?;

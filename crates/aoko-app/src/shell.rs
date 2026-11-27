@@ -306,6 +306,13 @@ pub struct Shell {
     /// changes only when the store does, and the card paints every frame, so composing it in the
     /// render would be one `format!` per frame in the section-6 budget. `None` is "not read yet".
     palette_current: Option<SharedString>,
+    /// The line the card shows for the last press that had something to say.
+    ///
+    /// The four stores' own `status()` methods compose it — a refused name, a refused colour, a
+    /// deleted row, a file that would not write — so the card paints the store's sentence rather
+    /// than a second copy of it. `None` is "nothing to say", which paints no row at all rather than
+    /// an empty one.
+    palette_status: Option<SharedString>,
     /// The palette card's name box (`NewPaletteNameBox`, `MainWindow.xaml:1953`).
     ///
     /// The typed name is not store state — [`PaletteStore::save_draft`] takes it as an argument and
@@ -703,6 +710,7 @@ impl Shell {
             // Both read on the first frame: the rows are a file read and the box needs a context.
             palette_rows: None,
             palette_current: None,
+            palette_status: None,
             palette_name: None,
             // Closed: a picker exists only between a swatch press and the report that ends it.
             picker: None,
@@ -1161,6 +1169,118 @@ impl Shell {
         }
         self.palette.draft_mut().name = name;
         cx.notify();
+    }
+
+    /// Applies one palette: the row press, and the preview press the card's copy calls instant
+    /// (`Click a palette preview to apply it instantly.`).
+    ///
+    /// `GuiPaletteButton_Click` (`MainWindow.xaml.cs:930-960`) in three steps: the store's name, the
+    /// theme that name paints, and the profile the name lives in. The last is not decoration — a
+    /// store that moved without the profile leaves the two disagreeing at the next load, which is
+    /// what [`palette_store::PaletteStore::apply`]'s own note warns about. `set_theme` recreates the
+    /// field entities because each carries a copy of the palette.
+    pub fn apply_palette(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.palette.apply(name);
+        let theme = self.palette.theme();
+        self.profile.gui_theme = theme.name.clone();
+        self.set_theme(theme, cx);
+        if let Err(error) = self.save_profile() {
+            self.palette_status = Some(SharedString::from(error));
+        }
+        // The line above the rows reads the store's current name, which just moved.
+        self.palette_current = None;
+        cx.notify();
+    }
+
+    /// A cap press: arms the confirmation and removes nothing.
+    ///
+    /// Managed asked in a `MessageBox` (`MainWindow.xaml.cs:1178-1181`); the card asks in place, so
+    /// the armed name is state and the removal is a second press.
+    pub fn palette_request_delete(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.palette.request_delete(name);
+        cx.notify();
+    }
+
+    /// The confirmation's Delete.
+    pub fn palette_confirm_delete(&mut self, cx: &mut Context<Self>) {
+        match self.palette.confirm_delete() {
+            Some(Ok(outcome)) => {
+                self.palette_status = Some(SharedString::from(outcome.status));
+                self.palette_rows = None;
+                // Deleting the applied palette falls back to `Slate`; the theme, the live line and
+                // the profile all follow the fallback the outcome names.
+                if let Some(fallback) = outcome.fallback {
+                    self.profile.gui_theme = fallback.to_owned();
+                    let theme = self.palette.theme();
+                    self.set_theme(theme, cx);
+                    let _ = self.save_profile();
+                }
+                self.palette_current = None;
+            }
+            Some(Err(error)) => self.palette_status = Some(SharedString::from(error.status())),
+            // Nothing armed: the confirmation is only painted while a row is, so this is unreachable
+            // rather than a state the card can be in.
+            None => {}
+        }
+        cx.notify();
+    }
+
+    /// The confirmation's Cancel: the file keeps the palette.
+    pub fn palette_cancel_delete(&mut self, cx: &mut Context<Self>) {
+        self.palette.cancel_delete();
+        cx.notify();
+    }
+
+    /// `AddCustomPaletteButton_Click` (`MainWindow.xaml.cs:1095-1171`), first press: save, or ask.
+    ///
+    /// This is where the case-insensitive built-in refusal and the `#AARRGGBB` refusal become
+    /// reachable by a user — `save_draft` returns them as the sentence the card paints.
+    pub fn palette_add(&mut self, cx: &mut Context<Self>) {
+        match self.palette.save_draft(false) {
+            Ok(palette_store::DraftOutcome::Saved { status, .. }) => {
+                self.adopt_saved_palette(status, cx)
+            }
+            // The store armed the question; the card paints it from `overwrite_pending`.
+            Ok(palette_store::DraftOutcome::ConfirmOverwrite { .. }) => {}
+            Err(error) => self.palette_status = Some(SharedString::from(error.status())),
+        }
+        cx.notify();
+    }
+
+    /// The overwrite prompt's confirm.
+    pub fn palette_confirm_overwrite(&mut self, cx: &mut Context<Self>) {
+        match self.palette.confirm_overwrite() {
+            Ok(palette_store::DraftOutcome::Saved { status, .. }) => {
+                self.adopt_saved_palette(status, cx)
+            }
+            // `overwrite = true` cannot ask again, so this arm keeps the prompt rather than claiming
+            // a save that did not happen.
+            Ok(palette_store::DraftOutcome::ConfirmOverwrite { .. }) => {}
+            Err(error) => self.palette_status = Some(SharedString::from(error.status())),
+        }
+        cx.notify();
+    }
+
+    /// The overwrite prompt's Cancel: the file keeps its row and nothing is written.
+    pub fn palette_cancel_overwrite(&mut self, cx: &mut Context<Self>) {
+        self.palette.cancel_overwrite();
+        cx.notify();
+    }
+
+    /// Reads a finished save back into the card, the theme and the profile.
+    ///
+    /// `save_draft` applies the name it wrote, so these are the same steps a press on that row runs
+    /// — which is the point: a save and an apply must not paint differently.
+    fn adopt_saved_palette(&mut self, status: String, cx: &mut Context<Self>) {
+        self.palette_status = Some(SharedString::from(status));
+        self.palette_rows = None;
+        self.palette_current = None;
+        let theme = self.palette.theme();
+        self.profile.gui_theme = theme.name.clone();
+        self.set_theme(theme, cx);
+        if let Err(error) = self.save_profile() {
+            self.palette_status = Some(SharedString::from(error));
+        }
     }
 
     /// The one write path for a palette row's text: the box's `on_change`, the Enter commit and
@@ -1820,7 +1940,13 @@ impl Shell {
     /// padding, the name at 12 px, and the four 34×12 swatches 4 px apart. The data is the store's —
     /// the name and the four roles [`palette_store::PaletteRow`] carries — so nothing here derives a
     /// shade.
-    fn render_palette_rows(&self, theme: &Theme) -> AnyElement {
+    fn render_palette_rows(
+        &self,
+        theme: &Theme,
+        entity: &Entity<Self>,
+        delete_tooltip: &'static str,
+        apply_tooltip: &'static str,
+    ) -> AnyElement {
         let mut cards = div()
             .flex()
             .flex_row()
@@ -1843,6 +1969,37 @@ impl Shell {
                 );
             }
 
+            // The cap is its own control, so one press cannot both ask to remove the row and apply
+            // it: `stop_propagation` is what keeps the two apart.
+            let remove = {
+                let handle = entity.clone();
+                let name = row.name.clone();
+                div()
+                    .id(crate::reuse::indexed("saved-palette-delete", index))
+                    .debug_selector(move || format!("saved-palette-delete-{index}"))
+                    .w(px(metrics::palette_card::DELETE))
+                    .h(px(metrics::palette_card::DELETE))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(metrics::palette_card::SWATCH_RADIUS))
+                    .cursor_pointer()
+                    .text_size(px(metrics::text::CAPTION))
+                    .text_color(theme.dim_text)
+                    .tooltip(components::tooltip(theme, delete_tooltip))
+                    .on_click(move |_, _, cx| {
+                        let name = name.clone();
+                        handle.update(cx, |shell, cx| shell.palette_request_delete(&name, cx));
+                        cx.stop_propagation();
+                    })
+                    .child(copy::REMOVE_GLYPH)
+            };
+
+            // The card is the apply button (`MainWindow.xaml:1926` — the card itself is the click
+            // target, which is what the row's tooltip says), so the press is on the card rather than
+            // on a button inside it.
+            let handle = entity.clone();
+            let name = row.name.clone();
             cards = cards.child(
                 div()
                     .id(crate::reuse::indexed("saved-palette", index))
@@ -1854,11 +2011,24 @@ impl Shell {
                     .bg(theme.panel)
                     .px(px(metrics::palette_card::PAD_X))
                     .py(px(metrics::palette_card::PAD_Y))
+                    .cursor_pointer()
+                    .tooltip(components::tooltip(theme, apply_tooltip))
+                    .on_click(move |_, _, cx| {
+                        let name = name.clone();
+                        handle.update(cx, |shell, cx| shell.apply_palette(&name, cx));
+                    })
                     .child(
                         div()
-                            .text_size(px(metrics::palette_card::NAME_TEXT))
-                            .text_color(theme.text)
-                            .child(SharedString::from(row.name.clone())),
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_size(px(metrics::palette_card::NAME_TEXT))
+                                    .text_color(theme.text)
+                                    .child(SharedString::from(row.name.clone())),
+                            )
+                            .child(div().ml_auto().child(remove)),
                     )
                     .child(swatches),
             );
@@ -1868,7 +2038,7 @@ impl Shell {
         // after it, which is why the cached text is the prefix and the name together rather than two
         // children. Above the cards because that is where the markup puts it, and the empty string
         // before the first read paints no line rather than a lone colon.
-        div()
+        let mut column = div()
             .flex()
             .flex_col()
             .gap(px(metrics::palette_card::PREVIEW_GAP))
@@ -1881,9 +2051,98 @@ impl Shell {
                         Some(line) => SharedString::clone(line),
                         None => SharedString::from(""),
                     }),
-            )
-            .child(cards)
-            .into_any_element()
+            );
+
+        // The two questions a press can leave open, both asked in place and both answered by a
+        // second press: the remove confirmation, and the overwrite one `save_draft` arms. Managed
+        // asked in a `MessageBox`; the configs card already proves the in-card shape in this tree.
+        if let Some(name) = self.palette.delete_armed() {
+            let prompt = palette_store::PaletteStore::delete_confirmation(name).0;
+            let handle = entity.clone();
+            let confirm = components::button(
+                "palette-delete-confirm",
+                theme,
+                ButtonVariant::Danger,
+                "Delete",
+                move |_, _, cx| handle.update(cx, |shell, cx| shell.palette_confirm_delete(cx)),
+            );
+            let handle = entity.clone();
+            let cancel = components::button(
+                "palette-delete-cancel",
+                theme,
+                ButtonVariant::Secondary,
+                "Cancel",
+                move |_, _, cx| handle.update(cx, |shell, cx| shell.palette_cancel_delete(cx)),
+            );
+            column = column.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0))
+                    .w_full()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(metrics::text::CAPTION))
+                            .text_color(theme.text)
+                            .child(SharedString::from(prompt)),
+                    )
+                    .child(confirm)
+                    .child(cancel),
+            );
+        }
+
+        if let Some(name) = self.palette.overwrite_pending() {
+            let prompt = copy::PALETTE_OVERWRITE_PROMPT.replace("{name}", name);
+            let handle = entity.clone();
+            let confirm = components::button(
+                "palette-overwrite-confirm",
+                theme,
+                ButtonVariant::Danger,
+                "Overwrite",
+                move |_, _, cx| handle.update(cx, |shell, cx| shell.palette_confirm_overwrite(cx)),
+            );
+            let handle = entity.clone();
+            let cancel = components::button(
+                "palette-overwrite-cancel",
+                theme,
+                ButtonVariant::Secondary,
+                "Cancel",
+                move |_, _, cx| handle.update(cx, |shell, cx| shell.palette_cancel_overwrite(cx)),
+            );
+            column = column.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0))
+                    .w_full()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(metrics::text::CAPTION))
+                            .text_color(theme.text)
+                            .child(SharedString::from(prompt)),
+                    )
+                    .child(confirm)
+                    .child(cancel),
+            );
+        }
+
+        // The store's own sentence for the last press that had one. No row when there is nothing to
+        // say: a card that always paints a line would have to paint an empty one.
+        if let Some(status) = &self.palette_status {
+            column = column.child(
+                div()
+                    .debug_selector(|| String::from("palette-status"))
+                    .text_size(px(metrics::text::CAPTION))
+                    .text_color(theme.dim_text)
+                    .child(status.clone()),
+            );
+        }
+
+        column.child(cards).into_any_element()
     }
 
     /// The create box's name row (`MainWindow.xaml:1949-1956`): the caption, then the box.
@@ -4624,6 +4883,11 @@ impl Shell {
                     // `PanicButton_Click` (`:1393-1396`): the reset, then the exit the title bar's
                     // close runs. Not a reset-only button — managed's shutdown is half of it.
                     ("PanicCard", "Trigger Panic Now") => Shell::panic,
+                    // `AddCustomPaletteButton_Click` (`MainWindow.xaml.cs:1095-1171`). The card's
+                    // other presses are not in this table because they are not `Control::Button`s:
+                    // a saved row is its own click target, and its cap is walked by
+                    // `render_palette_rows`, which is also where the confirmation is painted.
+                    ("GuiCustomizationCard", copy::PALETTE_ADD) => Shell::palette_add,
                     // The stats card is not wired here, on purpose: the Stats tab is
                     // `TabBody::Stats`, so `STATS` is never painted as cards and this table entry is
                     // unreachable. The reset the user presses is `views::stats_view`'s own button,
@@ -4720,25 +4984,34 @@ impl Shell {
                 self.render_color_field(label, bind, theme, entity)
             }
 
-            // The saved palettes (`MainWindow.xaml:1910-1937`) and the name box (`:1949-1956`) are
-            // the two controls the card was missing a mount for. The rows paint the store's own
-            // data; the presses that make a row a button — apply on the card, remove on its cap —
-            // and the Add press are the next commit, because managed asked before a removal
-            // (`MessageBox`) and this port has no confirmation surface to ask with yet. A cap that
-            // deleted without asking would be worse than one that is not drawn.
-            Control::PaletteRows { .. } => self.render_palette_rows(theme),
+            // The saved palettes (`MainWindow.xaml:1910-1937`) and the name box (`:1949-1956`), with
+            // every press the card advertises: apply on the card, remove on its cap through the
+            // store's confirmation, and the line the store's own errors compose. The two tooltips
+            // are the variant's because a `DataTemplate` row has no card entry to hang copy on.
+            Control::PaletteRows {
+                delete_tooltip,
+                apply_tooltip,
+            } => self.render_palette_rows(theme, entity, *delete_tooltip, *apply_tooltip),
 
             Control::PaletteNameBox { label } => self.render_palette_name_box(label, theme),
 
             Control::PalettePreview { name } => {
                 let preview_accent = Theme::accent_by_name(name);
+                // The card's own copy says what this press does — `Click a palette preview to apply
+                // it instantly.` — so it is the same call the saved row makes, not a second path.
+                let handle = entity.clone();
+                let applied = *name;
                 div()
                     .id(crate::reuse::stitched("palette-", "", name))
+                    .debug_selector(move || format!("palette-preview-{applied}"))
                     .flex()
                     .flex_row()
                     .items_center()
                     .gap(px(6.0))
                     .cursor_pointer()
+                    .on_click(move |_, _, cx| {
+                        handle.update(cx, |shell, cx| shell.apply_palette(applied, cx));
+                    })
                     .child(
                         div()
                             .w(px(22.0))
@@ -9295,6 +9568,186 @@ mod tests {
     /// — `render_palette_rows` says why — but the data on screen is the store's, which is what the
     /// mount had to prove, and the box's text is the draft's `name`, which is what the Add press
     /// reads.
+    /// The palette card on the Settings tab, with one saved palette and one drawn frame.
+    ///
+    /// The file is the test's and the frame is what gives the card's rows bounds: every test below
+    /// presses a painted control, and a control with no bounds cannot be pressed.
+    fn palette_card_in_settings(
+        cx: &mut gpui::TestAppContext,
+    ) -> (std::path::PathBuf, Entity<Shell>, gpui::VisualTestContext) {
+        let root = scratch_root();
+        let path = root.join("palettes.json");
+        let mut store = palette_store::PaletteStore::at(path.clone());
+        store.draft_mut().name = "Ember".to_owned();
+        store.save_draft(false).expect("the palette was written");
+
+        let (shell, _handle, mut visual) = shell_in_window(cx, &root);
+        cx.update(|cx| shell.update(cx, |shell, _| shell.set_palette_path(path.clone())));
+        cx.update(|cx| shell.update(cx, |shell, cx| shell.select_tab_named("settings", cx)));
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        (path, shell, visual)
+    }
+
+    /// A cap press asks, and only the confirmation removes.
+    ///
+    /// Managed asked in a `MessageBox` (`MainWindow.xaml.cs:1178-1181`); the card asks in place, so
+    /// the first press has to leave the file exactly as it was — the assertion that would fail if a
+    /// cap ever deleted on its own.
+    #[gpui::test]
+    fn a_cap_press_asks_and_the_confirmation_removes(cx: &mut gpui::TestAppContext) {
+        use gpui::Modifiers;
+
+        let (path, shell, mut visual) = palette_card_in_settings(cx);
+
+        scroll_into_view(&mut visual, "saved-palette-delete-0");
+        let cap = visual
+            .debug_bounds("saved-palette-delete-0")
+            .expect("the cap paints");
+        visual.simulate_click(cap.center(), Modifiers::default());
+
+        assert_eq!(
+            cx.read(|cx| shell.read(cx).palette.delete_armed().map(str::to_owned)),
+            Some("Ember".to_owned()),
+            "the cap asks about the row it belongs to"
+        );
+        assert_eq!(
+            palette_store::PaletteStore::at(path.clone())
+                .palettes()
+                .len(),
+            1,
+            "and nothing is removed until the confirmation"
+        );
+        assert_eq!(
+            cx.read(|cx| shell.read(cx).palette.current_name().to_owned()),
+            "Slate",
+            "nor did the press fall through to the card's apply: the cap stops propagation"
+        );
+
+        cx.update(|cx| shell.update(cx, |shell, cx| shell.palette_confirm_delete(cx)));
+
+        assert_eq!(
+            palette_store::PaletteStore::at(path).palettes().len(),
+            0,
+            "the confirmation removed it"
+        );
+        assert_eq!(
+            cx.read(|cx| shell.read(cx).palette_status.clone()),
+            Some(SharedString::from(
+                copy::PALETTE_STATUS_DELETED.replace("{name}", "Ember")
+            )),
+            "and the card paints the store's own sentence for it"
+        );
+    }
+
+    /// A row press applies it: the theme, the profile and the live-palette line.
+    ///
+    /// The three are one behaviour in managed (`GuiPaletteButton_Click`, `:930-960`) — a press that
+    /// moved only the theme would leave the profile pointing at the old name, and the next load
+    /// would undo the press.
+    #[gpui::test]
+    fn a_saved_rows_press_applies_it_to_the_theme_the_profile_and_the_line(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::Modifiers;
+
+        let (_path, shell, mut visual) = palette_card_in_settings(cx);
+
+        scroll_into_view(&mut visual, "saved-palette-0");
+        let row = visual
+            .debug_bounds("saved-palette-0")
+            .expect("the row paints");
+        visual.simulate_click(row.center(), Modifiers::default());
+
+        assert_eq!(
+            cx.read(|cx| shell.read(cx).theme().name.clone()),
+            "Ember",
+            "the press paints the palette it names"
+        );
+        assert_eq!(
+            cx.read(|cx| shell.read(cx).profile.gui_theme.clone()),
+            "Ember",
+            "and the name reaches the profile the config frame is built from"
+        );
+
+        // The line above the rows is read once a frame, so the frame after the press is what shows it.
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(
+            cx.read(|cx| shell.read(cx).palette_current.clone()),
+            Some(SharedString::from(format!(
+                "{}{}",
+                copy::PALETTE_CURRENT_PREFIX,
+                "Ember"
+            ))),
+            "the live-palette line follows the store"
+        );
+    }
+
+    /// The Add press writes the row, and the card paints it.
+    ///
+    /// The press itself is invoked through the method the button's callback runs: `components::button`
+    /// installs an `ElementId` but no `debug_selector`, so a card button is not addressable from a
+    /// `VisualTestContext` — the limitation `the_rail_button_opens_the_state_ctrl_k_opens` records
+    /// for the rail's own button. What is asserted here is the write, the sentence and the new row.
+    #[gpui::test]
+    fn the_add_press_writes_the_row_the_store_keeps(cx: &mut gpui::TestAppContext) {
+        let (path, shell, mut visual) = palette_card_in_settings(cx);
+
+        cx.update(|cx| {
+            shell.update(cx, |shell, cx| {
+                shell.palette.draft_mut().name = "Dusk".to_owned();
+                shell.palette_add(cx);
+            })
+        });
+
+        assert!(
+            palette_store::PaletteStore::at(path)
+                .palettes()
+                .iter()
+                .any(|stored| stored.name == "Dusk"),
+            "the press wrote the row"
+        );
+        assert_eq!(
+            cx.read(|cx| shell.read(cx).palette_status.clone()),
+            Some(SharedString::from(
+                copy::PALETTE_STATUS_SAVED.replace("{name}", "Dusk")
+            )),
+            "and the card says so in the store's words"
+        );
+
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        scroll_into_view(&mut visual, "saved-palette-1");
+        assert!(
+            visual.debug_bounds("saved-palette-1").is_some(),
+            "the card paints a second row"
+        );
+    }
+
+    /// A preview press applies that palette instantly, which is what its own copy promises.
+    #[gpui::test]
+    fn a_preview_press_applies_that_palette(cx: &mut gpui::TestAppContext) {
+        use gpui::Modifiers;
+
+        let (_path, shell, mut visual) = palette_card_in_settings(cx);
+
+        scroll_into_view(&mut visual, "palette-preview-Ink");
+        let preview = visual
+            .debug_bounds("palette-preview-Ink")
+            .expect("the preview paints");
+        visual.simulate_click(preview.center(), Modifiers::default());
+
+        assert_eq!(
+            cx.read(|cx| shell.read(cx).theme().name.clone()),
+            "Ink",
+            "the preview press is the apply, not a second path"
+        );
+    }
+
     /// The live-palette line above the cards names the palette the store says is applied.
     ///
     /// `MainWindow.xaml:1904` is a `Run` inside one sentence with the name after it, which is why the
