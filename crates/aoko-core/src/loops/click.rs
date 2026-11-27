@@ -234,6 +234,14 @@ pub fn run(
 
         let mut guards = config.guards;
         guards.injected = sense.is_injected();
+        // `HitSelectEnabled` is a module switch, so the switch set is the only truth for it
+        // between a save and the next load (`config_map::SWITCH_PROFILE_KEYS`): the Hit Select
+        // card's switch writes `EnabledFlag::HitSelect` and never the profile field this config
+        // was built from. Read it live, the way the managed loop read the property inside its
+        // `while`; `None` keeps the started value, for a sense that models no switches.
+        if let Some(on) = sense.module_enabled(super::HIT_SELECT_MODULE) {
+            guards.hit_select_enabled = on;
+        }
         let context = TickContext {
             minecraft_active: sense.minecraft_active(),
             cursor_visible: sense.cursor_visible(),

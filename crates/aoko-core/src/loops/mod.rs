@@ -90,6 +90,14 @@ pub const TRIGGERBOT_MODULE: &str = "triggerbot";
 pub const CHEST_STEALER_MODULE: &str = "cheststealer";
 /// `refill`.
 pub const REFILL_MODULE: &str = "refill";
+/// `hitselect`, read by the click bodies as a guard rather than as the owner of a loop.
+///
+/// `Clicker.HitSelectEnabled` was a property the managed `ClickLoop` read inside its `while`
+/// (`Clicker.cs:3218-3227`), so the switch was live by construction. Here the module card
+/// writes `EnabledFlag::HitSelect` and nothing else, so the guard has to read the switch;
+/// [`ClickerLoopConfigs::from_profile`] only sees a `Profile`, whose `hitSelectEnabled` field is
+/// written on save and therefore lags the switch until a reload.
+pub const HIT_SELECT_MODULE: &str = "hitselect";
 
 /// Poll a body takes while its own module is switched off.
 ///
@@ -471,19 +479,27 @@ impl ClickerLoopConfigs {
             || profile.chest_stealer_custom_items_check()
             || profile.chest_stealer_physical_check();
 
+        // The managed menu and inventory guard was engine-agnostic: `ClickLoop` evaluated
+        // `ClickInChests` / `ChestStealerMenuCheck` before it branched on `leftButton`
+        // (`Clicker.cs:3130-3178`). Only the "only hold block", break-blocks and hit-select terms
+        // are `leftButton`-gated (`:3183`, `:3195`, `:3218`), and `decide` already applies that
+        // test. So both engines start from the same guard set, which is why the right engine used
+        // to be blocked in every chest GUI with "Click in Chests" on.
+        let guards = crate::clicker::tick::ClickConfig {
+            click_in_chests: profile.click_in_chests,
+            chest_stealer_menu_check: chest_menu_check,
+            break_blocks_enabled: profile.break_blocks_enabled,
+            hit_select_enabled: profile.hit_select_enabled,
+            // Set per engine below; the left engine's guard never reads it.
+            right_click_only_block: false,
+            // Filled from the live link state inside the body.
+            injected: false,
+        };
+
         Self {
             left: click::ClickLoopConfig {
                 left_button: true,
-                guards: crate::clicker::tick::ClickConfig {
-                    click_in_chests: profile.click_in_chests,
-                    chest_stealer_menu_check: chest_menu_check,
-                    break_blocks_enabled: profile.break_blocks_enabled,
-                    hit_select_enabled: profile.hit_select_enabled,
-                    // The left engine's guard never reads this one; the right engine has it.
-                    right_click_only_block: false,
-                    // Filled from the live link state inside the body.
-                    injected: false,
-                },
+                guards,
                 mode,
                 min_cps: left_min,
                 max_cps: left_max,
@@ -492,7 +508,7 @@ impl ClickerLoopConfigs {
                 left_button: false,
                 guards: crate::clicker::tick::ClickConfig {
                     right_click_only_block: profile.right_click_only_block,
-                    ..Default::default()
+                    ..guards
                 },
                 mode,
                 min_cps: right_min,

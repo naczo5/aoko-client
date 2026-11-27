@@ -484,6 +484,79 @@ fn the_click_body_reads_its_settings_live() {
     );
 }
 
+/// `ClickInChests` and the Chest Stealer menu check are engine-agnostic in managed
+/// (`Clicker.cs:3145-3157`, evaluated before the `leftButton` branch), so both engines have to
+/// carry them. The right engine used to start with `ClickConfig::default()`, which is
+/// `click_in_chests: false` — "Click in Chests" turned on left the right clicker blocked in
+/// every chest GUI.
+#[test]
+fn both_click_engines_share_the_chest_menu_guards() {
+    use aoko_protocol::profile::Profile;
+
+    let mut profile = Profile::default();
+    profile.click_in_chests = true;
+    profile.right_click_only_block = true;
+
+    let configs = super::ClickerLoopConfigs::from_profile(&profile, false);
+
+    assert!(configs.left.guards.click_in_chests);
+    assert!(
+        configs.right.guards.click_in_chests,
+        "the right engine clicks in chests too when the user allowed it"
+    );
+    assert_eq!(
+        configs.left.guards.chest_stealer_menu_check,
+        configs.right.guards.chest_stealer_menu_check,
+        "one menu-check row, both engines"
+    );
+    assert!(configs.left.guards.chest_stealer_menu_check);
+    // The two engine-specific terms stay where they belong.
+    assert!(!configs.left.guards.right_click_only_block);
+    assert!(configs.right.guards.right_click_only_block);
+}
+
+/// The Hit Select card is a module switch, so `EnabledFlag::HitSelect` is the only truth for it
+/// between a save and the next load; the profile field this config is built from lags. A body
+/// that trusted the config kept clicking through the target's hurt window with the module on.
+#[test]
+fn the_hit_select_switch_reaches_the_click_guard() {
+    let clock = Arc::new(VirtualClock::new());
+    let sleeper = Arc::new(CancelAfterSleeper::new(clock.clone(), 1));
+    let loop_runtime = LoopRuntime::new(
+        clock.clone(),
+        sleeper.clone(),
+        Box::new(SplitMix64::new(167)),
+    );
+    sleeper.attach(loop_runtime.token().clone());
+
+    // On target, still inside its invulnerability window: a click here is one the server drops.
+    let mut state = clicking_state();
+    state.looking_at_entity = true;
+    state.looking_at_entity_hurt_time = 2;
+
+    let sense = StaticSense::new(Some(state))
+        .with_switches(&["autoclicker", "hitselect"])
+        .with_configs(super::ClickerLoopConfigs::defaults());
+    let input = FakeInput::new();
+    let sink = CountingSink::default();
+    let mut state_timing = timing();
+
+    super::click::run(
+        &loop_runtime,
+        &sense,
+        &input,
+        &sink,
+        &click_config(true),
+        &mut state_timing,
+    );
+
+    assert_eq!(
+        input.click_count(),
+        0,
+        "the live `hitselect` switch must reach the guard chain"
+    );
+}
+
 #[test]
 fn cancelling_mid_sleep_does_not_inject_another_click() {
     let clock = Arc::new(VirtualClock::new());
