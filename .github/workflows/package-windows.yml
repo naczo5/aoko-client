@@ -15,7 +15,14 @@ name: package windows
 # so the zip carries no `Data/` directory: a missing asset is a compile error
 # rather than a runtime surprise.
 
+# `workflow_dispatch` is only registered once this file is on the default branch,
+# so the push trigger is what makes it runnable from `rust` today. It fires only
+# when this file itself changes, which during the migration is the only reason to
+# re-run it; the dispatch path is for a ref that wants a zip without an edit.
 on:
+  push:
+    paths:
+      - '.github/workflows/package-windows.yml'
   workflow_dispatch:
     inputs:
       tag:
