@@ -60,9 +60,9 @@ use gpui::{
     Subscription, Window,
 };
 
-use crate::components::{button_sized, ButtonVariant};
+use crate::components::{button_sized, tooltip, ButtonVariant};
 use crate::theme::Theme;
-use crate::views::keybind_text;
+use crate::views::{copy, keybind_text};
 
 /// What a finished capture produced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -247,6 +247,11 @@ impl Render for KeybindCapture {
             .id(ElementId::Name(SharedString::from(format!("{name}-focus"))))
             .track_focus(&self.focus)
             .cursor_pointer()
+            // The only place the managed UI said Escape unbinds (`MainWindow.xaml:1005`), and it
+            // says it on the control rather than in a help panel: the key that unbinds is not one
+            // a user guesses, and a button that silently starts listening owes the instruction.
+            // Attached here rather than by each caller so all 40 bindings get it from one place.
+            .tooltip(tooltip(&theme, copy::KEYBIND_TOOLTIP))
             .debug_selector(move || format!("{selector}-capture"))
             .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                 window.focus(&focus, cx);
