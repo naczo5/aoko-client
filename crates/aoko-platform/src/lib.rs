@@ -16,6 +16,7 @@ mod capabilities;
 mod discord;
 mod error;
 mod input;
+mod mcping;
 mod netstat;
 mod open;
 mod process;
@@ -42,6 +43,11 @@ pub use discord::{
 };
 pub use error::PlatformError;
 pub use input::{key_for_virtual_key, InputBackend, InputEvent, Key, MouseButton, MouseState};
+pub use mcping::{
+    ping_address, ping_text, PingBackend, PingJob, PingReport, PingService, ServerPingResult,
+    LEGACY_BUDGET, MAXIMUM_PACKET_LENGTH, OPERATION_TIMEOUT, PING_BUDGET, PING_PARALLELISM,
+    PROTOCOL_VERSION,
+};
 pub use netstat::{protocol_listener_pid, NetstatLineParser, TcpPortProbe};
 pub use open::{open_path, open_url};
 pub use process::{

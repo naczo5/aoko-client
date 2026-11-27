@@ -14,7 +14,18 @@
 //!   whatever input seam lands later; [`ServersState::open_add_form`] still does
 //!   the managed prefill from the direct-address box.
 //! * **Delete confirmation is state**, not a `MessageBox` (`:447-470`).
+//!
+//! Pings are the one asynchronous thing here. The exchange itself lives in
+//! `aoko_platform::mcping`, on a small worker pool, so no press and no frame ever
+//! waits for a socket: a refresh queues jobs ([`ServersState::start_ping_all_now`],
+//! [`ServersState::tab_opened`]) and the caller drains the answers with
+//! [`ServersState::poll_pings`]. Answers are cached per row with a TTL, which is what
+//! makes switching back to the tab cost one map lookup per row instead of a dial.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use aoko_platform::{PingBackend, PingJob, PingService, ServerPingResult};
 use aoko_protocol::servers::{validate_target, ServerAddress};
 
 use crate::views::accounts_state::StatusTone;
@@ -22,6 +33,15 @@ use crate::views::servers_logic::{
     self, PingOutcome, ServerJoinState, ServerRowSource, ServerRowState, ServerStatusTone,
 };
 use crate::views::tab_copy;
+
+/// How long a successful ping answer is reused.
+pub const PING_SUCCESS_TTL_MS: i64 = 60_000;
+
+/// How long a failed ping answer is reused.
+///
+/// Shorter than a success: a host that was down a moment ago is worth one more
+/// socket, while a host that just answered will answer the same way a minute later.
+pub const PING_FAILURE_TTL_MS: i64 = 20_000;
 
 /// The Servers tab's status line: same shape as the Accounts tab's.
 pub use crate::views::accounts_state::StatusLine;
@@ -79,6 +99,75 @@ struct PingPass {
     online: usize,
 }
 
+/// What a refresh did with the rows it was handed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PingStart {
+    /// Rows handed to the worker pool.
+    pub queued: usize,
+    /// Rows a live cache entry answered without a socket.
+    pub cached: usize,
+    /// Rows whose saved address does not parse.
+    pub invalid: usize,
+}
+
+impl PingStart {
+    /// Whether nothing reached a socket.
+    #[must_use]
+    pub const fn is_idle(&self) -> bool {
+        self.queued == 0
+    }
+}
+
+/// One ping answer and the instant it stops being reused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CachedPing {
+    outcome: PingOutcome,
+    expires_at_ms: i64,
+}
+
+/// Ping answers kept between passes, keyed by row id.
+///
+/// The managed tab kept none, so every load dialled every row. Successes and
+/// failures expire separately, the same split the managed SRV cache used.
+#[derive(Debug, Clone, Default)]
+struct PingCache {
+    entries: HashMap<String, CachedPing>,
+}
+
+impl PingCache {
+    /// The live answer for `id`, `None` once it has expired.
+    fn get(&self, id: &str, now_ms: i64) -> Option<&PingOutcome> {
+        let entry = self.entries.get(id)?;
+        (entry.expires_at_ms > now_ms).then_some(&entry.outcome)
+    }
+
+    fn store(&mut self, id: &str, outcome: &PingOutcome, now_ms: i64) {
+        let ttl = if outcome.online {
+            PING_SUCCESS_TTL_MS
+        } else {
+            PING_FAILURE_TTL_MS
+        };
+        self.entries.insert(
+            id.to_owned(),
+            CachedPing {
+                outcome: outcome.clone(),
+                expires_at_ms: now_ms.saturating_add(ttl),
+            },
+        );
+    }
+
+    /// Drops every answer whose row is gone, so a deleted server leaves nothing
+    /// behind and the map cannot grow with the list.
+    fn retain_ids(&mut self, ids: &[String]) {
+        self.entries
+            .retain(|id, _| ids.iter().any(|kept| kept == id));
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
 /// The Servers tab's whole state.
 #[derive(Debug, Clone, Default)]
 pub struct ServersState {
@@ -100,6 +189,13 @@ pub struct ServersState {
     recovery_notice: Option<String>,
     pending_delete: Option<usize>,
     pass: PingPass,
+    /// The worker pool, created on the first pass and shared by every clone.
+    pings: Option<Arc<dyn PingBackend>>,
+    /// Resolvers the pool asks for SRV records; empty means the public pair.
+    srv_resolvers: Vec<String>,
+    ping_cache: PingCache,
+    /// Answers this pass is still waiting for.
+    pending_pings: usize,
 }
 
 impl ServersState {
@@ -338,6 +434,7 @@ impl ServersState {
 
         self.rows = rows;
         let ids: Vec<String> = self.rows.iter().map(|row| row.id.clone()).collect();
+        self.ping_cache.retain_ids(&ids);
         let resolved =
             servers_logic::resolve_selection_index(&ids, keep.as_deref(), fallback_index);
         self.selected = resolved;
@@ -689,6 +786,7 @@ impl ServersState {
     pub fn finish_pass(&mut self, announce: bool) -> String {
         self.ping_in_flight = false;
         self.auto_pinged = true;
+        self.pending_pings = 0;
 
         let summary = servers_logic::ping_summary_text(self.pass.total, self.pass.online);
         let tone = if self.pass.online == self.pass.total {
@@ -721,6 +819,7 @@ impl ServersState {
     /// pass stops.
     pub fn ping_failed(&mut self) {
         self.ping_in_flight = false;
+        self.pending_pings = 0;
         self.pass = PingPass::default();
         for row in &mut self.rows {
             if row.status_text == servers_logic::PINGING_LABEL {
@@ -731,6 +830,199 @@ impl ServersState {
             "The ping could not finish. Try again.",
             StatusTone::Critical,
         );
+    }
+
+    /// Supplies the worker pool. A test hands in its own so it never dials; a
+    /// shipped tab leaves this alone and the pool is created on the first pass.
+    pub fn set_ping_backend(&mut self, backend: Arc<dyn PingBackend>) {
+        self.pings = Some(backend);
+    }
+
+    /// Sets the resolvers the pool asks for `_minecraft._tcp` records, taken from
+    /// `aoko_platform::default_services().srv`.
+    ///
+    /// A pool that already exists keeps the list it was built with.
+    pub fn set_srv_resolvers(&mut self, resolvers: Vec<String>) {
+        self.srv_resolvers = resolvers;
+    }
+
+    /// How many ping answers the cache holds, expired ones included until a read
+    /// evicts them.
+    #[must_use]
+    pub fn cached_pings(&self) -> usize {
+        self.ping_cache.len()
+    }
+
+    /// "Ping all" (`PingAllButton_Click`, `:423-437`), explicitly: every row is
+    /// dialled, cached answer or not.
+    ///
+    /// The press is the refresh action, so it never reuses a cached answer; a tab
+    /// that has just been opened uses [`ServersState::tab_opened`] instead.
+    pub fn start_ping_all_now(&mut self, now_ms: i64) -> PingStart {
+        match self.start_ping_all() {
+            PingRequest::Refused => PingStart::default(),
+            PingRequest::Ids(ids) => self.start_refresh(&ids, now_ms, true),
+        }
+    }
+
+    /// One row's chip press (`LatencyChip_Click`, `:404-421`), explicitly.
+    pub fn start_ping_one_now(&mut self, id: &str, now_ms: i64) -> PingStart {
+        match self.start_ping_one(id) {
+            PingRequest::Refused => PingStart::default(),
+            PingRequest::Ids(ids) => self.start_refresh(&ids, now_ms, true),
+        }
+    }
+
+    /// The tab is on screen: answer what the cache can and dial the rest.
+    ///
+    /// Managed pinged once, the first time the tab loaded (`_autoPinged`); with the
+    /// cache in front, a later visit costs one lookup per row and re-dials only what
+    /// has expired.
+    pub fn tab_opened(&mut self, now_ms: i64) -> PingStart {
+        if !servers_logic::can_start_ping(self.ping_in_flight, self.rows.len()) {
+            return PingStart::default();
+        }
+
+        let ids: Vec<String> = self.rows.iter().map(|row| row.id.clone()).collect();
+        self.begin_pass(ids.len(), &ids);
+        self.auto_pinged = true;
+        self.start_refresh(&ids, now_ms, false)
+    }
+
+    /// Drains the worker pool and applies every finished answer.
+    ///
+    /// `true` means something a user can see moved, which is what the caller turns
+    /// into a repaint.
+    pub fn poll_pings(&mut self, now_ms: i64) -> bool {
+        let Some(backend) = self.pings.as_ref().map(Arc::clone) else {
+            return false;
+        };
+
+        let reports = backend.take_finished();
+        if reports.is_empty() {
+            return false;
+        }
+
+        for report in &reports {
+            let outcome = ping_outcome(&report.result);
+            self.ping_cache.store(&report.id, &outcome, now_ms);
+            self.apply_ping(&report.id, &outcome);
+            self.pending_pings = self.pending_pings.saturating_sub(1);
+        }
+
+        if self.pending_pings == 0 && self.ping_in_flight {
+            self.finish_pass(true);
+        }
+
+        true
+    }
+
+    /// Abandons the pass in flight, as leaving the tab did (`View_Unloaded`).
+    ///
+    /// The rows go back to a plain chip rather than `Cancelled`, which is what the
+    /// managed handler painted for an abandoned pass (`:596-605`).
+    pub fn cancel_pings(&mut self) {
+        if let Some(backend) = self.pings.as_ref() {
+            backend.cancel();
+        }
+
+        self.pending_pings = 0;
+        self.ping_in_flight = false;
+        self.pass = PingPass::default();
+        for row in &mut self.rows {
+            if row.status_text == servers_logic::PINGING_LABEL {
+                row.mark_not_pinged();
+            }
+        }
+    }
+
+    /// Queues `ids` and answers the rows the cache already knows. `force` is the
+    /// explicit refresh: a cached answer is ignored and every row is dialled.
+    fn refresh_pings(&mut self, ids: &[String], now_ms: i64, force: bool) -> PingStart {
+        let mut start = PingStart::default();
+        let mut jobs = Vec::new();
+
+        let targets: Vec<(usize, String)> = ids
+            .iter()
+            .filter_map(|id| {
+                self.rows
+                    .iter()
+                    .position(|row| &row.id == id)
+                    .map(|index| (index, id.clone()))
+            })
+            .collect();
+
+        for (index, id) in targets {
+            let address = self.rows[index].address.clone();
+            if ServerAddress::try_parse(Some(&address)).is_none() {
+                // No socket is opened for text that is not an address; managed painted
+                // the invalid chip and skipped the row.
+                self.rows[index].apply_invalid_address();
+                start.invalid += 1;
+                continue;
+            }
+
+            if !force {
+                if let Some(outcome) = self.ping_cache.get(&id, now_ms).cloned() {
+                    self.rows[index].apply_ping(&outcome);
+                    start.cached += 1;
+                    continue;
+                }
+            }
+
+            jobs.push(PingJob { id, address });
+            start.queued += 1;
+        }
+
+        if self.ping_in_flight {
+            // The footer counts the rows that were actually dialled, not the ones the
+            // cache answered.
+            self.pass.total = start.queued;
+        }
+
+        if start.queued == 0 {
+            return start;
+        }
+
+        let Some(backend) = self.ping_backend() else {
+            self.ping_failed();
+            return PingStart { queued: 0, ..start };
+        };
+
+        if backend.workers() == 0 || backend.enqueue(jobs) == 0 {
+            self.ping_failed();
+            return PingStart { queued: 0, ..start };
+        }
+
+        self.pending_pings = start.queued;
+        start
+    }
+
+    /// Refreshes after a pass was opened, closing it again when nothing was dialled.
+    fn start_refresh(&mut self, ids: &[String], now_ms: i64, force: bool) -> PingStart {
+        let start = self.refresh_pings(ids, now_ms, force);
+        if start.is_idle() && self.ping_in_flight {
+            self.finish_pass(false);
+        }
+        start
+    }
+
+    /// The pool, created on the first pass so a tab that is never pinged costs
+    /// nothing. A test build creates none, so no test can dial a fixture host name;
+    /// [`ServersState::set_ping_backend`] is how a test supplies one.
+    fn ping_backend(&mut self) -> Option<Arc<dyn PingBackend>> {
+        if let Some(backend) = &self.pings {
+            return Some(Arc::clone(backend));
+        }
+
+        if cfg!(test) {
+            return None;
+        }
+
+        let backend: Arc<dyn PingBackend> =
+            Arc::new(PingService::with_resolvers(self.srv_resolvers.clone()));
+        self.pings = Some(Arc::clone(&backend));
+        Some(backend)
     }
 
     /// The store-recovery notice, `None` to hide it.
@@ -768,6 +1060,21 @@ fn copy_ping_state(target: &mut ServerRowState, old: &ServerRowState) {
     target.players_label = old.players_label.clone();
 }
 
+/// Maps a ping answer onto the fields the card paints.
+fn ping_outcome(result: &ServerPingResult) -> PingOutcome {
+    PingOutcome {
+        online: result.online,
+        latency_ms: result.latency_ms,
+        players_label: result.players_label(),
+        description: if result.description.trim().is_empty() {
+            None
+        } else {
+            Some(result.description.clone())
+        },
+        error: result.error.clone(),
+    }
+}
+
 /// The managed delete question, verbatim (`:455-457`).
 #[must_use]
 pub fn delete_question(name: &str) -> String {
@@ -777,6 +1084,8 @@ pub fn delete_question(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aoko_platform::PingReport;
+    use std::sync::Mutex;
 
     const NOW_MS: i64 = 1_700_000_000_000;
 
@@ -1241,5 +1550,320 @@ mod tests {
             state.status().map(|status| status.tone),
             Some(StatusTone::Critical)
         );
+    }
+
+    // === Ping pool and cache ===
+
+    /// A pool that never dials: the test decides what each job answers.
+    #[derive(Debug, Default)]
+    struct FakePings {
+        queued: Mutex<Vec<PingJob>>,
+        finished: Mutex<Vec<PingReport>>,
+    }
+
+    impl FakePings {
+        fn take_queued(&self) -> Vec<String> {
+            let jobs = std::mem::take(&mut *self.queued.lock().expect("the queue"));
+            jobs.into_iter().map(|job| job.id).collect()
+        }
+
+        fn answer(&self, id: &str, result: ServerPingResult) {
+            self.finished
+                .lock()
+                .expect("the answer list")
+                .push(PingReport {
+                    id: id.to_owned(),
+                    result,
+                });
+        }
+    }
+
+    impl PingBackend for FakePings {
+        fn enqueue(&self, jobs: Vec<PingJob>) -> usize {
+            let accepted = jobs.len();
+            self.queued.lock().expect("the queue").extend(jobs);
+            accepted
+        }
+
+        fn take_finished(&self) -> Vec<PingReport> {
+            std::mem::take(&mut *self.finished.lock().expect("the answer list"))
+        }
+
+        fn workers(&self) -> usize {
+            1
+        }
+
+        fn cancel(&self) {}
+    }
+
+    fn answered(latency_ms: i32, online: i32, max: i32, motd: &str) -> ServerPingResult {
+        ServerPingResult {
+            online: true,
+            latency_ms,
+            description: motd.to_owned(),
+            online_players: online,
+            max_players: max,
+            version: "1.21.4".to_owned(),
+            protocol: 769,
+            error: String::new(),
+        }
+    }
+
+    fn with_fake(sources: &[ServerRowSource]) -> (ServersState, Arc<FakePings>) {
+        let fake = Arc::new(FakePings::default());
+        let mut state = ready();
+        let backend: Arc<dyn PingBackend> = Arc::clone(&fake);
+        state.set_ping_backend(backend);
+        state.load(sources, None, None, NOW_MS);
+        (state, fake)
+    }
+
+    #[test]
+    fn ping_all_queues_every_row_and_paints_the_answers() {
+        let (mut state, fake) = with_fake(&three());
+
+        let start = state.start_ping_all_now(NOW_MS);
+        assert_eq!(
+            start,
+            PingStart {
+                queued: 3,
+                cached: 0,
+                invalid: 0
+            }
+        );
+        assert_eq!(fake.take_queued(), vec!["a", "b", "c"]);
+        assert!(state.ping_in_flight());
+        assert_eq!(
+            state.rows()[0].status_text,
+            servers_logic::PINGING_LABEL,
+            "a queued row shows the spinner"
+        );
+
+        fake.answer("a", answered(42, 12, 100, "Hello"));
+        fake.answer("b", ServerPingResult::offline("Offline"));
+
+        assert!(state.poll_pings(NOW_MS));
+        assert_eq!(state.rows()[0].status_text, "42 ms");
+        assert_eq!(state.rows()[0].players_label, "12/100");
+        assert_eq!(state.rows()[0].motd, "Hello");
+        assert_eq!(state.rows()[0].status_tone, ServerStatusTone::Accent);
+        assert_eq!(state.rows()[1].status_text, "Offline");
+        assert_eq!(state.rows()[1].status_tone, ServerStatusTone::Critical);
+        assert_eq!(state.rows()[1].players_label, "");
+        assert!(state.ping_in_flight(), "one answer is still missing");
+
+        fake.answer("c", ServerPingResult::offline("Offline"));
+        assert!(state.poll_pings(NOW_MS));
+        assert!(!state.ping_in_flight());
+        assert_eq!(
+            state.status().map(|status| status.text.as_str()),
+            Some("Pinged 3 servers: 1 online, 2 offline.")
+        );
+        assert_eq!(
+            state.status().map(|status| status.tone),
+            Some(StatusTone::Critical)
+        );
+    }
+
+    #[test]
+    fn a_finished_answer_is_reused_when_the_tab_reopens() {
+        let (mut state, fake) = with_fake(&three());
+        state.start_ping_all_now(NOW_MS);
+        fake.take_queued();
+        for id in ["a", "b", "c"] {
+            fake.answer(id, answered(20, 3, 20, "Hello"));
+        }
+        state.poll_pings(NOW_MS);
+        assert_eq!(state.cached_pings(), 3);
+        state.clear_status();
+
+        let start = state.tab_opened(NOW_MS + 1_000);
+
+        assert_eq!(
+            start,
+            PingStart {
+                queued: 0,
+                cached: 3,
+                invalid: 0
+            },
+            "a reopen inside the TTL opens no socket"
+        );
+        assert!(fake.take_queued().is_empty());
+        assert!(
+            !state.ping_in_flight(),
+            "nothing was dialled, so nothing spins"
+        );
+        assert_eq!(state.rows()[0].status_text, "20 ms");
+        assert!(
+            state.status().is_none(),
+            "a pass that dialled nothing announces nothing"
+        );
+    }
+
+    #[test]
+    fn an_expired_answer_is_dialled_again() {
+        let (mut state, fake) = with_fake(&three());
+        state.start_ping_all_now(NOW_MS);
+        fake.take_queued();
+        for id in ["a", "b", "c"] {
+            fake.answer(id, answered(20, 3, 20, "Hello"));
+        }
+        state.poll_pings(NOW_MS);
+
+        let start = state.tab_opened(NOW_MS + PING_SUCCESS_TTL_MS + 1);
+
+        assert_eq!(start.queued, 3);
+        assert_eq!(start.cached, 0);
+        assert_eq!(fake.take_queued(), vec!["a", "b", "c"]);
+        assert!(state.ping_in_flight());
+    }
+
+    #[test]
+    fn the_refresh_press_ignores_a_fresh_answer() {
+        let (mut state, fake) = with_fake(&three());
+        state.start_ping_all_now(NOW_MS);
+        fake.take_queued();
+        for id in ["a", "b", "c"] {
+            fake.answer(id, answered(20, 3, 20, "Hello"));
+        }
+        state.poll_pings(NOW_MS);
+
+        let start = state.start_ping_all_now(NOW_MS + 1);
+
+        assert_eq!(start.queued, 3, "the press re-pings every row");
+        assert_eq!(start.cached, 0);
+        assert_eq!(fake.take_queued(), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn a_cached_answer_survives_a_reload() {
+        let (mut state, fake) = with_fake(&three());
+        state.start_ping_all_now(NOW_MS);
+        fake.take_queued();
+        fake.answer("a", answered(42, 12, 100, "Hello"));
+        state.poll_pings(NOW_MS);
+
+        state.load(&three(), Some("a"), None, NOW_MS);
+
+        assert_eq!(state.rows()[0].status_text, "42 ms");
+        assert_eq!(state.cached_pings(), 1);
+    }
+
+    #[test]
+    fn a_deleted_row_leaves_no_cached_answer() {
+        let (mut state, fake) = with_fake(&three());
+        state.start_ping_all_now(NOW_MS);
+        fake.take_queued();
+        for id in ["a", "b", "c"] {
+            fake.answer(id, answered(20, 3, 20, "Hello"));
+        }
+        state.poll_pings(NOW_MS);
+        assert_eq!(state.cached_pings(), 3);
+
+        let kept = three();
+        state.load(&kept[..2], None, None, NOW_MS);
+
+        assert_eq!(state.cached_pings(), 2, "the deleted row's answer is gone");
+    }
+
+    #[test]
+    fn an_unparsable_address_gets_the_invalid_chip_and_no_job() {
+        let sources = [source("x", "Bad", "bad host")];
+        let (mut state, fake) = with_fake(&sources);
+
+        let start = state.start_ping_all_now(NOW_MS);
+
+        assert_eq!(
+            start,
+            PingStart {
+                queued: 0,
+                cached: 0,
+                invalid: 1
+            }
+        );
+        assert!(
+            fake.take_queued().is_empty(),
+            "no socket for unparsable text"
+        );
+        assert_eq!(
+            state.rows()[0].status_text,
+            servers_logic::INVALID_ADDRESS_CHIP_LABEL
+        );
+        assert!(!state.ping_in_flight());
+    }
+
+    #[test]
+    fn a_failed_ping_expires_sooner_than_a_successful_one() {
+        let (mut state, fake) = with_fake(&three());
+        state.start_ping_all_now(NOW_MS);
+        fake.take_queued();
+        for id in ["a", "b", "c"] {
+            fake.answer(id, ServerPingResult::offline("Offline"));
+        }
+        state.poll_pings(NOW_MS);
+        assert_eq!(
+            state.rows()[0].status_text,
+            "Offline",
+            "the failure is painted, not cached away"
+        );
+
+        let fresh = state.tab_opened(NOW_MS + PING_FAILURE_TTL_MS - 1);
+        assert_eq!(
+            fresh.cached, 3,
+            "inside the failure TTL the answer is reused"
+        );
+        fake.take_queued();
+
+        let stale = state.tab_opened(NOW_MS + PING_FAILURE_TTL_MS + 1);
+        assert_eq!(stale.queued, 3, "past it every row is dialled again");
+        assert_eq!(fake.take_queued(), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn a_poll_with_nothing_finished_does_not_repaint() {
+        let (mut state, fake) = with_fake(&three());
+        assert!(!state.poll_pings(NOW_MS), "no pass has run");
+
+        state.start_ping_all_now(NOW_MS);
+        fake.take_queued();
+        assert!(!state.poll_pings(NOW_MS), "the workers have not answered");
+    }
+
+    #[test]
+    fn cancelling_a_pass_returns_the_rows_to_the_rest_state() {
+        let (mut state, fake) = with_fake(&three());
+        state.start_ping_all_now(NOW_MS);
+        fake.take_queued();
+        fake.answer("a", answered(42, 12, 100, "Hello"));
+        state.poll_pings(NOW_MS);
+
+        state.cancel_pings();
+
+        assert!(!state.ping_in_flight());
+        assert!(
+            state
+                .rows()
+                .iter()
+                .filter(|row| row.status_text == servers_logic::PINGING_LABEL)
+                .count()
+                == 0,
+            "no row is left spinning"
+        );
+        assert!(state.status().is_none(), "an abandoned pass says nothing");
+        assert_eq!(
+            state.rows()[0].status_text,
+            "42 ms",
+            "an answer already applied stays"
+        );
+        assert!(!state.poll_pings(NOW_MS));
+    }
+
+    #[test]
+    fn a_tab_with_no_rows_pings_nothing() {
+        let (mut state, fake) = with_fake(&[]);
+
+        assert_eq!(state.tab_opened(NOW_MS), PingStart::default());
+        assert_eq!(state.start_ping_all_now(NOW_MS), PingStart::default());
+        assert!(fake.take_queued().is_empty());
     }
 }
