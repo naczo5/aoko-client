@@ -2382,9 +2382,9 @@ impl Shell {
     /// what makes the reset observable: the next frame composes from the cleared tracker
     /// rather than from a copy the view kept.
     ///
-    /// No `Window`: the two entry points are the card's button and the Stats tab's own reset, and
-    /// neither has anything to do with a window here — the view's callback receives one and lets it
-    /// go. Taking it and ignoring it would be the unused parameter this method used to carry.
+    /// No `Window`: the one caller is `views::stats_view`'s reset button, whose callback receives a
+    /// window and lets it go. There is no second entry point — the Stats tab is `TabBody::Stats`, so
+    /// its `StatsActionsCard` table entry never paints and the action table carries no arm for it.
     pub fn reset_stats(&mut self, cx: &mut Context<Self>) {
         if self.runtime.reset_stats() {
             cx.notify();
@@ -4441,9 +4441,9 @@ impl Shell {
                 // The configs card's buttons are real actions: Load and Save
                 // (`LoadConfigButton_Click` `:813-831`, `SaveConfigButton_Click`
                 // `:847-862`), Delete and Create with their confirmations, and Open
-                // Configs Folder (`:969-985`). The four the review named as inert are wired here
-                // too, so no rendered button is a decoration; each maps to the one call managed's
-                // handler made.
+                // Configs Folder (`:969-985`). The three the review named as inert are wired here
+                // too, each to the one call managed's handler made, so a rendered card button is
+                // never a decoration.
                 let action: fn(&mut Shell, &mut Context<Shell>) = match (card.id, *label) {
                     ("ConfigsCard", "Load") => Shell::configs_load,
                     ("ConfigsCard", "Save") => Shell::configs_save,
@@ -4460,8 +4460,11 @@ impl Shell {
                     // `PanicButton_Click` (`:1393-1396`): the reset, then the exit the title bar's
                     // close runs. Not a reset-only button — managed's shutdown is half of it.
                     ("PanicCard", "Trigger Panic Now") => Shell::panic,
-                    // `ResetStatsButton_Click` (`:1976-1979`): the tracker's own reset.
-                    ("StatsActionsCard", copy::STATS_RESET_LABEL) => Shell::reset_stats,
+                    // The stats card is not wired here, on purpose: the Stats tab is
+                    // `TabBody::Stats`, so `STATS` is never painted as cards and this table entry is
+                    // unreachable. The reset the user presses is `views::stats_view`'s own button,
+                    // whose callback calls [`Shell::reset_stats`] directly — one path to one
+                    // function.
                     _ => |_, _| {},
                 };
                 let handle = entity.clone();
@@ -6274,6 +6277,11 @@ mod tests {
     /// `Control::Button`'s action match keys on two strings that `views/copy.rs` owns, so a rename
     /// there would silently unwire a button instead of failing to compile — the failure mode the
     /// review found three of. This is that seam's own check; it is deliberately not a render test.
+    ///
+    /// The list is exactly the arms in `render_control`, which is why it caught `StatsActionsCard`:
+    /// that entry is in the `STATS` table, but its tab is `TabBody::Stats`, so nothing paints it and
+    /// the arm was a second path to `reset_stats` for a card that never renders. The reset the user
+    /// presses is `views::stats_view`'s own button.
     #[test]
     fn every_wired_card_button_is_a_label_the_table_carries() {
         let wired = [
@@ -6285,7 +6293,6 @@ mod tests {
             ("HudEditorCard", "Reset layout"),
             ("ReloadMappingsCard", "Reload Mappings"),
             ("PanicCard", "Trigger Panic Now"),
-            ("StatsActionsCard", copy::STATS_RESET_LABEL),
         ];
 
         let cards: Vec<&Card> = copy::TABS
