@@ -1694,12 +1694,39 @@ impl Shell {
     }
 
     /// Shows one tab by name, case-insensitively, as the overlay's jump does.
+    ///
+    /// This is the state half only; [`Shell::show_tab`] is the half that also has a window and can
+    /// drop the keyboard a hidden field was holding. Every user-visible tab change goes through
+    /// that one — the rail is the only control that switches tabs — while this stays for callers
+    /// with no window (a jump, a test setting a scene).
     pub fn select_tab_named(&mut self, name: &str, cx: &mut Context<Self>) {
         if let Some(index) = copy::TABS
             .iter()
             .position(|tab| tab.name.eq_ignore_ascii_case(name))
         {
             self.select_tab(index, cx);
+        }
+    }
+
+    /// Shows one tab from a window, and drops the keyboard from a field the new body hides.
+    ///
+    /// The rail is the only control that changes tabs, so this is the choke point for a user-visible
+    /// switch. A text field that lived in the old body has no node in the new frame, so it receives
+    /// nothing — every character falls back to the dispatch tree's synthetic root — while
+    /// `Window::focused` keeps reporting it, which also keeps [`Shell::window_focus`] from taking
+    /// the keyboard back. The symptom is a window whose Ctrl+K is dead until the user clicks a
+    /// field.
+    ///
+    /// The fix belongs here rather than in a broader "reclaim focus when the focused node is gone"
+    /// rule, because that rule cannot tell a hidden field from a field that is about to be painted:
+    /// `overlay::focus_query` focuses the query box one frame before its node exists, and a rule
+    /// that swept stale handles would take the keyboard straight back out of it.
+    pub fn show_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.select_tab(index, cx);
+
+        if self.tab_text_field_focused(window, cx) {
+            window.blur(cx);
+            cx.notify();
         }
     }
 
@@ -2713,6 +2740,21 @@ impl Shell {
     /// open the search overlay. The query box matters twice over, because it is the one field
     /// that exists while the overlay is open, so the close path blurs it.
     fn any_text_field_focused(&self, window: &Window, cx: &App) -> bool {
+        self.tab_text_field_focused(window, cx)
+            || self
+                .search_query
+                .as_ref()
+                .is_some_and(|field| field.read(cx).focus_handle().is_focused(window))
+    }
+
+    /// Whether a text field painted *inside a tab body* owns the keyboard.
+    ///
+    /// The same set as [`Shell::any_text_field_focused`] minus the overlay's query box, and the two
+    /// differ for one reason each. The gate needs the query box, because a character typed into an
+    /// open overlay must not be read as a second type-to-open. Tab changes need it *excluded*,
+    /// because the overlay is not a tab: nothing a tab change does can hide that box, and blurring
+    /// it here would drop the keyboard from a surface that is still up.
+    fn tab_text_field_focused(&self, window: &Window, cx: &App) -> bool {
         [
             &self.fields.token,
             &self.fields.offline_name,
@@ -2721,7 +2763,6 @@ impl Shell {
             &self.fields.direct_address,
             &self.fields.config_name,
             &self.block_add,
-            &self.search_query,
         ]
         .into_iter()
         .flatten()
@@ -3197,8 +3238,10 @@ impl Shell {
             .text_size(px(metrics::text::SECTION_TITLE))
             .text_color(label)
             .aria_selected(selected)
-            .on_click(move |_, _, cx| {
-                handle.update(cx, |shell, cx| shell.select_tab(index, cx));
+            .on_click(move |_, window, cx| {
+                // `show_tab`, not `select_tab`: the window is here, and a tab change is the one
+                // moment a focused field can be hidden under the keyboard.
+                handle.update(cx, |shell, cx| shell.show_tab(index, window, cx));
             })
             .child(name)
             .into_any_element()
@@ -8418,6 +8461,54 @@ mod tests {
         assert!(
             visual.debug_bounds("keybind-AutoClickerCard").is_some(),
             "with the cards back"
+        );
+    }
+
+    /// Switching tabs drops the keyboard from a field the new body does not paint.
+    ///
+    /// Without it the box keeps `Window::focused` while losing its node: characters fall back to
+    /// the dispatch tree's synthetic root, and the shell's own handle never gets the keyboard back,
+    /// so the window's Ctrl+K stays dead until the user clicks a field. The assertion is that
+    /// symptom rather than the focus value — the press works again afterwards.
+    #[gpui::test]
+    fn switching_tabs_returns_the_keyboard_to_the_window(cx: &mut gpui::TestAppContext) {
+        use gpui::Keystroke;
+
+        let root = scratch_root();
+        let (shell, handle, mut visual) = shell_in_window(cx, &root);
+        // Focuses the Block ESP box, which lives on Render.
+        focus_block_add(cx, &shell, &mut visual);
+
+        visual.update(|window, cx| {
+            assert!(
+                !shell
+                    .read(cx)
+                    .search_gate(Some(window), cx)
+                    .can_open_search(),
+                "a focused field closes the gate while its tab is showing"
+            );
+        });
+
+        // The rail's own path: it is the only control that changes tabs, and the only one with a
+        // window to blur.
+        visual.update(|window, cx| shell.update(cx, |shell, cx| shell.show_tab(0, window, cx)));
+        visual.update(|window, cx| {
+            assert!(
+                shell
+                    .read(cx)
+                    .search_gate(Some(window), cx)
+                    .can_open_search(),
+                "the hidden box no longer holds the keyboard"
+            );
+            let _ = window.draw(cx);
+        });
+
+        visual
+            .cx
+            .dispatch_keystroke(handle, Keystroke::parse("ctrl-k").expect("keystroke"));
+        assert!(
+            cx.read(|cx| shell.read(cx).search().is_open()),
+            "and Ctrl+K reaches the window again, which is what the user notices"
         );
     }
 }
