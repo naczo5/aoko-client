@@ -1,24 +1,37 @@
-//! The one mapping from [`Profile`] to the `config` frame's [`ConfigPayload`].
+//! The one mapping from [`Profile`] and the controller's switches to the `config` frame's
+//! [`ConfigPayload`].
 //!
-//! The managed host built the frame from `Clicker` properties, and `Clicker` was filled from
-//! the profile by `Profile.ApplyToClicker` (`Profile.cs:727-903`) — the single place the
-//! managed host copied settings across. Every `ConfigPayload` field's doc comment names the
-//! `Clicker` property it serialises, so the chain is profile field -> `Clicker` property ->
-//! payload key, and this module is that chain in one direction only: the profile owns the
-//! value, the payload carries a copy, and nothing writes one back.
+//! The managed host built the frame from `Clicker` properties. Those properties had two
+//! writers: `Profile.ApplyToClicker` (`Profile.cs:727-903`) filled them from the saved
+//! settings, and the switch buttons changed them at runtime, which is why the frame reported
+//! live state. This port keeps the two halves apart — the profile is the saved settings, the
+//! [`EnabledFlag`] set is what is running now — so the frame reads both and writes neither
+//! back:
+//!
+//! * a **module boolean** comes from the switch set, keyed by
+//!   [`module_catalog::MODULE_WIRE_KEYS`], because a switch press is what the managed
+//!   `Clicker` property changed. `armed` is one of these: the managed `Clicker.IsArmed` is
+//!   this port's `LeftClick` switch. The frame used to send the profile's saved boolean here,
+//!   which meant a module the user switched on told the bridge it was off;
+//! * everything else comes from the profile, including the sub-settings a module owns
+//!   (`pixelPartyAutoLook`, `nametagHideVanilla`, `left`, ...).
 //!
 //! The struct literal below is deliberately exhaustive — there is no
 //! `..ConfigPayload::default()` — so adding a payload field is a compile error until it has a
-//! source here. `every_payload_key_comes_from_the_profile` is the runtime half: it serialises
-//! a profile with every setting off its default and requires every key to move.
+//! source here. `every_payload_key_has_a_live_source` is the runtime half: it serialises a
+//! profile with every setting off its default and a switch set with every switch on, and
+//! requires every key to move.
 //!
 //! Three fields are derived rather than copied, because the managed `Clicker` derived them:
 //!
 //! * `jitter` is `Clicker.JitterEnabled`, which is `RandomizationMode != Basic`
-//!   (`Clicker.cs:350`), so it follows the mode and the stored `jitterEnabled` flag only
-//!   feeds that mode.
+//!   (`Clicker.cs:350`), so it follows the mode. This is the one key a switch *could* feed —
+//!   `EnabledFlag::Jitter` exists for it — and it deliberately does not: nothing in the app
+//!   writes that switch, so the frame would disagree with the clicker that jitters. See
+//!   `module_catalog::MODULE_WIRE_KEY_EXCEPTIONS`.
 //! * `nick_hider_enabled` is `Clicker.IsNickHiderActive`, which is `NickHiderEnabled`
-//!   **and** a non-empty normalised alias (`Clicker.cs:981`).
+//!   **and** a non-empty normalised alias (`Clicker.cs:981`): the switch from the module set,
+//!   the alias from the profile.
 //! * `block_esp_blocks` is `Clicker.BlockEspBlocksSerialized`, the delimited target string
 //!   built from the profile's targets (`Clicker.cs:1343`).
 //!
@@ -47,37 +60,124 @@
 
 use aoko_protocol::block_esp::{self, BlockEspTarget, BlockEspTargetData};
 use aoko_protocol::config_payload::{module_list_style_to_index, ConfigPayload};
+use aoko_protocol::module_catalog::EnabledFlag;
 use aoko_protocol::nick_hider;
 use aoko_protocol::profile::{ClickRandomizationMode, Profile};
 
-/// The frame the profile produces.
-pub(crate) fn payload(profile: &Profile, hud_editor: bool, reload_nonce: i32) -> ConfigPayload {
+/// The profile field that stores each module switch, by its JSON key.
+///
+/// This is the other half of `Profile.ApplyToClicker` (`Profile.cs:727-903`): the managed apply
+/// step copied these into the `Clicker`, and the switches changed them afterwards, so the frame
+/// started out reporting the saved settings. `AppController` seeds its switch set from here
+/// when a profile is built or adopted, which is why the frame itself never reads this table: a
+/// module boolean comes from the switch, and a saved value only reaches the wire by becoming
+/// one.
+///
+/// The keys are the profile's serde names, and the test below pins both halves: every key is a
+/// boolean on the profile, and setting it seeds exactly the switch it is paired with.
+pub(crate) const SWITCH_PROFILE_KEYS: [(EnabledFlag, &str); 39] = [
+    (EnabledFlag::LeftClick, "isArmed"),
+    (EnabledFlag::RightClick, "rightClickEnabled"),
+    (EnabledFlag::BreakBlocks, "breakBlocksEnabled"),
+    (EnabledFlag::ClickInChests, "clickInChests"),
+    (EnabledFlag::AimAssist, "aimAssistEnabled"),
+    (EnabledFlag::Triggerbot, "triggerbotEnabled"),
+    (EnabledFlag::KillAura, "killAuraEnabled"),
+    (EnabledFlag::SpeedBridge, "speedBridgeEnabled"),
+    (EnabledFlag::GtbHelper, "gtbHelperEnabled"),
+    (EnabledFlag::PixelPartyAssist, "pixelPartyAssistEnabled"),
+    (EnabledFlag::Nametags, "nametagsEnabled"),
+    (EnabledFlag::NickHider, "nickHiderEnabled"),
+    (EnabledFlag::ClosestPlayerInfo, "closestPlayerInfoEnabled"),
+    (EnabledFlag::FightStatus, "fightStatusEnabled"),
+    (EnabledFlag::ChestEsp, "chestEspEnabled"),
+    (EnabledFlag::ChestStealer, "chestStealerEnabled"),
+    (EnabledFlag::Refill, "refillEnabled"),
+    (EnabledFlag::BlockEsp, "blockEspEnabled"),
+    (EnabledFlag::BedPlates, "bedPlatesEnabled"),
+    (EnabledFlag::Reach, "reachEnabled"),
+    (EnabledFlag::Velocity, "velocityEnabled"),
+    (EnabledFlag::AutoTotem, "autoTotemEnabled"),
+    (EnabledFlag::AutoRod, "autoRodEnabled"),
+    (EnabledFlag::Throwpot, "throwpotEnabled"),
+    (EnabledFlag::AutoHeal, "autoHealEnabled"),
+    (EnabledFlag::AutoTool, "autoToolEnabled"),
+    (EnabledFlag::AntiDebuff, "antiDebuffEnabled"),
+    (EnabledFlag::HitDelayFix, "hitDelayFixEnabled"),
+    (EnabledFlag::FireballWarning, "fireballWarningEnabled"),
+    (EnabledFlag::FastPlace, "fastPlaceEnabled"),
+    (EnabledFlag::NoHurtCam, "noHurtCamEnabled"),
+    (EnabledFlag::Sprint, "sprintEnabled"),
+    (EnabledFlag::TntTimer, "tntTimerEnabled"),
+    (EnabledFlag::WTap, "wTapEnabled"),
+    (EnabledFlag::JumpReset, "jumpResetEnabled"),
+    (EnabledFlag::HitSelect, "hitSelectEnabled"),
+    (EnabledFlag::Trajectories, "trajectoriesEnabled"),
+    (EnabledFlag::MurderMystery, "murderMysteryEnabled"),
+    (EnabledFlag::BreakProgress, "breakProgressEnabled"),
+];
+
+/// The switches a profile carries, as the controller's switch set holds them.
+///
+/// One direction only: the profile is the saved state, the returned set is what the app is
+/// running, and nothing writes the set back. A profile that does not serialise yields no
+/// switches rather than a panic — the caller then reports every module as off, which is the
+/// truth about an app that failed to read its own settings.
+pub(crate) fn profile_switches(profile: &Profile) -> Vec<EnabledFlag> {
+    let Ok(settings) = serde_json::to_value(profile) else {
+        return Vec::new();
+    };
+    SWITCH_PROFILE_KEYS
+        .iter()
+        .filter(|(_, key)| {
+            settings
+                .get(*key)
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        })
+        .map(|(flag, _)| *flag)
+        .collect()
+}
+
+/// The frame the profile and the controller's switches produce.
+///
+/// Two sources, both one direction: the profile owns the settings, the switch set owns which
+/// modules are live. The managed host had a `Clicker` property for each, filled from the
+/// profile on apply and changed by the switches at runtime, so the frame read live state; this
+/// port has the two halves apart, and the frame reads the same two.
+pub(crate) fn payload(
+    profile: &Profile,
+    modules: &[EnabledFlag],
+    hud_editor: bool,
+    reload_nonce: i32,
+) -> ConfigPayload {
+    let enabled = |flag: EnabledFlag| modules.contains(&flag);
     let keybind = |module: &str| profile.module_keys.get(module).copied().unwrap_or(0);
     let nick_hider_alias = nick_hider::normalize_alias(Some(&profile.nick_hider_alias));
-    let nick_hider_enabled = profile.nick_hider_enabled && !nick_hider_alias.is_empty();
+    let nick_hider_enabled = enabled(EnabledFlag::NickHider) && !nick_hider_alias.is_empty();
     let block_esp_blocks = block_esp::serialize_targets(&block_esp_targets(profile));
 
     ConfigPayload {
         perf_diagnostics: false,
-        armed: profile.is_armed,
+        armed: enabled(EnabledFlag::LeftClick),
         clicking: false,
         min_cps: profile.min_cps,
         max_cps: profile.max_cps,
         left: profile.left_click_enabled,
-        right: profile.right_click_enabled,
+        right: enabled(EnabledFlag::RightClick),
         right_min_cps: profile.right_min_cps,
         right_max_cps: profile.right_max_cps,
         right_block: profile.right_click_only_block,
-        break_blocks: profile.break_blocks_enabled,
+        break_blocks: enabled(EnabledFlag::BreakBlocks),
         jitter: profile.randomization_mode() != ClickRandomizationMode::Basic,
         randomization_mode: profile.randomization_mode().as_i32(),
-        click_in_chests: profile.click_in_chests,
-        aim_assist: profile.aim_assist_enabled,
+        click_in_chests: enabled(EnabledFlag::ClickInChests),
+        aim_assist: enabled(EnabledFlag::AimAssist),
         aim_assist_fov: profile.aim_assist_fov,
         aim_assist_range: profile.aim_assist_range,
         aim_assist_strength: profile.aim_assist_strength,
-        triggerbot: profile.triggerbot_enabled,
-        kill_aura: profile.kill_aura_enabled,
+        triggerbot: enabled(EnabledFlag::Triggerbot),
+        kill_aura: enabled(EnabledFlag::KillAura),
         kill_aura_cps_mode: profile.kill_aura_settings.cps_mode().to_owned(),
         kill_aura_mode: profile.kill_aura_settings.mode().to_owned(),
         kill_aura_sort: profile.kill_aura_settings.sort().to_owned(),
@@ -142,55 +242,55 @@ pub(crate) fn payload(profile: &Profile, hud_editor: bool, reload_nonce: i32) ->
             .liquid_bounce_horizontal_search(),
         kill_aura_lb_body_min: profile.kill_aura_settings.liquid_bounce_body_point_min(),
         kill_aura_lb_body_max: profile.kill_aura_settings.liquid_bounce_body_point_max(),
-        speed_bridge: profile.speed_bridge_enabled,
+        speed_bridge: enabled(EnabledFlag::SpeedBridge),
         speed_bridge_block_only: profile.speed_bridge_block_only,
         speed_bridge_delay_ms: profile.speed_bridge_delay_ms,
         speed_bridge_holding_shift_only: profile.speed_bridge_holding_shift_only,
         speed_bridge_looking_down_only: profile.speed_bridge_looking_down_only,
-        gtb_helper: profile.gtb_helper_enabled,
-        pixel_party_assist: profile.pixel_party_assist_enabled,
+        gtb_helper: enabled(EnabledFlag::GtbHelper),
+        pixel_party_assist: enabled(EnabledFlag::PixelPartyAssist),
         pixel_party_scan_radius: profile.pixel_party_scan_radius,
         pixel_party_auto_look: profile.pixel_party_auto_look_enabled,
         pixel_party_auto_walk: profile.pixel_party_auto_walk_enabled,
         gtb_hint: "-".to_owned(),
         gtb_count: 0,
         gtb_preview: "-".to_owned(),
-        nametags: profile.nametags_enabled,
+        nametags: enabled(EnabledFlag::Nametags),
         nick_hider_enabled,
         nick_hider_alias: nick_hider_alias.clone(),
         show_module_list: profile.show_module_list,
         module_list_style: module_list_style_to_index(Some(&profile.module_list_style)),
         show_logo: profile.show_logo,
         gui_theme: profile.gui_theme.to_owned(),
-        closest_player_info: profile.closest_player_info_enabled,
-        fight_status: profile.fight_status_enabled,
+        closest_player_info: enabled(EnabledFlag::ClosestPlayerInfo),
+        fight_status: enabled(EnabledFlag::FightStatus),
         nametag_show_health: profile.nametag_show_health,
         nametag_show_armor: profile.nametag_show_armor,
         nametag_show_held_item: profile.nametag_show_held_item,
         nametag_hide_vanilla: profile.nametag_hide_vanilla,
         reload_mappings_nonce: reload_nonce,
         nametag_range: profile.nametag_range,
-        chest_esp: profile.chest_esp_enabled,
+        chest_esp: enabled(EnabledFlag::ChestEsp),
         chest_esp_range: profile.chest_esp_range,
-        chest_stealer_enabled: profile.chest_stealer_enabled,
+        chest_stealer_enabled: enabled(EnabledFlag::ChestStealer),
         chest_stealer_delay_ms: profile.chest_stealer_delay_ms,
         chest_stealer_menu_check: profile.chest_stealer_menu_check(),
         chest_stealer_title_check: profile.chest_stealer_title_check(),
         chest_stealer_custom_items_check: profile.chest_stealer_custom_items_check(),
         chest_stealer_physical_check: profile.chest_stealer_physical_check(),
-        refill_enabled: profile.refill_enabled,
+        refill_enabled: enabled(EnabledFlag::Refill),
         refill_delay_ms: profile.refill_delay_ms,
-        block_esp_enabled: profile.block_esp_enabled,
+        block_esp_enabled: enabled(EnabledFlag::BlockEsp),
         block_esp_boxes: profile.block_esp_boxes,
         block_esp_tracers: profile.block_esp_tracers,
         block_esp_hud: profile.block_esp_hud,
         block_esp_max_count: profile.block_esp_max_count,
         block_esp_range: profile.block_esp_range,
         block_esp_blocks,
-        bed_plates_enabled: profile.bed_plates_enabled,
+        bed_plates_enabled: enabled(EnabledFlag::BedPlates),
         bed_plates_show_distance: profile.bed_plates_show_distance,
         bed_plates_range: profile.bed_plates_range,
-        reach_enabled: profile.reach_enabled,
+        reach_enabled: enabled(EnabledFlag::Reach),
         reach_min: profile.reach_min,
         reach_max: profile.reach_max,
         reach_chance: profile.reach_chance,
@@ -198,26 +298,26 @@ pub(crate) fn payload(profile: &Profile, hud_editor: bool, reload_nonce: i32) ->
         reach_only_while_sprinting: profile.reach_only_while_sprinting,
         reach_disable_in_water: profile.reach_disable_in_water,
         reach_vertical_check: profile.reach_vertical_check,
-        velocity_enabled: profile.velocity_enabled,
+        velocity_enabled: enabled(EnabledFlag::Velocity),
         velocity_horizontal: profile.velocity_horizontal,
         velocity_vertical: profile.velocity_vertical,
         velocity_chance: profile.velocity_chance,
-        auto_totem_enabled: profile.auto_totem_enabled,
+        auto_totem_enabled: enabled(EnabledFlag::AutoTotem),
         auto_totem_mode: profile.auto_totem_mode,
         auto_totem_health: profile.auto_totem_health,
         auto_totem_elytra: profile.auto_totem_elytra,
         auto_totem_delay: profile.auto_totem_delay,
         auto_totem_behavior_mode: profile.auto_totem_behavior_mode,
-        auto_rod_enabled: profile.auto_rod_enabled,
+        auto_rod_enabled: enabled(EnabledFlag::AutoRod),
         auto_rod_slot_mode: profile.auto_rod_slot_mode(),
         auto_rod_verify_forced_slot: profile.auto_rod_verify_forced_slot,
         auto_rod_extension_ticks: profile.auto_rod_extension_ticks(),
         auto_rod_hold_to_extend: profile.auto_rod_hold_to_extend,
-        throwpot_enabled: profile.throwpot_enabled,
-        auto_heal_enabled: profile.auto_heal_enabled,
+        throwpot_enabled: enabled(EnabledFlag::Throwpot),
+        auto_heal_enabled: enabled(EnabledFlag::AutoHeal),
         auto_heal_health: profile.auto_heal_health,
         auto_heal_delay_ms: profile.auto_heal_delay_ms,
-        auto_tool_enabled: profile.auto_tool_enabled,
+        auto_tool_enabled: enabled(EnabledFlag::AutoTool),
         auto_tool_swap_weapon: profile.auto_tool_swap_weapon,
         auto_tool_instant_swap: profile.auto_tool_instant_swap,
         auto_tool_swap_to_delay: profile.auto_tool_swap_to_delay,
@@ -226,22 +326,22 @@ pub(crate) fn payload(profile: &Profile, hud_editor: bool, reload_nonce: i32) ->
         auto_tool_require_mouse_down: profile.auto_tool_require_mouse_down,
         auto_tool_only_sneaking: profile.auto_tool_only_sneaking,
         auto_tool_bedwars_mode: profile.auto_tool_bedwars_mode,
-        anti_debuff_enabled: profile.anti_debuff_enabled,
-        hit_delay_fix_enabled: profile.hit_delay_fix_enabled,
-        fireball_warning: profile.fireball_warning_enabled,
+        anti_debuff_enabled: enabled(EnabledFlag::AntiDebuff),
+        hit_delay_fix_enabled: enabled(EnabledFlag::HitDelayFix),
+        fireball_warning: enabled(EnabledFlag::FireballWarning),
         fireball_warning_box: profile.fireball_warning_box,
         fireball_warning_arrow: profile.fireball_warning_arrow,
         fireball_warning_sound: profile.fireball_warning_sound,
-        fast_place: profile.fast_place_enabled,
-        no_hurt_cam: profile.no_hurt_cam_enabled,
-        sprint: profile.sprint_enabled,
-        tnt_timer: profile.tnt_timer_enabled,
-        w_tap: profile.wtap_enabled,
-        jump_reset: profile.jump_reset_enabled,
-        hit_select: profile.hit_select_enabled,
-        trajectories: profile.trajectories_enabled,
-        murder_mystery: profile.murder_mystery_enabled,
-        break_progress: profile.break_progress_enabled,
+        fast_place: enabled(EnabledFlag::FastPlace),
+        no_hurt_cam: enabled(EnabledFlag::NoHurtCam),
+        sprint: enabled(EnabledFlag::Sprint),
+        tnt_timer: enabled(EnabledFlag::TntTimer),
+        w_tap: enabled(EnabledFlag::WTap),
+        jump_reset: enabled(EnabledFlag::JumpReset),
+        hit_select: enabled(EnabledFlag::HitSelect),
+        trajectories: enabled(EnabledFlag::Trajectories),
+        murder_mystery: enabled(EnabledFlag::MurderMystery),
+        break_progress: enabled(EnabledFlag::BreakProgress),
         jump_reset_chance: profile.jump_reset_chance,
         keybind_autoclicker: keybind("autoclicker"),
         keybind_right_click: keybind("rightclick"),
@@ -298,6 +398,7 @@ mod tests {
     use super::*;
     use aoko_protocol::config_payload::CONFIG_KEYS;
     use aoko_protocol::hud::HudLayout;
+    use aoko_protocol::module_catalog::{MODULE_WIRE_KEYS, MODULE_WIRE_KEY_EXCEPTIONS};
     use aoko_protocol::profile::load_profile_from_json;
     use serde_json::Value;
 
@@ -356,6 +457,13 @@ mod tests {
         }
     }
 
+    /// Every switch that feeds a frame key, as the controller holds them with every module
+    /// on. The exceptions in [`MODULE_WIRE_KEY_EXCEPTIONS`] are not here: neither feeds a key
+    /// of its own.
+    fn fixture_modules() -> Vec<EnabledFlag> {
+        MODULE_WIRE_KEYS.iter().map(|(flag, _)| *flag).collect()
+    }
+
     fn keys(line: &str) -> serde_json::Map<String, Value> {
         serde_json::from_str::<Value>(line)
             .expect("the frame is JSON")
@@ -365,15 +473,17 @@ mod tests {
     }
 
     /// The completeness guard: every emitted key either moves when its source moves — the
-    /// fixture profile, the controller's HUD editor mode, or its mapping-reload nonce — or is
-    /// on the no-source list and stays put.
+    /// fixture profile, the fixture switch set, the controller's HUD editor mode, or its
+    /// mapping-reload nonce — or is on the no-source list and stays put.
     ///
     /// A key added to `ConfigPayload` and left at its default fails the first arm. A key wired
     /// to a profile field that the fixture does not move fails it too. A key that gains a
     /// source without leaving the no-source list fails the second.
     #[test]
-    fn every_payload_key_comes_from_the_profile() {
-        let wired = keys(&payload(&fixture_profile(), true, 7).to_line(&HudLayout::new()));
+    fn every_payload_key_has_a_live_source() {
+        let wired = keys(
+            &payload(&fixture_profile(), &fixture_modules(), true, 7).to_line(&HudLayout::new()),
+        );
         let defaults = keys(&ConfigPayload::default().to_line(&HudLayout::new()));
 
         for key in CONFIG_KEYS {
@@ -424,14 +534,14 @@ mod tests {
 
         let mut profile = Profile::default();
         profile.block_esp_targets = vec![target("minecraft:emerald_block", true)];
-        let enabled = payload(&profile, false, 0).block_esp_blocks;
+        let enabled = payload(&profile, &[], false, 0).block_esp_blocks;
         assert_eq!(
             enabled, "emerald_block=00FF88",
             "an enabled target has to reach the frame in the normalised wire spelling"
         );
 
         profile.block_esp_targets = vec![target("minecraft:emerald_block", false)];
-        let disabled = payload(&profile, false, 0).block_esp_blocks;
+        let disabled = payload(&profile, &[], false, 0).block_esp_blocks;
         assert_eq!(
             disabled, "",
             "a disabled target must not reach the frame at all"
@@ -441,10 +551,97 @@ mod tests {
             target("minecraft:emerald_block", true),
             target("minecraft:emerald_block", true),
         ];
-        let repeated = payload(&profile, false, 0).block_esp_blocks;
+        let repeated = payload(&profile, &[], false, 0).block_esp_blocks;
         assert_eq!(
             repeated, "emerald_block=00FF88",
             "a repeated id is serialised once"
         );
+    }
+
+    /// The switch-to-key table is only worth having if the frame obeys it: one switch at a
+    /// time, the frame must move exactly the key the table names.
+    ///
+    /// This is the guard the profile guard cannot be. A module boolean left reading the
+    /// profile would still move under `every_payload_key_has_a_live_source`, because the
+    /// fixture profile moves every field — the frame would just keep ignoring the switch. Here
+    /// the profile is fixed and only the switch set changes, so a key that does not follow its
+    /// switch fails, and a key wired to the wrong switch fails twice: it does not move for its
+    /// own switch, and it moves for someone else's.
+    #[test]
+    fn one_switch_moves_exactly_its_own_key() {
+        // The nick hider's key needs an alias to be allowed on; that half is the profile's,
+        // and it must not decide whether the switch reaches the wire.
+        let mut profile = Profile::default();
+        profile.nick_hider_alias = "Player".to_owned();
+        let off = keys(&payload(&profile, &[], false, 0).to_line(&HudLayout::new()));
+
+        for (flag, key) in MODULE_WIRE_KEYS {
+            let on = keys(&payload(&profile, &[flag], false, 0).to_line(&HudLayout::new()));
+            let moved: Vec<&str> = CONFIG_KEYS
+                .iter()
+                .copied()
+                .filter(|candidate| on.get(*candidate) != off.get(*candidate))
+                .collect();
+            assert_eq!(
+                moved,
+                vec![key],
+                "{flag:?} must move exactly {key} and nothing else"
+            );
+        }
+
+        // The exceptions have no key at all, so their switches must leave the frame alone.
+        for flag in MODULE_WIRE_KEY_EXCEPTIONS {
+            let on = keys(&payload(&profile, &[flag], false, 0).to_line(&HudLayout::new()));
+            assert_eq!(
+                on, off,
+                "{flag:?} feeds no key, so it cannot move the frame"
+            );
+        }
+    }
+
+    /// The seeding table, guarded from both ends: it covers exactly the switches the frame
+    /// reads, every key it names is a boolean on the profile, and setting one key seeds
+    /// exactly its own switch. A renamed profile field, a key paired with the wrong flag, or a
+    /// switch with no saved field fails here rather than at connect, where the frame would
+    /// quietly report the module off for a user who switched it on.
+    #[test]
+    fn every_switch_is_seeded_from_its_own_profile_field() {
+        for (flag, _) in MODULE_WIRE_KEYS {
+            assert!(
+                SWITCH_PROFILE_KEYS
+                    .iter()
+                    .any(|(seeded, _)| *seeded == flag),
+                "{flag:?} feeds a frame key but nothing seeds it from the profile"
+            );
+        }
+        for (index, (flag, key)) in SWITCH_PROFILE_KEYS.iter().enumerate() {
+            assert!(
+                MODULE_WIRE_KEYS.iter().any(|(mapped, _)| mapped == flag),
+                "{flag:?} is seeded but feeds no frame key"
+            );
+            assert!(
+                !SWITCH_PROFILE_KEYS[..index]
+                    .iter()
+                    .any(|(_, other)| other == key),
+                "{key} is read twice"
+            );
+        }
+
+        let base: Value =
+            serde_json::to_value(Profile::default()).expect("the default profile serialises");
+        for (flag, key) in SWITCH_PROFILE_KEYS {
+            let mut json = base.clone();
+            match json.get_mut(key) {
+                Some(slot) if slot.is_boolean() => *slot = Value::Bool(true),
+                _ => panic!("{key} is not a boolean field on the profile"),
+            }
+            let profile =
+                load_profile_from_json(&json.to_string()).expect("the seeded profile loads");
+            assert_eq!(
+                profile_switches(&profile),
+                vec![flag],
+                "{key} has to seed exactly {flag:?}"
+            );
+        }
     }
 }

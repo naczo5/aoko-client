@@ -215,19 +215,25 @@ struct FrameCache {
 }
 
 impl AppController {
-    /// A controller with a default profile, no modules on and the given
-    /// capability report (use `aoko_platform::probe_capabilities()` in production).
+    /// A controller with a default profile and the given capability report (use
+    /// `aoko_platform::probe_capabilities()` in production).
+    ///
+    /// The switch set is seeded from the profile, which is the apply half of the managed
+    /// `Profile.ApplyToClicker`: a saved module that is on has to be running, and the frame has
+    /// to say so, before any button is pressed. The profile's defaults have every module off,
+    /// so this is empty for a fresh controller — the seeding matters for an adopted profile.
     #[must_use]
     pub fn new(capabilities: CapabilityReport) -> Self {
         let profile = Profile::default();
+        let modules = crate::config_map::profile_switches(&profile);
         let frame = ConfigFrame {
-            payload: crate::config_map::payload(&profile, false, 0),
+            payload: crate::config_map::payload(&profile, &modules, false, 0),
             hud_layout: profile.to_hud_layout(),
         };
         Self {
             store: Arc::new(StateStore::new()),
             profile: RwLock::new(profile),
-            modules: RwLock::new(Vec::new()),
+            modules: RwLock::new(modules),
             capabilities,
             frame_cache: RwLock::new(FrameCache { frame, fresh: true }),
             hud_editor: AtomicBool::new(false),
@@ -376,17 +382,37 @@ impl AppController {
     /// collide — general module binds win. The stored profile is the normalised one,
     /// because the managed `ApplyToClicker` also zeroes the field on the profile it
     /// was handed. Returns whether anything was changed by normalisation.
+    ///
+    /// It also **seeds the switches** from the profile (`crate::config_map::profile_switches`),
+    /// which is the other half of `ApplyToClicker`: the managed host copied the saved module
+    /// state into `Clicker` properties, and the frame read those. Adopting a profile is the
+    /// apply step here, so the set is replaced rather than merged, and a module the loaded
+    /// file turns off stops running. An in-place [`update_profile`](Self::update_profile) is a
+    /// settings edit, not an apply, and leaves the switches alone.
     pub fn replace_profile(&self, mut profile: Profile) -> bool {
         let normalised = profile.normalize_action_binds();
+        let switches = crate::config_map::profile_switches(&profile);
         let mut cache = self.frame_cache.write();
+        let mut modules = self.modules.write();
         *self.profile.write() = profile;
+        *modules = switches;
         cache.fresh = false;
         normalised
     }
 
-    /// Sets one module switch.
-    pub fn set_module_enabled(&self, flag: EnabledFlag, enabled: bool) {
-        write_flag(&mut self.modules.write(), flag, enabled);
+    /// Sets one module switch, returning whether it moved.
+    ///
+    /// The frame carries every module boolean from this set, so a press invalidates the cache
+    /// the way [`set_hud_editor`](Self::set_hud_editor) does, in the same order: the frame
+    /// lock first, then the data. Taking the data lock first would let a rebuild read the old
+    /// set and mark the cache fresh, and the wire would then lag the button by one frame.
+    pub fn set_module_enabled(&self, flag: EnabledFlag, enabled: bool) -> bool {
+        let mut cache = self.frame_cache.write();
+        let changed = write_flag(&mut self.modules.write(), flag, enabled);
+        if changed {
+            cache.fresh = false;
+        }
+        changed
     }
 
     /// Whether one module switch is on.
@@ -492,9 +518,15 @@ impl AppController {
     pub fn config_frame(&self) -> ConfigFrameRef<'_> {
         let mut cache = self.frame_cache.write();
         if !cache.fresh {
+            let modules = self.modules.read();
             let profile = self.profile.read();
             cache.frame = ConfigFrame {
-                payload: Self::payload(&profile, self.hud_editor(), self.mapping_reload_nonce()),
+                payload: Self::payload(
+                    &profile,
+                    modules.as_slice(),
+                    self.hud_editor(),
+                    self.mapping_reload_nonce(),
+                ),
                 hud_layout: profile.to_hud_layout(),
             };
             cache.fresh = true;
@@ -523,20 +555,27 @@ impl AppController {
     /// exists to close.
     #[must_use]
     pub fn config_payload(&self) -> ConfigPayload {
+        let modules = self.modules.read();
         Self::payload(
             &self.profile.read(),
+            modules.as_slice(),
             self.hud_editor(),
             self.mapping_reload_nonce(),
         )
     }
 
-    /// The payload the profile produces.
+    /// The payload the profile and the switch set produce.
     ///
     /// Shared by [`config_payload`](Self::config_payload) and
-    /// [`config_frame`](Self::config_frame) so the frame's two halves cannot drift apart, and
-    /// delegated to `crate::config_map`, which owns the one profile-to-key mapping.
-    fn payload(profile: &Profile, hud_editor: bool, reload_nonce: i32) -> ConfigPayload {
-        crate::config_map::payload(profile, hud_editor, reload_nonce)
+    /// [`config_frame`](Self::config_frame) so the frame's halves cannot drift apart, and
+    /// delegated to `crate::config_map`, which owns the one mapping into the payload.
+    fn payload(
+        profile: &Profile,
+        modules: &[EnabledFlag],
+        hud_editor: bool,
+        reload_nonce: i32,
+    ) -> ConfigPayload {
+        crate::config_map::payload(profile, modules, hud_editor, reload_nonce)
     }
 }
 
@@ -799,17 +838,19 @@ mod tests {
         assert_eq!(app.profile().auto_rod_action_key, 0x53);
     }
 
-    /// The gap the retired `Profile.cs` source pin was hiding: the profile carries
-    /// `fight_status_enabled` and the payload carries `fightStatus`, and until this test
-    /// existed nothing connected them.
+    /// The gap the retired `Profile.cs` source pin was hiding, in its final shape: the profile
+    /// carries `fight_status_enabled`, the payload carries `fightStatus`, and what connects
+    /// them is the module switch — the profile seeds it on apply, the button moves it at
+    /// runtime, and the frame reads it. The managed `clicker.FightStatusEnabled` was exactly
+    /// that pair: a `Clicker` property `ApplyToClicker` filled and the toggle changed.
     #[test]
-    fn the_config_payload_carries_the_profile_fight_status() {
+    fn the_config_payload_carries_the_fight_status_switch() {
         let app = AppController::default();
 
         // The connect-time value, in both hosts for the same reason: the managed frame sent
         // `clicker.FightStatusEnabled`, whose backing field is `false`, and `ProfileManager`
-        // loaded that from `Profile.FightStatusEnabled = false`. This port keeps one copy of
-        // the truth, on the profile, and the payload reads it.
+        // loaded that from `Profile.FightStatusEnabled = false`. Here the default profile's
+        // field seeds no switch, so the frame sends the same `false`.
         assert!(!app.profile().fight_status_enabled);
         let payload = app.config_payload();
         assert!(!payload.fight_status);
@@ -820,11 +861,8 @@ mod tests {
         assert_eq!(payload.gui_theme, profile.gui_theme);
         assert_eq!(payload.left, profile.left_click_enabled);
 
-        // Flipping the profile is the only way to move it, in either direction.
-        assert!(app.update_profile(|profile| {
-            profile.fight_status_enabled = true;
-            true
-        }));
+        // The switch is what moves it, in either direction.
+        assert!(app.set_module_enabled(EnabledFlag::FightStatus, true));
         let payload = app.config_payload();
         assert!(payload.fight_status);
         assert!(
@@ -834,22 +872,35 @@ mod tests {
             "the frame the bridge parses has to carry it, not just the struct"
         );
 
-        assert!(app.update_profile(|profile| {
-            profile.fight_status_enabled = false;
-            true
-        }));
+        assert!(app.set_module_enabled(EnabledFlag::FightStatus, false));
         assert!(!app.config_payload().fight_status);
 
-        // And a panic reset is a third way it moves, which is the case the managed host had
-        // to get right: `TriggerPanicAsync` cleared `Clicker.FightStatusEnabled`, so the
-        // frame it sent said false afterwards. Here the panic clears the profile field, and
-        // the frame follows without knowing about panics.
-        let mut toggles = crate::clicker::ModuleToggles::default();
-        app.update_profile(|profile| {
+        // The saved field on its own does not: it is the value the switch is seeded from, not
+        // a second source inside the mapping. Replacing the profile seeds it, which is the
+        // apply step, and that is how a saved fight status reaches the wire.
+        assert!(app.update_profile(|profile| {
             profile.fight_status_enabled = true;
-            crate::clicker::panic_reset(&mut toggles, profile);
             true
-        });
+        }));
+        assert!(
+            !app.config_payload().fight_status,
+            "an in-place profile edit is not an apply: the switch is what the frame reads"
+        );
+        let mut loaded = Profile::default();
+        loaded.fight_status_enabled = true;
+        app.replace_profile(loaded);
+        assert!(
+            app.config_payload().fight_status,
+            "adopting a profile seeds its switches, the way ApplyToClicker filled the Clicker"
+        );
+
+        // And a panic reset moves it, which is the case the managed host had to get right:
+        // `TriggerPanicAsync` cleared `Clicker.FightStatusEnabled`, so the frame it sent said
+        // false afterwards.
+        assert!(
+            app.panic_reset(),
+            "the panic has to find something to turn off"
+        );
         assert!(
             !app.config_payload().fight_status,
             "a panic reset turns fight status off in the frame the bridge receives"
@@ -957,6 +1008,42 @@ mod tests {
         assert!(
             app.config_frame().to_line().contains("\"hudEditor\":false"),
             "closing it has to reach the frame too"
+        );
+    }
+
+    /// A switch press has to reach a frame that is already built. The sender compares the
+    /// frame it last sent, so a press that left the cache warm would keep telling the bridge
+    /// the module was off, which is the defect this wiring closes.
+    #[test]
+    fn a_switch_press_reaches_the_warm_frame() {
+        let app = AppController::default();
+        let before = app.config_frame().to_line();
+        assert!(
+            !before.contains("\"aimAssist\":true"),
+            "the default profile has no module on: {before}"
+        );
+        let layout = app.config_frame().hud_layout.clone();
+
+        assert!(
+            app.set_module_enabled(EnabledFlag::AimAssist, true),
+            "the press moves the switch"
+        );
+        let after = app.config_frame();
+        assert!(
+            after.to_line().contains("\"aimAssist\":true"),
+            "a switch press has to reach a frame that was already built"
+        );
+        assert_eq!(
+            &after.hud_layout, &layout,
+            "a switch press must not disturb the HUD layout"
+        );
+
+        // The guard is a read lock on the cache; the next line writes it.
+        drop(after);
+
+        assert!(
+            !app.set_module_enabled(EnabledFlag::AimAssist, true),
+            "a press that changes nothing reports nothing"
         );
     }
 

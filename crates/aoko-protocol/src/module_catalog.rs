@@ -116,6 +116,73 @@ pub fn flag_for_id(module_id: &str) -> Option<EnabledFlag> {
         .filter(|flag| *flag != EnabledFlag::Never)
 }
 
+/// The `config` frame key each module switch feeds.
+///
+/// This is the last hop of the chain `flag_for_id` starts: module id -> [`EnabledFlag`] ->
+/// frame key. `aoko-core`'s `config_map` reads the switch, not this table, for each key it
+/// writes; the table exists so a test can prove the two agree one switch at a time, and so a
+/// module added to the catalogue without a frame key fails a test instead of silently
+/// shipping a stale boolean.
+///
+/// Every switch the catalogue carries appears here exactly once, except the two listed in
+/// [`MODULE_WIRE_KEY_EXCEPTIONS`]; the keybind-only `panic` entry carries no boolean at all,
+/// so it has neither a switch nor a key.
+pub const MODULE_WIRE_KEYS: [(EnabledFlag, &str); 39] = [
+    // `Clicker.IsArmed` (`GameStateClient.cs`), which is the switch this port calls
+    // `LeftClick`: arming is what the left clicker's card toggles.
+    (EnabledFlag::LeftClick, "armed"),
+    (EnabledFlag::RightClick, "right"),
+    (EnabledFlag::BreakBlocks, "breakBlocks"),
+    (EnabledFlag::ClickInChests, "clickInChests"),
+    (EnabledFlag::AimAssist, "aimAssist"),
+    (EnabledFlag::Triggerbot, "triggerbot"),
+    (EnabledFlag::KillAura, "killAura"),
+    (EnabledFlag::SpeedBridge, "speedBridge"),
+    (EnabledFlag::GtbHelper, "gtbHelper"),
+    (EnabledFlag::PixelPartyAssist, "pixelPartyAssist"),
+    (EnabledFlag::Nametags, "nametags"),
+    (EnabledFlag::NickHider, "nickHiderEnabled"),
+    (EnabledFlag::ClosestPlayerInfo, "closestPlayerInfo"),
+    (EnabledFlag::FightStatus, "fightStatus"),
+    (EnabledFlag::ChestEsp, "chestEsp"),
+    (EnabledFlag::ChestStealer, "chestStealerEnabled"),
+    (EnabledFlag::Refill, "refillEnabled"),
+    (EnabledFlag::BlockEsp, "blockEspEnabled"),
+    (EnabledFlag::BedPlates, "bedPlatesEnabled"),
+    (EnabledFlag::Reach, "reachEnabled"),
+    (EnabledFlag::Velocity, "velocityEnabled"),
+    (EnabledFlag::AutoTotem, "autoTotemEnabled"),
+    (EnabledFlag::AutoRod, "autoRodEnabled"),
+    (EnabledFlag::Throwpot, "throwpotEnabled"),
+    (EnabledFlag::AutoHeal, "autoHealEnabled"),
+    (EnabledFlag::AutoTool, "autoToolEnabled"),
+    (EnabledFlag::AntiDebuff, "antiDebuffEnabled"),
+    (EnabledFlag::HitDelayFix, "hitDelayFixEnabled"),
+    (EnabledFlag::FireballWarning, "fireballWarning"),
+    (EnabledFlag::FastPlace, "fastPlace"),
+    (EnabledFlag::NoHurtCam, "noHurtCam"),
+    (EnabledFlag::Sprint, "sprint"),
+    (EnabledFlag::TntTimer, "tntTimer"),
+    (EnabledFlag::WTap, "wTap"),
+    (EnabledFlag::JumpReset, "jumpReset"),
+    (EnabledFlag::HitSelect, "hitSelect"),
+    (EnabledFlag::Trajectories, "trajectories"),
+    (EnabledFlag::MurderMystery, "murderMystery"),
+    (EnabledFlag::BreakProgress, "breakProgress"),
+];
+
+/// The switches [`MODULE_WIRE_KEYS`] deliberately leaves out.
+///
+/// * [`EnabledFlag::Jitter`] — the managed `Clicker.JitterEnabled` was itself a derived
+///   property, `RandomizationMode != Basic` (`Clicker.cs:350`), so the frame's `jitter`
+///   follows the profile's mode. The switch is never written by the app, so making the frame
+///   read it would make the frame disagree with the clicker.
+/// * [`EnabledFlag::HudEditorActive`] — the mode is not a stored switch: the controller holds
+///   it (`AppController::set_hud_editor`) and passes it to the mapping as a parameter, which
+///   is also why it must not enter the switch set (the Discord presence counts that set).
+pub const MODULE_WIRE_KEY_EXCEPTIONS: [EnabledFlag; 2] =
+    [EnabledFlag::Jitter, EnabledFlag::HudEditorActive];
+
 /// One integer module setting: wire key, profile property, clamp range, default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SettingSpec {
@@ -510,4 +577,67 @@ pub fn count_enabled_for_discord(
     requiring(Surfaces::DISCORD_RPC)
         .filter(|entry| is_gui_visible(entry, dev_mode) && is_enabled(entry.enabled_flag))
         .count()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config_payload::CONFIG_KEYS;
+
+    /// The switch-to-frame-key table, guarded the way the payload guard guards itself: every
+    /// switch the catalogue carries is mapped exactly once or listed as an exception, nothing
+    /// is mapped twice, every mapped key is a real frame key, and every exception is a switch
+    /// the catalogue actually carries. A module added without a frame key fails here rather
+    /// than shipping a boolean nobody updates.
+    #[test]
+    fn every_catalog_switch_has_exactly_one_frame_key() {
+        for entry in ALL {
+            let flag = entry.enabled_flag;
+            if flag == EnabledFlag::Never {
+                assert!(
+                    !MODULE_WIRE_KEYS.iter().any(|(mapped, _)| *mapped == flag),
+                    "{} has no boolean, so it cannot feed a frame key",
+                    entry.id
+                );
+                continue;
+            }
+            if MODULE_WIRE_KEY_EXCEPTIONS.contains(&flag) {
+                assert!(
+                    !MODULE_WIRE_KEYS.iter().any(|(mapped, _)| *mapped == flag),
+                    "{} is an exception, so the table must not carry its switch",
+                    entry.id
+                );
+                continue;
+            }
+            let mapped = MODULE_WIRE_KEYS
+                .iter()
+                .filter(|(mapped, _)| *mapped == flag)
+                .count();
+            assert_eq!(
+                mapped, 1,
+                "{} ({flag:?}) must feed exactly one frame key, and feeds {mapped}",
+                entry.id
+            );
+        }
+
+        for (index, (flag, key)) in MODULE_WIRE_KEYS.iter().enumerate() {
+            assert!(
+                CONFIG_KEYS.contains(key),
+                "{key} is not a config frame key, so {flag:?} would feed nothing"
+            );
+            assert!(
+                !MODULE_WIRE_KEYS[..index]
+                    .iter()
+                    .any(|(_, other)| other == key),
+                "{key} is mapped twice"
+            );
+        }
+
+        for flag in MODULE_WIRE_KEY_EXCEPTIONS {
+            assert!(
+                ALL.iter().any(|entry| entry.enabled_flag == flag),
+                "{flag:?} is an exception the catalogue does not carry"
+            );
+        }
+    }
 }
