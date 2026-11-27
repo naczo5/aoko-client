@@ -43,12 +43,12 @@
 //!
 //! **One writer, and it is the reader.** `Transport` gives a single `&mut self` for both
 //! directions, so a second thread would have to share the transport behind a lock — and the
-//! socket's read blocks with no timeout (`aoko-platform/src/tcp.rs:87`), which would starve
-//! that lock for as long as the bridge is quiet. Instead the read loop syncs before every
-//! read: the transport is owned by one thread, a write can never land inside a read, and a
-//! torn frame is not something a lock has to prevent. The cost is latency, not correctness —
-//! a change goes out on the next inbound frame, and the bridge streams state at tens of
-//! hertz.
+//! socket's read blocks for as long as the bridge is quiet, which would starve that lock.
+//! Instead the read loop syncs before every read: the transport is owned by one thread, a write
+//! can never land inside a read, and a torn frame is not something a lock has to prevent. The
+//! cost is latency, not correctness — a change goes out on the next frame, which is at most one
+//! `READ_TICK` away even while the game is silent, and a bridge streaming state at tens of
+//! hertz answers sooner.
 //!
 //! The managed host runs a separate `ConfigSenderLoop` with a 2 s heartbeat
 //! (`GameStateClient.cs:1265-1345`). That shape needs a writer that can make progress while a
@@ -81,20 +81,33 @@
 //! chest stealer, the HUD layout) saw a dead game rather than a slow one. See
 //! `dial_with_retries` for the numbers and `DIAL_ATTEMPTS` for the bound.
 //!
-//! What is still out of scope: the managed host also *re*connected after a live link dropped
-//! (`ScheduleAutoReconnectAsync`, `GameStateClient.cs:626-660`) and tore its socket down on close.
-//! Neither is here. The reader thread is detached when `crate::ingest::Ingest` is dropped, and a
-//! blocking `recv_line` on a live socket cannot be interrupted without closing it - closing it is
-//! the transport's job, not this module's. `Ingest`'s stop flag therefore ends a reader that is
-//! *waiting to dial*, which is the case a replaced reader is always in.
+//! # The reconnect
+//!
+//! A link that was up and went down is dialled again, one attempt `RECONNECT_DELAY` apart, and
+//! `ScheduleAutoReconnectAsync` (`GameStateClient.cs:626-660`) is the reference: the game restarts
+//! and comes back, and the reader that lost the old link is what finds the new one. Managed also
+//! painted `"Reconnecting to agent..."` over the read loop's `"Disconnected from agent."` for every
+//! round; this reader leaves `LinkFailure::Disconnected` standing instead, so the panel's reason is
+//! the drop that happened rather than a state that flips once a second.
+//!
+//! Two things a reader needs for that to be safe, and neither is the transport's:
+//!
+//! * **A bounded read.** The socket carries `READ_TICK`, so a quiet link returns the thread and the
+//!   stop flag is read a few times a second instead of only when a frame arrives.
+//! * **A way out of a blocked read.** [`Ingest`]'s drop shuts the socket down through a duplicate
+//!   of the handle it dialled, so a reader that is *inside* `recv_line` returns end of stream
+//!   instead of keeping the connection. Before that duplicate, every re-dial detached a reader
+//!   that was still attached - a second live socket, and a thread still publishing into the store
+//!   the replacement had taken over.
 
+use std::net::{Shutdown, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockWriteGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use aoko_core::app::{AppController, ConfigFrame};
-use aoko_platform::TcpBridgeTransport;
+use aoko_platform::{TcpBridgeTransport, BRIDGE_ADDRESS};
 use aoko_protocol::capabilities::BridgeCapabilities;
 use aoko_protocol::codec::{Decoder, Inbound, Pump, TransportClient};
 use aoko_protocol::diagnostics::ManagedTransportDiagnostics;
@@ -127,6 +140,206 @@ const DIAL_ATTEMPTS: u32 = 30;
 /// (`GameStateClient.cs:486`).
 const DIAL_RETRY: Duration = Duration::from_millis(500);
 
+/// How long the reader waits between one re-dial round and the next.
+///
+/// `ScheduleAutoReconnectAsync`'s `await Task.Delay(1000)` inside its loop
+/// (`GameStateClient.cs:626-660`) after the first 500 ms pause. A round is one attempt, so the game
+/// gets a dial a second for as long as the reader lives, and the reader is stopped by [`Ingest`]'s
+/// drop rather than by a count.
+const RECONNECT_DELAY: Duration = Duration::from_millis(1_000);
+
+/// How long a dialled socket may block a read before the reader gets its thread back.
+///
+/// A socket `TcpBridgeTransport` dials carries no read timeout, so `recv_line` blocks until the
+/// bridge speaks or closes - a replaced reader with no timeout sits on a live connection forever.
+/// A quarter of a second is short enough that a dropped reader notices the stop flag promptly and
+/// long enough that a streaming bridge rarely waits at all, since a frame at tens of hertz arrives
+/// well inside one tick.
+const READ_TICK: Duration = Duration::from_millis(250);
+
+/// The socket a reader is blocked on, so the handle that owns the reader can cut it.
+///
+/// A stop flag ends a reader that is between reads, and nothing else: `recv_line` waits in the
+/// kernel and never looks at the flag. Shutting the connection down does wake it - the blocked
+/// read returns end of stream - which is what stops a replaced reader from keeping a socket
+/// attached and publishing into the store its replacement owns. The duplicate is the same socket
+/// (`TcpStream::try_clone`), so the shutdown reaches the read this thread is holding.
+#[derive(Clone, Default)]
+struct LinkGuard(Arc<Mutex<Option<TcpStream>>>);
+
+impl LinkGuard {
+    /// Hands the dialled socket to the guard, which owns it until [`Self::cut`].
+    fn arm(&self, socket: TcpStream) {
+        *self.slot() = Some(socket);
+    }
+
+    /// Shuts the connection down, waking a reader blocked in `recv_line` with end of stream.
+    ///
+    /// An already-closed socket answers with an error and is dropped: the wake-up is the whole
+    /// purpose, and a reader that finished first has nothing left to interrupt.
+    fn cut(&self) {
+        if let Some(socket) = self.slot().take() {
+            let _ = socket.shutdown(Shutdown::Both);
+        }
+    }
+
+    /// The slot, with a poisoned lock recovered rather than skipped: it guards one handle, not an
+    /// invariant another thread's panic could have broken, and skipping it would leak exactly the
+    /// connection this type exists to close.
+    fn slot(&self) -> MutexGuard<'_, Option<TcpStream>> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// Dials the loopback bridge, and hands back a duplicate of the socket beside the transport.
+///
+/// The duplicate is how the reader gets the two things `Transport` cannot express: `READ_TICK` as
+/// the socket's read timeout, so a read that blocks returns the thread instead of holding it until
+/// the bridge next speaks, and a shutdown in [`Ingest`]'s drop, which wakes a read that is already
+/// blocked. Socket options and the shutdown state belong to the socket, so setting either through
+/// the duplicate is setting it for the reader.
+///
+/// The timeout is set after `from_stream`, which sets the read timeout to `None`, and on the
+/// duplicate rather than on the stream the transport took: the option lands last, so the reader
+/// runs on `READ_TICK` and not on the transport's default.
+fn dial_loopback() -> Result<(TcpBridgeTransport, TcpStream), TransportError> {
+    let stream = TcpStream::connect(BRIDGE_ADDRESS)?;
+    let socket = stream.try_clone()?;
+    let transport = TcpBridgeTransport::from_stream(stream)?;
+    socket.set_read_timeout(Some(READ_TICK))?;
+    Ok((transport, socket))
+}
+
+/// Whether a read error is the socket's read timeout rather than a broken link.
+///
+/// `dial_loopback` puts `READ_TICK` on every socket this module dials, so a quiet bridge surfaces
+/// as a timeout instead of as a block: Unix reports `WouldBlock`, Windows reports `TimedOut`, and
+/// neither is a disconnect. `TcpBridgeTransport` keeps the bytes of a half-read frame across the
+/// error, so the next read resumes the line rather than losing it.
+fn is_read_timeout(error: &TransportError) -> bool {
+    matches!(
+        error,
+        TransportError::Io(io)
+            if matches!(
+                io.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            )
+    )
+}
+
+/// Dials the loopback bridge and reads it, and re-dials for as long as this reader is the live one.
+///
+/// The first round is the press's attach: `DIAL_ATTEMPTS` dials [`DIAL_RETRY`] apart, because the
+/// bridge's listener only binds after `LoadLibrary` returns. A first round that never finds a
+/// bridge publishes [`LinkFailure::ConnectFailed`] and ends the reader, which is the answer the
+/// press is owed.
+///
+/// Every round after a link has been up is one dial [`RECONNECT_DELAY`] apart, which is
+/// `ScheduleAutoReconnectAsync` (`GameStateClient.cs:626-660`): the game restarts, its bridge
+/// rebinds, and the reader that was attached to the link it lost is what attaches again. Without
+/// it a restart ended the session until the user pressed Inject a second time, and every panel
+/// went on showing the session that was gone. A reconnect round publishes no failure of its own -
+/// `pump`'s exit already published [`LinkFailure::Disconnected`], and that is still the truth
+/// while the bridge is not there.
+///
+/// Nothing here publishes `connected`: that is `pump`'s first line, so the store reads disconnected
+/// for the whole time a round is dialling, and a reader that a new press replaced leaves without
+/// touching the store, the report or the capability cell.
+fn serve(
+    controller: &AppController,
+    advertised: &RwLock<BridgeCapabilities>,
+    report: &LinkReport,
+    stop: &AtomicBool,
+    link: &LinkGuard,
+) {
+    let mut attempts = DIAL_ATTEMPTS;
+    let mut ever_linked = false;
+
+    loop {
+        if stop.load(Ordering::SeqCst) {
+            tracing::debug!("bridge reader stopped: its handle was dropped");
+            return;
+        }
+
+        match dial_with_retries(dial_loopback, stop, attempts, DIAL_RETRY) {
+            Some((transport, socket)) => {
+                // A dial that answers after the handle was dropped owns a link nobody reads. Both
+                // halves drop here, which closes the connection instead of leaving a reader
+                // attached to a bridge the reader that replaced this one also dialled.
+                if stop.load(Ordering::SeqCst) {
+                    tracing::debug!(
+                        "bridge dial answered after the reader was replaced; the link is closed \
+                         unread"
+                    );
+                    return;
+                }
+                // Armed before the first read, so a drop between here and the loop finds a socket
+                // to shut down rather than an empty guard.
+                link.arm(socket);
+                // A reason from an earlier attempt must not outlive the link that makes it false:
+                // `Runtime::link_failure` reads this cell first, so a stale `ConnectFailed` paints
+                // over a session that is already connected.
+                report.clear();
+                tracing::info!("bridge connected on the loopback port");
+                ever_linked = true;
+                let (reader, counts) = client(transport);
+                pump(reader, counts, controller, advertised, report, stop);
+                // The pump owns the transport, so its return is the end of this connection:
+                // releasing the duplicate keeps one handle per link rather than one per reader.
+                link.cut();
+                tracing::info!("bridge link closed");
+            }
+            None => {
+                // A raised stop is this reader being replaced, not a failed dial. Publishing here
+                // would overwrite the answer of the reader that replaced it.
+                if stop.load(Ordering::SeqCst) {
+                    tracing::debug!("bridge dial abandoned: the reader was replaced");
+                    return;
+                }
+                if ever_linked {
+                    // The link was up and the bridge is not answering yet, which is a game that is
+                    // still starting. The report already says the session dropped, so a round that
+                    // found nothing leaves it standing instead of repainting every second.
+                    tracing::debug!("bridge re-dial found no listener; keeping the last report");
+                } else {
+                    // Not fatal: the window is usable without a bridge. The reason is published as
+                    // well as logged, because the loader panel is what a user can act on and
+                    // `connected` alone cannot say why it is false.
+                    tracing::warn!(
+                        "no bridge on the loopback port after {DIAL_ATTEMPTS} dial attempts"
+                    );
+                    report.publish(LinkFailure::ConnectFailed {
+                        port: aoko_protocol::BRIDGE_PORT,
+                    });
+                    return;
+                }
+            }
+        }
+
+        // One attempt per round from here on, the managed reconnect's shape, and a pause that a
+        // raised stop cuts short rather than a nap nothing can interrupt.
+        attempts = 1;
+        sleep_unless_stopped(stop, RECONNECT_DELAY);
+    }
+}
+
+/// Sleeps up to `delay`, in `READ_TICK` steps, and returns early once `stop` is raised.
+fn sleep_unless_stopped(stop: &AtomicBool, delay: Duration) {
+    let deadline = Instant::now() + delay;
+    loop {
+        if stop.load(Ordering::SeqCst) {
+            return;
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return;
+        }
+        thread::sleep((deadline - now).min(READ_TICK));
+    }
+}
+
 /// Dials until `dial` answers, the window closes, or `stop` is raised.
 ///
 /// `GameStateClient.ConnectAsync`'s retry loop (`GameStateClient.cs:464-489`) with the same
@@ -156,7 +369,9 @@ fn dial_with_retries<T>(
                 // would put thirty lines in the shipped log for one slow bridge.
                 tracing::debug!(%error, attempt = attempt, "bridge dial failed");
                 if attempt < attempts {
-                    thread::sleep(retry);
+                    // A nap a dropped handle can cut short: the window is fifteen seconds long and
+                    // a replaced reader has no business finishing one of them.
+                    sleep_unless_stopped(stop, retry);
                 }
             }
         }
@@ -279,6 +494,9 @@ pub enum LinkFailure {
         port: u16,
     },
     /// The link was up and went down, which is the transition `connected` alone cannot express.
+    ///
+    /// It stays published while the reader re-dials: the session did drop, and a round that has not
+    /// found the bridge again has nothing newer to say than that.
     Disconnected,
 }
 
@@ -303,22 +521,27 @@ impl LinkReport {
 
     /// Records why the link is down. Called by the reader thread only.
     pub fn publish(&self, failure: LinkFailure) {
-        if let Ok(mut cell) = self.0.lock() {
-            *cell = Some(failure);
-        }
+        *self.cell() = Some(failure);
     }
 
     /// Forgets the last answer, which is what a new dial does before it starts.
     pub fn clear(&self) {
-        if let Ok(mut cell) = self.0.lock() {
-            *cell = None;
-        }
+        *self.cell() = None;
     }
 
     /// The last answer, `None` while an attempt is still unanswered.
     #[must_use]
     pub fn read(&self) -> Option<LinkFailure> {
-        self.0.lock().ok().and_then(|cell| *cell)
+        *self.cell()
+    }
+
+    /// The cell, with a poisoned lock recovered rather than skipped: it guards one `Copy` value,
+    /// not an invariant another thread's panic could have broken, and skipping it would leave the
+    /// panel answering "still dialling" for the rest of the session.
+    fn cell(&self) -> MutexGuard<'_, Option<LinkFailure>> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -326,10 +549,13 @@ impl LinkReport {
 pub struct Ingest {
     /// `None` only when the thread could not be started; the reason is logged.
     worker: Option<JoinHandle<()>>,
-    /// Raised when this handle is dropped, so a reader that is *waiting to dial again* stops
-    /// instead of racing the reader that replaced it. Shared with the worker, which reads it
-    /// before every attempt and between every frame.
+    /// Raised when this handle is dropped. Shared with the worker, which reads it before every
+    /// attempt, before every read and on the way out of the loop, so a replaced reader stops
+    /// instead of racing the reader that took the store over.
     stop: Arc<AtomicBool>,
+    /// The socket that reader is on, so dropping this handle can cut it. Empty until the dial
+    /// answers, and empty for a transport that was attached rather than dialled.
+    link: LinkGuard,
 }
 
 impl Ingest {
@@ -339,6 +565,10 @@ impl Ingest {
     /// OS SYN timeout, and the startup path must not wait for it. It is also *retried* inside the
     /// thread, up to `DIAL_ATTEMPTS` times `DIAL_RETRY` apart, because the press that injected
     /// the bridge races the bridge's own listener: see the module header and `dial_with_retries`.
+    ///
+    /// The worker outlives the first link. When the link drops it re-dials, one attempt
+    /// `RECONNECT_DELAY` apart, for as long as this handle is alive - a game that restarts comes
+    /// back on the same reader rather than waiting for a second press. See `serve`.
     ///
     /// A test build returns a reader with no worker instead of dialling. That is the rule this
     /// module's header states — no test opens a socket, because a bridge genuinely listening on the
@@ -353,59 +583,22 @@ impl Ingest {
         report: LinkReport,
     ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
+        let link = LinkGuard::default();
         if cfg!(test) {
-            return Self { worker: None, stop };
+            return Self {
+                worker: None,
+                stop,
+                link,
+            };
         }
 
         let reading = {
             let stop = Arc::clone(&stop);
-            move || {
-                match dial_with_retries(
-                    TcpBridgeTransport::connect_bridge,
-                    stop.as_ref(),
-                    DIAL_ATTEMPTS,
-                    DIAL_RETRY,
-                ) {
-                    Some(transport) => {
-                        // A reason from an earlier attempt must not outlive the link that makes it
-                        // false: `Runtime::link_failure` reads this cell first, so a stale
-                        // `ConnectFailed` paints over a session that is already connected.
-                        report.clear();
-                        tracing::info!("bridge connected on the loopback port");
-                        let (reader, counts) = client(transport);
-                        pump(
-                            reader,
-                            counts,
-                            &controller,
-                            &advertised,
-                            &report,
-                            stop.as_ref(),
-                        );
-                        tracing::info!("bridge link closed");
-                    }
-                    None => {
-                        // A raised stop is this reader being replaced, not a failed dial. Publishing
-                        // here would overwrite the answer of the reader that replaced it.
-                        if stop.load(Ordering::SeqCst) {
-                            tracing::debug!("bridge dial abandoned: the reader was replaced");
-                            return;
-                        }
-                        // Not fatal: the window is usable without a bridge. The reason is published
-                        // as well as logged, because the loader panel is what a user can act on and
-                        // `connected` alone cannot say why it is false.
-                        tracing::warn!(
-                            "no bridge on the loopback port after {} dial attempts",
-                            DIAL_ATTEMPTS
-                        );
-                        report.publish(LinkFailure::ConnectFailed {
-                            port: aoko_protocol::BRIDGE_PORT,
-                        });
-                    }
-                }
-            }
+            let link = link.clone();
+            move || serve(&controller, &advertised, &report, stop.as_ref(), &link)
         };
 
-        Self::start("aoko-bridge-dial", stop, reading)
+        Self::start("aoko-bridge-dial", stop, link, reading)
     }
 
     /// Attaches an already-connected transport and starts the reader.
@@ -435,13 +628,15 @@ impl Ingest {
                 )
             }
         };
-        Self::start("aoko-bridge-read", stop, reading)
+        Self::start("aoko-bridge-read", stop, LinkGuard::default(), reading)
     }
 
     /// Waits for the reader to finish.
     ///
-    /// Only a transport that ends on its own can finish: a real socket blocks in
-    /// `recv_line` until the peer closes. Tests call this to prove the disconnect path.
+    /// Only a transport that ends on its own can finish, which is [`Ingest::attach`]'s memory
+    /// duplex: a socket reader re-dials instead of returning when its link drops (`serve`), so this
+    /// would wait for as long as the handle exists. Tests call it to prove the disconnect path;
+    /// dropping the handle is how a dialled reader is stopped.
     pub fn join(mut self) {
         if let Some(worker) = self.worker.take() {
             if worker.join().is_err() {
@@ -451,7 +646,7 @@ impl Ingest {
     }
 
     /// Starts the worker, logging rather than panicking when the OS refuses a thread.
-    fn start<F>(name: &str, stop: Arc<AtomicBool>, body: F) -> Self
+    fn start<F>(name: &str, stop: Arc<AtomicBool>, link: LinkGuard, body: F) -> Self
     where
         F: FnOnce() + Send + 'static,
     {
@@ -459,10 +654,15 @@ impl Ingest {
             Ok(worker) => Self {
                 worker: Some(worker),
                 stop,
+                link,
             },
             Err(error) => {
                 tracing::warn!("cannot start the bridge reader thread: {error}");
-                Self { worker: None, stop }
+                Self {
+                    worker: None,
+                    stop,
+                    link,
+                }
             }
         }
     }
@@ -470,11 +670,13 @@ impl Ingest {
 
 impl Drop for Ingest {
     fn drop(&mut self) {
-        // The one thing this handle can still do to a blocked worker: a reader that is between
-        // dial attempts reads this and returns, so replacing the reader does not leave two of them
-        // dialling the same port. A reader inside `recv_line` on a live socket is out of reach -
-        // interrupting it means closing the socket, which the transport owns and this type does not.
+        // Two halves, because neither is enough on its own. The flag ends a reader that is between
+        // dial attempts or between reads, so replacing the reader does not leave two of them
+        // dialling the same port; cutting the socket is what ends one that is *inside* `recv_line`,
+        // which no flag reaches. Together they are what stops a re-dial from leaving the old reader
+        // attached to a live link and publishing into the store its replacement owns.
         self.stop.store(true, Ordering::SeqCst);
+        self.link.cut();
     }
 }
 
@@ -493,12 +695,16 @@ impl Drop for Ingest {
 /// `advertised` is the cell [`crate::runtime::Runtime::module_supported`] reads. This thread
 /// is its only writer, because it is the thread that receives the capability frame.
 ///
-/// `stop` is the owning [`Ingest`]'s stop flag. It cannot interrupt a blocked `recv_line`, so it is
-/// read between frames: a reader whose handle was dropped leaves at the next frame instead of
-/// decoding into a store nobody watches any more. Leaving that way writes nothing - not the reason,
-/// not `connected`, not the capability cell - because the reader that replaced it owns all three.
-/// A quiet socket holds the thread until the peer speaks or closes, which is the transport's limit
-/// and not something this loop can fix.
+/// `stop` is the owning [`Ingest`]'s stop flag. It is read before the first frame, before every
+/// read and after the loop: a reader whose handle was dropped leaves instead of decoding into a
+/// store nobody watches any more, and a quiet link gives it the chance because the read timeout
+/// (`READ_TICK`) returns the thread. Leaving that way writes nothing - not the reason, not
+/// `connected`, not the capability cell - because the reader that replaced it owns all three.
+/// Only a reader that stopped on its own publishes the disconnect.
+///
+/// A read that times out with the bridge silent is not a failure: the loop keeps the link, syncs
+/// the config frame and reads again, so a frame on the wire is at most one tick after the change
+/// that produced it and no diagnostics are recorded for a tick that carried nothing.
 ///
 /// `counts` is the byte counter of `client`'s own transport. `TransportClient::pump` does not report
 /// how many bytes the frame it decoded held, so the reader takes that number from the layer the
@@ -512,6 +718,14 @@ fn pump<T: Transport>(
     report: &LinkReport,
     stop: &AtomicBool,
 ) {
+    // A reader replaced while it was dialling reaches this point with its flag already raised, and
+    // it owns no link: claiming `connected` here would say a link is up that this thread is about
+    // to leave, over the answer of the reader that replaced it.
+    if stop.load(Ordering::SeqCst) {
+        tracing::debug!("bridge reader stopped before its first read");
+        return;
+    }
+
     let store = controller.store();
     store.set_connected(true);
 
@@ -527,9 +741,8 @@ fn pump<T: Transport>(
 
     // The codec's own table, published once on entry: a window that opens before the handshake
     // asks the same question the decoder would answer, rather than reading an empty list.
-    if let Ok(mut cell) = advertised.write() {
-        *cell = client.decoder().capabilities().clone();
-    }
+    let capabilities = client.decoder().capabilities().clone();
+    *advertised_write(advertised) = capabilities;
 
     loop {
         if stop.load(Ordering::SeqCst) {
@@ -582,15 +795,19 @@ fn pump<T: Transport>(
             // table, so the shared cell is one clone away from being current, and the overlay's
             // `supported` column reads it through `Runtime::module_supported`.
             Ok(Pump::Frame(Inbound::Capabilities(_))) => {
-                if let Ok(mut cell) = advertised.write() {
-                    *cell = client.decoder().capabilities().clone();
-                }
+                let capabilities = client.decoder().capabilities().clone();
+                *advertised_write(advertised) = capabilities;
             }
             Ok(Pump::Frame(_)) => {}
             Ok(Pump::TooLong) => {
                 tracing::warn!("bridge line exceeded the 1 MiB inbound cap; discarded");
             }
             Ok(Pump::Closed) => break,
+            // Not a frame and not a failure: `READ_TICK` expired with the bridge quiet. The link
+            // is still up, so the loop goes back to the stop flag and the config compare - which is
+            // also what puts a profile change on the wire while the game is silent. Nothing is
+            // recorded: no frame arrived, and a tick would skew the inbound columns.
+            Err(error) if is_read_timeout(&error) => continue,
             Err(error) => {
                 tracing::warn!("bridge read failed: {error}");
                 break;
@@ -605,6 +822,15 @@ fn pump<T: Transport>(
         log_transport_diagnostics(&client, diagnostics_epoch);
     }
 
+    // A reader that was replaced while its link was open leaves the way it does inside the loop:
+    // it owns nothing, and the reader that replaced it owns the store, the report and the
+    // capability cell. This is the exit a cut socket takes, and publishing `Disconnected` here
+    // would paint over the link the replacement is dialling.
+    if stop.load(Ordering::SeqCst) {
+        tracing::debug!("bridge reader stopped with its link open; nothing published");
+        return;
+    }
+
     // The reason first, then the flag: see this function's doc for why the order is a
     // correctness requirement rather than style.
     report.publish(LinkFailure::Disconnected);
@@ -617,9 +843,19 @@ fn pump<T: Transport>(
     // gates a control on `module_supported` keeps the control enabled for a bridge that cannot
     // answer. The fallback is the same table `Runtime::new` seeds the cell with, so "no link" reads
     // exactly like "not connected yet".
-    if let Ok(mut cell) = advertised.write() {
-        *cell = BridgeCapabilities::for_version_fallback(None);
-    }
+    *advertised_write(advertised) = BridgeCapabilities::for_version_fallback(None);
+}
+
+/// The advertised-module cell's write guard, with a poisoned lock recovered rather than skipped.
+///
+/// The cell guards the bridge's advertised lists - a table a capability frame replaces wholesale -
+/// so the value a panicking reader left behind is stale, not corrupt, and the same recovery
+/// [`LinkReport::cell`] makes applies: skipping the write would freeze the list for the rest of the
+/// session, and every surface that gates a control on `module_supported` would keep the last frame's
+/// answer while the bridge advertised something else. The readers in `crate::runtime` recover the
+/// same way, so the two sides of the cell agree about what a poisoned lock means.
+fn advertised_write(cell: &RwLock<BridgeCapabilities>) -> RwLockWriteGuard<'_, BridgeCapabilities> {
+    cell.write().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Stores an inbound `hudLayout` into the active profile, unless it is the echo of what is there.
