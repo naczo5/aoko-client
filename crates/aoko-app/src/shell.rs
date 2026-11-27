@@ -391,7 +391,7 @@ impl Shell {
 
         // The loader's window list comes from the platform, and this is the only session that may
         // touch it: `default_services()` builds the real inspector, so a test or a capture run
-        // keeps `None` and opens no display connection (see [`Shell::windows`]).
+        // keeps `None` and opens no display connection (see `Shell::windows`).
         //
         // The loader is what a shipped window paints until the bridge answers
         // (`MainWindow.xaml.cs:469-492`). A session with no window surface starts *in* the control
@@ -1167,7 +1167,7 @@ impl Shell {
     /// Replaces the window surface, which is the seam a test drives the loader through.
     ///
     /// `None` is what `cfg(test)` and `capture` builds get, and it is also what a platform without
-    /// window inspection gets; see [`Shell::windows`].
+    /// window inspection gets; see `Shell::windows`.
     pub fn set_windows(&mut self, windows: Option<Arc<dyn WindowInspector>>) {
         self.windows = windows;
     }
@@ -1215,7 +1215,7 @@ impl Shell {
     ///
     /// The managed order: the button goes busy and says "Detecting", the targets are enumerated,
     /// a single one is taken without asking (`:1449-1452`), and more than one waits for a choice.
-    /// Then [`Shell::attach`] runs.
+    /// Then `Shell::attach` runs.
     ///
     /// The press is gated on the *painted* rule rather than on a second one of its own: the button
     /// is pressable exactly when [`Shell::injection_view`] says `enabled`, so a state the panel
@@ -1888,7 +1888,7 @@ impl Shell {
     /// The rail is the only control that changes tabs, so this is the choke point for a user-visible
     /// switch. A text field that lived in the old body has no node in the new frame, so it receives
     /// nothing — every character falls back to the dispatch tree's synthetic root — while
-    /// `Window::focused` keeps reporting it, which also keeps [`Shell::window_focus`] from taking
+    /// `Window::focused` keeps reporting it, which also keeps `Shell::window_focus` from taking
     /// the keyboard back. The symptom is a window whose Ctrl+K is dead until the user clicks a
     /// field.
     ///

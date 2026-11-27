@@ -65,7 +65,7 @@
 //!
 //! What this deliberately does not do: no reconnect, no command frames, no injection and no
 //! module execution. A failed dial leaves the link down, and the reason is published into the
-//! runtime's [`LinkReport`] as well as logged, because the loader panel is what a user can act on
+//! runtime's `LinkReport` as well as logged, because the loader panel is what a user can act on
 //! and `connected` alone cannot say why it is false. Retry, backoff and socket teardown belong to
 //! a later slice. The reader thread is detached when `crate::ingest::Ingest` is dropped: a
 //! blocking `recv_line` on a live socket cannot be interrupted without closing it, and closing it
