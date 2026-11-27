@@ -114,7 +114,11 @@ pub(crate) fn open_url_with(url: &str, launcher: &dyn UrlLauncher) -> Result<(),
 /// goes straight to a shell that will act on any scheme it understands.
 fn check_url(url: &str) -> Result<(), PlatformError> {
     let refused = |reason: &str| {
-        PlatformError::invalid_argument(format!("refusing to open {url:?}: {reason}"))
+        // `Display` inside explicit quotes, not `{:?}`: a detail is read by a user, and
+        // Debug renders a Windows path with doubled separators, which is the runtime's
+        // representation leaking into the sentence rather than the string the caller
+        // passed. Paths elsewhere in this crate use `display()` for the same reason.
+        PlatformError::invalid_argument(format!("refusing to open \"{url}\": {reason}"))
     };
 
     let Some((scheme, host)) = url.split_once("://") else {
