@@ -271,11 +271,26 @@ mod tests {
     }
 
     #[test]
-    fn the_probe_reports_availability_without_creating_a_device() {
-        // `is_available` only opens the node; no UI_DEV_CREATE is issued, so this
-        // is safe to run in CI where /dev/uinput is usually absent.
-        let available = is_available();
-        if !available {
+    fn the_probe_means_the_node_opens_not_that_it_exists() {
+        // `is_available` answers "can this session create a device", which is the
+        // node opening read-write. Asserted in both directions: the previous
+        // version only asserted when the node was unavailable, so a capable
+        // session ran zero assertions, and a probe weakened to `Path::exists()`
+        // would read as available on the stock root-only /dev/uinput.
+        let opens = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(device_path())
+            .is_ok();
+
+        assert_eq!(
+            is_available(),
+            opens,
+            "availability must mean the node opened, not that it exists"
+        );
+
+        if !opens {
+            // And the failure is classified rather than a panic.
             assert!(UinputDevice::create("aoko-test", &[], &[]).is_err());
         }
     }

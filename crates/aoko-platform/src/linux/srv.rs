@@ -128,12 +128,31 @@ nameserver 1.1.1.1
     }
 
     #[test]
-    fn the_live_file_parses_without_panicking() {
-        // CI may not have the file at all; either way the answer is a list of
-        // addresses or an empty list, never a panic.
+    fn the_live_file_parses_into_the_same_answer_the_parser_gives() {
+        // Skipped, not passed, when there is no file: `.all()` over an empty list
+        // is vacuously true, which is how this test used to look green on a box
+        // with no /etc/resolv.conf. The parser itself is covered above; what only
+        // the live file can prove is that `collect` adds nothing to it.
+        let Ok(text) = std::fs::read_to_string(RESOLV_CONF) else {
+            eprintln!("skipped: {RESOLV_CONF} is not readable in this environment");
+            return;
+        };
+
         let servers = collect_system_dns_servers();
-        assert!(servers
-            .iter()
-            .all(|server| server.parse::<IpAddr>().is_ok()));
+        assert_eq!(
+            servers,
+            parse_resolv_conf(&text),
+            "collect must be the read plus the parser, nothing else"
+        );
+
+        // And each answer is a real address, filtered and deduplicated.
+        let mut seen = std::collections::HashSet::new();
+        for server in &servers {
+            let address: IpAddr = server
+                .parse()
+                .unwrap_or_else(|err| panic!("{server:?} is not an address: {err}"));
+            assert!(!address.is_unspecified(), "{address} must be filtered");
+            assert!(seen.insert(server.clone()), "{server} appears twice");
+        }
     }
 }

@@ -258,11 +258,23 @@ mod tests {
     }
 
     #[test]
-    fn constructing_the_inspector_never_panics_without_a_display() {
-        // Whatever the environment, `new` must return a value with a diagnostic.
+    fn the_constructor_stores_a_diagnostic_exactly_when_it_has_no_backend() {
+        // Holds with and without DISPLAY, which is the point: the previous version
+        // asserted only on the headless path, so a capable session ran zero
+        // assertions here. `backend()` trusts exactly this invariant - it returns
+        // the stored error only when there is no connection - and `enumerate`
+        // reaches the OS only through it.
         let inspector = LinuxWindowInspector::new();
-        if !inspector.is_available() {
-            assert!(inspector.enumerate().is_err());
+
+        assert_eq!(
+            inspector.is_available(),
+            inspector.unavailable.is_none(),
+            "a usable inspector must not carry a stored error, and vice versa"
+        );
+
+        match (inspector.is_available(), inspector.enumerate()) {
+            (false, result) => assert!(result.is_err(), "no backend must not look like no windows"),
+            (true, result) => assert!(result.is_ok(), "a live display must enumerate: {result:?}"),
         }
     }
 

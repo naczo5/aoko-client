@@ -498,14 +498,22 @@ mod tests {
 
     #[test]
     fn instance_candidate_allows_unknown_metadata() {
-        let candidate = InstanceCandidate {
-            pid: 1,
-            label: "Minecraft".to_string(),
-            version: None,
-            launcher: None,
-            executable: None,
-        };
+        // A JVM with no title, no version and no client marker: the conversion
+        // must carry the unknown metadata through rather than inventing a version
+        // or a launcher, which is what a picker would then display as fact.
+        let described = describe_target(1, None, "", "java", None, None);
+        let candidate = described.to_candidate();
+
+        // The description itself is the empty case, not a fixture the test built.
+        assert_eq!(described.client_type, ClientType::JavaProcess);
+        assert_eq!(described.confidence, 10);
+        assert!(described.detected_version.is_none());
+
+        assert_eq!(candidate.pid, 1);
         assert!(candidate.version.is_none());
+        assert!(candidate.launcher.is_none());
+        assert!(candidate.executable.is_none());
+        assert_eq!(candidate.label, "Java process");
     }
 
     #[test]

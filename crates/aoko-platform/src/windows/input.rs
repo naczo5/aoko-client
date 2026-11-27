@@ -103,27 +103,32 @@ impl HookGuard {
         guard.mouse = mouse.0 as isize;
         Ok(guard)
     }
+
+    /// Passes each live handle to `unhook` exactly once and clears it.
+    ///
+    /// The callback is the seam the tests observe: with a recorder in place of
+    /// `UnhookWindowsHookEx`, "a zero handle is never unhooked" is an assertion
+    /// rather than a comment. `Drop` is the only production caller.
+    fn unhook(&mut self, mut unhook: impl FnMut(isize)) {
+        if self.keyboard != 0 {
+            unhook(self.keyboard);
+            self.keyboard = 0;
+        }
+        if self.mouse != 0 {
+            unhook(self.mouse);
+            self.mouse = 0;
+        }
+    }
 }
 
 impl Drop for HookGuard {
     fn drop(&mut self) {
-        // SAFETY: whichever handle is non-zero came from a successful
-        // `SetWindowsHookExW` in `install`, is still installed, and is cleared here,
-        // so each hook is unhooked exactly once.
-        if self.keyboard != 0 {
-            unsafe {
-                let _ = UnhookWindowsHookEx(HHOOK(self.keyboard as *mut core::ffi::c_void));
-            }
-            self.keyboard = 0;
-        }
-        if self.mouse != 0 {
-            // SAFETY: as above, for the mouse handle: it came from a successful
-            // `SetWindowsHookExW`, is still installed, and is zeroed here.
-            unsafe {
-                let _ = UnhookWindowsHookEx(HHOOK(self.mouse as *mut core::ffi::c_void));
-            }
-            self.mouse = 0;
-        }
+        self.unhook(|handle| {
+            // SAFETY: `unhook` only passes handles that came from a successful
+            // `SetWindowsHookExW` in `install`, and clears each field before it
+            // could be passed again, so this never sees a null or a stale `HHOOK`.
+            let _ = unsafe { UnhookWindowsHookEx(HHOOK(handle as *mut core::ffi::c_void)) };
+        });
     }
 }
 
@@ -524,14 +529,41 @@ mod tests {
     }
 
     #[test]
-    fn a_guard_without_handles_drops_without_calling_user32() {
+    fn a_guard_without_handles_unhooks_nothing() {
         // A zero handle is what `install` leaves behind when the second hook fails,
         // so `Drop` must treat it as "nothing to unhook" rather than passing a
-        // `NULL` `HHOOK` to `UnhookWindowsHookEx`.
-        drop(HookGuard {
+        // `NULL` `HHOOK` to `UnhookWindowsHookEx`. The recorder stands in for
+        // user32, so this asserts the call list instead of trusting a no-crash.
+        let mut guard = HookGuard {
             keyboard: 0,
             mouse: 0,
-        });
+        };
+        let mut unhooked = Vec::new();
+
+        guard.unhook(|handle| unhooked.push(handle));
+
+        assert!(unhooked.is_empty(), "unhooked {unhooked:?}");
+    }
+
+    #[test]
+    fn each_live_handle_is_unhooked_exactly_once() {
+        let mut guard = HookGuard {
+            keyboard: 0x11,
+            mouse: 0x22,
+        };
+        let mut unhooked = Vec::new();
+
+        guard.unhook(|handle| unhooked.push(handle));
+        assert_eq!(unhooked, vec![0x11isize, 0x22]);
+
+        // The fields are cleared as they are unhooked, so a second pass - `Drop`
+        // after an explicit call, or any double teardown - touches no stale handle.
+        guard.unhook(|handle| unhooked.push(handle));
+        assert_eq!(
+            unhooked,
+            vec![0x11isize, 0x22],
+            "a second pass must unhook nothing"
+        );
     }
 
     #[test]
@@ -570,11 +602,29 @@ mod tests {
     }
 
     #[test]
-    fn mouse_state_is_readable() {
+    fn the_mouse_sampler_always_answers_on_windows() {
+        // `mouse_state` is `probe_mouse_state().unwrap_or_default()`, and a button
+        // held down is not something a test can stage: with the desktop idle,
+        // `default()` equals the truth, so asserting on the value cannot tell a
+        // real read from a hardcoded one. What is observable is that the probe
+        // answers at all, which is what this pins.
+        assert!(
+            WindowsInputBackend::new().probe_mouse_state().is_some(),
+            "GetAsyncKeyState always has a definite answer on Windows"
+        );
+    }
+
+    #[test]
+    fn an_unqueryable_key_is_unknown_rather_than_up() {
+        // A key with no virtual-key code cannot be queried at all. Reporting it as
+        // "up" would tell the loops a key is released when nobody asked the OS.
         let backend = WindowsInputBackend::new();
-        let state = backend.mouse_state();
-        // Values are whatever the desktop reports; the contract is that the read
-        // is cheap and never fails.
-        let _ = state.left_down || state.right_down;
+        for key in [Key::F(0), Key::F(25), Key::Char('\u{100}')] {
+            assert_eq!(backend.probe_key_state(key), None, "{key:?} has no code");
+            assert!(
+                !backend.key_state(key),
+                "the fallback is `false`, not a panic"
+            );
+        }
     }
 }
