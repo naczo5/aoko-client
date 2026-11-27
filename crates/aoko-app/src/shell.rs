@@ -3745,6 +3745,19 @@ impl Shell {
             rail = rail.child(self.render_rail_item(index, tab.name, theme, entity));
         }
 
+        // `CurrentVersionText` (`MainWindow.xaml:278`), above the footer. Only the version line is
+        // here: the status half (`UpdateStatusText`, `:272`) needs the check, and the check needs a
+        // `ReleaseFetcher`, which no crate implements — see the report on this round.
+        rail = rail.child(
+            div()
+                .debug_selector(|| String::from("rail-version"))
+                .px(px(12.0))
+                .py(px(2.0))
+                .text_size(px(metrics::text::CAPTION))
+                .text_color(theme.dim_text)
+                .child(SharedString::from(Self::version_line())),
+        );
+
         rail.child(
             div()
                 .text_size(px(metrics::text::CAPTION))
@@ -3752,6 +3765,25 @@ impl Shell {
                 .child(SharedString::clone(chip)),
         )
         .into_any_element()
+    }
+
+    /// The rail's version line, `CurrentVersionText` (`MainWindow.xaml:278`).
+    ///
+    /// The version is the running build's, from [`aoko_core::services::update::current_version`] —
+    /// the module's port of `Assembly.GetName().Version?.ToString(3)` — and never a literal here, so
+    /// a release bump changes this line and nothing else. The sentence is [`copy::UPDATE_CURRENT`]'s;
+    /// the `{version}` placeholder is filled with `str::replace`, the convention this crate keeps for
+    /// a template in copy.
+    ///
+    /// Computed once: the value cannot change while the process lives, and the rail paints every
+    /// frame — a `format!` here would be one allocation per frame in the section-6 budget, which is
+    /// the thing `perf.rs`'s steady-state pin counts.
+    fn version_line() -> &'static str {
+        static LINE: OnceLock<String> = OnceLock::new();
+        LINE.get_or_init(|| {
+            copy::UPDATE_CURRENT
+                .replace("{version}", &aoko_core::services::update::current_version())
+        })
     }
 
     fn render_rail_item(
@@ -8255,6 +8287,33 @@ mod tests {
         assert_eq!(
             by_button, by_key,
             "the same open, query, selection and row count"
+        );
+    }
+
+    /// The rail paints the running build's version, and the module's reader is what says which.
+    ///
+    /// `CurrentVersionText` (`MainWindow.xaml:278`) is `Current vX.Y`; the value is
+    /// [`aoko_core::services::update::current_version`]'s — the port of
+    /// `Assembly.GetName().Version?.ToString(3)` — so a release bump moves this line and no version
+    /// literal exists in this file.
+    #[gpui::test]
+    fn the_rail_paints_the_running_builds_version(cx: &mut gpui::TestAppContext) {
+        let root = scratch_root();
+        let (_shell, _handle, mut visual) = shell_in_window(cx, &root);
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            visual.debug_bounds("rail-version").is_some(),
+            "the version line is in the rail, not only in the model"
+        );
+
+        let current = aoko_core::services::update::current_version();
+        let expected = copy::UPDATE_CURRENT.replace("{version}", &current);
+        assert_eq!(
+            Shell::version_line(),
+            expected.as_str(),
+            "the copy owner's sentence with the build's own version in its slot"
         );
     }
 
