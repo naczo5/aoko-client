@@ -443,6 +443,36 @@ impl AppController {
         changed
     }
 
+    /// The switch behind a checkbox bind, or `None` when that key names no switch.
+    ///
+    /// The shell writes two kinds of control through the profile: a module card, which is a
+    /// switch ([`set_module_enabled`](Self::set_module_enabled)), and a `Control::Check`,
+    /// which is a profile field. A few of those fields are the saved copy of a switch —
+    /// `breakBlocksEnabled` is one, `"Pause when breaking"` in the Block ESP card is where it
+    /// is painted — and the frame reads the switch, so the check has to move the switch too
+    /// or the module neither starts nor reaches the bridge until a save and a reload.
+    ///
+    /// The key is the profile's own property name, matched case-insensitively because the bind
+    /// is PascalCase (`"BreakBlocksEnabled"`) while the profile's serde names are camelCase.
+    /// That is the rule [`module_catalog::flag_for_id`] already uses for module ids.
+    ///
+    /// `None` for every key that names no switch, which is why this is a lookup and not "any
+    /// bind ending in `Enabled`": `PixelPartyAutoLookEnabled` and `PixelPartyAutoWalkEnabled`
+    /// are sub-settings the profile owns and the frame reads from the profile, and they must
+    /// stay that way.
+    ///
+    /// Returns what [`set_module_enabled`](Self::set_module_enabled) answers — whether the
+    /// switch moved — so a caller can fold it into its own change detection.
+    pub fn set_switch_for_profile_key(&self, key: &str, on: bool) -> Option<bool> {
+        let flag =
+            crate::config_map::SWITCH_PROFILE_KEYS
+                .iter()
+                .find_map(|(flag, profile_key)| {
+                    profile_key.eq_ignore_ascii_case(key).then_some(*flag)
+                })?;
+        Some(self.set_module_enabled(flag, on))
+    }
+
     /// Whether one module switch is on.
     #[must_use]
     pub fn is_module_enabled(&self, flag: EnabledFlag) -> bool {
@@ -1134,6 +1164,67 @@ mod tests {
         // The rest of the profile is the user's settings, untouched by the overlay.
         assert_eq!(reloaded.min_cps, working.min_cps);
         assert_eq!(reloaded.gui_theme, "Ember");
+    }
+
+    /// The checkbox half of the switch wiring: a bind that names a switch has to move it, and a
+    /// bind that names a sub-setting has to leave it alone.
+    ///
+    /// The frame assertion is the one that matters. It goes through the payload the bridge
+    /// parses, so the helper and `module_catalog::MODULE_WIRE_KEYS` are proved to agree about
+    /// the key the bridge reads — not merely to be built from the same constant.
+    #[test]
+    fn a_profile_key_can_move_the_switch_behind_it() {
+        let app = AppController::default();
+        // The nick hider's key needs an alias to be allowed on; that half is the profile's.
+        assert!(app.update_profile(|profile| {
+            profile.nick_hider_alias = "Player".to_owned();
+            true
+        }));
+
+        for (flag, wire_key) in module_catalog::MODULE_WIRE_KEYS {
+            let profile_key = crate::config_map::SWITCH_PROFILE_KEYS
+                .iter()
+                .find_map(|(mapped, key)| (*mapped == flag).then_some(*key))
+                .expect("every switch that feeds a key has a profile field");
+            // The binds are PascalCase, so the lookup has to fold case.
+            assert_eq!(
+                app.set_switch_for_profile_key(&profile_key.to_uppercase(), true),
+                Some(true),
+                "{profile_key} has to name {flag:?}"
+            );
+            let line = app.config_payload().to_line(&HudLayout::new());
+            let frame: Value = serde_json::from_str(&line).expect("the frame is JSON");
+            assert_eq!(
+                frame.get(wire_key).and_then(Value::as_bool),
+                Some(true),
+                "{profile_key} has to move {wire_key} on the wire"
+            );
+        }
+
+        // Sub-settings and unknown keys are not switches: the profile owns them and the frame
+        // reads the profile, so a blanket "any `*Enabled` bind" would be wrong here.
+        for key in [
+            "PixelPartyAutoLookEnabled",
+            "PixelPartyAutoWalkEnabled",
+            "NotASwitch",
+        ] {
+            assert_eq!(
+                app.set_switch_for_profile_key(key, true),
+                None,
+                "{key} names no switch"
+            );
+        }
+
+        // The bind this was found through: `"Pause when breaking"` in the Block ESP card.
+        assert_eq!(
+            app.set_switch_for_profile_key("BreakBlocksEnabled", false),
+            Some(true),
+            "the checkbox that pauses breaking has to reach its switch"
+        );
+        assert!(
+            !app.config_payload().break_blocks,
+            "and the frame has to follow it back off"
+        );
     }
 
     /// `reloadMappingsNonce` is how "Reload Mappings" reaches the bridge: the host bumps a
