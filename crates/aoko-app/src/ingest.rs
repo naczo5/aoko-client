@@ -85,10 +85,13 @@
 //!
 //! A link that was up and went down is dialled again, one attempt `RECONNECT_DELAY` apart, and
 //! `ScheduleAutoReconnectAsync` (`GameStateClient.cs:626-660`) is the reference: the game restarts
-//! and comes back, and the reader that lost the old link is what finds the new one. Managed also
-//! painted `"Reconnecting to agent..."` over the read loop's `"Disconnected from agent."` for every
-//! round; this reader leaves `LinkFailure::Disconnected` standing instead, so the panel's reason is
-//! the drop that happened rather than a state that flips once a second.
+//! and comes back, and the reader that lost the old link is what finds the new one. The reason the
+//! panel paints moves with it: `LinkFailure::Disconnected` on the read loop's way out, then
+//! `LinkFailure::Reconnecting` for as long as the redial finds nothing. That is the managed pair —
+//! `"Reconnecting to agent..."` (`:637`) was painted over the read loop's `"Disconnected from
+//! agent."` (`:615`) once a round — with one difference in where the flip lives: managed rewrote
+//! one string every second, and this reader publishes the state once and leaves it, so a frame
+//! that lands mid-round reads the same answer as the round before it.
 //!
 //! Two things a reader needs for that to be safe, and neither is the transport's:
 //!
@@ -240,9 +243,10 @@ fn is_read_timeout(error: &TransportError) -> bool {
 /// `ScheduleAutoReconnectAsync` (`GameStateClient.cs:626-660`): the game restarts, its bridge
 /// rebinds, and the reader that was attached to the link it lost is what attaches again. Without
 /// it a restart ended the session until the user pressed Inject a second time, and every panel
-/// went on showing the session that was gone. A reconnect round publishes no failure of its own -
-/// `pump`'s exit already published [`LinkFailure::Disconnected`], and that is still the truth
-/// while the bridge is not there.
+/// went on showing the session that was gone. The drop is published first by `pump`'s exit
+/// ([`LinkFailure::Disconnected`]) and the redial replaces it straight away
+/// ([`LinkFailure::Reconnecting`]), which is the managed order: `"Disconnected from agent."` was
+/// painted by the read loop and `"Reconnecting to agent..."` by the loop that followed it.
 ///
 /// Nothing here publishes `connected`: that is `pump`'s first line, so the store reads disconnected
 /// for the whole time a round is dialling, and a reader that a new press replaced leaves without
@@ -290,6 +294,13 @@ fn serve(
                 // releasing the duplicate keeps one handle per link rather than one per reader.
                 link.cut();
                 tracing::info!("bridge link closed");
+                // The link is gone and the next thing this reader does is dial it again, so the
+                // panel's reason becomes the wait rather than the drop `pump` just published. A
+                // reader whose handle was dropped publishes nothing here: it was replaced, and the
+                // reader that replaced it owns the report cell - the check `pump`'s own exit makes.
+                if !stop.load(Ordering::SeqCst) {
+                    report.publish(LinkFailure::Reconnecting);
+                }
             }
             None => {
                 // A raised stop is this reader being replaced, not a failed dial. Publishing here
@@ -300,8 +311,8 @@ fn serve(
                 }
                 if ever_linked {
                     // The link was up and the bridge is not answering yet, which is a game that is
-                    // still starting. The report already says the session dropped, so a round that
-                    // found nothing leaves it standing instead of repainting every second.
+                    // still starting. The report already says the reader is re-dialling, so a round
+                    // that found nothing leaves it standing instead of repainting every second.
                     tracing::debug!("bridge re-dial found no listener; keeping the last report");
                 } else {
                     // Not fatal: the window is usable without a bridge. The reason is published as
@@ -476,13 +487,14 @@ pub struct IngestStatus {
     pub fresh: bool,
 }
 
-/// Why the link is not up, in the two shapes the loader panel names.
+/// Why the link is not up, in the three shapes the loader panel names.
 ///
 /// `IngestStatus::connected` says *whether* the link is up; this says why it is not, which is what
-/// a user can act on. The managed host carried the same two facts in one `StatusMessage` channel —
+/// a user can act on. The managed host carried the same facts in one `StatusMessage` channel —
 /// `"ERROR: Could not connect to agent on port " + _port` (`GameStateClient.cs:493`) when the dial
-/// failed, `"Disconnected from agent."` (`:615`) when a live link went down — and this is the split
-/// that lets the panel paint them as states instead of as one mutating string.
+/// failed, `"Disconnected from agent."` (`:615`) when a live link went down, and
+/// `"Reconnecting to agent..."` (`:637`) while it re-dialled — and this is the split that lets the
+/// panel paint them as states instead of as one mutating string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkFailure {
     /// The dial never reached the bridge, so nothing was ever injected into.
@@ -495,9 +507,19 @@ pub enum LinkFailure {
     },
     /// The link was up and went down, which is the transition `connected` alone cannot express.
     ///
-    /// It stays published while the reader re-dials: the session did drop, and a round that has not
-    /// found the bridge again has nothing newer to say than that.
+    /// It is published by the read loop's exit, so it stands for as long as the drop is the newest
+    /// thing that happened: the session did go away, and a round that has not found the bridge again
+    /// has nothing newer to say than that.
     Disconnected,
+    /// The link went down and the reader is dialling it again, one attempt at a time.
+    ///
+    /// A live link that dropped is not the end of the session: `serve` re-dials it every
+    /// `RECONNECT_DELAY` until the bridge answers or the handle is dropped, which is
+    /// `ScheduleAutoReconnectAsync` (`GameStateClient.cs:626-660`). This is the reason that covers
+    /// those rounds — `pump`'s exit publishes [`LinkFailure::Disconnected`] first, and the redial
+    /// replaces it here, so a panel can name the wait instead of repeating the drop for as long as
+    /// the bridge stays away.
+    Reconnecting,
 }
 
 /// Where the reader publishes why the link went down, one attempt at a time.
@@ -855,7 +877,8 @@ fn pump<T: Transport>(
 /// answer while the bridge advertised something else. The readers in `crate::runtime` recover the
 /// same way, so the two sides of the cell agree about what a poisoned lock means.
 fn advertised_write(cell: &RwLock<BridgeCapabilities>) -> RwLockWriteGuard<'_, BridgeCapabilities> {
-    cell.write().unwrap_or_else(|poisoned| poisoned.into_inner())
+    cell.write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Stores an inbound `hudLayout` into the active profile, unless it is the echo of what is there.

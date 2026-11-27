@@ -57,18 +57,19 @@
 use std::collections::{BTreeMap, HashMap};
 use std::hash::Hash;
 use std::sync::{Arc, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gpui::prelude::*;
 use gpui::{
     div, px, Animation, AnimationExt, AnyElement, App, Context, Entity, FocusHandle, KeyDownEvent,
-    MouseButton, Render, SharedString, Window, WindowControlArea,
+    MouseButton, Render, ScrollHandle, SharedString, Window, WindowControlArea,
 };
 
 use aoko_core::app::AppController;
 use aoko_core::search;
 use aoko_platform::{WindowInfo, WindowInspector};
 use aoko_protocol::block_esp::{self, BlockEspTargetData};
+use aoko_protocol::capabilities::actions;
 
 use crate::components;
 use crate::components::block_esp::{BlockEspRow, RowAction};
@@ -77,21 +78,24 @@ use crate::components::ButtonVariant;
 use crate::components::FieldVariant;
 use crate::dialogs::color_picker::{PickResult, Rgb};
 use crate::dialogs::color_picker_view::ColorPickerView;
-use crate::ingest::LinkFailure;
+use crate::ingest::{IngestStatus, LinkFailure};
 use crate::runtime::Runtime;
 use crate::theme::metrics;
 use crate::theme::motion::{self, Motion};
 use crate::theme::{Color, Theme};
-use crate::views::accounts_state::{AccountPanel, AccountsState, OfflineSubmit, PasteSubmit};
+use crate::views::accounts_state::{
+    AccountPanel, AccountsState, OfflineSubmit, PasteSubmit, SessionStrip,
+};
 use crate::views::command_search::{
-    CommandSearchState, KeyboardGate, RowFactTable, RowFacts, SearchKey, SearchKeyOutcome,
+    CommandSearchState, KeyboardGate, QueryKey, QueryKeyOutcome, RowFactTable, RowFacts, SearchKey,
+    SearchKeyOutcome,
 };
 use crate::views::copy::{self, Card, Control, TabBody, MODULE_LIST_PREVIEW_SAMPLE};
 use crate::views::forms::FormFields;
 use crate::views::palette_store::{self, PaletteStore};
 use crate::views::prefs::ClientPrefs;
 use crate::views::profiles::{CreateOutcome, Profiles};
-use crate::views::servers_state::{AddOutcome, JoinOutcome, PingRequest, ServersState};
+use crate::views::servers_state::{AddOutcome, JoinOutcome, ServersState};
 use crate::views::stores::{NoStore, StoreBridge};
 
 /// Which row the colour picker was opened for.
@@ -258,6 +262,14 @@ pub struct Shell {
     /// overwritten, so the copy comes back by the line being dropped.
     action_status: [Option<SharedString>; 2],
     search: CommandSearchState,
+    /// The overlay's results list's scroll position.
+    ///
+    /// A `ScrollHandle` is `Rc<RefCell<…>>` rather than a plain value: it holds the offset and every
+    /// row's bounds between paints, so it has to outlive the frame that tracks it. It lives here
+    /// because the overlay is repainted from [`Shell::render`] and a handle built per frame would
+    /// scroll the list back to the top on every keystroke. The state records *which* row a key
+    /// moved to ([`CommandSearchState::take_scroll_request`]) and the paint is what moves it.
+    search_scroll: ScrollHandle,
     accounts: AccountsState,
     servers: ServersState,
     /// Persistence behind the two data tabs. [`NoStore`] until `aoko-core` grows
@@ -421,6 +433,13 @@ pub struct Shell {
     /// `None` until [`Shell::from_system`] installs the platform's, which is what keeps the suite
     /// from spawning a launcher; [`Shell::set_url_opener`] is the seam the press test uses.
     url_opener: Option<Arc<OpenUrl>>,
+    /// Why the last press on the version line opened nothing, painted under it.
+    ///
+    /// The rail has no status area, so the sentence sits where the press was made — the same shape
+    /// [`Shell::configs_open_folder`] gives the configs card's status line. `None` is the resting
+    /// rail, and a press that reaches the browser clears the line because its reason has stopped
+    /// being true.
+    release_status: Option<SharedString>,
     /// Decision 3's client setting: whether animated sites run. Kept in
     /// `client-prefs.json` rather than `Profile`, which is a bridge wire type.
     animations: bool,
@@ -447,6 +466,24 @@ pub struct Shell {
     /// either stores the request or reports why it cannot.
     pending_join: Option<String>,
     pending_account_switch: Option<String>,
+    /// When the playtime counter last advanced, on [`Runtime::now_ms`]'s clock.
+    ///
+    /// The one per-frame observation that says the game is actually being played: the tracker
+    /// counts a second only while the game is in front (`StatsTracker.cs:181-193`), so a
+    /// counter that moved is proof that a repaint has something new on it. [`Shell::needs_frame`]
+    /// reads it, and [`PLAYTIME_PUMP_HOLD_MS`] is how long one move keeps the frame pump alive.
+    /// `None` until the counter has moved once, which is also the state of every shell with no
+    /// playtime session.
+    playtime_moved_ms: Option<i64>,
+    /// Whether this shell has asked the runtime to dial the bridge.
+    ///
+    /// [`Shell::needs_frame`] needs it because [`Runtime::link_failure`] answers `None` in two
+    /// different states: an attempt still inside its deadline, and no attempt at all. Only the
+    /// first is worth a frame — the second is a window at rest, and a shell that pumped for it would
+    /// repaint a still picture for as long as it was open. This is the shell's own fact (it is the
+    /// caller of `Runtime::connect_bridge`), not a second copy of the runtime's: whether the attempt
+    /// is *finished* stays `link_failure`'s answer alone, which is why this is only ever set.
+    bridge_dialled: bool,
     /// The title bar's strings, with the values they were built from.
     chrome: ChromeCache,
 }
@@ -570,6 +607,10 @@ impl Shell {
         // panel instead, because the loader's whole job is choosing a window it cannot enumerate —
         // and that is exactly what keeps the nine captured screens painting tabs.
         let services = aoko_platform::default_services();
+        // The ping pool asks for `_minecraft._tcp` records before it dials a host entered without a
+        // port, and this is the one session that has the machine's resolver list: an empty list
+        // would fall back to the public pair, which is not the network the game is on.
+        shell.servers.set_srv_resolvers(services.srv.resolvers());
         let windows: Arc<dyn WindowInspector> = services.windows.into();
         shell.set_windows(Some(windows));
         shell.loader_visible = true;
@@ -600,12 +641,17 @@ impl Shell {
         // here so the shipped binary is the only build that can launch anything.
         shell.set_url_opener(Some(Arc::new(aoko_platform::open_url)));
 
-        // Before the link dials: the `config` frame is built from the controller's profile,
-        // and the profile `start` loaded above went into the controller this line replaces.
-        // Pushing first means the first frame the bridge sees already carries the saved
-        // settings, rather than the defaults and then a correction.
-        shell.push_profile();
+        // Before the link dials: the `config` frame is built from the controller's profile, and
+        // the profile `start` loaded above went into the controller this line replaces. Applying it
+        // again is what puts the saved settings — and, through `replace_profile`, the module
+        // switches the file carries — into the controller the bridge reads, so the first frame
+        // already carries the saved settings rather than the defaults and then a correction, and a
+        // module the file turns on is on before `start_supervision` decides whether to own the
+        // loops.
+        let loaded = shell.profile.clone();
+        shell.apply_loaded_profile(loaded);
         // Nothing else connects the store to a bridge; see `crate::ingest`.
+        shell.bridge_dialled = true;
         shell.runtime.connect_bridge();
         // From here on a module switch starts and stops loop threads; see
         // `Runtime::start_supervision`.
@@ -719,6 +765,7 @@ impl Shell {
             keybind_conflict: None,
             action_status: [None, None],
             search: CommandSearchState::new(),
+            search_scroll: ScrollHandle::new(),
             accounts: AccountsState::new(),
             servers: ServersState::new(),
             stores: Box::new(NoStore),
@@ -757,6 +804,7 @@ impl Shell {
             config_name: String::new(),
             open_configs_folder: false,
             url_opener: None,
+            release_status: None,
             // Under `cfg(test)` and `capture` nothing has changed the process gate, so
             // the row shows what the leaf widgets are already doing.
             animations: motion::animations_enabled(),
@@ -767,6 +815,8 @@ impl Shell {
             close_hook_installed: false,
             pending_join: None,
             pending_account_switch: None,
+            playtime_moved_ms: None,
+            bridge_dialled: false,
             chrome: ChromeCache::default(),
         };
         shell.reload_accounts();
@@ -777,22 +827,15 @@ impl Shell {
 
     /// Replaces the loaded profile, which is what applying a saved config does.
     ///
-    /// This is one of the two places a profile is *loaded*, so it is where the load-time half
-    /// of the action-bind rule runs
-    /// ([`aoko_protocol::profile::Profile::normalize_action_binds`]): the module binds
-    /// are applied first and win, and a dedicated Auto Rod or Throwpot key that duplicates one
-    /// is cleared, as `Profile.cs:889-899` clears it on apply. A profile whose action binds are
-    /// distinct changes nothing — the function returns false and the values are untouched — so
-    /// the return is not needed here. The snapshot is taken after normalisation, because a
-    /// cleared key has to paint as `Unbound` rather than as the key the file survives with.
+    /// This is one of the two places a profile is *loaded* — the other is
+    /// [`Shell::load_config`] — and the apply is one function, so a fresh shell and the Settings
+    /// card's Load cannot disagree about what a load does; see
+    /// [`Shell::apply_loaded_profile`]. It is also where the load-time half of the action-bind rule
+    /// runs ([`aoko_protocol::profile::Profile::normalize_action_binds`]): module binds are applied
+    /// first and win, and a dedicated Auto Rod or Throwpot key that duplicates one is cleared, as
+    /// `Profile.cs:889-899` clears it on apply.
     fn with_loaded_profile(mut self, profile: aoko_protocol::profile::Profile) -> Self {
-        // The same replacement a load performs, so the rule lives in one place; a fresh shell's
-        // override map is empty, and this keeps it that way if one is ever planted before this
-        // runs.
-        self.adopt_profile(profile);
-        // The frame is built from the controller, not from this shell: a shell that starts
-        // from a saved profile has to hand it over before anything reads it.
-        self.push_profile();
+        self.apply_loaded_profile(profile);
         self
     }
 
@@ -861,20 +904,60 @@ impl Shell {
         self.draft.clear();
     }
 
+    /// Makes a loaded config the live one: this view's copy, the controller's, and the modules.
+    ///
+    /// `ApplyLoadedProfile` (`MainWindow.xaml.cs:835-848`) is the managed load, and its one step is
+    /// `ProfileManager.ApplyToClicker` (`Profile.cs:727`), which assigns **every** `Clicker`
+    /// property from the profile — the module booleans among them, and those are what start and stop
+    /// each module. The port keeps that state in two places: [`Shell::adopt_profile`] is this
+    /// view's copy, which every control paints from, and [`AppController::replace_profile`] is the
+    /// controller's, which the `config` frame and the automation loops read. A load that ran only
+    /// the first repainted the tab and left the modules running the previous config.
+    ///
+    /// `replace_profile` rather than [`Shell::push_profile`], because a push is an *edit*: it
+    /// assigns the profile and leaves the switches where the last press put them, which is right
+    /// for a slider and wrong for a load. The replacement seeds them from the file and normalises
+    /// the action binds on the copy it stores, so the two copies stay equal after a load that
+    /// cleared a duplicated key.
+    ///
+    /// The supervisor is the half a switch write cannot reach: it decided whether to own the
+    /// automation loops when the *previous* config's set was live, and it only looks again when a
+    /// switch is written through it. Re-applying the set is that look — each call is a no-op on a
+    /// switch that already holds the value, and `Runtime::set_module_enabled` reconciles the loops
+    /// — so a loaded config that turns the clicker on starts clicking without a second press.
+    fn apply_loaded_profile(&mut self, profile: aoko_protocol::profile::Profile) {
+        // Normalises the binds, re-reads every bound control from the profile and drops the session
+        // overrides; see `Shell::adopt_profile`.
+        self.adopt_profile(profile);
+
+        let profile = self.profile.clone();
+        self.runtime.controller().replace_profile(profile);
+
+        for entry in aoko_protocol::module_catalog::ALL.iter() {
+            let on = self.runtime.module_enabled(entry.id);
+            self.runtime.set_module_enabled(entry.id, on);
+        }
+    }
+
     /// The Settings card's Load: replaces the live settings with a saved config.
+    ///
+    /// The palette it names is resolved here, because the store is the one that carries the applied
+    /// name and it has to move with the load. The *propagation* is not: every widget owns a copy of
+    /// the palette, so repainting them all is [`Shell::set_theme`]'s job, and that needs a
+    /// `Context` this function does not have. `configs_load` is the only production caller and runs
+    /// it; a test that calls this directly sees `self.theme` move and the entities stay as they are.
     pub fn load_config(&mut self, name: &str) -> Result<(), String> {
         match self.profiles.load_named(name) {
             Ok(profile) => {
-                // The load-time half of the action-bind rule, and the override reset, are the
-                // replacement's own business; see `Shell::adopt_profile`.
-                self.adopt_profile(profile);
-                // The palette travels in the profile, so applying a config has to
-                // repaint with the theme it names (`ApplyLoadedProfile`,
-                // `MainWindow.xaml.cs:835-848`).
-                self.theme = crate::views::palette_store::theme_for(&self.profile.gui_theme);
-                // And the loaded settings are what the bridge should be running: the config
-                // frame reads the controller's copy.
-                self.push_profile();
+                self.apply_loaded_profile(profile);
+                // The palette travels in the profile, so applying a config has to repaint with the
+                // theme it names (`ApplyLoadedProfile`, `MainWindow.xaml.cs:835-848`). The store is
+                // the one that carries the applied name — the card's current-palette row reads it,
+                // not the profile — so it moves with the load rather than waiting for the next
+                // preview press.
+                let gui_theme = self.profile.gui_theme.clone();
+                self.palette.apply(&gui_theme);
+                self.theme = self.palette.theme();
                 Ok(())
             }
             Err(error) => Err(error),
@@ -966,9 +1049,9 @@ impl Shell {
     /// rather than through [`palette_store::theme_for`], which builds its own store from the
     /// machine's app-data path. That choice is what makes the rule observable: a test points
     /// the store at a scratch file and sees a custom palette adopted without this machine's
-    /// palette directory being read at all. `load_config` still calls `theme_for`, which reads
-    /// the same file in the shipped binary; the two should become one call once the
-    /// saved-palette card makes this store the writer as well as the reader.
+    /// palette directory being read at all. [`Shell::load_config`] resolves through the same
+    /// store for the same reason, and because the store is what holds the applied name the
+    /// Palettes card paints.
     fn adopt_profile_theme(&mut self) {
         if self.theme_pinned {
             return;
@@ -977,12 +1060,49 @@ impl Shell {
     }
 
     /// Replaces the palette, e.g. from the Settings tab.
+    ///
+    /// Every widget in this crate carries its own copy of the theme — a `TextInput` paints its
+    /// caret, border and placeholder from the one it was built with, and a `KeybindCapture` paints
+    /// its label from the same — so a palette press has to reach the entities as well as the field
+    /// this view paints from. It used to clear only [`Shell::fields`], which left the four colour
+    /// boxes, the Block ESP add box, the palette name box, the overlay's query box and every capture
+    /// button on the old palette until the process restarted.
+    ///
+    /// The two halves are handled differently on purpose:
+    ///
+    /// * **[`Shell::fields`] are dropped.** Each is seeded from a state machine every render
+    ///   ([`Shell::ensure_form_fields`], [`Shell::sync_form_fields`]), so recreating one loses
+    ///   nothing.
+    /// * **Everything else is pushed the new theme.** The Block ESP box, the palette name box and
+    ///   the query box hold text only the entity owns, and a capture holds focus and a listening
+    ///   state across frames — recreating any of them would drop an edit in progress or the
+    ///   keyboard. `TextInput::set_theme` and `KeybindCapture::set_theme` are those pushes.
     pub fn set_theme(&mut self, theme: Theme, cx: &mut Context<Self>) {
         self.theme = theme;
-        // The fields carry their own copy of the palette, so they are recreated on
-        // the next render. Their values live in the state machines, which is why
-        // dropping the entities loses nothing.
+
+        // The recreated half.
         self.fields.clear();
+
+        // The pushed half. One `Theme` clone per entity: a palette press is a deliberate user
+        // action, not a per-frame path, and the alternative — a theme shared behind an `Arc` — is a
+        // change to every widget in the crate for a cost paid once per palette.
+        if let Some(field) = self.block_add.as_ref() {
+            field.update(cx, |input, cx| input.set_theme(theme.clone(), cx));
+        }
+        if let Some(field) = self.search_query.as_ref() {
+            field.update(cx, |input, cx| input.set_theme(theme.clone(), cx));
+        }
+        if let Some(field) = self.palette_name.as_ref() {
+            field.update(cx, |input, cx| input.set_theme(theme.clone(), cx));
+        }
+        for field in self.color_fields.values() {
+            field.update(cx, |input, cx| input.set_theme(theme.clone(), cx));
+        }
+        for held in self.captures.values() {
+            held.capture
+                .update(cx, |capture, cx| capture.set_theme(theme.clone(), cx));
+        }
+
         cx.notify();
     }
 
@@ -1662,14 +1782,27 @@ impl Shell {
             return;
         };
 
-        // An enumeration that fails is "no target". There is no message channel from the
-        // platform to this panel, so it is not distinguishable from an empty list here.
-        let mut targets: Vec<WindowInfo> = windows
-            .enumerate()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(target_is_candidate)
-            .collect();
+        // An enumeration that failed is not "no target": the two are different things a user can
+        // act on, and swallowing the error into an empty list painted the refusal for a screen the
+        // platform never looked at. The platform's own sentence names the operation that failed
+        // (`PlatformError::user_facing`), which is the same shape an attach failure paints — see
+        // [`InjectionStatus::Failed`].
+        let enumerated = match windows.enumerate() {
+            Ok(enumerated) => enumerated,
+            Err(error) => {
+                self.injection_targets.clear();
+                self.injection_selected = None;
+                self.injection = InjectionStatus::Failed(error.user_facing());
+                cx.notify();
+                return;
+            }
+        };
+        let mut targets: Vec<WindowInfo> = Vec::new();
+        for info in enumerated {
+            if target_is_candidate(&info) {
+                targets.push(info);
+            }
+        }
         aoko_platform::sort_windows(&mut targets);
         self.injection_targets = targets;
 
@@ -1775,6 +1908,7 @@ impl Shell {
     fn dial(&mut self) {
         #[cfg(test)]
         DIALS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.bridge_dialled = true;
         self.runtime.connect_bridge();
     }
 
@@ -1918,12 +2052,163 @@ impl Shell {
     /// window: `EnterControlMode` is also where the managed host swapped 360×310 for 1020×760
     /// (`MainWindow.xaml.cs:472-475`), and the resize has to happen exactly once, on the frame the
     /// panel changes, or a user's own window size would be stomped on every later frame.
+    ///
+    /// The latch grows the size and *not* the floor, and that half is a pin, not an omission:
+    /// `:474-482` also raised the resizable window's minimum to 560×460, while
+    /// `WindowOptions::window_min_size` is read once by `Window::new` and rev 5526444 has no
+    /// runtime setter, so this window keeps the loader's 360×310 and a control-mode drag can
+    /// shrink it until the rail clips. [`crate::window`]'s module note has the API trail and the
+    /// two alternatives it rejected; there is nothing to fix here without a GPUI change.
     fn latch_control_mode(&mut self) -> bool {
         if self.loader_visible && self.runtime.ingest_status().connected {
             self.loader_visible = false;
             return true;
         }
         false
+    }
+
+    /// Whether the next frame is this shell's work rather than the user's.
+    ///
+    /// Every idle poll in the crate runs inside [`Render::render`]: the loader's link state
+    /// ([`Shell::latch_control_mode`]), [`Runtime::poll_module_keys`], [`Runtime::poll_gtb`],
+    /// [`Runtime::sample_playtime`] and the whole Stats tab. A GPUI view repaints only when
+    /// something asks it to — an input event, a `cx.notify()`, or
+    /// `Window::request_animation_frame` (`crates/gpui/src/window.rs:3102`) — and nothing here
+    /// asked, so `Status: Connecting…` stayed on screen until the mouse moved and playtime, CPS
+    /// and the module keybinds only advanced while the user was touching this window. This is the
+    /// ask, and it is a condition rather than a constant: every poll above returns on its first
+    /// guard when its state is idle, so a shell that scheduled frames unconditionally would burn
+    /// a core redrawing a still picture. Four states are live:
+    ///
+    /// * **A dial is in flight** — the loader is painted, this shell has asked for a dial, and the
+    ///   reader has not reported why the link is down. The answer arrives on the reader's thread and
+    ///   only a frame paints it. [`LinkFailure::Reconnecting`] is the same wait one state further
+    ///   on: the reader has answered, and the answer is that it is dialling again, so the frame that
+    ///   paints the redial is the one this keeps coming. A dial that *has* answered with a failure
+    ///   waits for the user's press, and the press notifies by itself; a shell that never dialled is
+    ///   a window at rest, not a pending answer, which is why the loader alone is not the test — see
+    ///   [`Shell::bridge_dialled`].
+    /// * **The link is up** — the reader rewrites the store underneath the polls.
+    /// * **A loop is owned** — `ClickerLoops` records the clicks and the CPS the Stats tab draws,
+    ///   on its own threads; the numbers are only visible when the frame reads them again.
+    /// * **The playtime counter is live** — see [`PLAYTIME_PUMP_HOLD_MS`]. This is also the state
+    ///   that keeps the keybind hook readable while the user is in the game, because the hook's
+    ///   queue is drained per frame.
+    ///
+    /// Otherwise the shell is genuinely idle: no link to read, no thread to report, no clock
+    /// worth a repaint — and the next frame will be the one an input event asks for.
+    fn needs_frame(&self, status: &IngestStatus) -> bool {
+        if self.loader_visible && self.bridge_dialled && self.dial_pending() {
+            return true;
+        }
+        if status.connected || self.runtime.loops_owned() > 0 {
+            return true;
+        }
+        self.playtime_moved_ms
+            .is_some_and(|moved| self.runtime.now_ms() - moved < PLAYTIME_PUMP_HOLD_MS)
+    }
+
+    /// Whether the loader is waiting on a dial rather than on the user: no reason yet, or the
+    /// reader dialling a link it already had.
+    ///
+    /// The two are the same wait — the answer arrives on the reader's thread, and [`Shell::needs_frame`]
+    /// is what keeps asking for the frame that paints it. A reason that is neither is the press's
+    /// answer, and a press notifies by itself.
+    fn dial_pending(&self) -> bool {
+        self.runtime
+            .link_failure()
+            .is_none_or(|reason| reason == LinkFailure::Reconnecting)
+    }
+
+    /// One frame's worth of the bridge's answers, for the two data tabs and the module cards.
+    ///
+    /// Three things that were written only by their tests and never by the app, in the managed
+    /// window's order of dependence on the link:
+    ///
+    /// * **The module switches.** `UpdateVersionAvailabilityUi` clears the toggle of every module
+    ///   the bridge does not advertise (`MainWindow.xaml.cs:597-620`), so a capability frame could
+    ///   pull a module out from under a switch that was already on. Nothing did it here, so a card
+    ///   claimed a module a legacy bridge cannot run and left the switch green. The walk is over
+    ///   the catalogue entries the capability payload is *required* to list
+    ///   ([`aoko_protocol::module_catalog::requiring`]) and only while the link is up: before a
+    ///   handshake the shared cell still holds the codec's version fallback, and enforcing against
+    ///   that would switch off a module a modern bridge is about to advertise.
+    /// * **The Servers tab's join gate.** `ServersView.RefreshAvailability` (`:48-56`) maps the
+    ///   link and the bridge's join capability onto [`crate::views::servers_logic::ServerJoinState`],
+    ///   and `set_join_state` had no production caller, so the tab read
+    ///   "Not connected to the game." for ever and greyed Join out on a live link.
+    /// * **The Accounts tab's session strip.** `AccountsView.RefreshAvailability`
+    ///   (`AccountsView.xaml.cs:64-74`) repoints the strip, and `set_session` had no production
+    ///   caller either, so `SessionStrip::default()` was permanent and Use account, Restore launch
+    ///   account and Refresh were all disabled.
+    ///
+    /// Both tabs are repointed only when the value moved, and the strip's *read* half — a known
+    /// identity and a read in flight — is carried across, because those are the refresh flow's
+    /// answers and not the link's. Returns whether anything changed, which is what tells
+    /// [`Shell::render`] to repaint; the frame pump covers the link itself, but a link that just
+    /// went down is exactly the frame the pump stops on.
+    fn sync_bridge_state(&mut self, status: &IngestStatus) -> bool {
+        let mut changed = false;
+
+        let capability = aoko_protocol::module_catalog::Surfaces::CAPABILITY;
+        if status.connected {
+            for entry in aoko_protocol::module_catalog::requiring(capability) {
+                if self.runtime.module_supported(entry.id) {
+                    continue;
+                }
+                if self.controller().is_module_enabled(entry.enabled_flag) {
+                    self.runtime.set_module_enabled(entry.id, false);
+                    changed = true;
+                }
+            }
+        }
+
+        // The managed gate is `IsConnected && SupportsAction(...)`
+        // (`ServersView.xaml.cs:50-53`, `AccountsView.xaml.cs:78-82`): the link, and the bridge's
+        // own `actions` list. Both are asked here rather than assumed, so a bridge that narrows the
+        // list greys Join out instead of being claimed as capable.
+        let join = crate::views::servers_logic::evaluate_join_state(
+            status.connected,
+            self.runtime.action_supported(actions::SERVER_JOIN),
+        );
+        if self.servers.set_join_state(join) {
+            changed = true;
+        }
+
+        // `ApplySessionChip` reads `CurrentState.InWorld`, which is the last frame the bridge sent
+        // rather than a fresh one, so this is the snapshot's answer and not `IngestStatus::fresh`'s.
+        let in_world = self
+            .runtime
+            .controller()
+            .store()
+            .snapshot()
+            .is_some_and(|snapshot| snapshot.state.in_world);
+        let set_session =
+            status.connected && self.runtime.action_supported(actions::ACCOUNT_SET_SESSION);
+        let read_session =
+            status.connected && self.runtime.action_supported(actions::ACCOUNT_GET_SESSION);
+        let session = self.accounts.session();
+        let moved = session.connected != status.connected
+            || session.in_world != in_world
+            || session.supports_set_session != set_session
+            || session.supports_session_read != read_session;
+        if moved {
+            // Only on a real move, so the steady-state frame clones nothing: an identity exists
+            // only after a successful read, and the read half belongs to that flow.
+            let strip = SessionStrip {
+                connected: status.connected,
+                in_world,
+                supports_set_session: set_session,
+                supports_session_read: read_session,
+                identity: session.identity.clone(),
+                refresh_in_flight: session.refresh_in_flight,
+            };
+            if self.accounts.set_session(strip) {
+                changed = true;
+            }
+        }
+
+        changed
     }
 
     /// One palette-editor row: the caption, the swatch, and the hex box beside it.
@@ -2457,9 +2742,13 @@ impl Shell {
 
     /// Records a refusal on the status line that belongs to the binding that asked.
     ///
-    /// A module's conflict reads in the keybind area and names both bindings; an action row's
-    /// reads under its own button, in the managed words. The profile is untouched either way,
-    /// which is what keeps a refused key out of the `config` frame.
+    /// A module's conflict reads in the keybind area and names both bindings, whoever holds the
+    /// key; an action row's reads under its own button. The key an action bind asks for and a
+    /// module already holds keeps the managed words verbatim (`copy::ACTION_BIND_CONFLICT`),
+    /// because that is the case `MainWindow.xaml.cs:2049` names. Every other pair is port-only
+    /// copy, because managed accepted it silently: two modules on one key, and both action binds
+    /// on one key. The profile is untouched either way, which is what keeps a refused key out of
+    /// the `config` frame.
     fn refuse_captured_key(&mut self, target: KeyTarget, holder: KeybindHolder, vk: i32) {
         match (target, holder) {
             (KeyTarget::Module(module), KeybindHolder::Action(action)) => {
@@ -2471,14 +2760,29 @@ impl Shell {
                     .replace("{requested}", module_label(module));
                 self.keybind_conflict = Some(SharedString::from(line));
             }
-            (KeyTarget::Action(which), KeybindHolder::Module) => {
+            // A key another module already holds: refused rather than shared, and the holder is
+            // named, because pressing it would otherwise toggle whichever module the table lists
+            // first.
+            (KeyTarget::Module(module), KeybindHolder::Module(other)) => {
+                let line = copy::MODULE_BIND_CONFLICT_NAMED
+                    .replace("{key}", &crate::views::keybind_text::format_virtual_key(vk))
+                    .replace("{holder}", module_label(&other))
+                    .replace("{requested}", module_label(module));
+                self.keybind_conflict = Some(SharedString::from(line));
+            }
+            (KeyTarget::Action(which), KeybindHolder::Module(_)) => {
                 self.action_status[status_slot(which)] =
                     Some(SharedString::from(copy::ACTION_BIND_CONFLICT));
             }
-            // The two kinds are disjoint by target: `keybind_holder` answers an action for a
-            // module and a module for an action, so this pair is unreachable.
-            (KeyTarget::Module(_), KeybindHolder::Module)
-            | (KeyTarget::Action(_), KeybindHolder::Action(_)) => {}
+            // The other action bind already holds it, which managed allowed: both buttons stored
+            // the key and only one of the two actions ever fired.
+            (KeyTarget::Action(which), KeybindHolder::Action(other)) => {
+                let line = copy::ACTION_BIND_CONFLICT_NAMED
+                    .replace("{key}", &crate::views::keybind_text::format_virtual_key(vk))
+                    .replace("{holder}", action_bind_name(other))
+                    .replace("{requested}", action_bind_name(which));
+                self.action_status[status_slot(which)] = Some(SharedString::from(line));
+            }
         }
     }
 
@@ -2559,12 +2863,37 @@ impl Shell {
     }
 
     /// Shows one tab by index; out of range is ignored.
+    ///
+    /// The Servers tab's ping pass belongs to the tab rather than to the session, which is the pair
+    /// the managed `View_Unloaded`/`Loaded` handlers made: leaving abandons the pass in flight, and
+    /// entering answers the rows the cache already knows and dials the rest. Both halves live here
+    /// rather than in [`Shell::render`] because a tab change happens once and a frame happens sixty
+    /// times a second.
     pub fn select_tab(&mut self, index: usize, cx: &mut Context<Self>) {
         if index < copy::TABS.len() && index != self.tab {
+            let leaving_servers = Self::servers_tab(self.tab);
             self.tab = index;
             self.tab_epoch = self.tab_epoch.wrapping_add(1);
+            if leaving_servers {
+                self.servers.cancel_pings();
+            }
+            if Self::servers_tab(index) {
+                self.servers.tab_opened(now_millis());
+                self.pump_server_pings(cx);
+            }
             cx.notify();
         }
+    }
+
+    /// Whether a rail index is the Servers tab, whose ping pass follows the tab.
+    ///
+    /// Read off the tab table rather than a literal, so a rail reorder cannot leave the ping pass
+    /// attached to whichever tab inherited the index.
+    fn servers_tab(index: usize) -> bool {
+        matches!(
+            copy::TABS.get(index).map(|tab| tab.body),
+            Some(TabBody::Servers)
+        )
     }
 
     /// Shows one tab by name, case-insensitively, as the overlay's jump does.
@@ -2669,6 +2998,18 @@ impl Shell {
             .unwrap_or(default)
     }
 
+    /// A control's stored value: the profile snapshot, without the session override.
+    ///
+    /// [`Shell::value`] is the *paint* answer, and the override wins there because that is what a
+    /// slider drag has to show. A control whose press *replaces* the override cannot use it to
+    /// decide whether anything moved: it would read back the number the override still held, which
+    /// is how a combo press after a slider on the same bind repainted nothing.
+    fn stored_value(&self, bind: &'static str) -> Option<f64> {
+        self.values
+            .get(bind)
+            .map(crate::views::bindings::ControlValue::as_f64)
+    }
+
     /// Records a control value and writes it into the profile.
     ///
     /// The profile is the persisted shape: a restart that loads it shows the value.
@@ -2749,20 +3090,23 @@ impl Shell {
     /// `sync_keybind_captures`, so the borrow costs the allocation budget rather than this
     /// function.
     ///
-    /// Every write site calls this. They are [`Shell::apply_control`] (every slider, checkbox,
-    /// combo and module switch), [`Shell::apply_captured_key`], [`Shell::with_loaded_profile`],
-    /// [`Shell::load_config`], [`Shell::save_profile`], [`Shell::save_config`],
-    /// [`Shell::configs_create`] and [`Shell::configs_overwrite_confirmed`]; the last four
-    /// because the store stamps `profile.name` on the copy it hands back. A grep for
-    /// `self.profile = ` and `&mut self.profile` in this file lists the current assignments,
-    /// and `every_catalog_bind_leaves_the_controllers_copy_equal` fails on a bind that goes
+    /// Every edit calls this. They are [`Shell::apply_control`] (every slider, checkbox,
+    /// combo and module switch), [`Shell::apply_captured_key`], [`Shell::save_profile`],
+    /// [`Shell::save_config`], [`Shell::configs_create`] and
+    /// [`Shell::configs_overwrite_confirmed`]; the last four because the store stamps
+    /// `profile.name` on the copy it hands back. A grep for `self.profile = ` and
+    /// `&mut self.profile` in this file lists the current assignments, and
+    /// `every_catalog_bind_leaves_the_controllers_copy_equal` fails on a bind that goes
     /// through `apply_control` and forgets.
     ///
+    /// The two load paths do **not** come through here: they replace the profile and seed the
+    /// module switches from it, which a push cannot do. See [`Shell::apply_loaded_profile`].
+    ///
     /// `update_profile` rather than `replace_profile`: the latter normalises the action binds
-    /// on the copy it is handed (`Profile::normalize_action_binds`), which is the rule for
-    /// *applying a saved config*, not for a live edit. Normalisation runs on the two load
-    /// paths instead, so the copy pushed here is already the normalised one. Assigning keeps
-    /// the two copies equal, so what the UI shows is what the wire carries.
+    /// on the copy it is handed (`Profile::normalize_action_binds`) and replaces the switch set,
+    /// which is the rule for *applying a saved config*, not for a live edit. Normalisation runs on
+    /// the two load paths instead, so the copy pushed here is already the normalised one. Assigning
+    /// keeps the two copies equal, so what the UI shows is what the wire carries.
     fn push_profile(&mut self) {
         let profile = self.profile.clone();
         self.runtime.controller().update_profile(move |active| {
@@ -2803,7 +3147,12 @@ impl Shell {
             return;
         }
 
-        let before = self.value(bind, f64::NAN).to_bits();
+        // The stored value, not [`Shell::value`]: that one prefers the session override, so a
+        // slider that had just written this bind made the comparison read back its own number and
+        // a press on the combo that shares it repainted nothing. The override goes with it — the
+        // press is the newer edit, so the profile is what the card has to paint next.
+        let before = self.stored_value(bind);
+        self.draft.remove(bind);
         // Through `apply_control`, like every other control: that is the one place that
         // refreshes the snapshot and hands the profile to the controller, and a second copy of
         // that sequence here was the shape that let a write reach the card and not the wire.
@@ -2813,7 +3162,7 @@ impl Shell {
         ) {
             self.draft.insert(bind, index as f64);
         }
-        if self.value(bind, f64::NAN).to_bits() != before {
+        if self.stored_value(bind) != before {
             cx.notify();
         }
     }
@@ -3059,7 +3408,15 @@ impl Shell {
             return;
         };
 
-        let _ = self.load_config(&name);
+        // The palette travels in the profile, so a load repaints with the theme it names — through
+        // the same propagation a palette press runs, because a second copy of it here is what left
+        // every field and capture on the old palette. See [`Shell::set_theme`]. A load that failed
+        // has already written the failure into the card's status line (`Profiles::load_named`), and
+        // the theme did not move.
+        if self.load_config(&name).is_ok() {
+            let theme = self.palette.theme();
+            self.set_theme(theme, cx);
+        }
         cx.notify();
     }
 
@@ -3241,8 +3598,19 @@ impl Shell {
     /// `Application.Current.Shutdown()`, and `OnClosed` (`:1861-1876`) saves again on the way out.
     /// One function for both exits — the title bar's button and [`Shell::panic`] — so the save and
     /// the quit cannot drift apart.
+    ///
+    /// A save that fails is logged, not dropped: [`Profiles::save_auto`] sets the Settings card's
+    /// status line, and that card is one line of chrome away from being gone with the window, so the
+    /// log is the only account of it that outlives the session. The slot is named beside the error
+    /// because the error's sentence names the operation, not the file that was being written.
     pub fn close(&mut self, cx: &mut Context<Self>) {
-        let _ = self.save_profile();
+        if let Err(error) = self.save_profile() {
+            tracing::warn!(
+                slot = crate::views::profiles::AUTO_SAVE_NAME,
+                directory = self.profiles.directory().unwrap_or_default(),
+                "could not save the profile on exit: {error}"
+            );
+        }
         cx.quit();
     }
 
@@ -3387,6 +3755,11 @@ impl Shell {
     }
 
     /// The add form's "Add": validates, then writes through the store seam.
+    ///
+    /// The new row is pinged as the save lands, which is `:524-528`: managed refreshed the list and
+    /// dialled the row it had just written, so a server whose address is wrong says so at once
+    /// instead of when the user next visits the tab. The pass announces nothing — the status line is
+    /// still saying `Added {name}.`, and a summary would replace the confirmation the press is owed.
     pub fn add_server(&mut self, cx: &mut Context<Self>) {
         match self.servers.submit_add() {
             AddOutcome::Ready { name, display } => {
@@ -3396,6 +3769,8 @@ impl Shell {
                         let servers = self.stores.servers();
                         self.servers
                             .apply_added(&servers, &saved.id, &saved.name, now);
+                        self.servers.start_ping_added_now(&saved.id, now);
+                        self.pump_server_pings(cx);
                     }
                     None => self.servers.add_failed(),
                 }
@@ -3405,21 +3780,52 @@ impl Shell {
         cx.notify();
     }
 
-    /// "Ping all": there is no ping service in this crate yet, so the pass reports
-    /// the managed failure line and puts the rows back to their rest state.
+    /// "Ping all" (`PingAllButton_Click`, `:423-437`): every saved row, cached answer or not.
     pub fn ping_all(&mut self, cx: &mut Context<Self>) {
-        if let PingRequest::Ids(_ids) = self.servers.start_ping_all() {
-            self.servers.ping_failed();
-        }
+        self.servers.start_ping_all_now(now_millis());
+        self.pump_server_pings(cx);
         cx.notify();
     }
 
-    /// One row's chip.
+    /// One row's chip (`LatencyChip_Click`, `:404-421`).
     pub fn ping_server(&mut self, id: String, cx: &mut Context<Self>) {
-        if let PingRequest::Ids(_ids) = self.servers.start_ping_one(&id) {
-            self.servers.ping_failed();
-        }
+        self.servers.start_ping_one_now(&id, now_millis());
+        self.pump_server_pings(cx);
         cx.notify();
+    }
+
+    /// Drains the Servers tab's ping answers until the pass is over.
+    ///
+    /// `aoko_platform::mcping` owns the sockets and answers on its own workers, and nothing pushes a
+    /// finished ping at this view: without a drain the chips stay on the managed `Pinging…` label and
+    /// the rows never resolve. One timer per tick ([`PING_POLL_INTERVAL`]), and `poll_pings` takes
+    /// whatever has landed — `false` when nothing has — so a slow host costs a wake-up and a lock and
+    /// never the frame.
+    ///
+    /// The loop ends with the pass rather than on a count: [`ServersState::poll_pings`] clears
+    /// `ping_in_flight` when the last answer lands, and [`ServersState::cancel_pings`] and
+    /// [`ServersState::ping_failed`] clear it too, so leaving the tab or a pool that refused the
+    /// jobs stops the timer as well. A press that arrives during a pass starts a second loop, which
+    /// the same check ends; `poll_pings` drains, so two loops cannot answer one row twice.
+    fn pump_server_pings(&self, cx: &mut Context<Self>) {
+        if !self.servers.ping_in_flight() {
+            return;
+        }
+
+        cx.spawn(async move |shell, cx| loop {
+            cx.background_executor().timer(PING_POLL_INTERVAL).await;
+
+            let running = shell.update(cx, |shell, cx| {
+                if shell.servers.poll_pings(now_millis()) {
+                    cx.notify();
+                }
+                shell.servers.ping_in_flight()
+            });
+            if !running.unwrap_or(false) {
+                break;
+            }
+        })
+        .detach();
     }
 
     /// "Delete": arms the confirmation.
@@ -3623,6 +4029,18 @@ impl Shell {
             return WindowKeyOutcome::Closed;
         }
 
+        // The query field's own keys, while the overlay owns the keyboard: the arrows walk the
+        // list, F2 and Ctrl+Space toggle the highlighted module, and Tab stays in the box. The
+        // managed `CommandSearchOverlay` handled these in the field's `PreviewKeyDown`; the pin's
+        // field hands every key it does not consume up the tree, so the root listener is where
+        // they land — and until now nothing routed them, so the list could only be walked with the
+        // mouse.
+        if self.search.is_open() {
+            if let Some(key) = query_key_of(event) {
+                return self.handle_query_key(key, cx);
+            }
+        }
+
         let Some(key) = search_key_of(event) else {
             return WindowKeyOutcome::Ignored;
         };
@@ -3633,6 +4051,35 @@ impl Shell {
         self.search
             .handle_window_key(key, &gate, dev_mode, &facts)
             .into()
+    }
+
+    /// One query-field key, acted on.
+    ///
+    /// [`CommandSearchState::handle_query_key`] is the whole decision — it is the managed
+    /// `QueryBox_PreviewKeyDown` port and it had no production caller — so this only performs the
+    /// two things a key can ask for outside the state: a repaint (the selection moved, and the row
+    /// it moved to is the state's `scroll_request`, which [`Shell::render_search`] consumes) and a
+    /// module toggle, followed by the row refresh the outcome's own doc requires.
+    ///
+    /// Every outcome is `Consumed`: the overlay owns the keyboard while it is up, and a key it acted
+    /// on must not also reach the widget behind it.
+    fn handle_query_key(&mut self, key: QueryKey, cx: &mut Context<Self>) -> WindowKeyOutcome {
+        match self.search.handle_query_key(key) {
+            QueryKeyOutcome::Moved(_) => cx.notify(),
+            QueryKeyOutcome::Toggle(entry) => {
+                self.toggle_module(entry.id, cx);
+                let facts = self.row_facts();
+                let dev_mode = self.profile.dev_mode;
+                if self.search.refresh_rows(dev_mode, &facts) > 0 {
+                    cx.notify();
+                }
+            }
+            // `Enter` is the listener's own branch above, which is the same jump by another route,
+            // and `Tab` is the managed "the rows are not tab stops" — nothing to do, and nothing
+            // to pass on.
+            QueryKeyOutcome::Jumped(_) | QueryKeyOutcome::Ignored => {}
+        }
+        WindowKeyOutcome::Consumed
     }
 
     /// A click on one result row: select it, then perform the jump.
@@ -3842,6 +4289,7 @@ impl Shell {
         motion: Motion,
         entity: &Entity<Self>,
         window: &Window,
+        scroll_to: Option<usize>,
     ) -> Option<AnyElement> {
         if !self.search.is_open() {
             return None;
@@ -3862,6 +4310,7 @@ impl Shell {
             &self.search,
             motion,
             query,
+            crate::overlay::ResultsScroll::new(&self.search_scroll, scroll_to),
             move |index, _event, _window, cx| {
                 handle.update(cx, |shell, cx| shell.jump_to_row(index, cx));
             },
@@ -3961,12 +4410,31 @@ impl Render for Shell {
         // The playtime timer rides the same hook. It is the same shape of decision: with no
         // session running, or with no whole second since the last tick, it returns before it
         // touches the clock's value, so an idle frame costs one branch.
+        //
+        // The counter either side of the call is what [`Shell::needs_frame`] reads: the tracker
+        // accepts a second only while the game is in front, so a total that grew is the one
+        // per-frame fact that says the game is being played rather than left running. The lock is
+        // taken twice per frame at most, and the owner is already holding it once inside the call.
+        let playtime_before = self.runtime.stats().total_playtime().as_secs();
         self.runtime.sample_playtime();
+        if self.runtime.stats().total_playtime().as_secs() > playtime_before {
+            self.playtime_moved_ms = Some(self.runtime.now_ms());
+        }
         // And the module keybinds ride it too. The global hook has been installed since the
         // platform backend existed and nothing drained it, so every bound key was dead: this is
         // the one per-frame caller of `Runtime::poll_module_keys`, and it repaints only when a
-        // switch actually moved.
+        // switch actually moved. Draining the queue needs a frame of its own, which is why
+        // [`Shell::needs_frame`] keeps them coming while the game is in front.
         if self.runtime.poll_module_keys() > 0 {
+            cx.notify();
+        }
+        // One read of the link for the whole frame: the pump and the two data tabs ask the same
+        // question, and `IngestStatus` is built from the store rather than stored here.
+        let status = self.runtime.ingest_status();
+        // The panels the link feeds, and the switches a capability frame can pull out from under.
+        // One per-frame sync, before the body is assembled, so the frame that sees the change is
+        // also the frame that paints it.
+        if self.sync_bridge_state(&status) {
             cx.notify();
         }
 
@@ -3985,6 +4453,10 @@ impl Render for Shell {
         // [`Shell::perform_jump`].
         let now = self.runtime.now_ms();
         self.search.prune_pulse(now);
+        // The row a query-field key moved to. Taken here because taking needs `&mut self` and the
+        // paint is handed the answer: the overlay's results list scrolls with the handle only the
+        // frame can track, and a request left in the state would fight the user's own wheel.
+        let search_scroll_to = self.search.take_scroll_request();
 
         // The managed swap (`MainWindow.xaml:306`/`:344`, `MainWindow.xaml.cs:469-492`) is latched
         // at the *end* of the frame, not here — see [`Shell::latch_control_mode`]: the frame that
@@ -3998,9 +4470,16 @@ impl Render for Shell {
             let body = match copy::TABS.get(self.tab).map(|tab| tab.body) {
                 // The Stats tab draws `views::stats_view`, which reads the runtime's tracker.
                 Some(TabBody::Stats) => {
+                    // The numbers are read out of the tracker before the paint, not borrowed from
+                    // it: `Runtime::stats` hands back a `MutexGuard`, a `Mutex` is not reentrant,
+                    // and the Reset button's callback lands in `Runtime::reset_stats`, which locks
+                    // the same mutex. A guard held across the element's construction is a guard the
+                    // press has to wait for, on the thread that already owns it. One clone of the
+                    // tracker per frame of this tab, which is a fixed array and four scalars.
+                    let stats = self.runtime.stats().clone();
                     let handle = cx.entity();
                     crate::views::stats_view::render(
-                        &self.runtime.stats(),
+                        &stats,
                         theme,
                         self.tab,
                         move |_, _window, cx| {
@@ -4080,7 +4559,7 @@ impl Render for Shell {
         // The overlay sits above the rail and the body and below the resize strips: a strip
         // the scrim swallowed would be a resize a user cannot perform, which is why this is
         // one child rather than a wrapper around the tree.
-        if let Some(search) = self.render_search(theme, motion, &entity, window) {
+        if let Some(search) = self.render_search(theme, motion, &entity, window, search_scroll_to) {
             root = root.child(search);
         }
 
@@ -4107,6 +4586,16 @@ impl Render for Shell {
         // loader's 360×310 so the splash is not a full-size GUI with one button in it.
         if self.latch_control_mode() {
             window.resize(crate::window::content_size());
+        }
+
+        // The pump. After the latch, because the loader this frame just left is not a reason to
+        // ask for another one — the control panel it became is what decides.
+        // `request_animation_frame` schedules `cx.notify` for this view on the next frame and
+        // wakes the platform's frame source (`crates/gpui/src/window.rs:3082`, `:3102`), which is
+        // the only per-frame hook the crate has; [`Shell::needs_frame`] is the rule for when it is
+        // worth one.
+        if self.needs_frame(&status) {
+            window.request_animation_frame();
         }
 
         root.into_any_element()
@@ -4291,6 +4780,19 @@ impl Shell {
                 .child(SharedString::from(Self::version_line()))
         });
 
+        // Why that press opened nothing, when it did not. No row when there is nothing to say: a
+        // rail that always painted a line would have to paint an empty one.
+        if let Some(status) = &self.release_status {
+            rail = rail.child(
+                div()
+                    .debug_selector(|| String::from("rail-release-status"))
+                    .px(px(12.0))
+                    .text_size(px(metrics::text::CAPTION))
+                    .text_color(theme.dim_text)
+                    .child(status.clone()),
+            );
+        }
+
         rail.child(
             div()
                 .text_size(px(metrics::text::CAPTION))
@@ -4326,16 +4828,26 @@ impl Shell {
 
     /// The version line's press: the releases page, `Process.Start` (`MainWindow.xaml.cs:1885`).
     ///
-    /// A launcher that refuses is logged rather than painted: the rail has no status area, no copy
-    /// owns a sentence for it, and the one refusal that actually happens — no `xdg-open` on `PATH` —
-    /// is a session condition `probe_capabilities` reports for the folder button already. Inventing
-    /// a line here would be the same class of mistake as an inert control, from the other side.
+    /// Both ways the press can do nothing are painted, not just logged. The rail has no status area
+    /// of its own, so the sentence goes under the version line that was pressed, which is where the
+    /// user is looking — the shape [`Shell::configs_open_folder`] gives the configs card's status
+    /// line. `None` on the opener is a session that was built without one (a test, a capture); the
+    /// launcher's own refusal is the other half, and its reason is the platform's sentence rather
+    /// than a second copy of the cause here. A press that reaches the browser clears the line again.
     fn open_release_page(&mut self) {
         let Some(open) = self.url_opener.clone() else {
+            self.release_status = Some(SharedString::from(copy::UPDATE_NO_LAUNCHER));
             return;
         };
-        if let Err(error) = open(aoko_core::services::update::RELEASES_URL) {
-            tracing::warn!("could not open the releases page: {}", error.user_facing());
+        match open(aoko_core::services::update::RELEASES_URL) {
+            Ok(()) => self.release_status = None,
+            Err(error) => {
+                let reason = error.user_facing();
+                tracing::warn!("could not open the releases page: {reason}");
+                self.release_status = Some(SharedString::from(
+                    copy::UPDATE_LAUNCH_FAILED.replace("{reason}", &reason),
+                ));
+            }
         }
     }
 
@@ -5145,12 +5657,20 @@ impl Shell {
                 slot.into_any_element()
             }
 
-            Control::Availability { text, bind } => div()
+            Control::Availability { module, text, bind } => div()
                 .id(SharedString::from(*bind))
                 .text_size(px(metrics::text::CAPTION))
                 .text_color(theme.dim_text)
                 .aria_label(SharedString::from(*bind))
-                .child(*text)
+                // `MainWindow.xaml.cs:623-657`: the line is the bridge's answer about one module,
+                // not a fixed rest state. The port painted the literal, so the Triggerbot card said
+                // "Available" on a 1.8.9 bridge — where the module is dead — while the overlay's
+                // injected row said UNAVAILABLE for the same module.
+                .child(if self.runtime.module_supported(*module) {
+                    *text
+                } else {
+                    copy::unavailable_text(*module)
+                })
                 .into_any_element(),
 
             Control::Expand { header } => div()
@@ -5738,11 +6258,11 @@ impl InjectionView {
     /// "Connected & Injected" and "Connected" on the button whatever the last press left behind,
     /// which is the managed order and the one-owner rule in one line.
     ///
-    /// The two failures are read only while the machine is [`InjectionStatus::Connecting`], and
-    /// that is the whole of their reach: a dial that never answered, and a link that went down
-    /// after answering, are both "the press is over and here is why". A refused press stays the
-    /// refusal even if an older attempt left a reason behind, because the rule that just refused is
-    /// what a user has to act on.
+    /// The link's reasons are read only while the machine is [`InjectionStatus::Connecting`], and
+    /// that is the whole of their reach: a dial that never answered, a link that went down after
+    /// answering, and the reader dialling that link again are all "the press is over and here is
+    /// why". A refused press stays the refusal even if an older attempt left a reason behind,
+    /// because the rule that just refused is what a user has to act on.
     ///
     /// One managed behaviour is deliberately not reproduced. `:1543-1547` re-enables the button on
     /// any game-state tick where the bridge is disconnected and the client is not injected, so a
@@ -5812,14 +6332,15 @@ impl InjectionView {
 /// `{port}` is filled with `str::replace`, which is this crate's convention for a template in copy
 /// (`copy::MODULE_BIND_CONFLICT_NAMED` does the same): the sentence is data owned by the copy
 /// module, and `format!` would need a literal format string here, which is the second copy in
-/// disguise. Neither sentence carries a `Status:` of its own — the prefix supplies it once — which
-/// is why both are composed here rather than in the widget.
+/// disguise. No sentence carries a `Status:` of its own — the prefix supplies it once — which is
+/// why every one of them is composed here rather than in the widget.
 fn link_failure_line(failure: LinkFailure) -> String {
     let sentence = match failure {
         LinkFailure::ConnectFailed { port } => {
             copy::LOADER_REASON_CONNECT_FAILED.replace("{port}", &port.to_string())
         }
         LinkFailure::Disconnected => copy::LOADER_REASON_DISCONNECTED.to_owned(),
+        LinkFailure::Reconnecting => copy::LOADER_REASON_RECONNECTING.to_owned(),
     };
     format!("{}{}", copy::LOADER_STATUS_PREFIX, sentence)
 }
@@ -5880,6 +6401,26 @@ const KEYBIND_WIDTH: f32 = 140.0;
 
 /// The action-bind buttons' `Width="210"` (`MainWindow.xaml:525`, `:542`).
 const ACTION_BIND_WIDTH: f32 = 210.0;
+
+/// How long one playtime sample keeps the frame pump alive.
+///
+/// [`Shell::needs_frame`] asks for a frame while there is something only a frame can advance, and
+/// the playtime clock is the one of those whose input is a whole second rather than a change on a
+/// socket or a thread. The tracker counts a second only while the game is in front
+/// (`StatsTracker.cs:181-193`), so a counter that moved is the per-frame evidence that the game is
+/// being played — and the state in which the module keybinds have to keep being drained too. Two
+/// sample windows cover one missed boundary and let the pump fall quiet about a second after the
+/// game loses focus, which is the only state where the next frame would repaint the same number.
+const PLAYTIME_PUMP_HOLD_MS: i64 = 2_000;
+
+/// How often the Servers tab's ping answers are drained while a pass is running.
+///
+/// The pool answers on threads of its own and nothing pushes a finished ping at this view, so the
+/// pass needs a clock rather than an event: [`Shell::pump_server_pings`] asks
+/// [`ServersState::poll_pings`] this often and stops as soon as the pass is over. Twenty ticks a
+/// second turns a chip under the cursor and costs the frame thread a lock acquisition — the socket
+/// belongs to the pool.
+const PING_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// One capturable binding: a card header's module key, or one of the two action binds.
 ///
@@ -5955,23 +6496,23 @@ const fn status_slot(which: copy::ActionBind) -> usize {
 enum KeybindHolder {
     /// A module's general bind holds the key.
     ///
-    /// Carries no id because nothing reads one: the managed action refusal is verbatim and
-    /// names the binding kind only (`copy::ACTION_BIND_CONFLICT`), and the module-conflict
-    /// line names the module that *asked*, which comes from the target through
-    /// [`module_label`]. An id here would be a `String` clone per refused capture with no
-    /// reader at the other end.
-    Module,
+    /// It carries the id because the *user* has to be told which module owns the key: two modules
+    /// bound to one key is a state the managed `InputHooks.SetModuleKey` allowed (`:124-134`), and
+    /// pressing that key then toggles whichever module the table happens to name first. Naming the
+    /// holder is the only signal a user gets, and a refused capture is rare enough that the `String`
+    /// this clones costs nothing on any other path.
+    Module(String),
     /// One of the two action binds.
     Action(copy::ActionBind),
 }
 
 /// Which binding already holds the key a capture asked for, or `None` when nothing does.
 ///
-/// `InputHooks.cs:124-156`, verbatim: `SetModuleKey` refuses a key either action bind holds,
-/// `SetAutoRodActionKey` and `SetThrowpotActionKey` refuse a key any general module bind
-/// holds, and a key of `0` — Escape, the managed unbind — never conflicts, so unbinding always
-/// lands. The two directions are disjoint, which is why the holder is exactly one of the two
-/// kinds and never both.
+/// `InputHooks.cs:124-156`, with the one addition the managed side lacked: a key of `0` — Escape,
+/// the managed unbind — never conflicts, so unbinding always lands. A module bind is refused by
+/// either action bind (`SetModuleKey`) *and* by another module's bind, which managed accepted
+/// silently; an action bind is refused by any general module bind and by the other action bind,
+/// which managed accepted silently in the same way.
 fn keybind_holder(
     profile: &aoko_protocol::profile::Profile,
     target: KeyTarget,
@@ -5982,18 +6523,36 @@ fn keybind_holder(
     }
 
     match target {
-        KeyTarget::Module(_) => [
+        KeyTarget::Module(module) => [
             (copy::ActionBind::AutoRod, profile.auto_rod_action_key),
             (copy::ActionBind::Throwpot, profile.throwpot_action_key),
         ]
         .into_iter()
         .find(|(_, key)| *key == vk)
-        .map(|(which, _)| KeybindHolder::Action(which)),
-        KeyTarget::Action(_) => profile
+        .map(|(which, _)| KeybindHolder::Action(which))
+        .or_else(|| {
+            profile
+                .module_keys
+                .iter()
+                .find(|(other, key)| **key == vk && other.as_str() != module)
+                .map(|(other, _)| KeybindHolder::Module(other.clone()))
+        }),
+        KeyTarget::Action(which) => profile
             .module_keys
             .iter()
             .find(|(_, key)| **key == vk)
-            .map(|_| KeybindHolder::Module),
+            .map(|(other, _)| KeybindHolder::Module(other.clone()))
+            .or_else(|| {
+                let (other, key) = match which {
+                    copy::ActionBind::AutoRod => {
+                        (copy::ActionBind::Throwpot, profile.throwpot_action_key)
+                    }
+                    copy::ActionBind::Throwpot => {
+                        (copy::ActionBind::AutoRod, profile.auto_rod_action_key)
+                    }
+                };
+                (key == vk).then_some(KeybindHolder::Action(other))
+            }),
     }
 }
 
@@ -6006,11 +6565,15 @@ fn header_label(card: &Card) -> Option<&'static str> {
 }
 
 /// The name a module's card shows, so a conflict line and the header cannot disagree.
-fn module_label(module: &'static str) -> &'static str {
+///
+/// Takes a borrow rather than a `&'static str` because the module a conflict *names* is read off
+/// the profile's key map, which owns its ids: the label is still the card's static one, and a
+/// module with no card of its own falls back to a phrase that names no id at all.
+fn module_label(module: &str) -> &'static str {
     copy::all_cards()
         .find(|card| card_module(card) == Some(module))
         .and_then(header_label)
-        .unwrap_or(module)
+        .unwrap_or("another module")
 }
 
 /// The name an action bind's row shows (`Auto Rod`, `Throwpot`), read from its card.
@@ -6163,6 +6726,44 @@ fn search_key_of(event: &KeyDownEvent) -> Option<SearchKey> {
     }
 
     Some(SearchKey::Printable(first))
+}
+
+/// The query-field key one keystroke is, or `None` when the overlay's query field does not own it.
+///
+/// The managed `CommandSearchOverlay`'s `QueryBox_PreviewKeyDown` handled exactly these: Up/Down
+/// walked the list with wrap-around, Enter jumped (a window key here, because the painted query row
+/// is not a focusable field at the pin), Ctrl+Space and F2 toggled the highlighted module, and Tab
+/// was swallowed so focus stayed in the box. A chord is matched before an unmodified key, so
+/// Ctrl+Space is the toggle and a bare space is just a character the field already consumed.
+/// Ctrl+K and Escape are the window's own keys and are matched before this in
+/// [`Shell::window_key_outcome`].
+fn query_key_of(event: &KeyDownEvent) -> Option<QueryKey> {
+    let modifiers = event.keystroke.modifiers;
+
+    if modifiers.control && !modifiers.alt && !modifiers.platform && !modifiers.shift {
+        return event
+            .keystroke
+            .key
+            .eq_ignore_ascii_case("space")
+            .then_some(QueryKey::ToggleChord);
+    }
+
+    if modifiers.control || modifiers.alt || modifiers.platform {
+        return None;
+    }
+
+    let key = event.keystroke.key.as_str();
+    if key.eq_ignore_ascii_case("up") {
+        Some(QueryKey::Up)
+    } else if key.eq_ignore_ascii_case("down") {
+        Some(QueryKey::Down)
+    } else if key.eq_ignore_ascii_case("f2") {
+        Some(QueryKey::ToggleF2)
+    } else if key.eq_ignore_ascii_case("tab") {
+        Some(QueryKey::Tab)
+    } else {
+        None
+    }
 }
 
 /// Milliseconds since the Unix epoch, for the `Last used` / `Last joined` lines.
@@ -6865,6 +7466,109 @@ mod tests {
 
         shell.load_config("Dark").expect("load");
         assert_eq!(shell.theme().name, "Ink");
+    }
+
+    /// A load applies the module switches the file carries, not just the settings the tab paints.
+    ///
+    /// `ApplyLoadedProfile` (`MainWindow.xaml.cs:835-848`) is `ApplyToClicker` (`Profile.cs:727`),
+    /// which assigns every `Clicker` property from the profile — the module booleans among them, so
+    /// a managed load started and stopped modules. The port keeps the settings and the switches in
+    /// two places, so the apply has to reach both: a load that replaced only this view's copy
+    /// repainted the tab and left the modules running the config the user had before.
+    #[test]
+    fn a_load_applies_the_module_switches_it_carries() {
+        use aoko_protocol::module_catalog::EnabledFlag;
+
+        let root = scratch_root();
+        let store = aoko_platform::ProfileStore::new(&root);
+
+        // A config with two modules on, written the way the app writes one. Dev Mode is on
+        // because Kill Aura is `DevOnly`: the apply ends in `DisableDevOnlyModules`
+        // (`Clicker.cs:194-200`), which drops it while the mode is off — the case
+        // `a_load_cannot_start_a_dev_only_module_with_dev_mode_off` pins.
+        let mut saved = aoko_protocol::profile::Profile::default();
+        saved.is_armed = true;
+        saved.dev_mode = true;
+        saved.kill_aura_enabled = true;
+        store
+            .write_profile("PvP", &aoko_protocol::profile::to_profile_json(&saved))
+            .expect("seed");
+
+        let mut shell = Shell::with_store(Theme::slate(), aoko_platform::ProfileStore::new(&root));
+        assert!(
+            !shell.controller().is_module_enabled(EnabledFlag::KillAura),
+            "the shell starts from the defaults, so the load has something to move"
+        );
+
+        shell.load_config("PvP").expect("named load");
+
+        assert!(
+            shell.controller().is_module_enabled(EnabledFlag::KillAura),
+            "the switch the file turns on is on"
+        );
+        assert!(
+            shell.controller().is_module_enabled(EnabledFlag::LeftClick),
+            "and so is the left clicker's"
+        );
+        // The card, the overlay's rows and the module keys all read this, not the profile.
+        assert!(shell.is_module_on("killaura"));
+        // And the frame the bridge runs is built from the same set.
+        assert!(shell.controller().config_payload().kill_aura);
+    }
+
+    /// A dev-only switch the file carries is dropped while Dev Mode is off.
+    ///
+    /// `Clicker.DisableDevOnlyModules` (`Clicker.cs:194-200`) is the last step of the managed apply,
+    /// and `AppController::replace_profile` keeps it: while the mode is off the Kill Aura card is
+    /// hidden and its keybind refused, so a switch the file still stores would be one no button
+    /// could reach. This is the shell's half of `AppController`'s own test of the same rule.
+    #[test]
+    fn a_load_cannot_start_a_dev_only_module_with_dev_mode_off() {
+        use aoko_protocol::module_catalog::EnabledFlag;
+
+        let root = scratch_root();
+        let mut saved = aoko_protocol::profile::Profile::default();
+        saved.dev_mode = false;
+        saved.kill_aura_enabled = true;
+        aoko_platform::ProfileStore::new(&root)
+            .write_profile("Beta", &aoko_protocol::profile::to_profile_json(&saved))
+            .expect("seed");
+
+        let mut shell = Shell::with_store(Theme::slate(), aoko_platform::ProfileStore::new(&root));
+        shell.load_config("Beta").expect("named load");
+
+        assert!(
+            !shell.controller().is_module_enabled(EnabledFlag::KillAura),
+            "the sweep drops the dev-only switch the file carries"
+        );
+        assert!(
+            !shell.controller().config_payload().kill_aura,
+            "and the frame the bridge runs agrees with the switch the card paints"
+        );
+    }
+
+    /// A config whose file turns a module off stops it, which is the other half of the apply.
+    #[test]
+    fn a_load_stops_the_modules_the_file_turns_off() {
+        use aoko_protocol::module_catalog::EnabledFlag;
+
+        let root = scratch_root();
+        let mut quiet = aoko_protocol::profile::Profile::default();
+        quiet.kill_aura_enabled = false;
+        aoko_platform::ProfileStore::new(&root)
+            .write_profile("Quiet", &aoko_protocol::profile::to_profile_json(&quiet))
+            .expect("seed");
+
+        let mut shell = Shell::with_store(Theme::slate(), aoko_platform::ProfileStore::new(&root));
+        shell.runtime_mut().set_module_enabled("killaura", true);
+        assert!(shell.controller().is_module_enabled(EnabledFlag::KillAura));
+
+        shell.load_config("Quiet").expect("named load");
+
+        assert!(
+            !shell.controller().is_module_enabled(EnabledFlag::KillAura),
+            "a load replaces the switch set rather than merging into it"
+        );
     }
 
     /// Reset layout writes the canonical HUD layout into the profile, the file and the frame.
@@ -9190,6 +9894,41 @@ mod tests {
         );
     }
 
+    /// A press that opens nothing says why, in the rail it was made in.
+    ///
+    /// The opener is left at the `None` every test shell and every capture starts with, which is the
+    /// one state this press cannot do anything in. Without the line the control simply does nothing
+    /// and says nothing, and the rail has no status area to borrow — so the sentence is painted under
+    /// the version line it belongs to, the shape the configs folder row gives its own refusal.
+    #[gpui::test]
+    fn a_press_with_no_launcher_paints_the_reason(cx: &mut gpui::TestAppContext) {
+        use gpui::Modifiers;
+
+        let root = scratch_root();
+        let (_shell, _handle, mut visual) = shell_in_window(cx, &root);
+
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            visual.debug_bounds("rail-release-status").is_none(),
+            "the resting rail says nothing"
+        );
+
+        let bounds = visual
+            .debug_bounds("rail-version")
+            .expect("the version line paints");
+        visual.simulate_click(bounds.center(), Modifiers::default());
+        visual.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        assert!(
+            visual.debug_bounds("rail-release-status").is_some(),
+            "the press names the launcher it did not have, under the line it was made on"
+        );
+    }
+
     /// The overlay is mounted: its card paints while it is open and not while it is closed.
     ///
     /// `command-search-card` is the one stable selector the overlay carries, and the mount
@@ -10706,6 +11445,7 @@ mod tests {
                 copy::LOADER_REASON_CONNECT_FAILED.replace("{port}", &port.to_string())
             }
             LinkFailure::Disconnected => copy::LOADER_REASON_DISCONNECTED.to_owned(),
+            LinkFailure::Reconnecting => copy::LOADER_REASON_RECONNECTING.to_owned(),
         };
         format!("{}{}", copy::LOADER_STATUS_PREFIX, sentence)
     }
@@ -11351,12 +12091,12 @@ mod tests {
         );
     }
 
-    /// Every state the machine can enter paints its own line, and both reasons do too.
+    /// Every state the machine can enter paints its own line, and every reason does too.
     ///
     /// `resolve` is the whole mapping, so a state that fell through to another arm — or a failure
     /// no state ever read — would be invisible here rather than at a call site.
     #[test]
-    fn every_state_and_both_reasons_paint_their_own_line() {
+    fn every_state_and_every_reason_paints_its_own_line() {
         use std::collections::BTreeSet;
 
         let lines = [
@@ -11385,6 +12125,12 @@ mod tests {
                 &InjectionStatus::Connecting,
                 false,
                 Some(LinkFailure::Disconnected),
+            )
+            .status,
+            InjectionView::resolve(
+                &InjectionStatus::Connecting,
+                false,
+                Some(LinkFailure::Reconnecting),
             )
             .status,
         ];
@@ -11416,6 +12162,11 @@ mod tests {
             lines[5]
         );
         assert_eq!(lines[6], failure_line(LinkFailure::Disconnected));
+        assert_eq!(
+            lines[7],
+            failure_line(LinkFailure::Reconnecting),
+            "a redial is not the drop it followed: the panel has a line for each"
+        );
     }
 
     /// The connected line is the controller's answer, not a state the panel stores.

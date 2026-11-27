@@ -16,9 +16,11 @@
 //! The bridge link is the second half: `crate::runtime::Runtime::connect_bridge` hands the
 //! controller to a `crate::ingest::Ingest` worker, which decodes wire lines and publishes
 //! `GameState` into the store, and `crate::runtime::Runtime::ingest_status` reports what
-//! that store holds. Nothing dials by itself — the shipped path asks for it once, a
+//! that store holds. Nothing here dials on its own — the shipped path asks for it once, a
 //! test-built runtime never does — so a switch flip is still observable with no bridge
-//! present.
+//! present. Re-dialling belongs to the reader: a link that drops is dialled again on the
+//! worker, and `crate::runtime::Runtime::link_failure` reports the round in flight as
+//! `LinkFailure::Reconnecting`.
 //!
 //! Supervision is the third: `crate::runtime::Runtime::start_supervision` makes a module
 //! switch the trigger for `aoko_core::loops::ClickerLoops`, which owns the seven automation
@@ -74,7 +76,7 @@
 //! view has no copy of its own to go stale. No message carries a click or a CPS value, so the
 //! ingest path feeds nothing and this file says so where the sink is defined.
 
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, RwLock, RwLockReadGuard};
 use std::time::{Duration, Instant};
 
 use aoko_core::app::{AppController, StateSnapshot};
@@ -110,6 +112,16 @@ const LOOP_SEED: u64 = 0x00A0_C0DE;
 /// `Timer` coalesces the ticks it misses for the same reason, so the cap follows it instead of
 /// inventing a rule. Five seconds is far beyond any frame gap a running app has.
 const PLAYTIME_MAX_CATCH_UP_SECS: u64 = 5;
+
+/// How many keys and mouse buttons [`Runtime::poll_module_keys`] will believe are held at once.
+///
+/// One entry per press whose release has not been seen yet. A human holds a few keys; the cap
+/// exists for the case where a release never arrives — the hook's queue is fixed-capacity
+/// (`windows/input.rs::EVENT_CAPACITY`), so a stall long enough to overflow it drops events,
+/// and a dropped `KeyUp` or `ButtonUp` would otherwise cost that control's bind for the rest of
+/// the session. Past the cap the oldest press is forgotten, which is the recoverable direction:
+/// the key dispatches again on its next press instead of never.
+const MAX_HELD_KEYS: usize = 16;
 
 /// How long a bridge dial may stay unanswered before the port calls it failed.
 ///
@@ -372,6 +384,33 @@ pub struct Runtime {
     /// This is the deadline's other half: a dial that is still unanswered this many milliseconds
     /// after it started is a failure to report, even though the worker is blocked in `connect`.
     connect_started_ms: Option<i64>,
+    /// The hook's event queue, drained and reused by [`Runtime::poll_module_keys`].
+    ///
+    /// This runs in the paint, so a fresh `Vec` per frame would be an allocation per frame for a
+    /// queue that is almost always empty: the buffer keeps its capacity instead, and the drain
+    /// refills it. The events are `InputEvent`s and not key presses because that is what the
+    /// backend reports, which is also what makes a mouse bind one arm of the same drain; only the
+    /// pointer's own movement in that queue is skipped.
+    key_events: Vec<InputEvent>,
+    /// The keys and mouse buttons the hook currently reports as down, so one press is one
+    /// dispatch.
+    ///
+    /// A virtual-key code rather than a [`Key`], because a mouse button is a managed pseudo-key
+    /// with no [`Key`] spelling: `0x01`..`0x06` is `VK_LBUTTON`..`VK_XBUTTON2`
+    /// ([`mouse_virtual_key`]), which is the code the capture stores and the code a mouse bind
+    /// holds, so one latch covers both families — the keyboard's codes start at `0x08`
+    /// (`VK_BACK`), so the two cannot collide.
+    ///
+    /// Both observers repeat a held control — `WM_KEYDOWN` repeats on Windows, and evdev sends
+    /// `value == 2` which the observer reports as another `KeyDown`
+    /// (`linux/evdev.rs:265-273`) — and a module is a toggle, so trusting the repeats is a
+    /// module flickering dozens of times a second. A press enters the list, its release leaves
+    /// it, and a repeat finds it already there.
+    ///
+    /// The list is capped: a `KeyUp` or `ButtonUp` dropped by a full event queue would otherwise
+    /// leave a control held for the life of the session and cost that one bind, so past the cap
+    /// the oldest entry is dropped instead of the newest press.
+    keys_held: Vec<i32>,
 }
 
 impl Runtime {
@@ -414,6 +453,8 @@ impl Runtime {
             epoch,
             link_report: LinkReport::new(),
             connect_started_ms: None,
+            key_events: Vec::new(),
+            keys_held: Vec::new(),
         }
     }
 
@@ -471,10 +512,7 @@ impl Runtime {
     /// what makes an overlay row read unavailable rather than guessed at.
     #[must_use]
     pub fn module_supported(&self, module_id: &str) -> bool {
-        self.advertised
-            .read()
-            .map(|advertised| advertised.supports_module(module_id))
-            .unwrap_or(false)
+        advertised_read(&self.advertised).supports_module(module_id)
     }
 
     /// Whether the bridge advertises one setting, by the name the `config` frame uses.
@@ -486,10 +524,20 @@ impl Runtime {
     /// including the `false` that makes a press a no-op against a bridge that never named it.
     #[must_use]
     pub fn setting_supported(&self, setting: &str) -> bool {
-        self.advertised
-            .read()
-            .map(|advertised| advertised.supports_setting(setting))
-            .unwrap_or(false)
+        advertised_read(&self.advertised).supports_setting(setting)
+    }
+
+    /// Whether the bridge advertises one session action, by its `actions` name.
+    ///
+    /// The fourth array of the same cell [`Runtime::module_supported`] reads, and the question the
+    /// two data tabs ask before they offer a command: `BridgeCapabilities.SupportsAction`
+    /// (`ServersView.xaml.cs:50-53`, `AccountsView.xaml.cs:78-82`) is the managed gate, and the
+    /// names are [`aoko_protocol::capabilities::actions`]'s — `server.join`, `account.setSession`
+    /// and their neighbours. The codec's fallback table carries all four before the handshake, so
+    /// the answer is "no" only for a bridge that named a narrower list.
+    #[must_use]
+    pub fn action_supported(&self, action: &str) -> bool {
+        advertised_read(&self.advertised).supports_action(action)
     }
 
     /// The shared advertised-module cell, for the reader that fills it.
@@ -511,14 +559,21 @@ impl Runtime {
     ///
     /// An attempt that *has* answered (the reader published a failure) or that has outlived
     /// [`CONNECT_DEADLINE_MS`] is replaced instead, because the press that follows a failure is a
-    /// retry and has to actually dial. In the deadline case the previous worker is still blocked
-    /// in `connect`; it is detached rather than joined, it reports into the report cell of its own
-    /// attempt, and the store's `connected` is a boolean either way — so the panel cannot be wrong
-    /// about whether the link is up, which is the property that matters here.
+    /// retry and has to actually dial. The reader being replaced is *stopped* before the
+    /// replacement dials, not detached: dropping its handle raises its stop flag and shuts the
+    /// socket it holds down (`Ingest`'s `Drop`), so it cannot keep the bridge's single accept slot
+    /// while the new reader dials for it — which is what left the panel saying `connected` about a
+    /// link the old reader no longer read.
     pub fn connect_bridge(&mut self) {
         if self.controller.store().is_connected() || self.attempt_is_live() {
             return;
         }
+
+        // Disposed of as its own statement, before the new reader exists. `Ingest::spawn`
+        // evaluates its dial when it is called, so assigning over the old handle would keep the
+        // previous reader - and its socket - alive for the whole of the new attempt's first dial,
+        // and the two would race for the one connection the bridge accepts.
+        self.ingest = None;
 
         // A new attempt supersedes the last answer, and its deadline starts now.
         self.link_report.clear();
@@ -574,6 +629,9 @@ impl Runtime {
         &mut self,
         transport: T,
     ) {
+        // The previous reader first, for the reason [`Runtime::connect_bridge`] gives: it is
+        // stopped here rather than after the replacement has already claimed the store.
+        self.ingest = None;
         self.link_report.clear();
         self.connect_started_ms = Some(self.now_ms());
         self.ingest = Some(Ingest::attach(
@@ -603,15 +661,19 @@ impl Runtime {
     /// Read out of the controller's store, so it is the same truth the rest of the app
     /// sees; nothing in this crate keeps a second "connected" flag. `fresh` is
     /// `aoko_core::app::UiSnapshot::is_state_fresh`, i.e. the age is inside
-    /// `aoko_core::chest_stealer::FRESH_STATE_MS`.
+    /// `aoko_core::chest_stealer::FRESH_STATE_MS` — answered from the one age this reads
+    /// rather than through `AppController::ui_snapshot`, which clones the screen name, the
+    /// version and the capability notes for a value nobody else here uses, and this runs
+    /// once a frame.
     #[must_use]
     pub fn ingest_status(&self) -> IngestStatus {
         let now = Instant::now();
         let store = self.controller.store();
+        let state_age = store.age(now);
         IngestStatus {
             connected: store.is_connected(),
-            state_age: store.age(now),
-            fresh: self.controller.ui_snapshot(now).is_state_fresh(),
+            state_age,
+            fresh: state_age.is_some_and(|age| age.as_millis() as u64 <= FRESH_STATE_MS),
         }
     }
 
@@ -691,58 +753,200 @@ impl Runtime {
 
     /// One frame's worth of module keybind edges, dispatched to the controller.
     ///
-    /// The global hook has been installed since the platform backend was built, but nothing
-    /// ever drained it: `InputBackend::poll_events` had no caller in the whole app, so every
-    /// key the user bound to a module (`Profile::module_keys`, the managed
-    /// `InputHooks.ModuleKeys` table) did nothing. This is that caller.
+    /// This is the managed `KeyboardProc`'s module loop (`InputHooks.cs:406-420`) with the
+    /// hook's thread replaced by the frame: drain the queue, and for each press find the
+    /// module whose saved virtual key it is and toggle it. Nothing else in the app drains
+    /// `InputBackend::poll_events`, so without this every key the user bound to a module
+    /// (`Profile::module_keys`, the managed `InputHooks.ModuleKeys` table) does nothing.
     ///
-    /// Only key-down edges act, because a module is a toggle: acting on the up too would
-    /// switch it back on the same press. Repeat events are not a problem — the hook reports
-    /// transitions, not auto-repeat.
+    /// A press is a keystroke *or* a mouse button. The managed mouse hook reported
+    /// `VK_LBUTTON`..`VK_XBUTTON2` and the capture stores those same five codes, so a mouse bind
+    /// lives in `Profile::module_keys` beside every keystroke bind and takes the same two steps
+    /// here — [`mouse_virtual_key`] gives the code, and the latch and the lookup do not care which
+    /// family it came from. Dropping the button events left those binds storable and dead.
+    ///
+    /// Five properties are load-bearing, and each one is a way this can be wrong:
+    ///
+    /// * **One dispatch per physical press.** A held key repeats (`WM_KEYDOWN` auto-repeat on
+    ///   Windows, evdev `value == 2` on Linux) and a module is a toggle, so repeats are dropped
+    ///   through `keys_held` rather than flipping the switch dozens of times a
+    ///   second. The managed host repeated, because it had no latch either; a module that
+    ///   flickers is the bug a user reports, not the behaviour to match.
+    /// * **The comparison is a virtual key**, through [`Key::virtual_key`] for a keystroke and
+    ///   [`mouse_virtual_key`] for a button, because a [`Key`] is a spelling: the Windows hook
+    ///   says `Key::Other(0x41)`, evdev says `Key::Char('a')` and a capture stores `0x41`.
+    ///   Comparing the values made a letter bind fire on neither observer.
+    /// * **The managed guard comes first.** `ShouldBlockModuleKeybinds` (`:340-352`) blocks
+    ///   module keybinds unless the game is the foreground window, and when the bridge is
+    ///   connected, unless no game screen is open. That is what stops a bound letter toggling a
+    ///   module while the user types it into this window's own search box, and it is why a bind
+    ///   does nothing while a chest is open — as in the host.
+    /// * **Nothing is consumed.** The port reads the hook and leaves the keystroke alone:
+    ///   `keyboard_proc` passes every event to `CallNextHookEx`, so a bind never eats the game's
+    ///   own key. There is nothing here to undo, and this note is what keeps it that way.
+    /// * **No allocation per frame.** The queue and the held set are reused buffers, and the
+    ///   binds are read from the live profile by scanning it — a clone per frame would be a
+    ///   `String` per module at the frame rate, for a table whose keys are `i32`.
     ///
     /// Returns how many switches were flipped, which is what tells the caller whether a
-    /// repaint is needed. Every refusal is silent on purpose: an unbindable code
-    /// ([`aoko_platform::key_for_virtual_key`] answering `None`), or an id the catalog does
-    /// not know, is a key that does nothing, which is also what the managed host did.
+    /// repaint is needed. A refusal is silent, as in the managed host: an unbound code, a
+    /// module the bridge does not advertise, and a dev-only module with dev mode off are all
+    /// keys that do nothing.
     pub fn poll_module_keys(&mut self) -> usize {
-        let Some(platform) = self.platform.as_ref() else {
+        let Some(input) = self
+            .platform
+            .as_ref()
+            .map(|platform| Arc::clone(&platform.input))
+        else {
             return 0;
         };
-        let mut events = Vec::new();
-        if let Err(error) = platform.input.poll_events(&mut events) {
+
+        let mut events = std::mem::take(&mut self.key_events);
+        events.clear();
+        if let Err(error) = input.poll_events(&mut events) {
             tracing::debug!(%error, "global input hook could not be drained");
+            self.key_events = events;
             return 0;
         }
         if events.is_empty() {
+            self.key_events = events;
             return 0;
         }
 
-        // The binds are read from the live profile, not cached: a capture that just recorded a
-        // new key must be in force on the next press, and the table is small.
-        let binds: Vec<(String, Key)> = {
-            let profile = self
-                .controller
-                .with_profile(|profile| profile.module_keys.clone());
-            profile
-                .into_iter()
-                .filter_map(|(module, code)| {
-                    aoko_platform::key_for_virtual_key(code).map(|key| (module, key))
-                })
-                .collect()
-        };
-
         let mut flipped = 0;
-        for event in events {
-            let InputEvent::KeyDown(key) = event else {
-                continue;
-            };
-            for (module, bound) in &binds {
-                if *bound == key && self.flip_module(module) {
-                    flipped += 1;
+        for event in &events {
+            match event {
+                InputEvent::KeyDown(key) => {
+                    if key
+                        .virtual_key()
+                        .is_some_and(|code| self.press_virtual_key(code))
+                    {
+                        flipped += 1;
+                    }
                 }
+                InputEvent::KeyUp(key) => {
+                    if let Some(code) = key.virtual_key() {
+                        self.release_virtual_key(code);
+                    }
+                }
+                // A mouse bind is one of the managed pseudo-keys: the capture stores
+                // `VK_LBUTTON`..`VK_XBUTTON2` for these buttons and the profile holds that code,
+                // so a button is the same two steps a key takes — one latch, one bind lookup.
+                // The arm is the whole enumeration rather than a wildcard, so a button the
+                // platform starts reporting cannot be dropped here in silence.
+                InputEvent::ButtonDown(button) => {
+                    if self.press_virtual_key(mouse_virtual_key(*button)) {
+                        flipped += 1;
+                    }
+                }
+                InputEvent::ButtonUp(button) => {
+                    self.release_virtual_key(mouse_virtual_key(*button));
+                }
+                // The pointer position rides the same queue and names no bind.
+                InputEvent::MouseMove { .. } => {}
             }
         }
+
+        self.key_events = events;
         flipped
+    }
+
+    /// One press of a virtual key or a mouse button: latched, then dispatched.
+    ///
+    /// Returns whether a module moved. The latch is `keys_held`, so a held control dispatches
+    /// once however often the hook repeats it, and a press the platform gives no virtual key
+    /// never reaches here at all.
+    fn press_virtual_key(&mut self, code: i32) -> bool {
+        if self.keys_held.contains(&code) {
+            // The auto-repeat of a press already dispatched.
+            return false;
+        }
+        if self.keys_held.len() >= MAX_HELD_KEYS {
+            self.keys_held.remove(0);
+        }
+        self.keys_held.push(code);
+        self.dispatch_module_key(code)
+    }
+
+    /// The release of a virtual key or a mouse button, which re-arms its next press.
+    fn release_virtual_key(&mut self, code: i32) {
+        if let Some(index) = self.keys_held.iter().position(|held| *held == code) {
+            self.keys_held.swap_remove(index);
+        }
+    }
+
+    /// Toggles the module the virtual key or mouse button `code` is bound to, and reports whether
+    /// it moved.
+    ///
+    /// `InputHooks.ToggleModule`'s guards, in its order: an unsupported module is ignored so a
+    /// keybind cannot desynchronise the two sides, and a dev-only module needs dev mode. Both
+    /// answer before the switch is written, and neither allocates.
+    fn dispatch_module_key(&mut self, code: i32) -> bool {
+        // The live profile, scanned rather than cloned: a capture that just recorded a key has
+        // to be in force on the next press, which is the reason this is not cached.
+        let bound = self.controller.with_profile(|profile| {
+            profile
+                .module_keys
+                .iter()
+                .find(|(_, saved)| **saved == code)
+                .map(|(module, _)| module.clone())
+        });
+        let Some(module) = bound else {
+            return false;
+        };
+
+        // The managed guard is checked after the match, so a key no module claims costs one
+        // profile scan and no window query at all.
+        if !self.module_keybinds_allowed() {
+            return false;
+        }
+        if !self.module_supported(&module) {
+            return false;
+        }
+        if module_catalog::is_dev_only(&module) && !self.controller.with_profile(|p| p.dev_mode) {
+            return false;
+        }
+
+        self.flip_module(&module)
+    }
+
+    /// `!InputHooks.ShouldBlockModuleKeybinds` (`InputHooks.cs:312-321`).
+    ///
+    /// Three facts, in the managed order. The game must be the confirmed foreground window,
+    /// which is the same strict [`game_is_foreground`] the injection gate reads — so a key
+    /// pressed while this window is focused cannot toggle anything, and typing a bound letter
+    /// into a search box is just typing. Then, when the bridge is connected, the game must not
+    /// be showing a screen: a menu, an inventory or a chest is not gameplay, and the managed
+    /// host blocked there too. Without a connection the cursor is the only signal, and a
+    /// backend that cannot report it reads as "not drawn" — the managed `GetCursorInfo`
+    /// failure answer — rather than as a refusal that would leave every bind dead.
+    fn module_keybinds_allowed(&self) -> bool {
+        let Some(windows) = self
+            .platform
+            .as_ref()
+            .and_then(|platform| platform.windows.as_deref())
+        else {
+            // No window surface, no confirmation: the same fail-closed answer the injection
+            // gate gives a session that cannot see windows.
+            return false;
+        };
+        if !game_is_foreground(windows) {
+            return false;
+        }
+
+        let store = self.controller.store();
+        if store.is_connected() {
+            let snapshot = store.snapshot();
+            let fallback = aoko_protocol::state::GameState::default();
+            let state = snapshot
+                .as_deref()
+                .map_or(&fallback, |snapshot| snapshot.state.as_ref());
+            return !any_game_screen_open(state);
+        }
+
+        // `WindowDetection.IsCursorVisible()` is a `false` on failure, so "cannot tell" here
+        // must not block: only a backend that says the pointer *is* drawn does.
+        windows.cursor_visible() != Some(true)
     }
 
     /// What the helper last answered, or `None` when there is nothing to show.
@@ -779,8 +983,14 @@ impl Runtime {
     /// The Stats tab's tracker, borrowed.
     ///
     /// A guard rather than a copy: `StatsTracker` is not `Clone`, the view reads a dozen numbers
-    /// from it, and a copy is exactly the stale second source this slice removes. The lock is
-    /// held only while the caller reads.
+    /// from it, and a copy is exactly the stale second source this slice removes.
+    ///
+    /// **A guard for one read, not for a paint.** Everything that writes the tracker takes the same
+    /// lock (`ClickSink::record_click` from a loop thread, [`Runtime::reset_stats`]), and
+    /// `MutexGuard` is neither `Send` nor reentrant: a caller that keeps the guard alive across a
+    /// callback which resets the stats — `views::stats_view::render`'s reset button — deadlocks the
+    /// window against itself. Read out what is needed, or let the guard drop at the end of the
+    /// statement.
     ///
     /// No `#[must_use]`: `MutexGuard` already carries one, and saying it twice is a clippy error
     /// rather than a stronger promise.
@@ -1108,6 +1318,17 @@ impl Runtime {
     }
 }
 
+/// The advertised-module cell's read guard, with a poisoned lock recovered rather than skipped.
+///
+/// The cell guards the bridge's advertised lists - a table a capability frame replaces wholesale -
+/// so the value a panicking reader left behind is stale, not corrupt. Answering "nothing is
+/// supported" instead would be worse than the stale table: every module gate in the app reads this
+/// cell, so a panicked reader would switch off every capability-gated control and refuse every
+/// module keybind for the rest of the session. `crate::ingest` recovers the write side the same way.
+fn advertised_read(cell: &RwLock<BridgeCapabilities>) -> RwLockReadGuard<'_, BridgeCapabilities> {
+    cell.read().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// The loop a catalog flag drives, `None` for a module that is only a setting.
 ///
 /// The catalog has no loop column: `Entry` carries the id, the flag, the surfaces and the
@@ -1268,6 +1489,46 @@ pub fn game_is_foreground(windows: &dyn WindowInspector) -> bool {
     }
 }
 
+/// `InputHooks.IsAnyGameScreenOpen` (`InputHooks.cs:166-175`): whether the game is showing a
+/// screen rather than gameplay.
+///
+/// Two facts, either of which is a screen: the `GuiOpen` flag, and a `screenName` that names
+/// something. `none`, `unknown` and an empty name are the bridge's own words for "no screen" —
+/// `unknown` is `GameState`'s default (`aoko-protocol/src/state.rs:26-28`), so a frame that
+/// carries no screen name does not count as one.
+#[must_use]
+fn any_game_screen_open(state: &aoko_protocol::state::GameState) -> bool {
+    if state.gui_open {
+        return true;
+    }
+    let screen = state.screen_name.trim();
+    !(screen.is_empty()
+        || screen.eq_ignore_ascii_case("none")
+        || screen.eq_ignore_ascii_case("unknown"))
+}
+
+/// The managed virtual key of one mouse button, `VK_LBUTTON`..`VK_XBUTTON2`.
+///
+/// `Aoko/Core/InputHooks.cs:40-44` and `:429-448` are the reference: the mouse hook reported the
+/// button as one of these five codes, the capture stores the same number
+/// (`components/keybind_capture.rs::mouse_virtual_key`), and `views::keybind_text` names them one
+/// by one because they are not contiguous — `0x03` is `VK_CANCEL` and names no button. A mouse bind
+/// is therefore written into `Profile::module_keys` in the same table, and as the same code, as a
+/// keystroke.
+///
+/// The arm is the whole enumeration on purpose: a button the platform starts reporting has to be
+/// given a code here rather than falling into a wildcard that no bind could ever match.
+#[must_use]
+fn mouse_virtual_key(button: MouseButton) -> i32 {
+    match button {
+        MouseButton::Left => 0x01,
+        MouseButton::Right => 0x02,
+        MouseButton::Middle => 0x04,
+        MouseButton::X1 => 0x05,
+        MouseButton::X2 => 0x06,
+    }
+}
+
 /// The platform input backend, gated on the game being confirmed foreground.
 ///
 /// Every acting call asks [`game_is_foreground`] first and is refused with a classified
@@ -1387,6 +1648,10 @@ impl InputBackend for ForegroundGated {
 /// crate re-implements an input call or a window query. The one addition is the gate —
 /// `ForegroundGated` refuses an acting call the platform backend would have performed, which is
 /// a safety condition rather than a second implementation of the call.
+///
+/// Building a reachable surface is also where the process-wide input hook is installed on
+/// Windows, for the reason spelled out at the call: the backend observes nothing until someone
+/// installs it, and this is the one place a session decides it can reach the platform.
 fn platform_surfaces(
     surfaces: &LoopSurfaces,
 ) -> (Arc<dyn InputBackend>, Option<Arc<dyn WindowInspector>>) {
@@ -1405,6 +1670,20 @@ fn platform_surfaces(
     }
 
     let services = aoko_platform::default_services();
+    // The observation hook has no other installer: `WindowsInputBackend::new` only reads a
+    // queue, so a session that never installs the hook is a session whose queue stays empty and
+    // whose module keybinds are all dead. This is the thread that pumps the window's messages,
+    // which is the thread a `WH_KEYBOARD_LL` hook is delivered on, and the install is
+    // idempotent, so a second surface build costs one branch.
+    #[cfg(windows)]
+    {
+        if let Err(error) = aoko_platform::install_hooks() {
+            tracing::warn!(
+                %error,
+                "the global input hook could not be installed: module keybinds will not fire"
+            );
+        }
+    }
     if surfaces.windows.is_platform() {
         windows = Some(Arc::from(services.windows));
     }
@@ -1546,19 +1825,15 @@ impl LoopSense for ControllerSense {
     /// why aim assist, Pixel Party assist and the triggerbot did nothing in the packaged build:
     /// their bodies parked on the very first condition, forever.
     fn supports_module(&self, module: &str) -> bool {
-        self.advertised.as_ref().is_some_and(|cell| {
-            cell.read()
-                .map(|advertised| advertised.supports_module(module))
-                .unwrap_or(false)
-        })
+        self.advertised
+            .as_ref()
+            .is_some_and(|cell| advertised_read(cell).supports_module(module))
     }
 
     fn supports_state_field(&self, field: &str) -> bool {
-        self.advertised.as_ref().is_some_and(|cell| {
-            cell.read()
-                .map(|advertised| advertised.supports_state_field(field))
-                .unwrap_or(false)
-        })
+        self.advertised
+            .as_ref()
+            .is_some_and(|cell| advertised_read(cell).supports_state_field(field))
     }
 
     /// The catalog switch behind one loop-driving module, read live.
@@ -1976,6 +2251,32 @@ mod tests {
         );
     }
 
+    /// A link the reader is re-dialling is painted, and a press still replaces that reader.
+    ///
+    /// The report answers for the round in flight, so the panel says the reader is reconnecting
+    /// rather than repeating the drop; the press after it dials again, because an attempt that is
+    /// re-dialling has nothing left to say about the link the press wants back.
+    #[test]
+    fn a_redialling_link_reports_the_wait_and_stays_retryable() {
+        let (mut runtime, _clock) = Runtime::stepped();
+        runtime.connect_bridge();
+
+        runtime.link_report.publish(LinkFailure::Reconnecting);
+
+        assert_eq!(
+            runtime.link_failure(),
+            Some(LinkFailure::Reconnecting),
+            "the reader's own answer is the one the panel paints"
+        );
+
+        runtime.connect_bridge();
+        assert_eq!(
+            runtime.link_failure(),
+            None,
+            "a press after a redial is a fresh attempt, not the reason it replaced"
+        );
+    }
+
     /// The row facts' `supported` source: the bridge's advertised list, not a list of ours.
     ///
     /// The cell starts on the codec's own fallback table, which is what a window opened before
@@ -1997,6 +2298,33 @@ mod tests {
         assert!(
             !runtime.module_supported("autoclicker"),
             "an empty advertised list supports nothing rather than everything"
+        );
+    }
+
+    /// The action half of the same cell: a bridge that narrows `actions` narrows the tabs.
+    ///
+    /// The fallback table carries all four session actions (`actions::ALL`), which is what lets the
+    /// Servers and Accounts tabs offer their commands before a handshake; an empty advertised set
+    /// answers "no" for every one of them, which is the managed `SupportsAction` against a bridge
+    /// that named none.
+    #[test]
+    fn action_support_reads_the_advertised_cell() {
+        use aoko_protocol::capabilities::actions;
+
+        let runtime = Runtime::headless();
+        assert!(
+            runtime.action_supported(actions::SERVER_JOIN),
+            "the codec's fallback table advertises the join action"
+        );
+        assert!(
+            runtime.action_supported(actions::ACCOUNT_SET_SESSION),
+            "and the session write the Accounts tab sends"
+        );
+
+        *runtime.advertised.write().expect("cell") = BridgeCapabilities::empty();
+        assert!(
+            !runtime.action_supported(actions::SERVER_JOIN),
+            "a bridge that advertises nothing supports no action"
         );
     }
 
@@ -3035,6 +3363,357 @@ mod tests {
             platform: Arc::new(AcceptingInput),
             windows,
         }
+    }
+
+    // ---- module keybinds: the hook queue, the guard, and one dispatch per press ----------
+
+    /// An input backend whose event queue is the test's to fill.
+    ///
+    /// The one thing a module keybind needs from the platform: `poll_events`. Everything else is
+    /// accepted and unobservable, because a keybind must not synthesise anything.
+    struct ScriptedInput {
+        queue: Mutex<Vec<InputEvent>>,
+    }
+
+    impl ScriptedInput {
+        fn push(&self, event: InputEvent) {
+            self.queue.lock().expect("queue").push(event);
+        }
+
+        /// One physical press: down then up, the way the hook reports it.
+        fn press(&self, key: Key) {
+            self.push(InputEvent::KeyDown(key));
+            self.push(InputEvent::KeyUp(key));
+        }
+
+        /// A held key's auto-repeat: another down with no up between them.
+        fn repeat(&self, key: Key) {
+            self.push(InputEvent::KeyDown(key));
+        }
+
+        fn release(&self, key: Key) {
+            self.push(InputEvent::KeyUp(key));
+        }
+
+        /// One physical mouse press: down then up, the way the managed mouse hook reported it.
+        fn press_button(&self, button: MouseButton) {
+            self.push(InputEvent::ButtonDown(button));
+            self.push(InputEvent::ButtonUp(button));
+        }
+
+        /// A held button's auto-repeat: another down with no up between them.
+        fn repeat_button(&self, button: MouseButton) {
+            self.push(InputEvent::ButtonDown(button));
+        }
+
+        fn release_button(&self, button: MouseButton) {
+            self.push(InputEvent::ButtonUp(button));
+        }
+    }
+
+    impl InputBackend for ScriptedInput {
+        fn mouse_state(&self) -> MouseState {
+            MouseState::default()
+        }
+
+        fn key_state(&self, _key: Key) -> bool {
+            false
+        }
+
+        fn click(&self, _button: MouseButton) -> Result<(), PlatformError> {
+            Ok(())
+        }
+
+        fn move_relative(&self, _dx: i32, _dy: i32) -> Result<(), PlatformError> {
+            Ok(())
+        }
+
+        fn key_press(&self, _key: Key) -> Result<(), PlatformError> {
+            Ok(())
+        }
+
+        fn poll_events(&self, out: &mut Vec<InputEvent>) -> Result<(), PlatformError> {
+            let mut queue = self.queue.lock().expect("queue");
+            out.append(&mut queue);
+            Ok(())
+        }
+    }
+
+    /// A runtime over a scripted hook queue, the 1.8.9 module list, and a foreground the caller
+    /// names — the four facts [`Runtime::poll_module_keys`] reads.
+    fn keybind_runtime(
+        foreground: Option<aoko_platform::WindowInfo>,
+    ) -> (Runtime, Arc<ScriptedInput>, Arc<AppController>) {
+        let controller = Arc::new(AppController::default());
+        let mut runtime = Runtime::new(Arc::clone(&controller));
+        // What the handshake publishes: without it `module_supported` answers `false` and the
+        // managed `ToggleModule` guard would refuse every bind.
+        *runtime.advertised.write().expect("cell") =
+            BridgeCapabilities::for_version_fallback(Some("1.8.9"));
+
+        let scripted = Arc::new(ScriptedInput {
+            queue: Mutex::new(Vec::new()),
+        });
+        let input: Arc<dyn InputBackend> = scripted.clone();
+        let windows: Arc<dyn WindowInspector> = Arc::new(FakeWindows {
+            foreground,
+            cursor: None,
+        });
+        runtime.platform = Some(PlatformSurfaces {
+            input,
+            windows: Some(windows),
+        });
+        (runtime, scripted, controller)
+    }
+
+    /// Writes one module bind the way `Shell::apply_captured_key` does.
+    fn bind(controller: &AppController, module: &str, vk: i32) {
+        let mut profile = controller.profile();
+        profile.module_keys.insert(module.to_owned(), vk);
+        controller.replace_profile(profile);
+    }
+
+    /// A bind is one toggle per physical press, and the queue is drained as it is read.
+    #[test]
+    fn a_bound_key_flips_its_module_once_per_press() {
+        let (mut runtime, input, controller) =
+            keybind_runtime(Some(window("Minecraft 1.8.9", "java")));
+        bind(&controller, "autoclicker", 0x41);
+
+        input.press(Key::Char('a'));
+        assert_eq!(runtime.poll_module_keys(), 1);
+        assert!(runtime.module_enabled("autoclicker"));
+
+        // The events were consumed: nothing is left to dispatch a second time.
+        assert_eq!(runtime.poll_module_keys(), 0);
+        assert!(runtime.module_enabled("autoclicker"));
+
+        // A second physical press is a second toggle, not a repeat.
+        input.press(Key::Char('a'));
+        assert_eq!(runtime.poll_module_keys(), 1);
+        assert!(!runtime.module_enabled("autoclicker"));
+    }
+
+    /// Both spellings of the same key reach one bind: evdev says lower case, a synthesised press
+    /// upper case, and the saved bind is the virtual-key code neither of them is.
+    #[test]
+    fn every_spelling_of_a_key_reaches_the_same_bind() {
+        let (mut runtime, input, controller) =
+            keybind_runtime(Some(window("Minecraft 1.8.9", "java")));
+        bind(&controller, "autoclicker", 0x41);
+
+        input.press(Key::Char('A'));
+        assert_eq!(runtime.poll_module_keys(), 1, "the capital spelling");
+        assert!(runtime.module_enabled("autoclicker"));
+
+        input.press(Key::Char('a'));
+        assert_eq!(runtime.poll_module_keys(), 1, "and the lower-case one");
+        assert!(!runtime.module_enabled("autoclicker"));
+    }
+
+    /// The Windows hook reports every key as `Key::Other(vkCode)`, which is the spelling the
+    /// comparison has to answer or every bind on Windows is dead.
+    #[cfg(windows)]
+    #[test]
+    fn the_windows_hook_spelling_reaches_the_bind() {
+        let (mut runtime, input, controller) =
+            keybind_runtime(Some(window("Minecraft 1.8.9", "java")));
+        bind(&controller, "autoclicker", 0x41);
+
+        input.press(Key::Other(0x41));
+        assert_eq!(runtime.poll_module_keys(), 1);
+        assert!(runtime.module_enabled("autoclicker"));
+    }
+
+    /// Holding a bound key is one press: `WM_KEYDOWN` repeats and evdev sends `value == 2`, and a
+    /// toggle that believed either would flicker the module dozens of times a second.
+    #[test]
+    fn the_auto_repeat_of_a_held_key_is_not_another_toggle() {
+        let (mut runtime, input, controller) =
+            keybind_runtime(Some(window("Minecraft 1.8.9", "java")));
+        bind(&controller, "autoclicker", 0x41);
+
+        input.repeat(Key::Char('a'));
+        assert_eq!(runtime.poll_module_keys(), 1, "the press itself");
+
+        for _ in 0..8 {
+            input.repeat(Key::Char('a'));
+        }
+        assert_eq!(runtime.poll_module_keys(), 0, "eight repeats, no toggle");
+        assert!(runtime.module_enabled("autoclicker"));
+
+        // Its release re-arms the key, so the next press is a press again.
+        input.release(Key::Char('a'));
+        assert_eq!(runtime.poll_module_keys(), 0);
+        input.repeat(Key::Char('a'));
+        assert_eq!(runtime.poll_module_keys(), 1);
+        assert!(!runtime.module_enabled("autoclicker"));
+    }
+
+    /// A mouse bind is a bind: the capture stores `VK_LBUTTON`..`VK_XBUTTON2` for the five
+    /// buttons, so a button press has to take the same latch and the same lookup a keystroke
+    /// does. The queue used to drop both button events, which left every mouse bind storable in
+    /// the profile and dead at the press.
+    #[test]
+    fn a_mouse_bind_flips_its_module_once_per_press() {
+        let (mut runtime, input, controller) =
+            keybind_runtime(Some(window("Minecraft 1.8.9", "java")));
+        bind(&controller, "autoclicker", 0x01);
+
+        input.press_button(MouseButton::Left);
+        assert_eq!(
+            runtime.poll_module_keys(),
+            1,
+            "the press on the bound button"
+        );
+        assert!(runtime.module_enabled("autoclicker"));
+
+        // A held button is one dispatch, exactly as a held key is.
+        input.repeat_button(MouseButton::Left);
+        assert_eq!(runtime.poll_module_keys(), 1, "the press itself");
+        assert!(!runtime.module_enabled("autoclicker"));
+        input.repeat_button(MouseButton::Left);
+        assert_eq!(
+            runtime.poll_module_keys(),
+            0,
+            "the auto-repeat of a held button"
+        );
+        input.release_button(MouseButton::Left);
+        assert_eq!(runtime.poll_module_keys(), 0);
+
+        // A different button is a different code, so it matches no bind.
+        input.press_button(MouseButton::Middle);
+        assert_eq!(
+            runtime.poll_module_keys(),
+            0,
+            "the middle button is not the bind"
+        );
+        assert!(!runtime.module_enabled("autoclicker"));
+    }
+
+    /// The five buttons are the codes the capture stores, so the bind a user records is the bind
+    /// this dispatches: `VK_LBUTTON`..`VK_XBUTTON2`, with `0x03` skipped.
+    #[test]
+    fn the_mouse_codes_are_the_ones_the_capture_stores() {
+        assert_eq!(mouse_virtual_key(MouseButton::Left), 0x01);
+        assert_eq!(mouse_virtual_key(MouseButton::Right), 0x02);
+        assert_eq!(mouse_virtual_key(MouseButton::Middle), 0x04);
+        assert_eq!(mouse_virtual_key(MouseButton::X1), 0x05);
+        assert_eq!(mouse_virtual_key(MouseButton::X2), 0x06);
+    }
+
+    /// A key no module claims is a scan and nothing else: no toggle, and nothing repainted.
+    #[test]
+    fn an_unbound_key_toggles_nothing() {
+        let (mut runtime, input, controller) =
+            keybind_runtime(Some(window("Minecraft 1.8.9", "java")));
+        bind(&controller, "autoclicker", 0x41);
+
+        input.press(Key::Char('z'));
+        assert_eq!(runtime.poll_module_keys(), 0);
+        assert!(!runtime.module_enabled("autoclicker"));
+    }
+
+    /// The managed guard: a bind does nothing unless the game is the foreground window, which is
+    /// what keeps a bound letter typed into this window's own search box from toggling a module.
+    #[test]
+    fn a_bind_does_nothing_while_this_window_is_in_front() {
+        for foreground in [
+            Some(window("aoko", "aoko-client.exe")),
+            Some(window("Minecraft 1.8.9", "explorer.exe")),
+            None,
+        ] {
+            let (mut runtime, input, controller) = keybind_runtime(foreground);
+            bind(&controller, "autoclicker", 0x41);
+
+            input.press(Key::Char('a'));
+            assert_eq!(runtime.poll_module_keys(), 0);
+            assert!(!runtime.module_enabled("autoclicker"));
+        }
+    }
+
+    /// Without a window surface the guard cannot confirm the game, so it fails closed — the same
+    /// answer the injection gate gives a session that cannot see windows.
+    #[test]
+    fn a_session_without_window_sense_dispatches_no_bind() {
+        let (mut runtime, input, controller) =
+            keybind_runtime(Some(window("Minecraft 1.8.9", "java")));
+        bind(&controller, "autoclicker", 0x41);
+        if let Some(platform) = runtime.platform.as_mut() {
+            platform.windows = None;
+        }
+
+        input.press(Key::Char('a'));
+        assert_eq!(runtime.poll_module_keys(), 0);
+        assert!(!runtime.module_enabled("autoclicker"));
+    }
+
+    /// An open game screen is not gameplay, and the managed host blocked its module keybinds
+    /// there: a bind pressed in a chest or an inventory does nothing.
+    #[test]
+    fn a_bind_behind_an_open_game_screen_does_nothing() {
+        let (mut runtime, input, controller) =
+            keybind_runtime(Some(window("Minecraft 1.8.9", "java")));
+        bind(&controller, "autoclicker", 0x41);
+
+        let store = runtime.controller().store();
+        store.set_connected(true);
+        store.publish(
+            aoko_protocol::state::GameState {
+                gui_open: true,
+                screen_name: String::from("GuiChest"),
+                ..aoko_protocol::state::GameState::default()
+            },
+            Instant::now(),
+        );
+
+        input.press(Key::Char('a'));
+        assert_eq!(runtime.poll_module_keys(), 0, "a chest is not gameplay");
+        assert!(!runtime.module_enabled("autoclicker"));
+
+        // The screen closes; the same press now lands.
+        runtime.controller().store().publish(
+            aoko_protocol::state::GameState {
+                gui_open: false,
+                screen_name: String::from("none"),
+                ..aoko_protocol::state::GameState::default()
+            },
+            Instant::now(),
+        );
+        input.press(Key::Char('a'));
+        assert_eq!(runtime.poll_module_keys(), 1);
+        assert!(runtime.module_enabled("autoclicker"));
+    }
+
+    /// The two `InputHooks.ToggleModule` refusals: a module the bridge does not advertise is
+    /// ignored, and a dev-only module needs dev mode.
+    #[test]
+    fn a_bind_cannot_toggle_a_module_the_host_would_refuse() {
+        let game = || Some(window("Minecraft 1.8.9", "java"));
+
+        let (mut runtime, input, controller) = keybind_runtime(game());
+        bind(&controller, "autoclicker", 0x41);
+        *runtime.advertised.write().expect("cell") = BridgeCapabilities::empty();
+        input.press(Key::Char('a'));
+        assert_eq!(runtime.poll_module_keys(), 0, "unadvertised module");
+        assert!(!runtime.module_enabled("autoclicker"));
+
+        let (mut runtime, input, controller) = keybind_runtime(game());
+        assert!(
+            module_catalog::is_dev_only("killaura"),
+            "the fixture is dev-only"
+        );
+        bind(&controller, "killaura", 0x42);
+        input.press(Key::Char('b'));
+        assert_eq!(runtime.poll_module_keys(), 0, "dev mode is off");
+        assert!(!runtime.module_enabled("killaura"));
+
+        let mut profile = controller.profile();
+        profile.dev_mode = true;
+        controller.replace_profile(profile);
+        input.press(Key::Char('b'));
+        assert_eq!(runtime.poll_module_keys(), 1, "dev mode is on");
+        assert!(runtime.module_enabled("killaura"));
     }
 
     /// The confirmation needs both halves of the managed rule: a game title and a Java launcher.

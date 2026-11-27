@@ -202,6 +202,13 @@ pub enum Control {
     },
     /// A `*AvailabilityText` line: the per-module availability sentence.
     Availability {
+        /// Catalogue id whose support the line reports.
+        ///
+        /// `MainWindow.xaml.cs:623-657` writes each of these lines from one `*Supported` flag, so
+        /// the id is the half that makes the sentence reachable: the paint asks the bridge whether
+        /// it advertises this module and swaps the rest-state text for [`unavailable_text`] when it
+        /// does not.
+        module: &'static str,
         /// The rest-state text.
         text: &'static str,
         /// `x:Name` of the line, which is how availability reaches it.
@@ -335,7 +342,7 @@ pub const COMBAT: &[Card] = &[
         controls: &[
             Keybind { module: "aimassist" },
             Switch { label: "Aim Assist", bind: "AimAssistEnabled" },
-            Availability { text: "Available", bind: "AimAssistAvailabilityText" },
+            Availability { module: "aimassist", text: "Available", bind: "AimAssistAvailabilityText" },
             Slider { label: "FOV", bind: "AimAssistFov", min: 1.0, max: 180.0, snap: false },
             Slider { label: "Range", bind: "AimAssistRange", min: 1.0, max: 12.0, snap: false },
             Slider { label: "Strength (%)", bind: "AimAssistStrength", min: 1.0, max: 100.0, snap: true },
@@ -346,7 +353,7 @@ pub const COMBAT: &[Card] = &[
         controls: &[
             Keybind { module: "triggerbot" },
             Switch { label: "Triggerbot", bind: "TriggerbotEnabled" },
-            Availability { text: "Available", bind: "TriggerbotAvailabilityText" },
+            Availability { module: "triggerbot", text: "Available", bind: "TriggerbotAvailabilityText" },
             Slider { label: "Cooldown Threshold (%)", bind: "TriggerbotCooldownThreshold", min: 1.0, max: 100.0, snap: true },
             Check { label: "Only attack when crosshair is on entity", bind: "TriggerbotOnlyCrosshair", tooltip: "" },
             Check { label: "Only attack if target is in real hit range", bind: "TriggerbotOnlyIfCanAttack", tooltip: "" },
@@ -359,7 +366,7 @@ pub const COMBAT: &[Card] = &[
         controls: &[
             Keybind { module: "autorod" },
             Switch { label: "Auto Rod", bind: "AutoRodEnabled" },
-            Availability { text: "Available", bind: "AutoRodAvailabilityText" },
+            Availability { module: "autorod", text: "Available", bind: "AutoRodAvailabilityText" },
             Combo { label: "Slot mode", bind: "AutoRodSlotMode", options: &["Auto", "Slot 1", "Slot 2", "Slot 3", "Slot 4", "Slot 5", "Slot 6", "Slot 7", "Slot 8", "Slot 9", ] },
             Check { label: "Verify forced slot contains a fishing rod", bind: "AutoRodVerifyForcedSlot", tooltip: "" },
             Note { text: "Disable verification to use the selected slot with another item." },
@@ -375,7 +382,7 @@ pub const COMBAT: &[Card] = &[
         controls: &[
             Keybind { module: "throwpot" },
             Switch { label: "Throwpot", bind: "ThrowpotEnabled" },
-            Availability { text: "Available", bind: "ThrowpotAvailabilityText" },
+            Availability { module: "throwpot", text: "Available", bind: "ThrowpotAvailabilityText" },
             Note { text: "Press the action bind to instantly throw the first healing splash potion (Instant Health / Regeneration) in your hotbar, then restore your original slot." },
             Control::ActionBind { which: ActionBind::Throwpot },
             Note { text: "The action fires once per press while enabled, connected, in-game, and no GUI is open." },
@@ -386,7 +393,7 @@ pub const COMBAT: &[Card] = &[
         controls: &[
             Keybind { module: "autoheal" },
             Switch { label: "AutoHeal", bind: "AutoHealEnabled" },
-            Availability { text: "Available", bind: "AutoHealAvailabilityText" },
+            Availability { module: "autoheal", text: "Available", bind: "AutoHealAvailabilityText" },
             // `:554`: the card's explanation, between the availability line and the two sliders.
             Note { text: "Automatically throws the first healing splash potion (Instant Health / Regeneration) in your hotbar when your health drops to or below the threshold. Only heals while you are looking steeply down, so the splash lands at your feet and not on an opponent." },
             Slider { label: "Health threshold (HP)", bind: "AutoHealHealth", min: 1.0, max: 20.0, snap: true },
@@ -398,7 +405,7 @@ pub const COMBAT: &[Card] = &[
         controls: &[
             Keybind { module: "hitdelayfix" },
             Note { text: "Hit Delay Fix" },
-            Availability { text: "Available", bind: "HitDelayFixAvailabilityText" },
+            Availability { module: "hitdelayfix", text: "Available", bind: "HitDelayFixAvailabilityText" },
             Switch { label: "Enable Hit Delay Fix", bind: "HitDelayFixEnabled" },
             Note { text: "Resets the client-side delay after a miss. It does not change weapon attack strength or send packets." },
     ],
@@ -515,7 +522,7 @@ pub const RENDER: &[Card] = &[
         controls: &[
             Keybind { module: "antidebuff" },
             Note { text: "AntiDebuff" },
-            Availability { text: "Available", bind: "AntiDebuffAvailabilityText" },
+            Availability { module: "antidebuff", text: "Available", bind: "AntiDebuffAvailabilityText" },
             Switch { label: "Enable AntiDebuff", bind: "AntiDebuffEnabled" },
             Note { text: "Suppresses Blindness only in the renderer while preserving its sprint/critical restrictions. Nausea and modern Darkness visuals are removed locally; the server still considers you affected." },
     ],
@@ -530,7 +537,7 @@ pub const UTILITY: &[Card] = &[
         controls: &[
             Keybind { module: "speedbridge" },
             Switch { label: "SpeedBridge", bind: "SpeedBridgeEnabled" },
-            Availability { text: "Available", bind: "SpeedBridgeAvailabilityText" },
+            Availability { module: "speedbridge", text: "Available", bind: "SpeedBridgeAvailabilityText" },
             Slider { label: "Safety", bind: "SpeedBridgeDelayMs", min: 20.0, max: 250.0, snap: true },
             Check { label: "Block only", bind: "SpeedBridgeBlockOnly", tooltip: "" },
             Check { label: "Holding sneak only", bind: "SpeedBridgeHoldingShiftOnly", tooltip: "" },
@@ -551,7 +558,7 @@ pub const UTILITY: &[Card] = &[
         controls: &[
             Keybind { module: "gtbhelper" },
             Switch { label: "GTB Helper", bind: "GtbHelperEnabled" },
-            Availability { text: "Hypixel Guess The Build helper using action-bar hints.", bind: "GtbHelperAvailabilityText" },
+            Availability { module: "gtbhelper", text: "Hypixel Guess The Build helper using action-bar hints.", bind: "GtbHelperAvailabilityText" },
     ],
     },
     Card {
@@ -562,6 +569,7 @@ pub const UTILITY: &[Card] = &[
             // `:868`: the availability line, whose default text is the card's explanation — the
             // same slot `AutoHeal` and `Refill` carry, with a sentence in place of "Available".
             Availability {
+                module: "pixelpartyassist",
                 text: "Hypixel Pixel Party: finds the closest matching terracotta on the floor.",
                 bind: "PixelPartyAssistAvailabilityText",
             },
@@ -575,7 +583,7 @@ pub const UTILITY: &[Card] = &[
         controls: &[
             Keybind { module: "cheststealer" },
             Note { text: "Chest Stealer" },
-            Availability { text: "Available", bind: "ChestStealerAvailabilityText" },
+            Availability { module: "cheststealer", text: "Available", bind: "ChestStealerAvailabilityText" },
             Switch { label: "Enable Chest Stealer", bind: "ChestStealerEnabled" },
             Slider { label: "Delay (ms)", bind: "ChestStealerDelayMs", min: 50.0, max: 500.0, snap: true },
             Check { label: "Title check", bind: "ChestStealerTitleCheck", tooltip: "" },
@@ -591,7 +599,7 @@ pub const UTILITY: &[Card] = &[
         controls: &[
             Keybind { module: "refill" },
             Note { text: "Refill" },
-            Availability { text: "Available", bind: "RefillAvailabilityText" },
+            Availability { module: "refill", text: "Available", bind: "RefillAvailabilityText" },
             Switch { label: "Enable Refill", bind: "RefillEnabled" },
             // `:944`: the card's explanation, above the delay slider.
             Note { text: "Moves potions and golden apples from your backpack into empty hotbar slots while your inventory is open." },
@@ -603,7 +611,7 @@ pub const UTILITY: &[Card] = &[
         controls: &[
             Keybind { module: "autotool" },
             Note { text: "AutoTool" },
-            Availability { text: "Available", bind: "AutoToolAvailabilityText" },
+            Availability { module: "autotool", text: "Available", bind: "AutoToolAvailabilityText" },
             Switch { label: "Enable AutoTool", bind: "AutoToolEnabled" },
             // `:968`: the card's explanation, above the swap-delay slider.
             Note { text: "Automatically swaps to the best tool in your hotbar when breaking blocks." },
@@ -636,6 +644,7 @@ pub const RISKY: &[Card] = &[
             Keybind { module: "reach" },
             Note { text: "Reach" },
             Availability {
+                module: "reach",
                 text: "Available",
                 bind: "ReachAvailabilityText",
             },
@@ -692,6 +701,7 @@ pub const RISKY: &[Card] = &[
             Keybind { module: "velocity" },
             Note { text: "Velocity" },
             Availability {
+                module: "velocity",
                 text: "Available",
                 bind: "VelocityAvailabilityText",
             },
@@ -733,6 +743,7 @@ pub const RISKY: &[Card] = &[
             },
             Note { text: "AutoTotem" },
             Availability {
+                module: "autototem",
                 text: "Available",
                 bind: "AutoTotemAvailabilityText",
             },
@@ -791,7 +802,7 @@ pub const BETA: &[Card] = &[
         controls: &[
             Keybind { module: "killaura" },
             Switch { label: "Kill Aura", bind: "KillAuraEnabled" },
-            Availability { text: "Available", bind: "KillAuraAvailabilityText" },
+            Availability { module: "killaura", text: "Available", bind: "KillAuraAvailabilityText" },
             // `:1221-1224`: the red warning box under the availability line — `#33E0533D` fill,
             // `#F0A090` text — which the port carries as a note and colours at paint time.
             Note { text: "OpenMyau-Plus behavior port. Native game calls and packet ordering; no OS-click fallback. Modern auto-block requires a genuinely block-capable sword." },
@@ -878,7 +889,7 @@ pub const BETA: &[Card] = &[
         controls: &[
             Keybind { module: "jumpreset" },
             Note { text: "Jump Reset" },
-            Availability { text: "Available", bind: "JumpResetAvailabilityText" },
+            Availability { module: "jumpreset", text: "Available", bind: "JumpResetAvailabilityText" },
             Switch { label: "Enable Jump Reset", bind: "JumpResetEnabled" },
             Slider { label: "Chance (%)", bind: "JumpResetChance", min: 0.0, max: 100.0, snap: true },
             Note { text: "Jumps for one tick when you take a hit on the ground while holding W, which cuts the knockback you take." },
@@ -889,7 +900,7 @@ pub const BETA: &[Card] = &[
         controls: &[
             Keybind { module: "hitselect" },
             Note { text: "Hit Select" },
-            Availability { text: "Available", bind: "HitSelectAvailabilityText" },
+            Availability { module: "hitselect", text: "Available", bind: "HitSelectAvailabilityText" },
             Switch { label: "Enable Hit Select", bind: "HitSelectEnabled" },
             Note { text: "Holds AutoClicker left clicks while the player under your crosshair is still in its hurt window, where the server ignores hits." },
     ],
@@ -899,7 +910,7 @@ pub const BETA: &[Card] = &[
         controls: &[
             Keybind { module: "wtap" },
             Note { text: "WTap" },
-            Availability { text: "Available", bind: "WTapAvailabilityText" },
+            Availability { module: "wtap", text: "Available", bind: "WTapAvailabilityText" },
             Switch { label: "Enable WTap", bind: "WTapEnabled" },
             Note { text: "Automatically resets sprint after landing hits to deal maximum knockback and restart combo momentum." },
     ],
@@ -909,7 +920,7 @@ pub const BETA: &[Card] = &[
         controls: &[
             Keybind { module: "trajectories" },
             Note { text: "Trajectories" },
-            Availability { text: "Available", bind: "TrajectoriesAvailabilityText" },
+            Availability { module: "trajectories", text: "Available", bind: "TrajectoriesAvailabilityText" },
             Switch { label: "Enable Trajectories", bind: "TrajectoriesEnabled" },
             Note { text: "Draws the predicted flight path and landing spot for a charged bow, snowballs, eggs, ender pearls, splash potions and experience bottles." },
     ],
@@ -919,7 +930,7 @@ pub const BETA: &[Card] = &[
         controls: &[
             Keybind { module: "murdermystery" },
             Note { text: "Murder Mystery" },
-            Availability { text: "Available", bind: "MurderMysteryAvailabilityText" },
+            Availability { module: "murdermystery", text: "Available", bind: "MurderMysteryAvailabilityText" },
             Switch { label: "Enable Murder Mystery", bind: "MurderMysteryEnabled" },
             Note { text: "Hypixel Murder Mystery: marks players who have held a murder weapon in red and bow holders in blue, with a murderer alert at the top of the screen." },
     ],
@@ -929,7 +940,7 @@ pub const BETA: &[Card] = &[
         controls: &[
             Keybind { module: "breakprogress" },
             Note { text: "Break Progress" },
-            Availability { text: "Available", bind: "BreakProgressAvailabilityText" },
+            Availability { module: "breakprogress", text: "Available", bind: "BreakProgressAvailabilityText" },
             Switch { label: "Enable Break Progress", bind: "BreakProgressEnabled" },
             Note { text: "Shows how far each block being mined has progressed, including blocks other players are breaking, such as your bed." },
     ],
@@ -939,7 +950,7 @@ pub const BETA: &[Card] = &[
         controls: &[
             Keybind { module: "nohurtcam" },
             Note { text: "No Hurt Cam" },
-            Availability { text: "Available", bind: "NoHurtCamAvailabilityText" },
+            Availability { module: "nohurtcam", text: "Available", bind: "NoHurtCamAvailabilityText" },
             Switch { label: "Enable No Hurt Cam", bind: "NoHurtCamEnabled" },
             Note { text: "Removes the jarring camera wobble when taking damage, keeping combat vision clear and stable." },
     ],
@@ -949,7 +960,7 @@ pub const BETA: &[Card] = &[
         controls: &[
             Keybind { module: "tnttimer" },
             Note { text: "TNT Timer" },
-            Availability { text: "Available", bind: "TntTimerAvailabilityText" },
+            Availability { module: "tnttimer", text: "Available", bind: "TntTimerAvailabilityText" },
             Switch { label: "Enable TNT Timer", bind: "TntTimerEnabled" },
             Note { text: "Renders remaining fuse time above ignited TNT entities with color-coded countdown indicators." },
     ],
@@ -959,7 +970,7 @@ pub const BETA: &[Card] = &[
         controls: &[
             Keybind { module: "fastplace" },
             Note { text: "Fast Place" },
-            Availability { text: "Available", bind: "FastPlaceAvailabilityText" },
+            Availability { module: "fastplace", text: "Available", bind: "FastPlaceAvailabilityText" },
             Switch { label: "Enable Fast Place", bind: "FastPlaceEnabled" },
             Note { text: "Removes the 4-tick right-click delay, allowing blocks and projectiles to place immediately on hold." },
     ],
@@ -969,7 +980,7 @@ pub const BETA: &[Card] = &[
         controls: &[
             Keybind { module: "sprint" },
             Note { text: "Sprint" },
-            Availability { text: "Available", bind: "SprintAvailabilityText" },
+            Availability { module: "sprint", text: "Available", bind: "SprintAvailabilityText" },
             Switch { label: "Enable Sprint", bind: "SprintEnabled" },
             Note { text: "Automatically maintains forward sprint without needing to double-tap or hold a dedicated sprint key." },
     ],
@@ -1236,6 +1247,17 @@ pub const ACTION_BIND_PENDING: &str = "Action: [Press key or mouse...]";
 pub const ACTION_BIND_CONFLICT: &str =
     "Conflict: that input is already used by a general module bind.";
 
+/// An action bind was refused because another action bind already holds the key.
+///
+/// New copy: managed compared an action bind only against the general module binds
+/// (`InputHooks.cs:124-156`), so binding Auto Rod and Throwpot to the same key landed on both and
+/// one of them silently never fired. `{key}` is the refused key as
+/// [`crate::views::keybind_text::format_virtual_key`] renders it, `{holder}` the action bind that
+/// already owns it, and `{requested}` the action bind that asked. Filled with `str::replace`, like
+/// [`MODULE_BIND_CONFLICT_NAMED`].
+pub const ACTION_BIND_CONFLICT_NAMED: &str =
+    "Conflict: {key} is already bound to {holder}, so {requested} was left unchanged.";
+
 /// The reverse outcome: the action bind took the key (`MainWindow.xaml.cs:2048`, repeated
 /// for Throwpot at `:2059`).
 pub const ACTION_BIND_UPDATED: &str = "Action bind updated.";
@@ -1258,6 +1280,31 @@ pub const MODULE_BIND_CONFLICT: &str = "Conflict: that input is used by an actio
 /// and `format!` requires a literal format string.
 pub const MODULE_BIND_CONFLICT_NAMED: &str =
     "Conflict: {key} is already bound to {holder}, so {requested} was left unchanged.";
+
+/// What an availability line says when the bridge does not advertise its module (`:624-657`).
+///
+/// The managed window has one sentence for every module but the Triggerbot, and
+/// [`unavailable_text`] is the one place that picks between them; `shell.rs`'s availability arm
+/// is the only caller.
+pub const UNAVAILABLE_ON_CURRENT_BRIDGE: &str = "Unavailable on current bridge";
+
+/// The Triggerbot's own sentence, because it is 1.21-only by design (`MainWindow.xaml.cs:625`).
+pub const UNAVAILABLE_TRIGGERBOT: &str = "Unavailable on 1.8.9 (cooldown-era PvP only)";
+
+/// The sentence one availability line shows while its module is unsupported.
+///
+/// `UpdateVersionAvailabilityUi` (`MainWindow.xaml.cs:623-657`) writes the generic sentence for
+/// every module and a specific one for the Triggerbot, which is cooldown-era PvP and therefore has
+/// never been in the 1.8.9 bridge: its line names the reason rather than the bridge, because the
+/// bridge is not what is missing.
+#[must_use]
+pub fn unavailable_text(module: &str) -> &'static str {
+    if module.eq_ignore_ascii_case("triggerbot") {
+        UNAVAILABLE_TRIGGERBOT
+    } else {
+        UNAVAILABLE_ON_CURRENT_BRIDGE
+    }
+}
 
 // ── The nine tabs ───────────────────────────────────────────────────────────────
 
@@ -1398,6 +1445,28 @@ pub const UPDATE_TOOLTIP: &str = "Check for a newer aoko release";
 /// on the rail saying the line can be pressed at all.
 pub const UPDATE_CURRENT_VIEW: &str = "Current v{version} \u{2022} click to view";
 
+// The press's two silences, and the only two lines under the version line that the update block
+// owns. Managed had no analogue: `Process.Start` (`MainWindow.xaml.cs:1885`) was called and its
+// failure was not read, so a machine with no browser registered lost the press with nothing said.
+// The port paints it where the press was made, the same shape the configs folder row gives its own
+// launcher refusal (`OpenConfigsFolderButton_Click`, `MainWindow.xaml.cs:969-985`).
+
+/// The version line's press in a session with no URL opener at all.
+///
+/// New copy. The opener is a seam ([`crate::shell::Shell::set_url_opener`]) that a test or a capture
+/// leaves empty so neither launches a browser, and a press there is the one case the shipped build
+/// cannot reach — which is why the sentence names the session rather than the machine.
+pub const UPDATE_NO_LAUNCHER: &str =
+    "Could not open the releases page: no URL opener in this session.";
+
+/// The version line's press where the launcher itself refused.
+///
+/// New copy, in the configs folder row's shape: `{reason}` is
+/// [`aoko_platform::PlatformError::user_facing`]'s own sentence, filled with `str::replace` like the
+/// other templates here. The one refusal that happens on a shipped Linux build is a missing
+/// `xdg-open`, and the platform's message is what names it.
+pub const UPDATE_LAUNCH_FAILED: &str = "Could not open the releases page: {reason}";
+
 /// A title with no managed source, kept flagged rather than deleted.
 ///
 /// `MainWindow.xaml` contains no "Aoko" text: the window is titled `aoko client` (`:7`) and
@@ -1473,15 +1542,14 @@ pub const LOADER_STATUS_CONNECTED: &str = "Status: Connected & Injected";
 /// Managed's tail is `GameStateClient.StatusMessage`, whose values are capitalised sentences
 /// with a full stop (`"Already connected/injected"` `:259`, `"ERROR: Injection failed. Check
 /// logs."` `:369`, `"Disconnected from agent."` `:615`, `"Reconnecting to agent..."` `:637`),
-/// plus a progress form at `:235`. Seven lines are written to paint behind this prefix: the four
-/// refusal rules below, which are the port's own and paint today, and the three reasons below
-/// them — the dial failure, the disconnect, and the bridge library that is not on disk, which is
-/// managed's `"ERROR: {dllName} not found."` (`:355`) with the resolved path added. The rest of
-/// the `StatusMessage` values still have no line — a port conflict found at inject (`:304`), a
-/// wrong-PID check (`:395`), a failed connectivity check (`:411`),
-/// `"Already connected/injected"` (`:259`), the progress form (`:235`) and the reconnect line
-/// (`:637`) — because the port cannot enter those states, and a sentence for a state it cannot
-/// enter is the defect rather than the gap.
+/// plus a progress form at `:235`. Eight lines are written to paint behind this prefix: the four
+/// refusal rules below, which are the port's own and paint today, and the four reasons below
+/// them — the dial failure, the disconnect, the redial after a dropped link, and the bridge library
+/// that is not on disk, which is managed's `"ERROR: {dllName} not found."` (`:355`) with the
+/// resolved path added. The rest of the `StatusMessage` values still have no line — a port conflict
+/// found at inject (`:304`), a wrong-PID check (`:395`), a failed connectivity check (`:411`),
+/// `"Already connected/injected"` (`:259`) and the progress form (`:235`) — because the port cannot
+/// enter those states, and a sentence for a state it cannot enter is the defect rather than the gap.
 pub const LOADER_STATUS_PREFIX: &str = "Status: ";
 
 // New copy, and the only block on this panel that is: managed's `InjectButton_Click`
@@ -1516,13 +1584,15 @@ pub const LOADER_REFUSAL_NOT_GAME_TITLE: &str = "The window's title does not nam
 /// and the process is not a JVM.
 pub const LOADER_REFUSAL_NOT_JAVA_PROCESS: &str = "The window's process is not a Java launcher.";
 
-// The dial's two outcomes after the gate passed, and the only two `StatusMessage` values the
-// port has copy for: every state above is one the machine can enter, and these two cover the one
-// it was missing — the press that leaves `Connecting` for an answer that never arrives.
+// The link's three reasons after the gate passed, and the only three `StatusMessage` values the
+// port has copy for: every state above is one the machine can enter, and these are the answers the
+// link gives it — a dial that never arrives, a link that answered and went away, and the reader
+// dialling that link again. The fourth line written behind the prefix is not a link state at all;
+// it is the attach's own failure ([`LOADER_REASON_BRIDGE_LIBRARY_MISSING`]).
 //
 // There is deliberately no `LOADER_STATUS_FAILED` beside [`LOADER_STATUS_CONNECTING`]: a failed
-// dial is not a fourth status line, it is [`LOADER_STATUS_PREFIX`] plus one of the two below, so
-// neither carries a `Status:` of its own.
+// dial is not a fourth status line, it is [`LOADER_STATUS_PREFIX`] plus one of the sentences below,
+// so none carries a `Status:` of its own.
 
 /// The dial never reached the bridge, `GameStateClient.cs:493`:
 /// `"ERROR: Could not connect to agent on port " + _port`.
@@ -1541,10 +1611,21 @@ pub const LOADER_REASON_CONNECT_FAILED: &str = "Could not connect to agent on po
 /// The link dropped after the bridge answered, `GameStateClient.cs:615`, verbatim.
 ///
 /// The managed sentence is already this port's shape — capitalised, ending in a full stop — so
-/// nothing is adjusted. Its neighbour `"Reconnecting to agent..."` (`:637`) has no constant,
-/// because the port attempts no reconnect: a line for a state the machine cannot enter is the
-/// thing this panel's audit went after.
+/// nothing is adjusted. Its neighbour `"Reconnecting to agent..."` (`:637`) is
+/// [`LOADER_REASON_RECONNECTING`]: the reader dials a dropped link again once a second
+/// (`crate::ingest`'s `serve`), so the state that line names is one this port enters, and the panel
+/// paints it between the drop and the next answer.
 pub const LOADER_REASON_DISCONNECTED: &str = "Disconnected from agent.";
+
+/// The reader is dialling a link that dropped, `GameStateClient.cs:637`.
+///
+/// Managed's own sentence ends in three dots because its `StatusMessage` was rewritten on every
+/// round: the reader painted `"Reconnecting to agent..."` over the read loop's
+/// `"Disconnected from agent."` and back again once a second. The port publishes one reason at a
+/// time instead — `crate::ingest::LinkFailure::Disconnected` on the way out of the read loop, then
+/// this one as soon as the redial starts — so the line is painted once per state change rather than
+/// flickering, and it is a full stop like every other tail behind [`LOADER_STATUS_PREFIX`].
+pub const LOADER_REASON_RECONNECTING: &str = "Reconnecting to agent.";
 
 /// The bridge library the selected version names is not on disk
 /// (`aoko-platform/src/bridge.rs:112-122` builds the error this replaces).
@@ -2064,6 +2145,7 @@ mod tests {
         for (name, reason) in [
             ("LOADER_REASON_CONNECT_FAILED", LOADER_REASON_CONNECT_FAILED),
             ("LOADER_REASON_DISCONNECTED", LOADER_REASON_DISCONNECTED),
+            ("LOADER_REASON_RECONNECTING", LOADER_REASON_RECONNECTING),
             (
                 "LOADER_REASON_BRIDGE_LIBRARY_MISSING",
                 LOADER_REASON_BRIDGE_LIBRARY_MISSING,
@@ -2093,6 +2175,10 @@ mod tests {
         assert!(
             !LOADER_REASON_DISCONNECTED.contains('{'),
             "the disconnect sentence takes no data"
+        );
+        assert!(
+            !LOADER_REASON_RECONNECTING.contains('{'),
+            "and neither does the redial it precedes"
         );
         assert_eq!(
             LOADER_REASON_BRIDGE_LIBRARY_MISSING

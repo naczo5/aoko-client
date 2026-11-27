@@ -196,6 +196,18 @@ pub struct ServersState {
     ping_cache: PingCache,
     /// Answers this pass is still waiting for.
     pending_pings: usize,
+    /// Whether the pass in flight announces its summary in the status line.
+    ///
+    /// The press and the tab entry do (`ServersView.xaml.cs:611-617`); the auto-ping after an add
+    /// does not (`:524-528`), because the status line is still carrying `Added {name}.` and a
+    /// summary would replace the confirmation the press is owed.
+    announce_pass: bool,
+    /// Whether a tab entry may dial at all, which [`ServersState::mark_auto_pinged`] clears.
+    ///
+    /// Apart from `auto_pinged` on purpose: that flag records that a pass has happened, and a later
+    /// visit still refreshes whatever the cache has let expire. This one is the capture harness's
+    /// "this tab is a picture, not a session" — the state it seeded is what the screenshot shows.
+    auto_ping_disabled: bool,
 }
 
 impl ServersState {
@@ -633,8 +645,11 @@ impl ServersState {
         }
     }
 
-    /// Applies a saved server: closes the form, selects the new row and announces
-    /// it, then pings it without announcing (`:524-528`).
+    /// Applies a saved server: closes the form, selects the new row and announces it.
+    ///
+    /// The ping the managed handler ran straight after (`:524-528`) is
+    /// [`ServersState::start_ping_added_now`]'s, and the caller makes it: this is the
+    /// half that answers the save, and a dial is not a store answer.
     pub fn apply_added(
         &mut self,
         sources: &[ServerRowSource],
@@ -722,13 +737,19 @@ impl ServersState {
         }
 
         let ids: Vec<String> = self.rows.iter().map(|row| row.id.clone()).collect();
-        self.begin_pass(ids.len(), &ids);
+        self.begin_pass(ids.len(), &ids, true);
         PingRequest::Ids(ids)
     }
 
     /// `LatencyChip_Click` (`:404-421`): one row, only while a pass is not
     /// running.
     pub fn start_ping_one(&mut self, id: &str) -> PingRequest {
+        self.begin_ping_one(id, true)
+    }
+
+    /// One row's pass, announcing or not. `announce` is what the pass hands
+    /// [`ServersState::finish_pass`] when the last answer lands.
+    fn begin_ping_one(&mut self, id: &str, announce: bool) -> PingRequest {
         if !servers_logic::can_start_ping(self.ping_in_flight, self.rows.len()) {
             return PingRequest::Refused;
         }
@@ -737,12 +758,13 @@ impl ServersState {
             return PingRequest::Refused;
         }
 
-        self.begin_pass(1, &[id.to_owned()]);
+        self.begin_pass(1, &[id.to_owned()], announce);
         PingRequest::Ids(vec![id.to_owned()])
     }
 
-    fn begin_pass(&mut self, total: usize, ids: &[String]) {
+    fn begin_pass(&mut self, total: usize, ids: &[String], announce: bool) {
         self.ping_in_flight = true;
+        self.announce_pass = announce;
         self.pass = PingPass { total, online: 0 };
 
         for row in &mut self.rows {
@@ -811,8 +833,14 @@ impl ServersState {
 
     /// Marks the first auto-ping as done without pinging: used by the capture
     /// harness so a screenshot shows the rest state rather than a spinner.
+    ///
+    /// It also closes the door on later entries, which is what marking it rather than
+    /// pinging it means: a screenshot would otherwise dial the rows the harness just
+    /// seeded, the moment it selects the tab. [`ServersState::start_ping_all_now`] and
+    /// the chip press still dial — those are presses, not the tab's own refresh.
     pub fn mark_auto_pinged(&mut self) {
         self.auto_pinged = true;
+        self.auto_ping_disabled = true;
     }
 
     /// A ping that never finished (`:411-437`): the rows are left alone and the
@@ -873,18 +901,36 @@ impl ServersState {
         }
     }
 
+    /// The auto-ping after an add (`:524-528`): the row that was just saved, dialled, and
+    /// no summary in the status line.
+    ///
+    /// Silent because the line is still saying `Added {name}.`, which is what the save is
+    /// owed; a pass that announced would replace the confirmation with a count of servers
+    /// the user has not asked about yet, before the row they just added has answered.
+    pub fn start_ping_added_now(&mut self, id: &str, now_ms: i64) -> PingStart {
+        match self.begin_ping_one(id, false) {
+            PingRequest::Refused => PingStart::default(),
+            PingRequest::Ids(ids) => self.start_refresh(&ids, now_ms, true),
+        }
+    }
+
     /// The tab is on screen: answer what the cache can and dial the rest.
     ///
     /// Managed pinged once, the first time the tab loaded (`_autoPinged`); with the
     /// cache in front, a later visit costs one lookup per row and re-dials only what
-    /// has expired.
+    /// has expired. A session that has turned the auto-ping off
+    /// ([`ServersState::mark_auto_pinged`]) dials nothing at all.
     pub fn tab_opened(&mut self, now_ms: i64) -> PingStart {
+        if self.auto_ping_disabled {
+            return PingStart::default();
+        }
+
         if !servers_logic::can_start_ping(self.ping_in_flight, self.rows.len()) {
             return PingStart::default();
         }
 
         let ids: Vec<String> = self.rows.iter().map(|row| row.id.clone()).collect();
-        self.begin_pass(ids.len(), &ids);
+        self.begin_pass(ids.len(), &ids, true);
         self.auto_pinged = true;
         self.start_refresh(&ids, now_ms, false)
     }
@@ -892,8 +938,15 @@ impl ServersState {
     /// Drains the worker pool and applies every finished answer.
     ///
     /// `true` means something a user can see moved, which is what the caller turns
-    /// into a repaint.
+    /// into a repaint. A pass that is not running drains nothing: leaving the tab
+    /// abandons the pass ([`ServersState::cancel_pings`]), and an answer the pool
+    /// finished on its way out would otherwise paint a chip on a row nobody is looking
+    /// at — and cache itself for the next visit.
     pub fn poll_pings(&mut self, now_ms: i64) -> bool {
+        if !self.ping_in_flight {
+            return false;
+        }
+
         let Some(backend) = self.pings.as_ref().map(Arc::clone) else {
             return false;
         };
@@ -911,7 +964,8 @@ impl ServersState {
         }
 
         if self.pending_pings == 0 && self.ping_in_flight {
-            self.finish_pass(true);
+            let announce = self.announce_pass;
+            self.finish_pass(announce);
         }
 
         true
@@ -1865,5 +1919,76 @@ mod tests {
         assert_eq!(state.tab_opened(NOW_MS), PingStart::default());
         assert_eq!(state.start_ping_all_now(NOW_MS), PingStart::default());
         assert!(fake.take_queued().is_empty());
+    }
+
+    /// The add's auto-ping dials the row it saved and leaves the status line alone.
+    ///
+    /// `:524-528` dialled the server it had just written without painting a summary, so
+    /// the `Added {name}.` confirmation survived the answer. The pass is otherwise a
+    /// normal one: the chip spins, and the answer is cached like any other.
+    #[test]
+    fn the_auto_ping_after_an_add_dials_one_row_and_announces_nothing() {
+        let (mut state, fake) = with_fake(&three());
+        state.set_status("Added Beta.", StatusTone::Success);
+
+        let start = state.start_ping_added_now("b", NOW_MS);
+
+        assert_eq!(
+            start,
+            PingStart {
+                queued: 1,
+                cached: 0,
+                invalid: 0
+            },
+            "only the row the form saved is dialled"
+        );
+        assert_eq!(fake.take_queued(), vec!["b"]);
+        assert_eq!(
+            state.rows()[1].status_text,
+            servers_logic::PINGING_LABEL,
+            "the row that is being dialled shows the spinner"
+        );
+
+        fake.answer("b", answered(38, 4, 20, "Hello"));
+        state.poll_pings(NOW_MS);
+
+        assert_eq!(state.rows()[1].status_text, "38 ms");
+        assert_eq!(
+            state.status().map(|status| status.text.as_str()),
+            Some("Added Beta."),
+            "a silent pass leaves the added row's confirmation on the line"
+        );
+        assert_eq!(
+            state.cached_pings(),
+            1,
+            "the answer is cached like any other"
+        );
+        assert!(
+            state.auto_pinged(),
+            "and it counts as the pass the tab owes"
+        );
+    }
+
+    /// A session that never dialled the tab keeps the state it seeded.
+    ///
+    /// [`ServersState::mark_auto_pinged`] is the capture harness's seam, and the whole
+    /// point of it is that the tab entry does not answer with a socket: a screenshot of
+    /// the Servers tab has to show the rows the harness painted, not a spinner over
+    /// them. The presses still dial, because those are presses.
+    #[test]
+    fn a_tab_that_was_marked_pinged_dials_nothing_when_it_opens() {
+        let (mut state, fake) = with_fake(&three());
+        state.mark_auto_pinged();
+
+        assert_eq!(state.tab_opened(NOW_MS), PingStart::default());
+        assert!(fake.take_queued().is_empty(), "no row left for a socket");
+        assert!(!state.ping_in_flight());
+
+        assert_eq!(
+            state.start_ping_all_now(NOW_MS).queued,
+            3,
+            "the press is not the tab entry, so it still dials"
+        );
+        assert_eq!(fake.take_queued(), vec!["a", "b", "c"]);
     }
 }
