@@ -1,13 +1,3 @@
-# ── C# build outputs ─────────────────────────────────────────────
-Aoko/bin/
-Aoko/obj/
-Aoko/publish/
-Aoko.Tests/bin/
-Aoko.Tests/obj/
-
-# bridge.dll is built from source; don't track the copy inside Aoko
-Aoko/bridge.dll
-
 # ── C++ build outputs ────────────────────────────────────────────
 McInjector/bridge.dll
 McInjector/build/
@@ -35,8 +25,6 @@ CRASH_LOG_LOCATIONS.md
 generate_analysis.py
 *.bat
 !/build_dll.bat
-!/build_exe.bat
-!/build_release.bat
 !/McInjector/build.bat
 !/McInjector/build_261.bat
 !/McInjector/build_121.bat
