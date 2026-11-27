@@ -38,6 +38,7 @@ pub mod chest_stealer;
 pub mod clicker;
 pub mod clock;
 pub mod concurrency;
+mod config_map;
 pub mod discord;
 pub mod loops;
 #[cfg(test)]

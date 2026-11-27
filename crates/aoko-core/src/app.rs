@@ -423,14 +423,10 @@ impl AppController {
     /// The payload the profile produces.
     ///
     /// Shared by [`config_payload`](Self::config_payload) and
-    /// [`config_frame`](Self::config_frame) so the frame's two halves cannot drift apart.
+    /// [`config_frame`](Self::config_frame) so the frame's two halves cannot drift apart, and
+    /// delegated to `crate::config_map`, which owns the one profile-to-key mapping.
     fn payload(profile: &Profile) -> ConfigPayload {
-        let mut payload = ConfigPayload {
-            fight_status: profile.fight_status_enabled,
-            ..ConfigPayload::default()
-        };
-        payload.fill_keybinds(|module| profile.module_keys.get(module).copied().unwrap_or(0));
-        payload
+        crate::config_map::payload(profile)
     }
 }
 
@@ -688,11 +684,12 @@ mod tests {
         assert!(!app.profile().fight_status_enabled);
         let payload = app.config_payload();
         assert!(!payload.fight_status);
-        assert_eq!(
-            payload,
-            ConfigPayload::default(),
-            "a default profile must produce exactly the managed defaults"
-        );
+        // The frame is the profile, so a default profile produces the profile's own values
+        // rather than an all-zero payload; these are the managed connect-time defaults.
+        let profile = app.profile();
+        assert_eq!(payload.min_cps, profile.min_cps);
+        assert_eq!(payload.gui_theme, profile.gui_theme);
+        assert_eq!(payload.left, profile.left_click_enabled);
 
         // Flipping the profile is the only way to move it, in either direction.
         assert!(app.update_profile(|profile| {
