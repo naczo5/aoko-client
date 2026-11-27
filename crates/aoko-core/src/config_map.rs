@@ -64,7 +64,7 @@
 
 use aoko_protocol::block_esp::{self, BlockEspTarget, BlockEspTargetData};
 use aoko_protocol::config_payload::{module_list_style_to_index, ConfigPayload};
-use aoko_protocol::module_catalog::EnabledFlag;
+use aoko_protocol::module_catalog::{self, EnabledFlag};
 use aoko_protocol::nick_hider;
 use aoko_protocol::profile::{ClickRandomizationMode, Profile};
 
@@ -203,6 +203,37 @@ pub(crate) fn profile_switches(profile: &Profile) -> Vec<EnabledFlag> {
         })
         .map(|(flag, _)| *flag)
         .collect()
+}
+
+/// `Clicker.DisableDevOnlyModules` (`Clicker.cs:194-200`): force off every switch whose
+/// catalog entry is `DevOnly` while Dev Mode is off, and report whether one was on.
+///
+/// A `DevOnly` module is one the GUI hides until Dev Mode is on, and
+/// [`crate::clicker::toggles::toggle`] refuses its keybind for the same reason, so a switch left
+/// on while Dev Mode is off is a running module with no control in either surface. The managed
+/// host called this from the `DevMode` setter (`Clicker.cs:180-193`) and at the end of every
+/// apply (`Profile.cs:903`).
+///
+/// Only the switch set is touched: the profile's `*_enabled` fields are the saved copy of it, so
+/// the next save (`AppController::profile_for_save`) writes the off state back.
+pub(crate) fn disable_dev_only_modules(modules: &mut Vec<EnabledFlag>, dev_mode: bool) -> bool {
+    if dev_mode {
+        return false;
+    }
+
+    let before = modules.len();
+    modules.retain(|flag| !is_dev_only(*flag));
+    before != modules.len()
+}
+
+/// Whether a switch belongs to a module the catalog marks `DevOnly`.
+fn is_dev_only(flag: EnabledFlag) -> bool {
+    if flag == EnabledFlag::Never {
+        return false;
+    }
+    module_catalog::ALL
+        .iter()
+        .any(|entry| entry.dev_only && entry.enabled_flag == flag)
 }
 
 /// The frame the profile and the controller's switches produce.
@@ -738,5 +769,46 @@ mod tests {
                 "{flag:?} must clear the same field"
             );
         }
+    }
+
+    /// The dev-only sweep, driven from the catalogue rather than a hard-coded module name: with
+    /// Dev Mode off it drops exactly the `DevOnly` switches, in place, and reports the drop once.
+    #[test]
+    fn the_dev_only_sweep_drops_exactly_the_dev_only_switches() {
+        let every: Vec<EnabledFlag> = SWITCH_PROFILE_KEYS.iter().map(|(flag, _)| *flag).collect();
+        let dev_only: Vec<EnabledFlag> = every
+            .iter()
+            .copied()
+            .filter(|flag| {
+                module_catalog::ALL
+                    .iter()
+                    .any(|entry| entry.dev_only && entry.enabled_flag == *flag)
+            })
+            .collect();
+        assert!(
+            !dev_only.is_empty(),
+            "the catalog has to carry a dev-only module for this to mean anything"
+        );
+
+        let mut modules = every.clone();
+        assert!(
+            !disable_dev_only_modules(&mut modules, true),
+            "Dev Mode on leaves every switch alone"
+        );
+        assert_eq!(modules, every);
+
+        assert!(disable_dev_only_modules(&mut modules, false));
+        let surviving: Vec<EnabledFlag> = every
+            .into_iter()
+            .filter(|flag| !dev_only.contains(flag))
+            .collect();
+        assert_eq!(
+            modules, surviving,
+            "the surviving switches keep their order"
+        );
+        assert!(
+            !disable_dev_only_modules(&mut modules, false),
+            "a second sweep finds nothing to drop"
+        );
     }
 }

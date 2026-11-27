@@ -18,16 +18,45 @@
 //! The managed host loads through the setters in document order, so this crate
 //! deserialises into an all-optional wire struct and applies the present values
 //! through the same setters.
+//!
+//! # Reading a document
+//!
+//! Three rules keep a profile file recoverable:
+//!
+//! * **Versioned.** Every save writes [`SCHEMA_VERSION_KEY`], and the one-way
+//!   migrations run only for a document older than [`PROFILE_SCHEMA_VERSION`].
+//!   A file with no version is a v1 file, which is what the managed host wrote.
+//! * **Keys this build does not know survive.** They are kept on
+//!   [`Profile::unknown_keys`] and written back verbatim, so a file a newer build
+//!   or a hand edit gave extra keys is not pruned by saving it here.
+//! * **A bad field costs one field.** Each key is decoded on its own: a value of
+//!   the wrong type falls back to the field's default and is reported through
+//!   [`ProfileLoad::problems`], where the whole document used to fail to load.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::block_esp::BlockEspTargetData;
 use crate::hud::{HudLayout, KNOWN_ELEMENT_IDS};
 use crate::kill_aura::KillAuraSettings;
+
+/// The profile schema this build writes and understands.
+///
+/// `1` is the shape the managed host shipped, which wrote no version at all: a document
+/// with no [`SCHEMA_VERSION_KEY`] is read as v1 and migrated. `2` adds the key itself and
+/// keeps the keys this build does not know, so a later shape change can tell a saved v2 file
+/// from a hand-edited one instead of re-running every key heuristics.
+pub const PROFILE_SCHEMA_VERSION: i64 = 2;
+
+/// The top-level key that records [`PROFILE_SCHEMA_VERSION`].
+///
+/// The managed reader ignores a key it does not know, so the `dev` host loads a file this
+/// build wrote; the reverse is what the migrations cover.
+pub const SCHEMA_VERSION_KEY: &str = "schemaVersion";
 
 /// Click randomisation mode. Serialised as a number, matching the managed enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -80,7 +109,7 @@ impl<'de> Deserialize<'de> for ClickRandomizationMode {
 /// hand-edited entry with a missing `scale` reaches the clamp rules as `0.0` and
 /// is then replaced by the element's canonical scale — exactly as
 /// `ProfileManager.BuildHudLayout` behaves.
-#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct HudElementLayoutValue {
     #[serde(default)]
     pub x: f64,
@@ -88,6 +117,12 @@ pub struct HudElementLayoutValue {
     pub y: f64,
     #[serde(default)]
     pub scale: f64,
+    /// Keys this build does not know on this element, written back on save.
+    ///
+    /// An element is the likeliest place for a newer writer to add a setting, because the
+    /// bridge sends the layout it renders back through `hudLayout`.
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, Value>,
 }
 
 /// A saved configuration.
@@ -385,6 +420,17 @@ pub struct Profile {
     pub has_explicit_randomization_mode: bool,
     #[serde(skip)]
     pub has_explicit_sub_checks: bool,
+
+    /// Top-level keys this build does not know, written back unchanged by
+    /// [`to_profile_json`].
+    ///
+    /// A profile written by a newer build, or edited by hand, can carry keys this schema has
+    /// no field for. They are kept out of the profile's own behaviour and out of every
+    /// payload, and only travel: read from the document, written to the next document, so
+    /// saving a config here does not delete them. [`SCHEMA_VERSION_KEY`] is not one of them —
+    /// it is written from [`PROFILE_SCHEMA_VERSION`] on every save.
+    #[serde(flatten)]
+    pub unknown_keys: BTreeMap<String, Value>,
 }
 
 /// The managed default module-key map: every keybindable module at key 0.
@@ -587,6 +633,7 @@ impl Default for Profile {
             auto_rod_extension_ticks: 4,
             has_explicit_randomization_mode: false,
             has_explicit_sub_checks: false,
+            unknown_keys: BTreeMap::new(),
         }
     }
 }
@@ -779,6 +826,7 @@ impl Profile {
                         x: element.x,
                         y: element.y,
                         scale: element.scale,
+                        unknown: BTreeMap::new(),
                     },
                 )
             })
@@ -789,294 +837,308 @@ impl Profile {
 /// Deserialisation shim: every field optional so a profile written by an older or
 /// newer build still loads. Present values are applied exactly as the managed
 /// property setters would.
-#[derive(Debug, Default, Deserialize)]
+///
+/// Built key by key by [`ProfileWire::from_root`], which is what keeps one malformed
+/// value to one field instead of the whole document.
 struct ProfileWire {
-    #[serde(rename = "name", default)]
     name: Option<String>,
-    #[serde(rename = "guiTheme", default)]
     gui_theme: Option<String>,
-    #[serde(rename = "moduleListStyle", default)]
     module_list_style: Option<String>,
-    #[serde(rename = "showLogo", default)]
     show_logo: Option<bool>,
-    #[serde(rename = "devMode", default)]
     dev_mode: Option<bool>,
-    #[serde(rename = "discordRpcEnabled", default)]
     discord_rpc_enabled: Option<bool>,
-    #[serde(rename = "isArmed", default)]
     is_armed: Option<bool>,
-    #[serde(rename = "minCPS", default)]
     min_cps: Option<f32>,
-    #[serde(rename = "maxCPS", default)]
     max_cps: Option<f32>,
-    #[serde(rename = "leftClickEnabled", default)]
     left_click_enabled: Option<bool>,
-    #[serde(rename = "rightClickEnabled", default)]
     right_click_enabled: Option<bool>,
-    #[serde(rename = "rightMinCPS", default)]
     right_min_cps: Option<f32>,
-    #[serde(rename = "rightMaxCPS", default)]
     right_max_cps: Option<f32>,
-    #[serde(rename = "rightClickOnlyBlock", default)]
     right_click_only_block: Option<bool>,
-    #[serde(rename = "breakBlocksEnabled", default)]
     break_blocks_enabled: Option<bool>,
-    #[serde(rename = "clickInChests", default)]
     click_in_chests: Option<bool>,
-    #[serde(rename = "aimAssistEnabled", default)]
     aim_assist_enabled: Option<bool>,
-    #[serde(rename = "aimAssistFov", default)]
     aim_assist_fov: Option<f32>,
-    #[serde(rename = "aimAssistRange", default)]
     aim_assist_range: Option<f32>,
-    #[serde(rename = "aimAssistStrength", default)]
     aim_assist_strength: Option<i32>,
-    #[serde(rename = "triggerbotEnabled", default)]
     triggerbot_enabled: Option<bool>,
-    #[serde(rename = "triggerbotOnlyCrosshair", default)]
     triggerbot_only_crosshair: Option<bool>,
-    #[serde(rename = "triggerbotOnlyIfCanAttack", default)]
     triggerbot_only_if_can_attack: Option<bool>,
-    #[serde(rename = "triggerbotCooldownThreshold", default)]
     triggerbot_cooldown_threshold: Option<i32>,
-    #[serde(rename = "triggerbotHitChance", default)]
     triggerbot_hit_chance: Option<i32>,
-    #[serde(rename = "triggerbotRequireClick", default)]
     triggerbot_require_click: Option<bool>,
-    #[serde(rename = "killAuraEnabled", default)]
     kill_aura_enabled: Option<bool>,
-    #[serde(rename = "killAuraSettings", default)]
     kill_aura_settings: Option<KillAuraSettings>,
-    #[serde(rename = "killAuraRange", default)]
     kill_aura_range: Option<f32>,
-    #[serde(rename = "killAuraAimRange", default)]
     kill_aura_aim_range: Option<f32>,
-    #[serde(rename = "killAuraMinTurnSpeed", default)]
     kill_aura_min_turn_speed: Option<f32>,
-    #[serde(rename = "killAuraMaxTurnSpeed", default)]
     kill_aura_max_turn_speed: Option<f32>,
-    #[serde(rename = "killAuraTargetMode", default)]
     kill_aura_target_mode: Option<String>,
-    #[serde(rename = "killAuraSwitchDelayMs", default)]
     kill_aura_switch_delay_ms: Option<i32>,
-    #[serde(rename = "killAuraRandomization", default)]
     kill_aura_randomization: Option<i32>,
-    #[serde(rename = "killAuraClickMode", default)]
     kill_aura_click_mode: Option<String>,
-    #[serde(rename = "killAuraMinCps", default)]
     kill_aura_min_cps: Option<f32>,
-    #[serde(rename = "killAuraMaxCps", default)]
     kill_aura_max_cps: Option<f32>,
-    #[serde(rename = "killAuraFov", default)]
     kill_aura_fov: Option<i32>,
-    #[serde(rename = "killAuraRotMode", default)]
     kill_aura_rot_mode: Option<String>,
-    #[serde(rename = "killAuraRequirePress", default)]
     kill_aura_require_press: Option<bool>,
-    #[serde(rename = "killAuraWeaponsOnly", default)]
     kill_aura_weapons_only: Option<bool>,
-    #[serde(rename = "speedBridgeEnabled", default)]
     speed_bridge_enabled: Option<bool>,
-    #[serde(rename = "speedBridgeBlockOnly", default)]
     speed_bridge_block_only: Option<bool>,
-    #[serde(rename = "speedBridgeDelayMs", default)]
     speed_bridge_delay_ms: Option<i32>,
-    #[serde(rename = "speedBridgeHoldingShiftOnly", default)]
     speed_bridge_holding_shift_only: Option<bool>,
-    #[serde(rename = "speedBridgeLookingDownOnly", default)]
     speed_bridge_looking_down_only: Option<bool>,
-    #[serde(rename = "gtbHelperEnabled", default)]
     gtb_helper_enabled: Option<bool>,
-    #[serde(rename = "pixelPartyAssistEnabled", default)]
     pixel_party_assist_enabled: Option<bool>,
-    #[serde(rename = "pixelPartyScanRadius", default)]
     pixel_party_scan_radius: Option<i32>,
-    #[serde(rename = "pixelPartyAutoLookEnabled", default)]
     pixel_party_auto_look_enabled: Option<bool>,
-    #[serde(rename = "pixelPartyAutoWalkEnabled", default)]
     pixel_party_auto_walk_enabled: Option<bool>,
-    #[serde(rename = "nametagsEnabled", default)]
     nametags_enabled: Option<bool>,
-    #[serde(rename = "nickHiderEnabled", default)]
     nick_hider_enabled: Option<bool>,
-    #[serde(rename = "nickHiderAlias", default)]
     nick_hider_alias: Option<String>,
-    #[serde(rename = "showModuleList", default)]
     show_module_list: Option<bool>,
-    #[serde(rename = "closestPlayerInfoEnabled", default)]
     closest_player_info_enabled: Option<bool>,
-    #[serde(rename = "fightStatusEnabled", default)]
     fight_status_enabled: Option<bool>,
-    #[serde(rename = "nametagShowHealth", default)]
     nametag_show_health: Option<bool>,
-    #[serde(rename = "nametagShowArmor", default)]
     nametag_show_armor: Option<bool>,
-    #[serde(rename = "nametagShowHeldItem", default)]
     nametag_show_held_item: Option<bool>,
-    #[serde(rename = "nametagHideVanilla", default)]
     nametag_hide_vanilla: Option<bool>,
-    #[serde(rename = "nametagRange", default)]
     nametag_range: Option<i32>,
-    #[serde(rename = "chestEspEnabled", default)]
     chest_esp_enabled: Option<bool>,
-    #[serde(rename = "chestEspRange", default)]
     chest_esp_range: Option<i32>,
-    #[serde(rename = "chestStealerEnabled", default)]
     chest_stealer_enabled: Option<bool>,
-    #[serde(rename = "chestStealerDelayMs", default)]
     chest_stealer_delay_ms: Option<i32>,
-    #[serde(rename = "refillEnabled", default)]
     refill_enabled: Option<bool>,
-    #[serde(rename = "refillDelayMs", default)]
     refill_delay_ms: Option<i32>,
-    #[serde(rename = "blockEspEnabled", default)]
     block_esp_enabled: Option<bool>,
-    #[serde(rename = "blockEspBoxes", default)]
     block_esp_boxes: Option<bool>,
-    #[serde(rename = "blockEspTracers", default)]
     block_esp_tracers: Option<bool>,
-    #[serde(rename = "blockEspHud", default)]
     block_esp_hud: Option<bool>,
-    #[serde(rename = "blockEspMaxCount", default)]
     block_esp_max_count: Option<i32>,
-    #[serde(rename = "blockEspRange", default)]
     block_esp_range: Option<i32>,
-    #[serde(rename = "blockEspTargets", default)]
     block_esp_targets: Option<Vec<BlockEspTargetData>>,
-    #[serde(rename = "bedPlatesEnabled", default)]
     bed_plates_enabled: Option<bool>,
-    #[serde(rename = "bedPlatesShowDistance", default)]
     bed_plates_show_distance: Option<bool>,
-    #[serde(rename = "bedPlatesRange", default)]
     bed_plates_range: Option<i32>,
-    #[serde(rename = "reachEnabled", default)]
     reach_enabled: Option<bool>,
-    #[serde(rename = "reachMin", default)]
     reach_min: Option<f32>,
-    #[serde(rename = "reachMax", default)]
     reach_max: Option<f32>,
-    #[serde(rename = "reachChance", default)]
     reach_chance: Option<i32>,
-    #[serde(rename = "reachChanceMode", default)]
     reach_chance_mode: Option<i32>,
-    #[serde(rename = "reachOnlyWhileSprinting", default)]
     reach_only_while_sprinting: Option<bool>,
-    #[serde(rename = "reachDisableInWater", default)]
     reach_disable_in_water: Option<bool>,
-    #[serde(rename = "reachVerticalCheck", default)]
     reach_vertical_check: Option<bool>,
-    #[serde(rename = "velocityEnabled", default)]
     velocity_enabled: Option<bool>,
-    #[serde(rename = "velocityHorizontal", default)]
     velocity_horizontal: Option<i32>,
-    #[serde(rename = "velocityVertical", default)]
     velocity_vertical: Option<i32>,
-    #[serde(rename = "velocityChance", default)]
     velocity_chance: Option<i32>,
-    #[serde(rename = "autoTotemEnabled", default)]
     auto_totem_enabled: Option<bool>,
-    #[serde(rename = "autoTotemMode", default)]
     auto_totem_mode: Option<i32>,
-    #[serde(rename = "autoTotemHealth", default)]
     auto_totem_health: Option<i32>,
-    #[serde(rename = "autoTotemElytra", default)]
     auto_totem_elytra: Option<bool>,
-    #[serde(rename = "autoTotemDelay", default)]
     auto_totem_delay: Option<i32>,
-    #[serde(rename = "autoTotemBehaviorMode", default)]
     auto_totem_behavior_mode: Option<i32>,
-    #[serde(rename = "autoRodEnabled", default)]
     auto_rod_enabled: Option<bool>,
-    #[serde(rename = "throwpotEnabled", default)]
     throwpot_enabled: Option<bool>,
-    #[serde(rename = "autoHealEnabled", default)]
     auto_heal_enabled: Option<bool>,
-    #[serde(rename = "autoHealHealth", default)]
     auto_heal_health: Option<i32>,
-    #[serde(rename = "autoHealDelayMs", default)]
     auto_heal_delay_ms: Option<i32>,
-    #[serde(rename = "autoRodVerifyForcedSlot", default)]
     auto_rod_verify_forced_slot: Option<bool>,
-    #[serde(rename = "autoRodHoldToExtend", default)]
     auto_rod_hold_to_extend: Option<bool>,
-    #[serde(rename = "autoRodActionKey", default)]
     auto_rod_action_key: Option<i32>,
-    #[serde(rename = "throwpotActionKey", default)]
     throwpot_action_key: Option<i32>,
-    #[serde(rename = "autoToolEnabled", default)]
     auto_tool_enabled: Option<bool>,
-    #[serde(rename = "autoToolSwapWeapon", default)]
     auto_tool_swap_weapon: Option<bool>,
-    #[serde(rename = "autoToolInstantSwap", default)]
     auto_tool_instant_swap: Option<bool>,
-    #[serde(rename = "autoToolSwapToDelay", default)]
     auto_tool_swap_to_delay: Option<i32>,
-    #[serde(rename = "autoToolSwapBack", default)]
     auto_tool_swap_back: Option<bool>,
-    #[serde(rename = "autoToolSwapBackDelay", default)]
     auto_tool_swap_back_delay: Option<i32>,
-    #[serde(rename = "autoToolRequireMouseDown", default)]
     auto_tool_require_mouse_down: Option<bool>,
-    #[serde(rename = "autoToolOnlySneaking", default)]
     auto_tool_only_sneaking: Option<bool>,
-    #[serde(rename = "autoToolBedwarsMode", default)]
     auto_tool_bedwars_mode: Option<bool>,
-    #[serde(rename = "antiDebuffEnabled", default)]
     anti_debuff_enabled: Option<bool>,
-    #[serde(rename = "hitDelayFixEnabled", default)]
     hit_delay_fix_enabled: Option<bool>,
-    #[serde(rename = "fireballWarningEnabled", default)]
     fireball_warning_enabled: Option<bool>,
-    #[serde(rename = "fireballWarningBox", default)]
     fireball_warning_box: Option<bool>,
-    #[serde(rename = "fireballWarningArrow", default)]
     fireball_warning_arrow: Option<bool>,
-    #[serde(rename = "fireballWarningSound", default)]
     fireball_warning_sound: Option<bool>,
-    #[serde(rename = "fastPlaceEnabled", default)]
     fast_place_enabled: Option<bool>,
-    #[serde(rename = "noHurtCamEnabled", default)]
     no_hurt_cam_enabled: Option<bool>,
-    #[serde(rename = "sprintEnabled", default)]
     sprint_enabled: Option<bool>,
-    #[serde(rename = "tntTimerEnabled", default)]
     tnt_timer_enabled: Option<bool>,
-    #[serde(rename = "wTapEnabled", default)]
     wtap_enabled: Option<bool>,
-    #[serde(rename = "jumpResetEnabled", default)]
     jump_reset_enabled: Option<bool>,
-    #[serde(rename = "hitSelectEnabled", default)]
     hit_select_enabled: Option<bool>,
-    #[serde(rename = "trajectoriesEnabled", default)]
     trajectories_enabled: Option<bool>,
-    #[serde(rename = "murderMysteryEnabled", default)]
     murder_mystery_enabled: Option<bool>,
-    #[serde(rename = "breakProgressEnabled", default)]
     break_progress_enabled: Option<bool>,
-    #[serde(rename = "jumpResetChance", default)]
     jump_reset_chance: Option<i32>,
-    #[serde(rename = "hudLayout", default)]
     hud_layout: Option<Option<BTreeMap<String, HudElementLayoutValue>>>,
-    #[serde(rename = "moduleKeys", default)]
     module_keys: Option<BTreeMap<String, i32>>,
-    #[serde(rename = "theme", default)]
     theme: Option<String>,
-    #[serde(rename = "randomizationMode", default)]
     randomization_mode: Option<ClickRandomizationMode>,
-    #[serde(rename = "jitterEnabled", default)]
     jitter_enabled: Option<bool>,
-    #[serde(rename = "chestStealerMenuCheck", default)]
     chest_stealer_menu_check: Option<bool>,
-    #[serde(rename = "chestStealerTitleCheck", default)]
     chest_stealer_title_check: Option<bool>,
-    #[serde(rename = "chestStealerCustomItemsCheck", default)]
     chest_stealer_custom_items_check: Option<bool>,
-    #[serde(rename = "chestStealerPhysicalCheck", default)]
     chest_stealer_physical_check: Option<bool>,
-    #[serde(rename = "autoRodSlotMode", default)]
     auto_rod_slot_mode: Option<i32>,
-    #[serde(rename = "autoRodExtensionTicks", default)]
     auto_rod_extension_ticks: Option<i32>,
+}
+
+impl ProfileWire {
+    /// Reads every key this schema knows, taking each one out of `fields`.
+    ///
+    /// What no `take` claims is left behind as the document's unknown keys, and a value
+    /// that does not fit its field is reported and skipped, so the rest of the document
+    /// still loads.
+    fn from_root(fields: &mut ProfileFields) -> Self {
+        Self {
+            name: fields.take("name"),
+            gui_theme: fields.take("guiTheme"),
+            module_list_style: fields.take("moduleListStyle"),
+            show_logo: fields.take("showLogo"),
+            dev_mode: fields.take("devMode"),
+            discord_rpc_enabled: fields.take("discordRpcEnabled"),
+            is_armed: fields.take("isArmed"),
+            min_cps: fields.take("minCPS"),
+            max_cps: fields.take("maxCPS"),
+            left_click_enabled: fields.take("leftClickEnabled"),
+            right_click_enabled: fields.take("rightClickEnabled"),
+            right_min_cps: fields.take("rightMinCPS"),
+            right_max_cps: fields.take("rightMaxCPS"),
+            right_click_only_block: fields.take("rightClickOnlyBlock"),
+            break_blocks_enabled: fields.take("breakBlocksEnabled"),
+            click_in_chests: fields.take("clickInChests"),
+            aim_assist_enabled: fields.take("aimAssistEnabled"),
+            aim_assist_fov: fields.take("aimAssistFov"),
+            aim_assist_range: fields.take("aimAssistRange"),
+            aim_assist_strength: fields.take("aimAssistStrength"),
+            triggerbot_enabled: fields.take("triggerbotEnabled"),
+            triggerbot_only_crosshair: fields.take("triggerbotOnlyCrosshair"),
+            triggerbot_only_if_can_attack: fields.take("triggerbotOnlyIfCanAttack"),
+            triggerbot_cooldown_threshold: fields.take("triggerbotCooldownThreshold"),
+            triggerbot_hit_chance: fields.take("triggerbotHitChance"),
+            triggerbot_require_click: fields.take("triggerbotRequireClick"),
+            kill_aura_enabled: fields.take("killAuraEnabled"),
+            kill_aura_settings: fields.take("killAuraSettings"),
+            kill_aura_range: fields.take("killAuraRange"),
+            kill_aura_aim_range: fields.take("killAuraAimRange"),
+            kill_aura_min_turn_speed: fields.take("killAuraMinTurnSpeed"),
+            kill_aura_max_turn_speed: fields.take("killAuraMaxTurnSpeed"),
+            kill_aura_target_mode: fields.take("killAuraTargetMode"),
+            kill_aura_switch_delay_ms: fields.take("killAuraSwitchDelayMs"),
+            kill_aura_randomization: fields.take("killAuraRandomization"),
+            kill_aura_click_mode: fields.take("killAuraClickMode"),
+            kill_aura_min_cps: fields.take("killAuraMinCps"),
+            kill_aura_max_cps: fields.take("killAuraMaxCps"),
+            kill_aura_fov: fields.take("killAuraFov"),
+            kill_aura_rot_mode: fields.take("killAuraRotMode"),
+            kill_aura_require_press: fields.take("killAuraRequirePress"),
+            kill_aura_weapons_only: fields.take("killAuraWeaponsOnly"),
+            speed_bridge_enabled: fields.take("speedBridgeEnabled"),
+            speed_bridge_block_only: fields.take("speedBridgeBlockOnly"),
+            speed_bridge_delay_ms: fields.take("speedBridgeDelayMs"),
+            speed_bridge_holding_shift_only: fields.take("speedBridgeHoldingShiftOnly"),
+            speed_bridge_looking_down_only: fields.take("speedBridgeLookingDownOnly"),
+            gtb_helper_enabled: fields.take("gtbHelperEnabled"),
+            pixel_party_assist_enabled: fields.take("pixelPartyAssistEnabled"),
+            pixel_party_scan_radius: fields.take("pixelPartyScanRadius"),
+            pixel_party_auto_look_enabled: fields.take("pixelPartyAutoLookEnabled"),
+            pixel_party_auto_walk_enabled: fields.take("pixelPartyAutoWalkEnabled"),
+            nametags_enabled: fields.take("nametagsEnabled"),
+            nick_hider_enabled: fields.take("nickHiderEnabled"),
+            nick_hider_alias: fields.take("nickHiderAlias"),
+            show_module_list: fields.take("showModuleList"),
+            closest_player_info_enabled: fields.take("closestPlayerInfoEnabled"),
+            fight_status_enabled: fields.take("fightStatusEnabled"),
+            nametag_show_health: fields.take("nametagShowHealth"),
+            nametag_show_armor: fields.take("nametagShowArmor"),
+            nametag_show_held_item: fields.take("nametagShowHeldItem"),
+            nametag_hide_vanilla: fields.take("nametagHideVanilla"),
+            nametag_range: fields.take("nametagRange"),
+            chest_esp_enabled: fields.take("chestEspEnabled"),
+            chest_esp_range: fields.take("chestEspRange"),
+            chest_stealer_enabled: fields.take("chestStealerEnabled"),
+            chest_stealer_delay_ms: fields.take("chestStealerDelayMs"),
+            refill_enabled: fields.take("refillEnabled"),
+            refill_delay_ms: fields.take("refillDelayMs"),
+            block_esp_enabled: fields.take("blockEspEnabled"),
+            block_esp_boxes: fields.take("blockEspBoxes"),
+            block_esp_tracers: fields.take("blockEspTracers"),
+            block_esp_hud: fields.take("blockEspHud"),
+            block_esp_max_count: fields.take("blockEspMaxCount"),
+            block_esp_range: fields.take("blockEspRange"),
+            block_esp_targets: fields.take("blockEspTargets"),
+            bed_plates_enabled: fields.take("bedPlatesEnabled"),
+            bed_plates_show_distance: fields.take("bedPlatesShowDistance"),
+            bed_plates_range: fields.take("bedPlatesRange"),
+            reach_enabled: fields.take("reachEnabled"),
+            reach_min: fields.take("reachMin"),
+            reach_max: fields.take("reachMax"),
+            reach_chance: fields.take("reachChance"),
+            reach_chance_mode: fields.take("reachChanceMode"),
+            reach_only_while_sprinting: fields.take("reachOnlyWhileSprinting"),
+            reach_disable_in_water: fields.take("reachDisableInWater"),
+            reach_vertical_check: fields.take("reachVerticalCheck"),
+            velocity_enabled: fields.take("velocityEnabled"),
+            velocity_horizontal: fields.take("velocityHorizontal"),
+            velocity_vertical: fields.take("velocityVertical"),
+            velocity_chance: fields.take("velocityChance"),
+            auto_totem_enabled: fields.take("autoTotemEnabled"),
+            auto_totem_mode: fields.take("autoTotemMode"),
+            auto_totem_health: fields.take("autoTotemHealth"),
+            auto_totem_elytra: fields.take("autoTotemElytra"),
+            auto_totem_delay: fields.take("autoTotemDelay"),
+            auto_totem_behavior_mode: fields.take("autoTotemBehaviorMode"),
+            auto_rod_enabled: fields.take("autoRodEnabled"),
+            throwpot_enabled: fields.take("throwpotEnabled"),
+            auto_heal_enabled: fields.take("autoHealEnabled"),
+            auto_heal_health: fields.take("autoHealHealth"),
+            auto_heal_delay_ms: fields.take("autoHealDelayMs"),
+            auto_rod_verify_forced_slot: fields.take("autoRodVerifyForcedSlot"),
+            auto_rod_hold_to_extend: fields.take("autoRodHoldToExtend"),
+            auto_rod_action_key: fields.take("autoRodActionKey"),
+            throwpot_action_key: fields.take("throwpotActionKey"),
+            auto_tool_enabled: fields.take("autoToolEnabled"),
+            auto_tool_swap_weapon: fields.take("autoToolSwapWeapon"),
+            auto_tool_instant_swap: fields.take("autoToolInstantSwap"),
+            auto_tool_swap_to_delay: fields.take("autoToolSwapToDelay"),
+            auto_tool_swap_back: fields.take("autoToolSwapBack"),
+            auto_tool_swap_back_delay: fields.take("autoToolSwapBackDelay"),
+            auto_tool_require_mouse_down: fields.take("autoToolRequireMouseDown"),
+            auto_tool_only_sneaking: fields.take("autoToolOnlySneaking"),
+            auto_tool_bedwars_mode: fields.take("autoToolBedwarsMode"),
+            anti_debuff_enabled: fields.take("antiDebuffEnabled"),
+            hit_delay_fix_enabled: fields.take("hitDelayFixEnabled"),
+            fireball_warning_enabled: fields.take("fireballWarningEnabled"),
+            fireball_warning_box: fields.take("fireballWarningBox"),
+            fireball_warning_arrow: fields.take("fireballWarningArrow"),
+            fireball_warning_sound: fields.take("fireballWarningSound"),
+            fast_place_enabled: fields.take("fastPlaceEnabled"),
+            no_hurt_cam_enabled: fields.take("noHurtCamEnabled"),
+            sprint_enabled: fields.take("sprintEnabled"),
+            tnt_timer_enabled: fields.take("tntTimerEnabled"),
+            wtap_enabled: fields.take("wTapEnabled"),
+            jump_reset_enabled: fields.take("jumpResetEnabled"),
+            hit_select_enabled: fields.take("hitSelectEnabled"),
+            trajectories_enabled: fields.take("trajectoriesEnabled"),
+            murder_mystery_enabled: fields.take("murderMysteryEnabled"),
+            break_progress_enabled: fields.take("breakProgressEnabled"),
+            jump_reset_chance: fields.take("jumpResetChance"),
+            hud_layout: fields.take("hudLayout"),
+            module_keys: fields.take("moduleKeys"),
+            theme: fields.take("theme"),
+            randomization_mode: fields.take("randomizationMode"),
+            jitter_enabled: fields.take("jitterEnabled"),
+            chest_stealer_menu_check: fields.take("chestStealerMenuCheck"),
+            chest_stealer_title_check: fields.take("chestStealerTitleCheck"),
+            chest_stealer_custom_items_check: fields.take("chestStealerCustomItemsCheck"),
+            chest_stealer_physical_check: fields.take("chestStealerPhysicalCheck"),
+            auto_rod_slot_mode: fields.take("autoRodSlotMode"),
+            auto_rod_extension_ticks: fields.take("autoRodExtensionTicks"),
+        }
+    }
 }
 
 impl From<ProfileWire> for Profile {
@@ -1521,12 +1583,127 @@ impl From<ProfileWire> for Profile {
     }
 }
 
+/// One field of a profile document that could not be read.
+///
+/// The field keeps its default and the rest of the document loads; this is what the reader
+/// saw instead of a value. An empty [`key`](Self::key) means the document itself, not one of
+/// its fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileProblem {
+    /// The document key, spelled as the file spells it (`minCPS`, `killAuraSettings`, ...).
+    pub key: String,
+    /// What the decoder said about the value.
+    pub message: String,
+}
+
+impl ProfileProblem {
+    /// A problem with the document rather than with one of its fields.
+    #[must_use]
+    pub fn document(message: impl Into<String>) -> Self {
+        Self {
+            key: String::new(),
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for ProfileProblem {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.key.is_empty() {
+            return write!(formatter, "{}", self.message);
+        }
+        write!(formatter, "{}: {}", self.key, self.message)
+    }
+}
+
+/// One profile document as read: the profile, its schema version, and everything the reader
+/// had to skip.
+///
+/// [`profile`](Self::profile) is `None` only when the document is not a JSON object, which is
+/// the managed `LoadProfile` catch-all. A document with a malformed field still loads — that
+/// field at its default — and the field is named in [`problems`](Self::problems), so a caller
+/// can report what it cost instead of losing the file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProfileLoad {
+    pub profile: Option<Profile>,
+    /// The schema version the document declared, `1` when it declared none.
+    pub schema_version: i64,
+    pub problems: Vec<ProfileProblem>,
+}
+
+/// The parts of a document that were not decoded, and the fields that did not fit.
+///
+/// Every known key is taken out of `remaining` as it is read, so what is left when the wire is
+/// built is exactly the part of the document this schema does not know. Reading key by key is
+/// also what keeps one malformed value to one field: it is reported and skipped, and the field
+/// it belonged to falls back to its default.
+struct ProfileFields {
+    remaining: serde_json::Map<String, Value>,
+    problems: Vec<ProfileProblem>,
+}
+
+impl ProfileFields {
+    fn new(root: &serde_json::Map<String, Value>) -> Self {
+        Self {
+            remaining: root.clone(),
+            problems: Vec::new(),
+        }
+    }
+
+    /// The value of `key`, or `None` when it is absent or does not fit `T`.
+    ///
+    /// `null` reads as absent rather than as a value of the wrong type, which is what the
+    /// managed serialiser wrote for an unset property.
+    fn take<T: DeserializeOwned>(&mut self, key: &str) -> Option<T> {
+        let value = self.remaining.remove(key)?;
+        if value.is_null() {
+            return None;
+        }
+        match serde_json::from_value(value) {
+            Ok(decoded) => Some(decoded),
+            Err(error) => {
+                self.problems.push(ProfileProblem {
+                    key: key.to_owned(),
+                    message: error.to_string(),
+                });
+                None
+            }
+        }
+    }
+
+    /// The keys no `take` claimed, which are the ones this build does not know.
+    ///
+    /// [`SCHEMA_VERSION_KEY`] is read separately rather than kept here, so it is written from
+    /// [`PROFILE_SCHEMA_VERSION`] and a document cannot carry two of them.
+    fn unknown(&mut self) -> BTreeMap<String, Value> {
+        self.remaining.remove(SCHEMA_VERSION_KEY);
+        std::mem::take(&mut self.remaining).into_iter().collect()
+    }
+}
+
+/// The schema version a document declares, defaulting to the unversioned v1 shape.
+///
+/// A `schemaVersion` that is not an integer reads as v1: the migrations are key-shaped, so
+/// running them over a document that does not need them is a no-op.
+fn schema_version_of(root: &serde_json::Map<String, Value>) -> i64 {
+    root.get(SCHEMA_VERSION_KEY)
+        .and_then(Value::as_i64)
+        .unwrap_or(1)
+}
+
 impl<'de> Deserialize<'de> for Profile {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        Ok(Profile::from(ProfileWire::deserialize(deserializer)?))
+        let root = Value::deserialize(deserializer)?;
+        let Some(object) = root.as_object() else {
+            return Err(serde::de::Error::custom("a profile is a JSON object"));
+        };
+        let mut fields = ProfileFields::new(object);
+        let mut profile = Profile::from(ProfileWire::from_root(&mut fields));
+        profile.unknown_keys = fields.unknown();
+        Ok(profile)
     }
 }
 
@@ -1607,26 +1784,84 @@ fn is_invalid_file_name_char(character: char) -> bool {
 /// The contract we do hold: every key and every value round-trips. A file written by
 /// this function loads back with identical values, a file written by the managed host
 /// loads here, and an untouched profile is written identically across saves.
+///
+/// The document starts with [`SCHEMA_VERSION_KEY`], which the managed reader ignores as an
+/// unknown key, and ends with [`Profile::unknown_keys`], so a key this build does not know
+/// survives the round trip. A value the profile was loaded with but could not decode is gone:
+/// the field it belonged to is at its default by then.
 #[must_use]
 pub fn to_profile_json(profile: &Profile) -> String {
-    serde_json::to_string_pretty(profile).unwrap_or_default()
+    serde_json::to_string_pretty(&ProfileDocument {
+        schema_version: PROFILE_SCHEMA_VERSION,
+        profile,
+    })
+    .unwrap_or_default()
 }
 
-/// Deserialises a profile and runs the one-way migrations.
+/// The document [`to_profile_json`] writes: the schema version, then the profile's own keys in
+/// declaration order, then the keys it does not know.
+#[derive(Serialize)]
+struct ProfileDocument<'a> {
+    #[serde(rename = "schemaVersion")]
+    schema_version: i64,
+    #[serde(flatten)]
+    profile: &'a Profile,
+}
+
+/// Reads a profile document and runs the one-way migrations, reporting every field it had to
+/// skip.
 ///
-/// Returns `None` when the document is not a JSON object or does not fit the
-/// schema at all, matching `LoadProfile`'s catch-all.
+/// The returned [`ProfileLoad::profile`] is `None` only when the document is not a JSON object,
+/// matching `LoadProfile`'s catch-all. A field with the wrong type is reported in
+/// [`ProfileLoad::problems`] and keeps its default, so one bad value costs one field rather than
+/// the file.
+///
+/// The migrations run only for a document older than [`PROFILE_SCHEMA_VERSION`]: they are keyed
+/// on the shape the managed host wrote, and re-running them over a document this build produced
+/// would rewrite values the user has since changed.
 #[must_use]
-pub fn load_profile_from_json(json: &str) -> Option<Profile> {
-    let root: Value = serde_json::from_str(json).ok()?;
-    if !root.is_object() {
-        return None;
+pub fn load_profile(json: &str) -> ProfileLoad {
+    let Ok(root) = serde_json::from_str::<Value>(json) else {
+        return ProfileLoad {
+            profile: None,
+            schema_version: PROFILE_SCHEMA_VERSION,
+            problems: vec![ProfileProblem::document("the file is not JSON")],
+        };
+    };
+    let Some(object) = root.as_object() else {
+        return ProfileLoad {
+            profile: None,
+            schema_version: PROFILE_SCHEMA_VERSION,
+            problems: vec![ProfileProblem::document(
+                "the document is not a JSON object",
+            )],
+        };
+    };
+
+    let schema_version = schema_version_of(object);
+    let mut fields = ProfileFields::new(object);
+    let mut profile = Profile::from(ProfileWire::from_root(&mut fields));
+    profile.unknown_keys = fields.unknown();
+    if schema_version < PROFILE_SCHEMA_VERSION {
+        migrate_silent_aura_to_kill_aura(&root, &mut profile);
+        migrate_flat_kill_aura_settings(&root, &mut profile);
     }
 
-    let mut profile: Profile = Profile::from(ProfileWire::deserialize(&root).ok()?);
-    migrate_silent_aura_to_kill_aura(&root, &mut profile);
-    migrate_flat_kill_aura_settings(&root, &mut profile);
-    Some(profile)
+    ProfileLoad {
+        profile: Some(profile),
+        schema_version,
+        problems: fields.problems,
+    }
+}
+
+/// [`load_profile`] without the report: the profile, or `None` when the document is not a JSON
+/// object.
+///
+/// A malformed field still loads at its default here; a caller that wants to know which field
+/// it was, and what the decoder said, uses [`load_profile`].
+#[must_use]
+pub fn load_profile_from_json(json: &str) -> Option<Profile> {
+    load_profile(json).profile
 }
 
 /// Carries forward only SilentAura values with identical OpenMyau semantics.
@@ -1707,5 +1942,198 @@ fn round_half_even(value: f32) -> f32 {
         }
     } else {
         value.round()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Every save stamps the version, on the profile's own document rather than around it.
+    #[test]
+    fn a_saved_document_carries_the_schema_version() {
+        let document = serde_json::from_str::<Value>(&to_profile_json(&Profile::default()))
+            .expect("a saved profile is JSON");
+
+        assert_eq!(
+            document.get(SCHEMA_VERSION_KEY).and_then(Value::as_i64),
+            Some(PROFILE_SCHEMA_VERSION)
+        );
+        assert_eq!(
+            document.get("name").and_then(Value::as_str),
+            Some("Default"),
+            "the version joins the profile's keys instead of wrapping them"
+        );
+        assert!(
+            document.get("unknownKeys").is_none(),
+            "the unknown-key map is flattened into the document, not nested under a key"
+        );
+    }
+
+    /// A file the managed host wrote declares no version, so it reads as v1 and gets the
+    /// migrations.
+    #[test]
+    fn a_versionless_document_reads_as_v1_and_migrates() {
+        let loaded = load_profile(
+            r#"{"name":"Legacy","silentAuraEnabled":true,"moduleKeys":{"silentaura":65}}"#,
+        );
+
+        assert_eq!(loaded.schema_version, 1);
+        assert!(loaded.problems.is_empty(), "{:?}", loaded.problems);
+        let profile = loaded.profile.expect("a v1 document loads");
+        assert!(profile.kill_aura_enabled, "SilentAura carried over");
+        assert!(
+            !profile.module_keys.contains_key("silentaura"),
+            "the retired module bind is dropped"
+        );
+    }
+
+    /// The same document stamped current: the migrations are for the shape the managed host
+    /// wrote, and running them again would rewrite values the user has since changed.
+    #[test]
+    fn a_current_document_does_not_rerun_the_migrations() {
+        let loaded = load_profile(
+            r#"{"schemaVersion":2,"silentAuraEnabled":true,"moduleKeys":{"silentaura":65}}"#,
+        );
+
+        assert_eq!(loaded.schema_version, PROFILE_SCHEMA_VERSION);
+        assert!(loaded.problems.is_empty(), "{:?}", loaded.problems);
+        let profile = loaded.profile.expect("a v2 document loads");
+        assert!(
+            !profile.kill_aura_enabled,
+            "the SilentAura migration did not run"
+        );
+        assert_eq!(profile.module_keys.get("silentaura").copied(), Some(65));
+        assert!(
+            profile.unknown_keys.contains_key("silentAuraEnabled"),
+            "the retired key is carried as an unknown one, not acted on"
+        );
+    }
+
+    /// A key this build does not know comes back unchanged, which is what a config written by a
+    /// newer build, or edited by hand, needs from a save here.
+    #[test]
+    fn unknown_keys_survive_a_load_and_save() {
+        let document = json!({
+            "schemaVersion": 2,
+            "name": "From A Newer Build",
+            "minCPS": 9.5,
+            "futureToggle": true,
+            "futureField": {"nested": 1, "list": [1, 2, 3]},
+            "futureTable": {"a": null},
+        });
+
+        let loaded = load_profile(&document.to_string());
+        assert!(loaded.problems.is_empty(), "{:?}", loaded.problems);
+        let profile = loaded.profile.expect("the document loads");
+        assert_eq!(profile.min_cps, 9.5, "a known key still lands in its field");
+        assert_eq!(
+            profile.unknown_keys.get("futureToggle"),
+            Some(&Value::Bool(true))
+        );
+
+        let saved =
+            serde_json::from_str::<Value>(&to_profile_json(&profile)).expect("the save is JSON");
+        for key in ["futureToggle", "futureField", "futureTable"] {
+            assert_eq!(
+                saved.get(key),
+                document.get(key),
+                "{key} was pruned by the save"
+            );
+        }
+        assert_eq!(saved.get("minCPS"), Some(&json!(9.5)));
+
+        // The document is stable: loading the save and saving again changes nothing, so an
+        // untouched config is not rewritten differently on every save.
+        let again = load_profile(&saved.to_string())
+            .profile
+            .expect("the save loads");
+        assert_eq!(again.unknown_keys, profile.unknown_keys);
+        assert_eq!(to_profile_json(&again), to_profile_json(&profile));
+
+        // The serde path is the same reader, so it keeps them too.
+        let direct = serde_json::from_value::<Profile>(document.clone()).expect("serde loads");
+        assert_eq!(direct.unknown_keys, profile.unknown_keys);
+    }
+
+    /// A key this build does not know *inside* a stored HUD element survives as well: the
+    /// bridge is the writer most likely to add one.
+    #[test]
+    fn a_nested_unknown_key_survives_inside_a_hud_element() {
+        let document = json!({
+            "hudLayout": {
+                "modulelist": {"x": 0.25, "y": 0.5, "scale": 1.5, "pinned": true},
+            },
+        });
+
+        let loaded = load_profile(&document.to_string());
+        assert!(loaded.problems.is_empty(), "{:?}", loaded.problems);
+        let profile = loaded.profile.expect("the document loads");
+        let element = profile
+            .hud_layout
+            .as_ref()
+            .and_then(|stored| stored.get("modulelist"))
+            .expect("the element is stored");
+        assert_eq!(element.x, 0.25);
+        assert_eq!(element.unknown.get("pinned"), Some(&Value::Bool(true)));
+        assert_eq!(
+            profile.to_hud_layout().get("modulelist").y,
+            0.5,
+            "the live layout reads the three known fields"
+        );
+
+        let saved =
+            serde_json::from_str::<Value>(&to_profile_json(&profile)).expect("the save is JSON");
+        assert_eq!(
+            saved["hudLayout"]["modulelist"]["pinned"],
+            Value::Bool(true)
+        );
+        assert_eq!(saved["hudLayout"]["modulelist"]["scale"], json!(1.5));
+    }
+
+    /// One value of the wrong type costs that field and nothing else, and the reader names the
+    /// field it skipped instead of refusing the file.
+    #[test]
+    fn one_wrong_typed_field_does_not_cost_the_document() {
+        let loaded = load_profile(r#"{"name":"Half","minCPS":"9","maxCPS":14}"#);
+
+        assert_eq!(loaded.schema_version, 1);
+        assert_eq!(loaded.problems.len(), 1, "{:?}", loaded.problems);
+        assert_eq!(loaded.problems[0].key, "minCPS");
+        assert!(
+            loaded.problems[0].to_string().starts_with("minCPS: "),
+            "the report names the field: {}",
+            loaded.problems[0]
+        );
+
+        let profile = loaded.profile.expect("the document still loads");
+        assert_eq!(profile.name, "Half", "a good field is applied");
+        assert_eq!(profile.max_cps, 14.0, "its neighbour is applied");
+        assert_eq!(
+            profile.min_cps,
+            Profile::default().min_cps,
+            "the bad field falls back to its default"
+        );
+
+        // The plain reader is the same load without the report.
+        let plain = load_profile_from_json(r#"{"minCPS":"9"}"#).expect("the document loads");
+        assert_eq!(plain.min_cps, Profile::default().min_cps);
+    }
+
+    /// A document that is not an object is the one case that still refuses to load, and it says
+    /// why rather than looking like an empty profile.
+    #[test]
+    fn a_document_that_is_not_an_object_is_refused() {
+        for text in ["[]", "\"profile\"", "{oops"] {
+            let loaded = load_profile(text);
+            assert!(loaded.profile.is_none(), "{text} is not a profile");
+            assert_eq!(loaded.problems.len(), 1, "{text}");
+            assert_eq!(
+                loaded.problems[0].key, "",
+                "the problem is the document's, not a field's"
+            );
+            assert!(load_profile_from_json(text).is_none());
+        }
     }
 }

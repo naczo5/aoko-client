@@ -423,11 +423,31 @@ impl AppController {
     ///
     /// Always drops the cached `config` frame, whatever the closure reports: the closure can
     /// write any field, and a caller that returns `false` may still have moved the HUD.
+    ///
+    /// A closure that turns `dev_mode` off also forces the `DevOnly` modules off, which is the
+    /// `Clicker.DevMode` setter (`Clicker.cs:180-193`): the cards for those modules are hidden
+    /// from then on, so a switch left on is one no button can reach. Only the transition acts,
+    /// as the managed setter returned early when the value did not change, and it runs after the
+    /// closure's own lock is released, so a closure is free to touch the switches. The return
+    /// value folds in whether that drop moved one.
     pub fn update_profile(&self, update: impl FnOnce(&mut Profile) -> bool) -> bool {
         let mut cache = self.frame_cache.write();
-        let changed = update(&mut self.profile.write());
+        let changed;
+        let turned_off_dev_mode;
+        {
+            let mut profile = self.profile.write();
+            let dev_mode_before = profile.dev_mode;
+            changed = update(&mut profile);
+            turned_off_dev_mode = dev_mode_before && !profile.dev_mode;
+        }
+        let mut dropped = false;
+        if turned_off_dev_mode {
+            // Dev Mode reads off here, which is the state the sweep acts on.
+            let mut modules = self.modules.write();
+            dropped = crate::config_map::disable_dev_only_modules(&mut modules, false);
+        }
         cache.fresh = false;
-        changed
+        changed || dropped
     }
 
     /// Replaces the whole profile, as loading a saved config does.
@@ -445,15 +465,44 @@ impl AppController {
     /// apply step here, so the set is replaced rather than merged, and a module the loaded
     /// file turns off stops running. An in-place [`update_profile`](Self::update_profile) is a
     /// settings edit, not an apply, and leaves the switches alone.
+    ///
+    /// The last step of the apply is [`disable_dev_only_modules`](Self::disable_dev_only_modules)
+    /// (`Profile.cs:903`), so a config that still stores `killAuraEnabled` cannot start Kill Aura
+    /// while Dev Mode is off, when its card is hidden and its keybind is refused.
     pub fn replace_profile(&self, mut profile: Profile) -> bool {
         let normalised = profile.normalize_action_binds();
-        let switches = crate::config_map::profile_switches(&profile);
+        let mut switches = crate::config_map::profile_switches(&profile);
+        crate::config_map::disable_dev_only_modules(&mut switches, profile.dev_mode);
         let mut cache = self.frame_cache.write();
         let mut modules = self.modules.write();
         *self.profile.write() = profile;
         *modules = switches;
         cache.fresh = false;
         normalised
+    }
+
+    /// `Clicker.DisableDevOnlyModules` (`Clicker.cs:194-200`): forces every `DevOnly` module
+    /// switch off while Dev Mode is off, returning whether one was running.
+    ///
+    /// The two ways a profile reaches this controller already run it —
+    /// [`replace_profile`](Self::replace_profile) on the apply path, and
+    /// [`update_profile`](Self::update_profile) when an edit turns Dev Mode off — so this is the
+    /// same rule for a caller that has just moved the mode itself or wants the switch set
+    /// settled without touching the profile. With Dev Mode on it is a no-op, which is why it is
+    /// safe on any path.
+    ///
+    /// Only the switch set changes. The profile's saved copy of it is written on the next save
+    /// ([`profile_for_save`](Self::profile_for_save)), the way the managed save sites rebuilt the
+    /// profile from the `Clicker`.
+    pub fn disable_dev_only_modules(&self) -> bool {
+        let mut cache = self.frame_cache.write();
+        let mut modules = self.modules.write();
+        let dev_mode = self.profile.read().dev_mode;
+        let changed = crate::config_map::disable_dev_only_modules(&mut modules, dev_mode);
+        if changed {
+            cache.fresh = false;
+        }
+        changed
     }
 
     /// Sets one module switch, returning whether it moved.
@@ -923,6 +972,110 @@ mod tests {
 
         assert!(!app.replace_profile(profile));
         assert_eq!(app.profile().auto_rod_action_key, 0x53);
+    }
+
+    /// The last line of `Profile.ApplyToClicker` (`Profile.cs:903`): a profile that still
+    /// stores a `DevOnly` module on does not start it while Dev Mode is off.
+    ///
+    /// The managed host needed it because the GUI hides a `DevOnly` card unless Dev Mode is on
+    /// and the keybind gate refuses the toggle for the same reason, so a module started from
+    /// the file was one the user could not stop from either surface.
+    #[test]
+    fn a_loaded_profile_cannot_start_a_dev_only_module_with_dev_mode_off() {
+        let app = AppController::default();
+        assert!(
+            module_catalog::is_dev_only("killaura"),
+            "the module this drives has to be the catalog's dev-only one"
+        );
+
+        let mut stored = Profile::default();
+        stored.kill_aura_enabled = true;
+        app.replace_profile(stored);
+
+        assert!(
+            !app.is_module_enabled(EnabledFlag::KillAura),
+            "the apply path drops the dev-only switch"
+        );
+        assert!(
+            !app.config_payload().kill_aura,
+            "the bridge hears it is off"
+        );
+        assert!(
+            app.profile().kill_aura_enabled,
+            "the stored field is the saved copy: the file it came from still says on"
+        );
+
+        // A save is what writes that copy back, so the next load of this slot starts clean.
+        assert!(!app.profile_for_save(&app.profile()).kill_aura_enabled);
+
+        // Dev Mode on is the one case that starts it.
+        let mut dev = Profile::default();
+        dev.dev_mode = true;
+        dev.kill_aura_enabled = true;
+        app.replace_profile(dev);
+        assert!(app.is_module_enabled(EnabledFlag::KillAura));
+        assert!(app.config_payload().kill_aura);
+    }
+
+    /// `Clicker.DevMode`'s setter (`Clicker.cs:180-193`): turning Dev Mode off mid-session
+    /// stops the modules it was hiding, and an edit that leaves the mode alone does not.
+    #[test]
+    fn turning_dev_mode_off_stops_the_dev_only_module() {
+        let app = AppController::default();
+        app.update_profile(|profile| {
+            profile.dev_mode = true;
+            true
+        });
+        assert!(app.set_module_enabled(EnabledFlag::KillAura, true));
+
+        app.update_profile(|profile| {
+            profile.min_cps = 10.0;
+            true
+        });
+        assert!(
+            app.is_module_enabled(EnabledFlag::KillAura),
+            "a settings edit is not a mode change"
+        );
+
+        let changed = app.update_profile(|profile| {
+            profile.dev_mode = false;
+            true
+        });
+        assert!(changed, "dropping a running switch is a change");
+        assert!(!app.is_module_enabled(EnabledFlag::KillAura));
+        assert!(!app.config_payload().kill_aura);
+    }
+
+    /// The sweep's own contract: a no-op with Dev Mode on, and it touches `DevOnly` switches
+    /// only.
+    #[test]
+    fn the_dev_only_sweep_is_a_no_op_with_dev_mode_on() {
+        let app = AppController::default();
+        assert!(app.set_module_enabled(EnabledFlag::LeftClick, true));
+        assert!(app.set_module_enabled(EnabledFlag::KillAura, true));
+        app.update_profile(|profile| {
+            profile.dev_mode = true;
+            true
+        });
+
+        assert!(
+            !app.disable_dev_only_modules(),
+            "there is nothing to drop with Dev Mode on"
+        );
+        assert!(app.is_module_enabled(EnabledFlag::KillAura));
+
+        app.update_profile(|profile| {
+            profile.dev_mode = false;
+            true
+        });
+        assert!(
+            !app.disable_dev_only_modules(),
+            "the edit that turned Dev Mode off already dropped it"
+        );
+        assert!(
+            app.is_module_enabled(EnabledFlag::LeftClick),
+            "only dev-only switches go"
+        );
     }
 
     /// The gap the retired `Profile.cs` source pin was hiding, in its final shape: the profile
