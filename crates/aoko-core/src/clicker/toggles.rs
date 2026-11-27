@@ -256,11 +256,43 @@ pub fn panic_disconnect_delay_ms(connected: bool) -> Option<u64> {
     }
 }
 
+/// The profile half of the panic reset, reporting whether anything changed.
+///
+/// `Clicker.TriggerPanicAsync` cleared these Clicker properties (`Clicker.cs:560-576`), and
+/// this port has no Clicker property layer: the profile is where they live, so it is where
+/// the panic clears them. Every one of them is also a `config` frame key, so a field left
+/// set here would keep telling the bridge the feature was on.
+///
+/// `pixelPartyAutoLook`, `pixelPartyAutoWalk` and `nametagHideVanilla` are here rather than
+/// among the switches because they have no catalog switch: they are sub-settings of their
+/// module, which is exactly what [`PANIC_EXTRA_KEYS`] records.
+pub fn panic_profile_reset(profile: &mut Profile) -> bool {
+    fn clear(flag: &mut bool) -> bool {
+        std::mem::replace(flag, false)
+    }
+
+    [
+        clear(&mut profile.show_module_list),
+        clear(&mut profile.show_logo),
+        clear(&mut profile.discord_rpc_enabled),
+        clear(&mut profile.fight_status_enabled),
+        clear(&mut profile.pixel_party_auto_look_enabled),
+        clear(&mut profile.pixel_party_auto_walk_enabled),
+        clear(&mut profile.nametag_hide_vanilla),
+    ]
+    .iter()
+    .any(|changed| *changed)
+}
+
 /// Applies the panic reset to the switches and the profile.
 ///
-/// Cleared: the armed flag, every module except the left clicker, the overlay list,
-/// the logo and Discord RPC. The two timing states are reset by their owners; this
-/// function has no handle on them, so the caller resets them alongside.
+/// Cleared: the armed flag, every module except the left clicker, the overlay list, the logo,
+/// Discord RPC, and the profile-side sub-settings [`panic_profile_reset`] owns. The two
+/// timing states are reset by their owners; this function has no handle on them, so the
+/// caller resets them alongside. A controller that holds its switches as [`EnabledFlag`]s
+/// applies the same lists itself rather than building a `ModuleToggles`.
+///
+/// [`EnabledFlag`]: aoko_protocol::module_catalog::EnabledFlag
 pub fn panic_reset(toggles: &mut ModuleToggles, profile: &mut Profile) {
     toggles.set_armed(false);
 
@@ -271,14 +303,7 @@ pub fn panic_reset(toggles: &mut ModuleToggles, profile: &mut Profile) {
         toggles.set_enabled(module, false);
     }
 
-    profile.show_module_list = false;
-    profile.show_logo = false;
-    profile.discord_rpc_enabled = false;
-    // `Clicker.FightStatusEnabled = false` in the managed panic (`Clicker.cs:564`). This
-    // port has no Clicker property layer, so the profile is where the flag lives, exactly
-    // as for the three above: leaving it set would keep `fightStatus` in the config frame
-    // true after a panic, which the managed host never sent.
-    profile.fight_status_enabled = false;
+    panic_profile_reset(profile);
 }
 
 #[cfg(test)]

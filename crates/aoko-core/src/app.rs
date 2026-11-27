@@ -21,7 +21,7 @@
 //! measured from the snapshot's own arrival instant, so a clock that jumps cannot
 //! make a stale state look fresh.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -34,6 +34,7 @@ use aoko_protocol::state::GameState;
 use arc_swap::ArcSwapOption;
 use parking_lot::{MappedRwLockReadGuard, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
+use crate::clicker::toggles;
 use crate::discord::{self, PresenceInputs, PresenceSnapshot};
 use crate::loops::LoopSense;
 
@@ -196,6 +197,9 @@ pub struct AppController {
     /// Whether the HUD editor mode is open. Runtime state, not a profile setting: the managed
     /// frame reported `clicker.HudEditorActive`, which the window toggled.
     hud_editor: AtomicBool,
+    /// Bumped by [`AppController::request_mapping_reload`]; the frame carries it as
+    /// `reloadMappingsNonce` so the bridge knows to re-read its mappings.
+    mapping_reload_nonce: AtomicI32,
 }
 
 /// The cached `config` frame and whether it still describes the controller.
@@ -217,7 +221,7 @@ impl AppController {
     pub fn new(capabilities: CapabilityReport) -> Self {
         let profile = Profile::default();
         let frame = ConfigFrame {
-            payload: crate::config_map::payload(&profile, false),
+            payload: crate::config_map::payload(&profile, false, 0),
             hud_layout: profile.to_hud_layout(),
         };
         Self {
@@ -227,6 +231,7 @@ impl AppController {
             capabilities,
             frame_cache: RwLock::new(FrameCache { frame, fresh: true }),
             hud_editor: AtomicBool::new(false),
+            mapping_reload_nonce: AtomicI32::new(0),
         }
     }
 
@@ -252,6 +257,67 @@ impl AppController {
         }
         cache.fresh = false;
         true
+    }
+
+    /// The nonce the frame currently carries as `reloadMappingsNonce`.
+    #[must_use]
+    pub fn mapping_reload_nonce(&self) -> i32 {
+        self.mapping_reload_nonce.load(Ordering::Relaxed)
+    }
+
+    /// Asks the bridge to re-read its mappings, returning the new nonce.
+    ///
+    /// The protocol is the managed one (`MainWindow.xaml.cs:1397-1404`): when the bridge
+    /// advertises `reloadMappingsNonce`, the host bumps a counter and the next `config` frame
+    /// carries the new value, which is the bridge's signal to reload. Nothing else in the frame
+    /// changes, so a difference in this key alone is the request.
+    ///
+    /// Takes the frame lock before the counter, the same order a rebuild uses, and drops the
+    /// cached frame so the next frame carries the new nonce.
+    pub fn request_mapping_reload(&self) -> i32 {
+        let mut cache = self.frame_cache.write();
+        let nonce = self
+            .mapping_reload_nonce
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1);
+        cache.fresh = false;
+        nonce
+    }
+
+    /// The panic reset: every switch the controller owns goes to its panic state, the
+    /// profile's overlay, Discord and fight-status flags clear, and the cached frame is dropped.
+    ///
+    /// `Clicker.TriggerPanicAsync` (`Clicker.cs:530-609`) did this to the `Clicker`, then
+    /// disconnected and shut the app down. The disconnect and the close are the shell's — they
+    /// should end in the same path the window's own close action takes, so a panic exit and a
+    /// normal exit do not diverge — and this stops at the state.
+    ///
+    /// The switch half is [`toggles::PANIC_ON`] / [`toggles::PANIC_OFF`] applied to the
+    /// [`EnabledFlag`]s the controller holds, and the profile half is
+    /// [`toggles::panic_profile_reset`]. Returns whether anything changed, so a caller can tell
+    /// a panic that moved state from one that found it already down.
+    pub fn panic_reset(&self) -> bool {
+        let mut cache = self.frame_cache.write();
+        let mut modules = self.modules.write();
+        let mut profile = self.profile.write();
+
+        let mut changed = false;
+        for module_id in toggles::PANIC_ON {
+            if let Some(flag) = module_catalog::flag_for_id(module_id) {
+                changed |= write_flag(&mut modules, flag, true);
+            }
+        }
+        for module_id in toggles::PANIC_OFF {
+            if let Some(flag) = module_catalog::flag_for_id(module_id) {
+                changed |= write_flag(&mut modules, flag, false);
+            }
+        }
+        changed |= toggles::panic_profile_reset(&mut profile);
+
+        if changed {
+            cache.fresh = false;
+        }
+        changed
     }
 
     /// The store, for the ingest side and the automation loops.
@@ -320,13 +386,7 @@ impl AppController {
 
     /// Sets one module switch.
     pub fn set_module_enabled(&self, flag: EnabledFlag, enabled: bool) {
-        let mut modules = self.modules.write();
-        let present = modules.contains(&flag);
-        if enabled && !present {
-            modules.push(flag);
-        } else if !enabled && present {
-            modules.retain(|existing| *existing != flag);
-        }
+        write_flag(&mut self.modules.write(), flag, enabled);
     }
 
     /// Whether one module switch is on.
@@ -434,7 +494,7 @@ impl AppController {
         if !cache.fresh {
             let profile = self.profile.read();
             cache.frame = ConfigFrame {
-                payload: Self::payload(&profile, self.hud_editor()),
+                payload: Self::payload(&profile, self.hud_editor(), self.mapping_reload_nonce()),
                 hud_layout: profile.to_hud_layout(),
             };
             cache.fresh = true;
@@ -448,9 +508,11 @@ impl AppController {
     /// The payload half of the `config` frame: everything but the HUD layout.
     ///
     /// Every setting comes from the profile, through `crate::config_map`, which names the
-    /// `Clicker` property each key serialised and therefore the profile field behind it. The
-    /// one runtime key, `hudEditor`, comes from [`hud_editor`](Self::hud_editor); the six keys
-    /// nothing owns yet are listed in that module.
+    /// `Clicker` property each key serialised and therefore the profile field behind it. Two
+    /// runtime keys do not come from a field: `hudEditor` from [`hud_editor`](Self::hud_editor),
+    /// and `reloadMappingsNonce` from
+    /// [`mapping_reload_nonce`](Self::mapping_reload_nonce). The five keys nothing owns yet are
+    /// listed in that module.
     ///
     /// All of it is one direction: the profile is the owner of the truth, this copies it out,
     /// and nothing writes a payload field back. A module the profile has no bind for sends
@@ -461,7 +523,11 @@ impl AppController {
     /// exists to close.
     #[must_use]
     pub fn config_payload(&self) -> ConfigPayload {
-        Self::payload(&self.profile.read(), self.hud_editor())
+        Self::payload(
+            &self.profile.read(),
+            self.hud_editor(),
+            self.mapping_reload_nonce(),
+        )
     }
 
     /// The payload the profile produces.
@@ -469,9 +535,27 @@ impl AppController {
     /// Shared by [`config_payload`](Self::config_payload) and
     /// [`config_frame`](Self::config_frame) so the frame's two halves cannot drift apart, and
     /// delegated to `crate::config_map`, which owns the one profile-to-key mapping.
-    fn payload(profile: &Profile, hud_editor: bool) -> ConfigPayload {
-        crate::config_map::payload(profile, hud_editor)
+    fn payload(profile: &Profile, hud_editor: bool, reload_nonce: i32) -> ConfigPayload {
+        crate::config_map::payload(profile, hud_editor, reload_nonce)
     }
+}
+
+/// Writes one switch, reporting whether it moved.
+///
+/// The controller's switches are a `Vec<EnabledFlag>` used as a set; the panic reset and
+/// [`AppController::set_module_enabled`] both go through here so one rule decides what "on"
+/// means.
+fn write_flag(modules: &mut Vec<EnabledFlag>, flag: EnabledFlag, enabled: bool) -> bool {
+    let present = modules.contains(&flag);
+    if enabled == present {
+        return false;
+    }
+    if enabled {
+        modules.push(flag);
+    } else {
+        modules.retain(|existing| *existing != flag);
+    }
+    true
 }
 
 /// One `config` frame: the payload the profile produces and the HUD layout it carries.
@@ -542,6 +626,7 @@ mod tests {
     use aoko_platform::Rect;
     use aoko_platform::WindowHandle;
     use aoko_protocol::hud::{element_id, HudElementLayout};
+    use serde_json::Value;
 
     fn transport_only() -> CapabilityReport {
         CapabilityReport::transport_only(SessionKind::None)
@@ -872,6 +957,97 @@ mod tests {
         assert!(
             app.config_frame().to_line().contains("\"hudEditor\":false"),
             "closing it has to reach the frame too"
+        );
+    }
+
+    /// `reloadMappingsNonce` is how "Reload Mappings" reaches the bridge: the host bumps a
+    /// counter (`MainWindow.xaml.cs:1397-1404`) and the next frame's new value is the request.
+    #[test]
+    fn a_mapping_reload_moves_the_nonce_and_nothing_else() {
+        let app = AppController::default();
+        let before_line = app.config_frame().to_line();
+        let before: Value = serde_json::from_str(&before_line).expect("the frame is JSON");
+        assert_eq!(app.mapping_reload_nonce(), 0);
+
+        // The frame above warmed the cache, so this request also has to drop it.
+        assert_eq!(
+            app.request_mapping_reload(),
+            1,
+            "the request reports the nonce"
+        );
+        let after_line = app.config_frame().to_line();
+        let after: Value = serde_json::from_str(&after_line).expect("the frame is JSON");
+
+        assert_eq!(after["reloadMappingsNonce"], 1);
+        let before = before.as_object().expect("the frame is an object");
+        let after = after.as_object().expect("the frame is an object");
+        for (key, value) in before {
+            if key == "reloadMappingsNonce" {
+                continue;
+            }
+            assert_eq!(
+                after.get(key),
+                Some(value),
+                "{key} must not move for a mapping reload"
+            );
+        }
+
+        // Every request is a new value, so the bridge sees each one.
+        assert_eq!(app.request_mapping_reload(), 2);
+        assert!(app
+            .config_frame()
+            .to_line()
+            .contains("\"reloadMappingsNonce\":2"));
+    }
+
+    /// The panic path resets the state the controller owns. The disconnect and the window
+    /// close are the shell's, so this stops at the switches and the profile.
+    #[test]
+    fn the_panic_reset_clears_the_switches_and_the_profile_flags() {
+        let app = AppController::default();
+        let off_after_panic = [
+            EnabledFlag::RightClick,
+            EnabledFlag::AimAssist,
+            EnabledFlag::KillAura,
+            EnabledFlag::WTap,
+        ];
+        for flag in off_after_panic {
+            app.set_module_enabled(flag, true);
+        }
+        // Warm the frame, so the reset has to drop it as well as move the state.
+        let _ = app.config_frame().to_line();
+
+        assert!(app.panic_reset(), "a panic that moves state reports it");
+
+        assert!(
+            app.is_module_enabled(EnabledFlag::LeftClick),
+            "the left clicker stays usable, which is the managed panic state"
+        );
+        for flag in off_after_panic {
+            assert!(
+                !app.is_module_enabled(flag),
+                "{flag:?} must be off after a panic"
+            );
+        }
+
+        let profile = app.profile();
+        assert!(!profile.show_module_list);
+        assert!(!profile.show_logo);
+        assert!(!profile.discord_rpc_enabled);
+        assert!(!profile.fight_status_enabled);
+        assert!(!profile.pixel_party_auto_look_enabled);
+        assert!(!profile.pixel_party_auto_walk_enabled);
+        assert!(!profile.nametag_hide_vanilla);
+        assert!(
+            !app.config_frame()
+                .to_line()
+                .contains("\"fightStatus\":true"),
+            "the frame must not keep claiming fight status after a panic"
+        );
+
+        assert!(
+            !app.panic_reset(),
+            "a second panic finds everything already down"
         );
     }
 

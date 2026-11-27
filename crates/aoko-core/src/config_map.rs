@@ -22,17 +22,21 @@
 //! * `block_esp_blocks` is `Clicker.BlockEspBlocksSerialized`, the delimited target string
 //!   built from the profile's targets (`Clicker.cs:1343`).
 //!
-//! `hudEditor` is runtime state too — the managed frame read `Clicker.HudEditorActive`, which
-//! the window toggled and no profile field ever carried — so it is a parameter here rather
-//! than a constant: `AppController::set_hud_editor` is its owner, and `hud_editor` reports the
-//! mode the user is in.
+//! Two parameters are runtime state rather than profile settings, so they arrive from the
+//! controller instead of a field:
+//!
+//! * `hudEditor` — the managed frame read `Clicker.HudEditorActive`, which the window toggled
+//!   and no profile field ever carried. `AppController::set_hud_editor` owns it.
+//! * `reloadMappingsNonce` — the managed host bumped a counter when the user asked to reload
+//!   mappings (`MainWindow.xaml.cs:1397-1404`), and the bridge reloads when it sees a new
+//!   value. `AppController::request_mapping_reload` owns it.
 //!
 //! # Keys with no source at all
 //!
-//! Six keys are runtime state the managed host read from `Clicker` and this port has nowhere
+//! Five keys are runtime state the managed host read from `Clicker` and this port has nowhere
 //! else to take them from yet: `perfDiagnostics`, `clicking`, `gtbHint`, `gtbCount`,
-//! `gtbPreview`, `reloadMappingsNonce`. They keep the payload default, and the test pins that
-//! list in both directions so a key cannot quietly join it.
+//! `gtbPreview`. They keep the payload default, and the test pins that list in both directions
+//! so a key cannot quietly join it.
 
 use aoko_protocol::block_esp::{self, BlockEspTarget, BlockEspTargetData};
 use aoko_protocol::config_payload::{module_list_style_to_index, ConfigPayload};
@@ -40,7 +44,7 @@ use aoko_protocol::nick_hider;
 use aoko_protocol::profile::{ClickRandomizationMode, Profile};
 
 /// The frame the profile produces.
-pub(crate) fn payload(profile: &Profile, hud_editor: bool) -> ConfigPayload {
+pub(crate) fn payload(profile: &Profile, hud_editor: bool, reload_nonce: i32) -> ConfigPayload {
     let keybind = |module: &str| profile.module_keys.get(module).copied().unwrap_or(0);
     let nick_hider_alias = nick_hider::normalize_alias(Some(&profile.nick_hider_alias));
     let nick_hider_enabled = profile.nick_hider_enabled && !nick_hider_alias.is_empty();
@@ -157,7 +161,7 @@ pub(crate) fn payload(profile: &Profile, hud_editor: bool) -> ConfigPayload {
         nametag_show_armor: profile.nametag_show_armor,
         nametag_show_held_item: profile.nametag_show_held_item,
         nametag_hide_vanilla: profile.nametag_hide_vanilla,
-        reload_mappings_nonce: 0,
+        reload_mappings_nonce: reload_nonce,
         nametag_range: profile.nametag_range,
         chest_esp: profile.chest_esp_enabled,
         chest_esp_range: profile.chest_esp_range,
@@ -290,15 +294,15 @@ mod tests {
     use aoko_protocol::profile::load_profile_from_json;
     use serde_json::Value;
 
-    /// The keys with no source at all; see the module docs. `hudEditor` is not here: its
-    /// source is the controller's mode, which the fixture turns on.
-    const NO_PROFILE_SOURCE: [&str; 6] = [
+    /// The keys with no source at all; see the module docs. `hudEditor` and
+    /// `reloadMappingsNonce` are not here: the controller owns both, and the fixture turns
+    /// them on.
+    const NO_PROFILE_SOURCE: [&str; 5] = [
         "perfDiagnostics",
         "clicking",
         "gtbHint",
         "gtbCount",
         "gtbPreview",
-        "reloadMappingsNonce",
     ];
 
     /// A profile with every setting moved off the payload's default for that key.
@@ -359,7 +363,7 @@ mod tests {
     /// source without leaving the no-source list fails the second.
     #[test]
     fn every_payload_key_comes_from_the_profile() {
-        let wired = keys(&payload(&fixture_profile(), true).to_line(&HudLayout::new()));
+        let wired = keys(&payload(&fixture_profile(), true, 7).to_line(&HudLayout::new()));
         let defaults = keys(&ConfigPayload::default().to_line(&HudLayout::new()));
 
         for key in CONFIG_KEYS {
@@ -402,14 +406,14 @@ mod tests {
 
         let mut profile = Profile::default();
         profile.block_esp_targets = vec![target("minecraft:emerald_block", true)];
-        let enabled = payload(&profile, false).block_esp_blocks;
+        let enabled = payload(&profile, false, 0).block_esp_blocks;
         assert!(
             enabled.contains("minecraft:emerald_block"),
             "an enabled target has to reach the frame: {enabled}"
         );
 
         profile.block_esp_targets = vec![target("minecraft:emerald_block", false)];
-        let disabled = payload(&profile, false).block_esp_blocks;
+        let disabled = payload(&profile, false, 0).block_esp_blocks;
         assert!(
             !disabled.contains("minecraft:emerald_block"),
             "a disabled target must not reach the frame: {disabled}"
@@ -419,7 +423,7 @@ mod tests {
             target("minecraft:emerald_block", true),
             target("minecraft:emerald_block", true),
         ];
-        let repeated = payload(&profile, false).block_esp_blocks;
+        let repeated = payload(&profile, false, 0).block_esp_blocks;
         assert_eq!(
             repeated.matches("minecraft:emerald_block").count(),
             1,

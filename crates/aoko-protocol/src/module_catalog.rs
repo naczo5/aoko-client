@@ -102,6 +102,20 @@ pub enum EnabledFlag {
     HudEditorActive,
 }
 
+/// The switch behind a catalog id, matched case-insensitively.
+///
+/// `None` for an id the catalog does not carry, and for the entries whose flag is
+/// [`EnabledFlag::Never`] — `panic` is the only one — because those have no stored boolean.
+/// The panic reset and the app's own id lookups need the same rule, so it lives beside the
+/// catalog rather than being re-derived per caller.
+#[must_use]
+pub fn flag_for_id(module_id: &str) -> Option<EnabledFlag> {
+    ALL.iter()
+        .find(|entry| entry.id.eq_ignore_ascii_case(module_id))
+        .map(|entry| entry.enabled_flag)
+        .filter(|flag| *flag != EnabledFlag::Never)
+}
+
 /// One integer module setting: wire key, profile property, clamp range, default.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SettingSpec {
