@@ -6237,41 +6237,39 @@ mod tests {
         assert_eq!(reloaded.value("MinCPS", 0.0), 11.0);
     }
 
-    /// A profile write reaches the controller, which is the copy the `config` frame is built
+    /// A switch press reaches the controller, which is the copy the `config` frame is built
     /// from.
     ///
     /// Two writers with no push between them is the defect this migration keeps finding: the
     /// UI would show the new value, the saved file would carry it, and the bridge would keep
-    /// running the old one for the life of the link. `FightStatusEnabled` is one of the two
-    /// fields the config slice names, and it stands in for every bind path that shares
-    /// `apply_control`.
-    #[test]
-    fn a_profile_write_reaches_the_controller_the_config_frame_reads() {
-        use crate::views::bindings::ControlValue;
+    /// running the old one for the life of the link. The frame's `fightStatus` is the
+    /// `EnabledFlag::FightStatus` switch, not `Profile::fight_status_enabled`, so the press has
+    /// to be the one a click makes ([`Shell::toggle_module`], which `render_switch` calls) —
+    /// writing the profile boolean would prove nothing about the wire.
+    #[gpui::test]
+    fn a_switch_press_reaches_the_config_frame_the_link_reads(cx: &mut gpui::TestAppContext) {
+        use aoko_protocol::module_catalog::EnabledFlag;
 
-        let mut shell = Shell::new(Theme::slate());
-        assert!(!shell.profile().fight_status_enabled);
+        let shell = cx.update(|cx| cx.new(|_| Shell::new(Theme::slate())));
+        let controller = cx.read(|cx| Arc::clone(shell.read(cx).controller()));
         assert!(
-            !shell.controller().config_payload().fight_status,
-            "the frame the link would send starts on the profile's default"
+            !controller.config_payload().fight_status,
+            "the frame the link would send starts on the default"
         );
 
-        assert!(
-            shell.apply_control("FightStatusEnabled", ControlValue::Toggle(true)),
-            "the switch's bind path has a field behind it"
-        );
+        // The call the switch's own handler runs, from `render_switch`'s closure.
+        cx.update(|cx| shell.update(cx, |shell, cx| shell.toggle_module("fightstatus", cx)));
 
-        assert!(shell.profile().fight_status_enabled, "the UI copy took it");
         assert!(
-            shell.controller().profile().fight_status_enabled,
-            "and the controller's copy, which `config_payload` fills `fightStatus` from"
+            controller.is_module_enabled(EnabledFlag::FightStatus),
+            "the press reached AppController::set_module_enabled"
         );
         assert!(
-            shell.controller().config_payload().fight_status,
+            controller.config_payload().fight_status,
             "so the frame the reader sends carries it"
         );
         assert!(
-            !shell.controller().store().is_connected(),
+            !controller.store().is_connected(),
             "with no reconnect: the payload moved on the controller the live link already reads"
         );
     }

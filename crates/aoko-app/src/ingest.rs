@@ -387,6 +387,7 @@ fn sync_config<T: Transport>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aoko_protocol::module_catalog::EnabledFlag;
     use aoko_protocol::state::GameState;
     use aoko_protocol::transport::{memory, LineBuf, RecvOutcome, TransportError};
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -676,13 +677,13 @@ mod tests {
     }
 
     /// On connect the client writes exactly one `config` frame, and it is the controller's:
-    /// `fightStatus` and `keybindAutoclicker` are the profile's values, not the payload's
-    /// defaults.
+    /// `fightStatus` is the module switch and `keybindAutoclicker` is the profile's key, so
+    /// neither is the payload's default.
     #[test]
     fn connecting_writes_the_controllers_config_frame_once() {
         let controller = Arc::new(AppController::default());
+        controller.set_module_enabled(EnabledFlag::FightStatus, true);
         controller.update_profile(|profile| {
-            profile.fight_status_enabled = true;
             profile
                 .module_keys
                 .insert(String::from("autoclicker"), 0x70);
@@ -699,7 +700,7 @@ mod tests {
         assert_eq!(
             frame["fightStatus"].as_bool(),
             Some(true),
-            "`fightStatus` is `Profile::fight_status_enabled`; `false` would be a default payload"
+            "`fightStatus` is the `FightStatus` switch; `false` would be a default payload"
         );
         assert_eq!(
             frame["keybindAutoclicker"].as_i64(),
@@ -728,11 +729,8 @@ mod tests {
             "the default profile is off, and that is what connect sent"
         );
 
-        // The flip is what a switch press does, from another thread.
-        controller.update_profile(|profile| {
-            profile.fight_status_enabled = true;
-            true
-        });
+        // The flip is what a switch press does, and it happens off the reader's thread.
+        controller.set_module_enabled(EnabledFlag::FightStatus, true);
 
         // One inbound frame is the tick the reader syncs on. The bridge streams these at tens
         // of hertz, so the change goes out within a frame rather than at the next connect.
@@ -761,11 +759,9 @@ mod tests {
         let (peer, closed, ingest) = connect(&controller);
         wait_for_lines(&peer, 1);
 
-        // One change, so there are two frames on the wire.
-        controller.update_profile(|profile| {
-            profile.fight_status_enabled = true;
-            true
-        });
+        // One change a frame can see — a switch the payload carries — so there are two frames on
+        // the wire.
+        controller.set_module_enabled(EnabledFlag::FightStatus, true);
         tick(&controller, &peer, 20.0);
         tick(&controller, &peer, 19.0);
         wait_for_lines(&peer, 2);
