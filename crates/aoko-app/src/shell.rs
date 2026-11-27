@@ -9105,8 +9105,16 @@ mod tests {
         });
         cx.update(|cx| handle.update(cx, |shell, cx| shell.inject(cx)));
 
-        let store = cx.read(|cx| handle.read(cx).runtime.controller().store().clone());
-        store.set_connected(true);
+        // The store is not `Clone`: `StateStore` has interior mutability and the controller hands
+        // out a reference, so the write goes inside the closure rather than into a binding.
+        cx.read(|cx| {
+            handle
+                .read(cx)
+                .runtime
+                .controller()
+                .store()
+                .set_connected(true)
+        });
 
         let view = cx.read(|cx| handle.read(cx).injection_view());
         assert_eq!(view.status, copy::LOADER_STATUS_CONNECTED);
@@ -9130,15 +9138,16 @@ mod tests {
             "no connection yet, so the loader stays"
         );
 
-        let store = shell.runtime.controller().store().clone();
-        store.set_connected(true);
+        // Re-borrowed per statement, not bound once: a bound `store` would borrow `shell` and the
+        // `&mut` that `latch_control_mode` needs could not be taken while it lived.
+        shell.runtime.controller().store().set_connected(true);
         shell.latch_control_mode();
         assert!(
             !shell.loader_visible(),
             "the first connection swaps the panel"
         );
 
-        store.set_connected(false);
+        shell.runtime.controller().store().set_connected(false);
         shell.latch_control_mode();
         assert!(
             !shell.loader_visible(),
@@ -9196,9 +9205,16 @@ mod tests {
             "and the panel says so"
         );
 
-        // The bridge answers: this frame is still the loader, painting its terminal state.
-        let store = cx.read(|cx| shell.read(cx).runtime.controller().store().clone());
-        store.set_connected(true);
+        // The bridge answers: this frame is still the loader, painting its terminal state. The write
+        // goes inside the closure because the store is a reference, not a value.
+        cx.read(|cx| {
+            shell
+                .read(cx)
+                .runtime
+                .controller()
+                .store()
+                .set_connected(true)
+        });
         visual.update(|window, cx| {
             let _ = window.draw(cx);
         });
