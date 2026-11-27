@@ -167,10 +167,18 @@ mod tests {
     /// `every_tab_stays_within_the_same_budget` is where those would show, and it is green at the
     /// same `TAB_BUDGET`, so that budget does not move either.
     ///
+    /// Moved from 985 to 986, measured in CI at `2716794`, and this one is attributable to a
+    /// single line: `2c56742` let `components::checkbox` and `components::combo` name their own
+    /// bounds, and the Combat frame's `Pause when breaking` checkbox is the one that does. A
+    /// named selector costs one allocation — the closure's `String::from` — on the element that
+    /// carries it. That is why the rule beside `check_debug_selector` and `switch_debug_selector`
+    /// is *name only what a test targets*: each name bought this way is one allocation per frame,
+    /// and there are fifty-seven checkboxes and thirteen combos in the table.
+    ///
     /// Treat this as a budget: if a change to the UI legitimately moves it, update the
     /// constant in the same commit and say why. If it moves on its own, something in
     /// `render` started allocating.
-    const SHELL_FRAME_ALLOCATIONS: usize = 985;
+    const SHELL_FRAME_ALLOCATIONS: usize = 986;
 
     fn warm_shell() -> (VisualTestContext, Entity<Shell>) {
         let cx = TestAppContext::single();
