@@ -87,6 +87,8 @@ public sealed class BridgeCapabilities
                     "trajectories",
                     "murdermystery",
                     "breakprogress",
+                    "cosmetics",
+                    "sky",
                     "pixelpartyassist",
                     "hudeditor"
                 ),                BuildSet(
@@ -244,6 +246,15 @@ public sealed class BridgeCapabilities
                     "pixelpartyscanradius",
                     "pixelpartyautolook",
                     "pixelpartyautowalk",
+                    "cosmeticsenabled",
+                    "cosmeticscape",
+                    "cosmeticshat",
+                    "cosmeticsback",
+                    "skyenabled",
+                    "skypreset",
+                    "skytime",
+                    "skyclearweather",
+                    "visualsdir",
                     "hudeditor"
                 ),
                 BuildSet(
@@ -273,7 +284,8 @@ public sealed class BridgeCapabilities
                     "pixelpartytargetyaw",
                     "pixelpartytargetdist",
                     "pixelpartyyawdelta",
-                    "hudlayout"
+                    "hudlayout",
+                    "visualsstatus"
                 ),
                 BuildBridgeActionSet()
             );
@@ -318,6 +330,8 @@ public sealed class BridgeCapabilities
                 "trajectories",
                 "murdermystery",
                 "breakprogress",
+                "cosmetics",
+                "sky",
                 "pixelpartyassist",
                 "hudeditor"
             ),
@@ -464,6 +478,15 @@ public sealed class BridgeCapabilities
                 "pixelpartyscanradius",
                 "pixelpartyautolook",
                 "pixelpartyautowalk",
+                "cosmeticsenabled",
+                "cosmeticscape",
+                "cosmeticshat",
+                "cosmeticsback",
+                "skyenabled",
+                "skypreset",
+                "skytime",
+                "skyclearweather",
+                "visualsdir",
                 "hudeditor"
             ),
             BuildSet(
@@ -495,7 +518,8 @@ public sealed class BridgeCapabilities
                 "pixelpartytargetyaw",
                 "pixelpartytargetdist",
                 "pixelpartyyawdelta",
-                "hudlayout"
+                "hudlayout",
+                "visualsstatus"
             ),
             BuildBridgeActionSet()
         );

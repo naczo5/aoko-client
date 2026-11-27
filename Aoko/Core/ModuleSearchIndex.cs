@@ -133,6 +133,8 @@ public sealed class ModuleSearchIndex
         new("tnttimer", "Beta", "TntTimerCard", "TntTimerEnabled", "TntTimerAvailabilityText", ["tnt", "fuse"]),
         new("fastplace", "Beta", "FastPlaceCard", "FastPlaceEnabled", "FastPlaceAvailabilityText", ["place", "block"]),
         new("sprint", "Beta", "SprintCard", "SprintEnabled", "SprintAvailabilityText", ["sprint", "speed"]),
+        new("cosmetics", "Beta", "CosmeticsCard", "CosmeticsEnabled", "CosmeticsAvailabilityText", ["cape", "hat", "back", "skin"]),
+        new("sky", "Beta", "SkyCard", "SkyEnabled", "SkyAvailabilityText", ["skybox", "time", "weather", "night", "stars"]),
     ];
 
     // Non-module destinations.

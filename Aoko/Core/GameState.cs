@@ -85,6 +85,10 @@ public class GameState
     [JsonPropertyName("lastActionResult")]
     public string LastActionResult { get; set; } = "";
 
+    /// <summary>Cosmetics / sky renderer status: off, ok, partial:&lt;detail&gt;, unsupported:&lt;detail&gt; or error:&lt;detail&gt;.</summary>
+    [JsonPropertyName("visualsStatus")]
+    public string VisualsStatus { get; set; } = "off";
+
     [JsonPropertyName("stateMs")]
     public ulong StateMs { get; set; }
 

@@ -1,0 +1,239 @@
+{
+  "format_version": "1.12.0",
+  "minecraft:geometry": [
+    {
+      "description": {
+        "identifier": "geometry.aoko.halo",
+        "texture_width": 64,
+        "texture_height": 64,
+        "visible_bounds_width": 4,
+        "visible_bounds_height": 4,
+        "visible_bounds_offset": [
+          0,
+          1.5,
+          0
+        ]
+      },
+      "bones": [
+        {
+          "name": "ring",
+          "pivot": [
+            0,
+            33.5,
+            0
+          ],
+          "cubes": [
+            {
+              "origin": [
+                -2,
+                33,
+                -5
+              ],
+              "size": [
+                4,
+                1,
+                1
+              ],
+              "uv": [
+                0,
+                0
+              ],
+              "pivot": [
+                0,
+                33.5,
+                0
+              ],
+              "rotation": [
+                0,
+                0,
+                0
+              ]
+            },
+            {
+              "origin": [
+                -2,
+                33,
+                -5
+              ],
+              "size": [
+                4,
+                1,
+                1
+              ],
+              "uv": [
+                0,
+                0
+              ],
+              "pivot": [
+                0,
+                33.5,
+                0
+              ],
+              "rotation": [
+                0,
+                45,
+                0
+              ]
+            },
+            {
+              "origin": [
+                -2,
+                33,
+                -5
+              ],
+              "size": [
+                4,
+                1,
+                1
+              ],
+              "uv": [
+                0,
+                0
+              ],
+              "pivot": [
+                0,
+                33.5,
+                0
+              ],
+              "rotation": [
+                0,
+                90,
+                0
+              ]
+            },
+            {
+              "origin": [
+                -2,
+                33,
+                -5
+              ],
+              "size": [
+                4,
+                1,
+                1
+              ],
+              "uv": [
+                0,
+                0
+              ],
+              "pivot": [
+                0,
+                33.5,
+                0
+              ],
+              "rotation": [
+                0,
+                135,
+                0
+              ]
+            },
+            {
+              "origin": [
+                -2,
+                33,
+                -5
+              ],
+              "size": [
+                4,
+                1,
+                1
+              ],
+              "uv": [
+                0,
+                0
+              ],
+              "pivot": [
+                0,
+                33.5,
+                0
+              ],
+              "rotation": [
+                0,
+                180,
+                0
+              ]
+            },
+            {
+              "origin": [
+                -2,
+                33,
+                -5
+              ],
+              "size": [
+                4,
+                1,
+                1
+              ],
+              "uv": [
+                0,
+                0
+              ],
+              "pivot": [
+                0,
+                33.5,
+                0
+              ],
+              "rotation": [
+                0,
+                225,
+                0
+              ]
+            },
+            {
+              "origin": [
+                -2,
+                33,
+                -5
+              ],
+              "size": [
+                4,
+                1,
+                1
+              ],
+              "uv": [
+                0,
+                0
+              ],
+              "pivot": [
+                0,
+                33.5,
+                0
+              ],
+              "rotation": [
+                0,
+                270,
+                0
+              ]
+            },
+            {
+              "origin": [
+                -2,
+                33,
+                -5
+              ],
+              "size": [
+                4,
+                1,
+                1
+              ],
+              "uv": [
+                0,
+                0
+              ],
+              "pivot": [
+                0,
+                33.5,
+                0
+              ],
+              "rotation": [
+                0,
+                315,
+                0
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

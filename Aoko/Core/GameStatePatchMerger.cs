@@ -66,6 +66,7 @@ internal static class GameStatePatchMerger
             KillAuraBlocking = previous.KillAuraBlocking,
             LastActionId = previous.LastActionId,
             LastActionResult = previous.LastActionResult,
+            VisualsStatus = previous.VisualsStatus,
             StateMs = previous.StateMs,
             PosX = previous.PosX,
             PosY = previous.PosY,
@@ -115,6 +116,7 @@ internal static class GameStatePatchMerger
                 case "killAuraBlocking": TryRead<bool>(value, v => merged.KillAuraBlocking = v); break;
                 case "lastActionId": TryRead<int>(value, v => merged.LastActionId = v); break;
                 case "lastActionResult": TryRead<string>(value, v => merged.LastActionResult = v); break;
+                case "visualsStatus": TryRead<string>(value, v => merged.VisualsStatus = v); break;
                 case "stateMs": TryRead<ulong>(value, v => merged.StateMs = v); break;
                 case "posX": TryRead<double>(value, v => merged.PosX = v); break;
                 case "posY": TryRead<double>(value, v => merged.PosY = v); break;

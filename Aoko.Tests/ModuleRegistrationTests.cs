@@ -144,7 +144,9 @@ public class ModuleRegistrationTests
             ["hitselect"] = "hitSelect",
             ["trajectories"] = "trajectories",
             ["murdermystery"] = "murderMystery",
-            ["breakprogress"] = "breakProgress"
+            ["breakprogress"] = "breakProgress",
+            ["cosmetics"] = "cosmeticsEnabled",
+            ["sky"] = "skyEnabled"
         };
 
         var catalogIds = ModuleCatalog.Requiring(ModuleCatalog.Surfaces.OverlayList)
@@ -488,6 +490,8 @@ public class ModuleRegistrationTests
             case "trajectories": clicker.TrajectoriesEnabled = enabled; return true;
             case "murdermystery": clicker.MurderMysteryEnabled = enabled; return true;
             case "breakprogress": clicker.BreakProgressEnabled = enabled; return true;
+            case "cosmetics": clicker.CosmeticsEnabled = enabled; return true;
+            case "sky": clicker.SkyEnabled = enabled; return true;
             default: return false;
         }
     }

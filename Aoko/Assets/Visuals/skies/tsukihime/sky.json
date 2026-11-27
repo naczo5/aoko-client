@@ -1,0 +1,25 @@
+{
+  "name": "Tsukihime",
+  "time": 18000,
+  "clearWeather": true,
+  "colors": {
+    "day": {
+      "sky": "#0a0d32",
+      "fog": "#345f96",
+      "cloud": "#1f3664",
+      "sunset": "#6fd4f2"
+    },
+    "night": {
+      "sky": "#0a0d32",
+      "fog": "#345f96",
+      "cloud": "#1f3664",
+      "sunset": "#6fd4f2"
+    }
+  },
+  "stars": 1.0,
+  "skybox": {
+    "texture": "sky.jpg",
+    "dayBrightness": 1.0,
+    "nightBrightness": 1.0
+  }
+}

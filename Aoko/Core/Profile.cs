@@ -224,6 +224,14 @@ public class Profile
     public bool MurderMysteryEnabled { get; set; } = false;
     public bool BreakProgressEnabled { get; set; } = false;
     public int JumpResetChance { get; set; } = 80;
+    public bool CosmeticsEnabled { get; set; } = false;
+    public string CosmeticsCape { get; set; } = string.Empty;
+    public string CosmeticsHat { get; set; } = string.Empty;
+    public string CosmeticsBack { get; set; } = string.Empty;
+    public bool SkyEnabled { get; set; } = false;
+    public string SkyPreset { get; set; } = string.Empty;
+    public int SkyTime { get; set; } = -2;
+    public bool SkyClearWeather { get; set; } = false;
 
     // Nullable so older JSON (without hudLayout) deserializes without error;
     // a null value is treated as canonical defaults in ApplyToClicker.
@@ -268,6 +276,8 @@ public class Profile
         ["trajectories"]     = 0,
         ["murdermystery"]    = 0,
         ["breakprogress"]    = 0,
+        ["cosmetics"]        = 0,
+        ["sky"]              = 0,
         ["panic"]            = 0,
         ["hudeditor"]        = 0,
     };
@@ -716,6 +726,14 @@ public static class ProfileManager
             MurderMysteryEnabled = clicker.MurderMysteryEnabled,
             BreakProgressEnabled = clicker.BreakProgressEnabled,
             JumpResetChance = clicker.JumpResetChance,
+            CosmeticsEnabled = clicker.CosmeticsEnabled,
+            CosmeticsCape = clicker.CosmeticsCape,
+            CosmeticsHat = clicker.CosmeticsHat,
+            CosmeticsBack = clicker.CosmeticsBack,
+            SkyEnabled = clicker.SkyEnabled,
+            SkyPreset = clicker.SkyPreset,
+            SkyTime = clicker.SkyTime,
+            SkyClearWeather = clicker.SkyClearWeather,
 
             HudLayout = BuildHudLayoutDict(clicker.HudLayout),
 
@@ -884,6 +902,14 @@ public static class ProfileManager
         clicker.MurderMysteryEnabled = profile.MurderMysteryEnabled;
         clicker.BreakProgressEnabled = profile.BreakProgressEnabled;
         clicker.JumpResetChance = profile.JumpResetChance;
+        clicker.CosmeticsEnabled = profile.CosmeticsEnabled;
+        clicker.CosmeticsCape = profile.CosmeticsCape;
+        clicker.CosmeticsHat = profile.CosmeticsHat;
+        clicker.CosmeticsBack = profile.CosmeticsBack;
+        clicker.SkyEnabled = profile.SkyEnabled;
+        clicker.SkyPreset = profile.SkyPreset;
+        clicker.SkyTime = profile.SkyTime;
+        clicker.SkyClearWeather = profile.SkyClearWeather;
 
         clicker.HudLayout = BuildHudLayout(profile.HudLayout);
 

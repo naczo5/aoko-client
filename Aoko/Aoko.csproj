@@ -54,4 +54,12 @@
     </None>
   </ItemGroup>
 
+  <!-- Built-in cosmetics and sky assets. Resource names are Aoko.Visuals/<relative path with forward slashes>;
+       VisualsInstaller extracts them to %AppData%\Aoko\visuals on start. An empty folder is fine. -->
+  <ItemGroup>
+    <None Remove="Assets\Visuals\**" />
+    <EmbeddedResource Include="Assets\Visuals\**"
+                      LogicalName="Aoko.Visuals/$([System.String]::Copy('%(RecursiveDir)').Replace('\', '/'))%(Filename)%(Extension)" />
+  </ItemGroup>
+
 </Project>

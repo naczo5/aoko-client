@@ -10,6 +10,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Aoko;
+using Aoko.Core.Visuals;
 
 namespace Aoko.Core;
 
@@ -1505,6 +1506,15 @@ public class GameStateClient : INotifyPropertyChanged
                     murderMystery = clicker.MurderMysteryEnabled,
                     breakProgress = clicker.BreakProgressEnabled,
                     jumpResetChance = clicker.JumpResetChance,
+                    cosmeticsEnabled = clicker.CosmeticsEnabled,
+                    cosmeticsCape = clicker.CosmeticsCape,
+                    cosmeticsHat = clicker.CosmeticsHat,
+                    cosmeticsBack = clicker.CosmeticsBack,
+                    skyEnabled = clicker.SkyEnabled,
+                    skyPreset = clicker.SkyPreset,
+                    skyTime = clicker.SkyTime,
+                    skyClearWeather = clicker.SkyClearWeather,
+                    visualsDir = VisualsPaths.Root,
                     // Per-module keybinds
                     keybindAutoclicker   = InputHooks.GetModuleKey("autoclicker"),
                     keybindRightClick    = InputHooks.GetModuleKey("rightclick"),

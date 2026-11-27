@@ -1,0 +1,29 @@
+{
+  "name": "Nebula",
+  "time": 18000,
+  "colors": {
+    "day": {
+      "sky": "#080921",
+      "fog": "#0a0a22",
+      "cloud": "#090a22",
+      "sunset": "#7a4cff"
+    },
+    "night": {
+      "sky": "#080921",
+      "fog": "#0a0a22",
+      "cloud": "#090a22",
+      "sunset": "#7a4cff"
+    }
+  },
+  "stars": 1.0,
+  "skybox": {
+    "texture": "sky.jpg",
+    "dayBrightness": 1.0,
+    "nightBrightness": 1.0,
+    "rotation": [
+      0.0,
+      0.3,
+      0.0
+    ]
+  }
+}

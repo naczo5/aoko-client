@@ -1372,6 +1372,59 @@
                             </StackPanel>
                         </Border>
 
+                        <Border x:Name="CosmeticsCard" Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
+                            <StackPanel>
+                                <DockPanel Margin="0,0,0,10">
+                                    <Button x:Name="KeybindCosmeticsButton" Tag="cosmetics" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
+                                    <TextBlock Text="Cosmetics" Foreground="{DynamicResource TextBrush}" FontSize="16" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </DockPanel>
+                                <TextBlock x:Name="CosmeticsAvailabilityText" Text="Available" Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,0,0,8"/>
+                                <CheckBox Content="Enable Cosmetics" IsChecked="{Binding CosmeticsEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                <TextBlock Text="Cape" Foreground="{DynamicResource TextBrush}" FontSize="12" Margin="0,10,0,0"/>
+                                <ComboBox x:Name="CosmeticsCapeCombo" Tag="cape" DisplayMemberPath="Name" SelectedValuePath="Id" SelectionChanged="VisualsCombo_SelectionChanged" Style="{StaticResource DarkComboBox}" Height="28" Margin="0,2,0,0"/>
+                                <TextBlock Text="Hat" Foreground="{DynamicResource TextBrush}" FontSize="12" Margin="0,10,0,0"/>
+                                <ComboBox x:Name="CosmeticsHatCombo" Tag="hat" DisplayMemberPath="Name" SelectedValuePath="Id" SelectionChanged="VisualsCombo_SelectionChanged" Style="{StaticResource DarkComboBox}" Height="28" Margin="0,2,0,0"/>
+                                <TextBlock Text="Back item" Foreground="{DynamicResource TextBrush}" FontSize="12" Margin="0,10,0,0"/>
+                                <ComboBox x:Name="CosmeticsBackCombo" Tag="back" DisplayMemberPath="Name" SelectedValuePath="Id" SelectionChanged="VisualsCombo_SelectionChanged" Style="{StaticResource DarkComboBox}" Height="28" Margin="0,2,0,0"/>
+                                <DockPanel Margin="0,10,0,0">
+                                    <Button x:Name="CosmeticsOpenFolderButton" Content="Open folder" Click="VisualsOpenFolder_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Opens the visuals folder in Explorer"/>
+                                    <TextBlock x:Name="CosmeticsStatusText" Text="Not active." Foreground="{DynamicResource DimTextBrush}" FontSize="11" TextWrapping="Wrap" VerticalAlignment="Center"/>
+                                </DockPanel>
+                                <TextBlock Text="Shows your chosen cape, hat and back item on your own player. Only you see them, and nothing is sent to the server. Works on 1.8.9 and 26.1 and newer."
+                                           Foreground="{DynamicResource DimTextBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,8,0,0"/>
+                            </StackPanel>
+                        </Border>
+
+                        <Border x:Name="SkyCard" Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
+                            <StackPanel>
+                                <DockPanel Margin="0,0,0,10">
+                                    <Button x:Name="KeybindSkyButton" Tag="sky" Click="KeybindButton_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Click, then press a key (Esc = unbind)"/>
+                                    <TextBlock Text="Sky" Foreground="{DynamicResource TextBrush}" FontSize="16" FontWeight="Bold" VerticalAlignment="Center"/>
+                                </DockPanel>
+                                <TextBlock x:Name="SkyAvailabilityText" Text="Available" Foreground="{DynamicResource DimTextBrush}" FontSize="11" Margin="0,0,0,8"/>
+                                <CheckBox Content="Enable Sky" IsChecked="{Binding SkyEnabled, Mode=TwoWay}" Style="{StaticResource ModuleSwitch}"/>
+                                <TextBlock Text="Preset" Foreground="{DynamicResource TextBrush}" FontSize="12" Margin="0,10,0,0"/>
+                                <ComboBox x:Name="SkyPresetCombo" Tag="sky" DisplayMemberPath="Name" SelectedValuePath="Id" SelectionChanged="VisualsCombo_SelectionChanged" Style="{StaticResource DarkComboBox}" Height="28" Margin="0,2,0,0"/>
+                                <TextBlock Text="Time of day" Foreground="{DynamicResource TextBrush}" FontSize="12" Margin="0,10,0,0"/>
+                                <ComboBox x:Name="SkyTimeCombo" Tag="time" SelectionChanged="VisualsCombo_SelectionChanged" Style="{StaticResource DarkComboBox}" Height="28" Margin="0,2,0,0">
+                                    <ComboBoxItem Content="Preset default" Tag="-2"/>
+                                    <ComboBoxItem Content="Follow server" Tag="-1"/>
+                                    <ComboBoxItem Content="Sunrise" Tag="0"/>
+                                    <ComboBoxItem Content="Noon" Tag="6000"/>
+                                    <ComboBoxItem Content="Sunset" Tag="12000"/>
+                                    <ComboBoxItem Content="Night" Tag="13000"/>
+                                    <ComboBoxItem Content="Midnight" Tag="18000"/>
+                                </ComboBox>
+                                <CheckBox Content="Clear weather" IsChecked="{Binding SkyClearWeather, Mode=TwoWay}" Style="{StaticResource DarkCheckBox}" Margin="0,10,0,0"/>
+                                <DockPanel Margin="0,10,0,0">
+                                    <Button x:Name="SkyOpenFolderButton" Content="Open folder" Click="VisualsOpenFolder_Click" Style="{StaticResource DarkButton}" DockPanel.Dock="Right" Width="140" Margin="8,0,0,0" VerticalAlignment="Center" ToolTip="Opens the visuals folder in Explorer"/>
+                                    <TextBlock x:Name="SkyStatusText" Text="Not active." Foreground="{DynamicResource DimTextBrush}" FontSize="11" TextWrapping="Wrap" VerticalAlignment="Center"/>
+                                </DockPanel>
+                                <TextBlock Text="Changes your sky colours, time of day, stars and moon. Only you see it, and nothing is sent to the server. Textured skyboxes render on 1.8.9 only. On 26.1 and newer a preset applies its colours only."
+                                           Foreground="{DynamicResource DimTextBrush}" FontSize="11" TextWrapping="Wrap" Margin="0,8,0,0"/>
+                            </StackPanel>
+                        </Border>
+
                         <Border x:Name="NoHurtCamCard" Style="{StaticResource ControlCardStyle}" Margin="0,0,0,12">
                             <StackPanel>
                                 <DockPanel Margin="0,0,0,10">

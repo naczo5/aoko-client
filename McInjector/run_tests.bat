@@ -231,6 +231,22 @@ echo [NativeTests] Running session_helper_format_tests.exe...
 tests\session_helper_format_tests.exe
 if %errorlevel% neq 0 exit /b %errorlevel%
 
+echo [NativeTests] Building method_hook_rewriter_tests.exe...
+"%GPP%" -m64 -std=c++11 -O2 -static-libgcc -static-libstdc++ -o tests\method_hook_rewriter_tests.exe tests\method_hook_rewriter_tests.cpp
+if %errorlevel% neq 0 exit /b %errorlevel%
+
+echo [NativeTests] Running method_hook_rewriter_tests.exe...
+tests\method_hook_rewriter_tests.exe
+if %errorlevel% neq 0 exit /b %errorlevel%
+
+echo [NativeTests] Building visuals_config_tests.exe...
+"%GPP%" -m64 -std=c++11 -O2 -static-libgcc -static-libstdc++ -o tests\visuals_config_tests.exe tests\visuals_config_tests.cpp
+if %errorlevel% neq 0 exit /b %errorlevel%
+
+echo [NativeTests] Running visuals_config_tests.exe...
+tests\visuals_config_tests.exe
+if %errorlevel% neq 0 exit /b %errorlevel%
+
 echo [NativeTests] All native harness tests passed.
 exit /b 0
 

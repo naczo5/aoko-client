@@ -11,6 +11,7 @@ Operating guide for coding agents working in `aoko-client` (`legoclickerC`). Bui
    - `java-to-jni-port`: Translate in-JVM Java (event buses, Mixins, mapping wrappers) into JNI/C#; unwrap to vanilla APIs.
    - `add-client-module`: `ModuleCatalog` first, then UI / Profile / TCP / string-list capabilities / bridges.
    - `diagnose-bridge-crash`: Root-cause runbook for JVM `hs_err` crash dumps and bridge debug logs.
+   - `visuals-pipeline`: Cosmetics (capes, hats, back items) and Sky presets on 1.8.9 and 26.x: the Java helper, the bytecode hook rewriter, asset format and the no-game test harnesses.
    - `release-verification`: PR compile gate vs `New-GitHubRelease.ps1` on `main` (stable) or `dev` with `-Beta`.
    - `gui-media-showcase`: Regenerate external GUI screenshots, smooth MP4 video tours, and animated GIFs using `scripts\New-GuiScreenshots.ps1`.
    - `write-docs`: README, website/docs site, AGENTS.md, and skills stay aligned with current modules; silent on removals.
@@ -29,7 +30,8 @@ Operating guide for coding agents working in `aoko-client` (`legoclickerC`). Bui
 - `McInjector/`: native bridge DLLs (`bridge.dll` for 1.8.9, `bridge_261.dll` for 26.1 / 26.2 / 26.3 / 1.21.x).
 - `McInjector/src/main/cpp/`: JNI/Win32/OpenGL/Vulkan/ImGui/MinHook bridge sources.
   - `overlay_ui.h`: header-only shared HUD layer (theme tokens, watermark, module list, cards, HUD-editor outline). Both bridges include it; keep new overlay drawing here so the two versions stay visually in sync.
-- `McInjector/src/main/java/`: `com/aoko/helper/SessionSwitcher.java` is the embedded helper that swaps the game session and starts server joins. The rest of the directory is obsolete agent code. Bridges perform all JNI, rendering, and TCP duties themselves.
+- `McInjector/src/main/java/`: `com/aoko/helper/SessionSwitcher.java` is the embedded helper that swaps the game session and starts server joins. `com/aoko/visuals/` is the embedded helper for the Cosmetics and Sky modules (see below). The rest of the directory is obsolete agent code. Bridges perform all JNI and TCP duties themselves; the visuals helper owns drawing for those two modules because it must run inside the game's own render path.
+- `Aoko/Assets/Visuals/`: built-in capes, skies and cosmetics embedded in `Aoko.exe` and extracted to `%AppData%\Aoko\visuals\`. Regenerate with `scripts/visuals/generate_assets.py`.
 
 ## Required Toolchain
 
@@ -55,7 +57,8 @@ Bridge build scripts auto-copy output to `Aoko\bin\Debug\`, `Release\`, and `pub
 - Publish (self-contained single-file): `build_exe.bat`
 - Full local package (bridges + publish): `build_release.bat` (invoked by the GitHub release script; do not run it extra when publishing)
 - GitHub release: `.\scripts\New-GitHubRelease.ps1 -Version 0.x.y` from clean `main` (see `release-verification` skill). Beta pre-release from `dev`: add `-Beta` (tag `v0.x.y-beta`, GitHub prerelease, Scoop unaffected).
-- CI release: **Actions → Build and publish release** (`.github/workflows/release.yml`). Tag pushes of `v<version>` or `v<version>-beta` also trigger it.
+- CI release: **Actions → Build and publish release** (`.github/workflows/release.yml`, manual dispatch only; tag pushes do nothing).
+- **Releases are always drafts.** `New-GitHubRelease.ps1` and the workflow can only create draft releases; the owner publishes manually in the GitHub UI. Never add a path that publishes or marks a release public, and do not publish a draft yourself.
 - Release notes: short 4–6 bullet diff from the previous release; list new modules explicitly, omit fixes for features that first ship in that release, mention HUD/renderer changes, Full Changelog last (see `release-verification`).
 
 ### Run locally
@@ -67,6 +70,7 @@ Bridge build scripts auto-copy output to `Aoko\bin\Debug\`, `Release\`, and `pub
 - Native compile gate: `McInjector\build_261.bat` and/or `McInjector\build.bat`
 - Run all C# tests: `dotnet test Aoko.Tests\Aoko.Tests.csproj`
 - Run native test harness: `McInjector\run_tests.bat`
+- Visuals helper and hook checks (no game needed, Linux or Git Bash): `McInjector/tests/java/run_hook_tests.sh`, `run_visuals_tests.sh`, `run_real_hook_checks.sh`, `run_modern_harness.sh`, `run_legacy_harness.sh` (see `visuals-pipeline`)
 
 ## Debugging
 
@@ -87,6 +91,7 @@ Bridge build scripts auto-copy output to `Aoko\bin\Debug\`, `Release\`, and `pub
 - Session writes and joins run in the embedded Java helper. `McInjector/src/main/java/com/aoko/helper/SessionSwitcher.java` is compiled to `jni_core/session_switcher.inc` by `McInjector/gen_java_helper.sh` and defined in the game JVM by `jni_core/session_helper_bridge.cpp`. Keep the class Java 8 bytecode compatible and rerun the script after editing it.
 - `bridge_261.cpp` uses Yarn-first, Mojmap-fallback arrays for dual-version 1.21 / 26.1 support.
 - **Renderer auto-detect (`bridge_261.dll`):** OpenGL (`wglSwapBuffers`) or Vulkan (`render_backend.cpp`). Whichever present path fires first claims the session (`RenderBackend_GetActiveKind()`). Kill-switch: `AOKO_BRIDGE261_VULKAN=0`.
+- **Visuals (Cosmetics, Sky):** `visuals_bridge.cpp` defines the embedded `com.aoko.visuals` classes (`jni_core/visuals_helper.inc`, regenerate with `McInjector/gen_visuals_helper.sh`) in the game ClassLoader and installs guard/value prologues on a few game methods through the shared JVMTI host (`method_hook_rewriter.h`, `visuals_hooks.h`). The callbacks are Java, never native. Supported: 1.8.9 (MCP or SRG names) and 26.1 to 26.3. 1.21.x reports `unsupported`. Client side only; nothing is sent to servers. Follow `visuals-pipeline` before touching it.
 - Preserve menu-injection compatibility (1.8.9): recover mappings when entering a world after injecting in title screen/lobby.
 
 ## Configuration Sync

@@ -34,6 +34,8 @@ aoko client is an open-source Windows utility client and external overlay for Lu
 - Nick Hider (JVMTI-based local name spoofing)
 - Hit Delay Fix (removes 1.8.9 attack cooldown delays)
 - Beta modules (Beta tab, not thoroughly tested): Fast Place, No Hurt Cam, Sprint, TNT Timer, WTap, Jump Reset, Hit Select, Trajectories, Murder Mystery helper, Break Progress
+- Cosmetics (Beta): your own cape, hat and back item, with your own capes from `%AppData%\Aoko\visuals\capes`. Client side only; 1.8.9 and 26.1 to 26.3
+- Sky (Beta): sky presets with fixed time of day, clear weather, stars and moon. Client side only; 1.8.9 and 26.1 to 26.3, textured skyboxes on 1.8.9 only
 - Chest Stealer (external cursor-based with menu check)
 - Refill (shift-clicks Instant Health/Regen pots and golden apples into empty hotbar slots while your inventory is open)
 - GTB Helper & Pixel Party Assist

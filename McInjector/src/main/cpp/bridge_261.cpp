@@ -70,6 +70,7 @@
 #include "kill_aura_core.h"
 #include "kill_aura_premotion.h"
 #include "silent_aura_aim.h" // temporary for non-engine JNI geometry helpers
+#include "visuals_bridge.h"
 
 // MinGW's <GL/gl.h> may not declare modern GL enums used with glGetIntegerv.
 #ifndef GL_CURRENT_PROGRAM
@@ -232,6 +233,8 @@ struct Config {
     bool  nametags       = false;
     bool  nickHiderEnabled = false;
     std::string nickHiderAlias;
+    bool  cosmeticsEnabled = false;
+    bool  skyEnabled = false;
     bool  chestEsp       = false;
     bool  chestStealer   = false;
     int   chestStealerDelayMs = 120;
@@ -687,6 +690,21 @@ static void ParseConfig(const std::string& line) {
     g_config.autoTotemBehaviorMode = lc::ClampInt(reader.GetInt("autoTotemBehaviorMode", 0), 0, 1);
     g_config.antiDebuffEnabled = reader.GetBool("antiDebuffEnabled");
     g_config.hitDelayFixEnabled = reader.GetBool("hitDelayFixEnabled");
+    {
+        visuals::Settings vs;
+        vs.cosmeticsEnabled = reader.GetBool("cosmeticsEnabled");
+        vs.cape = reader.GetString("cosmeticsCape");
+        vs.hat = reader.GetString("cosmeticsHat");
+        vs.back = reader.GetString("cosmeticsBack");
+        vs.skyEnabled = reader.GetBool("skyEnabled");
+        vs.skyPreset = reader.GetString("skyPreset");
+        vs.skyTime = visuals::ClampSkyTime(reader.GetInt("skyTime", -2));
+        vs.skyClearWeather = reader.GetBool("skyClearWeather");
+        if (!visuals::UnescapeJsonString(reader.GetString("visualsDir"), vs.dir)) vs.dir.clear();
+        g_config.cosmeticsEnabled = vs.cosmeticsEnabled;
+        g_config.skyEnabled = vs.skyEnabled;
+        visuals::SetSettings(vs);
+    }
     g_config.autoRodEnabled = reader.GetBool("autoRodEnabled");
     if (!g_config.autoRodEnabled) ClearAutoRodQueue();
     g_config.autoRodSlotMode = lc::ClampInt(reader.GetInt("autoRodSlotMode", g_config.autoRodSlotMode), 0, 9);
@@ -14034,6 +14052,12 @@ extern "C" __declspec(dllexport) void Detach() {
             InterlockedExchange(&g_detachRequested121, 0);
             return 0;
         }
+        if (!visuals::Shutdown(env)) {
+            Log("Detach aborted: Cosmetics/Sky could not be switched off without a JNI environment.");
+            if (attached && g_jvm) g_jvm->DetachCurrentThread();
+            InterlockedExchange(&g_detachRequested121, 0);
+            return 0;
+        }
         lc::ShutdownNickHiderJvmti(env);
         ka_premotion::Shutdown(env);
         CleanupImGuiAndHooks();
@@ -18943,6 +18967,8 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
             lc::RefreshNickHiderJvmtiTargets();
             lc::FlushNickHiderJvmtiDiagnostics();
         }
+        // Cosmetics and sky: defines the helper, arms the hooks and pushes settings when due.
+        visuals::Tick(env);
         Config cfg;
         { LockGuard lk(g_configMutex); cfg = g_config; }
         unsigned int sleepMs = lc::kWorkerIdleIntervalMs;
@@ -19400,6 +19426,7 @@ static DWORD WINAPI ChestScanThreadProc(LPVOID) {
     if (lastObservedPlayer) env->DeleteGlobalRef(lastObservedPlayer);
     ReleaseSpeedBridgeSneak121(env);
     ResetSpeedBridgeMovementTracking121();
+    visuals::Shutdown(env);
     const bool antiDebuffSafeToUnload = anti_debuff_jvmti::Shutdown(env);
     if (antiDebuffSafeToUnload) {
         lc::ShutdownNickHiderJvmti(env);
@@ -20918,6 +20945,8 @@ static void RenderOverlayPanels(
                 if (cfg.murderMystery) pushMod("Murder Mystery");
                 if (cfg.breakProgress) pushMod("Break Progress");
                 if (cfg.hitDelayFixEnabled) pushMod("Hit Delay Fix");
+                if (cfg.cosmeticsEnabled) pushMod("Cosmetics");
+                if (cfg.skyEnabled)    pushMod("Sky");
 
                 std::sort(modEntries.begin(), modEntries.end(),
                     [](const aoko::ui::ModuleEntry& a, const aoko::ui::ModuleEntry& b) {
@@ -21444,6 +21473,7 @@ glfw_done:;
         if (denv) {
             lc::InstallNickHiderJvmti(g_jvm, lc::NickHiderJvmtiGeneration::Modern121, Log);
             anti_debuff_jvmti::Install(g_jvm, Log);
+            visuals::Install(g_jvm, visuals::Generation::Modern26, Log);
             ka_premotion::Install(g_jvm, Log);
             ka_premotion::SetAttackHandler(KillAuraPremotionAttackHandler121);
             ka_premotion::SetAttackGate(KillAuraPremotionTickGate);
@@ -21743,6 +21773,10 @@ glfw_done:;
                 snprintf(ppDeltaBuf, sizeof(ppDeltaBuf), "%.2f", ppYawDelta);
                 state += ",\"pixelPartyYawDelta\":";
                 state += ppDeltaBuf;
+
+                state += ",\"visualsStatus\":\"";
+                state += visuals::Status();
+                state += "\"";
 
                 if (includeEntities) state += ",\"entities\":[";
 

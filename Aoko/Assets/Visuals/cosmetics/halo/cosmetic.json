@@ -1,0 +1,33 @@
+{
+  "name": "Halo",
+  "slot": "hat",
+  "anchor": "head",
+  "model": "model.geo.json",
+  "texture": "texture.png",
+  "scale": 1.0,
+  "offset": [
+    0,
+    0,
+    0
+  ],
+  "fullbright": true,
+  "translucent": true,
+  "hideWithHelmet": false,
+  "animations": [
+    {
+      "bone": "ring",
+      "spin": [
+        0,
+        40,
+        0
+      ],
+      "bob": [
+        0,
+        0.5,
+        0
+      ],
+      "speed": 0.5,
+      "phase": 0
+    }
+  ]
+}

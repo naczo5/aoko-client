@@ -3,6 +3,7 @@ using System.ComponentModel;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -20,6 +21,7 @@ using System.Windows.Media.Animation;
 using System.Windows.Media.Effects;
 using System.Windows.Threading;
 using Aoko.Core;
+using Aoko.Core.Visuals;
 using Aoko.Views;
 
 namespace Aoko;
@@ -75,6 +77,16 @@ public partial class MainWindow : Window
     private bool _pendingAutoRodActionBind;
     private bool _pendingThrowpotActionBind;
     private int _uiUpdateQueued;
+
+    private sealed record VisualsChoice(string Id, string Name);
+
+    private readonly VisualsCatalog _visualsCatalog = new(VisualsPaths.Root);
+    private int _visualsRefreshRunning;
+    private bool _syncingVisualsCombos;
+    private ComboBoxItem? _skyCustomTimeItem;
+    private string? _lastVisualsStatus;
+    private string? _visualsFolderError;
+    private string? _shownVisualsFolderError;
     private readonly CancellationTokenSource _updateCheckCancellation = new();
     private string? _latestReleaseUrl;
     private bool _updateCheckInProgress;
@@ -131,6 +143,8 @@ public partial class MainWindow : Window
         ["trajectories"] = "Trajectories",
         ["murdermystery"] = "Murder Mystery",
         ["breakprogress"] = "Break Progress",
+        ["cosmetics"] = "Cosmetics",
+        ["sky"] = "Sky",
         ["panic"] = "Panic"
     };
 
@@ -424,6 +438,7 @@ public partial class MainWindow : Window
         UpdateGameStateUI();
         UpdateKeybindButtons();
         RefreshConfigList();
+        InitializeVisualsUi();
 
         CommandSearchHost.StateProvider = GetCommandSearchRowState;
         CommandSearchHost.JumpRequested += CommandSearchHost_JumpRequested;
@@ -562,6 +577,8 @@ public partial class MainWindow : Window
         bool trajectoriesSupported = IsModuleSupported("trajectories");
         bool murderMysterySupported = IsModuleSupported("murdermystery");
         bool breakProgressSupported = IsModuleSupported("breakprogress");
+        bool cosmeticsSupported = IsModuleSupported("cosmetics");
+        bool skySupported = IsModuleSupported("sky");
         bool reloadMappingsSupported = GameStateClient.Instance.SupportsSetting("reloadMappingsNonce");
 
         AimAssistCard.IsEnabled = aimAssistSupported;
@@ -591,6 +608,8 @@ public partial class MainWindow : Window
         TrajectoriesCard.IsEnabled = trajectoriesSupported;
         MurderMysteryCard.IsEnabled = murderMysterySupported;
         BreakProgressCard.IsEnabled = breakProgressSupported;
+        CosmeticsCard.IsEnabled = cosmeticsSupported;
+        SkyCard.IsEnabled = skySupported;
 
         if (!aimAssistSupported && clicker.AimAssistEnabled) clicker.AimAssistEnabled = false;
         if (!triggerbotSupported && clicker.TriggerbotEnabled) clicker.TriggerbotEnabled = false;
@@ -619,6 +638,8 @@ public partial class MainWindow : Window
         if (!trajectoriesSupported && clicker.TrajectoriesEnabled) clicker.TrajectoriesEnabled = false;
         if (!murderMysterySupported && clicker.MurderMysteryEnabled) clicker.MurderMysteryEnabled = false;
         if (!breakProgressSupported && clicker.BreakProgressEnabled) clicker.BreakProgressEnabled = false;
+        if (!cosmeticsSupported && clicker.CosmeticsEnabled) clicker.CosmeticsEnabled = false;
+        if (!skySupported && clicker.SkyEnabled) clicker.SkyEnabled = false;
 
         // Update availability text - only show unavailable message for Triggerbot (intentionally 1.21-only)
         AimAssistAvailabilityText.Text = aimAssistSupported ? "Available" : "Unavailable on current bridge";
@@ -647,6 +668,8 @@ public partial class MainWindow : Window
         TrajectoriesAvailabilityText.Text = trajectoriesSupported ? "Available" : "Unavailable on current bridge";
         MurderMysteryAvailabilityText.Text = murderMysterySupported ? "Available" : "Unavailable on current bridge";
         BreakProgressAvailabilityText.Text = breakProgressSupported ? "Available" : "Unavailable on current bridge";
+        CosmeticsAvailabilityText.Text = cosmeticsSupported ? "Available" : "Unavailable on current bridge";
+        SkyAvailabilityText.Text = skySupported ? "Available" : "Unavailable on current bridge";
         ChestStealerAvailabilityText.Text = chestStealerSupported ? "Available" : "Unavailable on current bridge";
         RefillAvailabilityText.Text = refillSupported ? "Available" : "Unavailable on current bridge";
         GtbHelperAvailabilityText.Text = gtbSupported
@@ -685,6 +708,8 @@ public partial class MainWindow : Window
         KeybindTrajectoriesButton.IsEnabled = trajectoriesSupported;
         KeybindMurderMysteryButton.IsEnabled = murderMysterySupported;
         KeybindBreakProgressButton.IsEnabled = breakProgressSupported;
+        KeybindCosmeticsButton.IsEnabled = cosmeticsSupported;
+        KeybindSkyButton.IsEnabled = skySupported;
         KeybindPanicButton.IsEnabled = true;
         ReloadMappingsButton.IsEnabled = reloadMappingsSupported;
         ReloadMappingsAvailabilityText.Text = reloadMappingsSupported
@@ -693,6 +718,8 @@ public partial class MainWindow : Window
 
         _lastModuleStatus = null;
         RefreshModuleStatusTexts();
+        _lastVisualsStatus = null;
+        RefreshVisualsStatus();
 
         AccountsTab.RefreshAvailability();
         ServersTab.RefreshAvailability();
@@ -1558,6 +1585,7 @@ public partial class MainWindow : Window
                     else
                     {
                         RefreshModuleStatusTexts();
+                        RefreshVisualsStatus();
                     }
                 }
                 finally
@@ -1593,6 +1621,180 @@ public partial class MainWindow : Window
     {
         if (e.PropertyName == nameof(Clicker.DevMode))
             UpdateVersionAvailabilityUi();
+        else if (e.PropertyName is nameof(Clicker.CosmeticsCape) or nameof(Clicker.CosmeticsHat)
+                 or nameof(Clicker.CosmeticsBack) or nameof(Clicker.SkyPreset) or nameof(Clicker.SkyTime))
+            SyncVisualsSelection();
+    }
+
+    // ── Cosmetics and Sky ──────────────────────────────────────────────────────
+    // The pickers list what is on disk, so they are filled from the catalog instead of bound to
+    // Clicker. A two-way SelectedValue binding would write "" back whenever the list is replaced.
+
+    private void InitializeVisualsUi()
+    {
+        _visualsCatalog.Changed += snapshot =>
+        {
+            if (!Dispatcher.HasShutdownStarted)
+                Dispatcher.BeginInvoke(() => ApplyVisualsSnapshot(snapshot));
+        };
+        Activated += (_, _) => _ = RefreshVisualsCatalogAsync();
+
+        ApplyVisualsSnapshot(VisualsSnapshot.Empty);
+        _ = RefreshVisualsCatalogAsync(App.VisualsInstall);
+    }
+
+    /// <summary>Rescans the visuals folder off the UI thread. The catalog raises Changed only when the result differs.</summary>
+    private async Task RefreshVisualsCatalogAsync(Task? waitFor = null)
+    {
+        if (Interlocked.Exchange(ref _visualsRefreshRunning, 1) != 0) return;
+        try
+        {
+            if (waitFor != null)
+            {
+                try { await waitFor.ConfigureAwait(false); }
+                catch (Exception) { /* the installer reports its own failures */ }
+            }
+
+            await Task.Run(() => _visualsCatalog.Refresh()).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[Visuals] Catalog refresh failed: {ex.Message}");
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _visualsRefreshRunning, 0);
+        }
+    }
+
+    private void ApplyVisualsSnapshot(VisualsSnapshot snapshot)
+    {
+        var clicker = Clicker.Instance;
+        _syncingVisualsCombos = true;
+        try
+        {
+            SetVisualsChoices(CosmeticsCapeCombo,
+                snapshot.Capes.Select(c => new VisualsChoice(c.Id, c.Name)), clicker.CosmeticsCape);
+            SetVisualsChoices(CosmeticsHatCombo,
+                snapshot.CosmeticsForSlot(VisualsCatalog.HatSlot).Select(c => new VisualsChoice(c.Id, c.Name)), clicker.CosmeticsHat);
+            SetVisualsChoices(CosmeticsBackCombo,
+                snapshot.CosmeticsForSlot(VisualsCatalog.BackSlot).Select(c => new VisualsChoice(c.Id, c.Name)), clicker.CosmeticsBack);
+            SetVisualsChoices(SkyPresetCombo,
+                snapshot.Skies.Select(s => new VisualsChoice(s.Id, s.Name)), clicker.SkyPreset);
+            SyncSkyTimeCombo(clicker.SkyTime);
+        }
+        finally
+        {
+            _syncingVisualsCombos = false;
+        }
+    }
+
+    private static void SetVisualsChoices(ComboBox combo, IEnumerable<VisualsChoice> items, string selectedId)
+    {
+        var choices = new List<VisualsChoice> { new(string.Empty, "None") };
+        choices.AddRange(items);
+        // A saved id whose files are gone stays selected, so refreshing never erases the setting.
+        if (selectedId.Length > 0 && choices.All(c => c.Id != selectedId))
+            choices.Add(new VisualsChoice(selectedId, selectedId + " (missing)"));
+
+        combo.ItemsSource = choices;
+        combo.SelectedValue = selectedId;
+    }
+
+    private void SyncSkyTimeCombo(int ticks)
+    {
+        if (_skyCustomTimeItem != null)
+        {
+            SkyTimeCombo.Items.Remove(_skyCustomTimeItem);
+            _skyCustomTimeItem = null;
+        }
+
+        string tag = ticks.ToString(CultureInfo.InvariantCulture);
+        ComboBoxItem? match = SkyTimeCombo.Items.OfType<ComboBoxItem>().FirstOrDefault(i => (i.Tag as string) == tag);
+        if (match == null)
+        {
+            // A profile can hold a tick the list has no entry for; keep it visible instead of blank.
+            match = new ComboBoxItem { Content = $"Custom ({ticks})", Tag = tag };
+            SkyTimeCombo.Items.Add(match);
+            _skyCustomTimeItem = match;
+        }
+
+        SkyTimeCombo.SelectedItem = match;
+    }
+
+    private void SyncVisualsSelection()
+    {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.BeginInvoke(SyncVisualsSelection);
+            return;
+        }
+
+        var clicker = Clicker.Instance;
+        bool matches =
+            (CosmeticsCapeCombo.SelectedValue as string ?? string.Empty) == clicker.CosmeticsCape
+            && (CosmeticsHatCombo.SelectedValue as string ?? string.Empty) == clicker.CosmeticsHat
+            && (CosmeticsBackCombo.SelectedValue as string ?? string.Empty) == clicker.CosmeticsBack
+            && (SkyPresetCombo.SelectedValue as string ?? string.Empty) == clicker.SkyPreset
+            && (SkyTimeCombo.SelectedItem as ComboBoxItem)?.Tag as string == clicker.SkyTime.ToString(CultureInfo.InvariantCulture);
+        if (!matches)
+            ApplyVisualsSnapshot(_visualsCatalog.Current);
+    }
+
+    private void VisualsCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_syncingVisualsCombos || sender is not ComboBox combo || combo.SelectedItem == null)
+            return;
+
+        var clicker = Clicker.Instance;
+        switch (combo.Tag as string)
+        {
+            case "cape" when combo.SelectedItem is VisualsChoice cape: clicker.CosmeticsCape = cape.Id; break;
+            case "hat" when combo.SelectedItem is VisualsChoice hat: clicker.CosmeticsHat = hat.Id; break;
+            case "back" when combo.SelectedItem is VisualsChoice back: clicker.CosmeticsBack = back.Id; break;
+            case "sky" when combo.SelectedItem is VisualsChoice sky: clicker.SkyPreset = sky.Id; break;
+            case "time" when combo.SelectedItem is ComboBoxItem { Tag: string tag }
+                && int.TryParse(tag, NumberStyles.Integer, CultureInfo.InvariantCulture, out int ticks):
+                clicker.SkyTime = ticks;
+                break;
+        }
+    }
+
+    private void VisualsOpenFolder_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            string folder = VisualsPaths.Root;
+            Directory.CreateDirectory(folder);
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = "explorer.exe",
+                Arguments = $"\"{folder}\"",
+                UseShellExecute = true
+            });
+            _visualsFolderError = null;
+        }
+        catch (Exception ex)
+        {
+            _visualsFolderError = $"Could not open the visuals folder: {ex.Message}";
+        }
+
+        RefreshVisualsStatus();
+        _ = RefreshVisualsCatalogAsync();
+    }
+
+    private void RefreshVisualsStatus()
+    {
+        var gs = GameStateClient.Instance;
+        string status = gs.IsConnected ? gs.CurrentState.VisualsStatus : "off";
+        if (_lastVisualsStatus == status && ReferenceEquals(_shownVisualsFolderError, _visualsFolderError))
+            return;
+
+        _lastVisualsStatus = status;
+        _shownVisualsFolderError = _visualsFolderError;
+        string text = _visualsFolderError ?? VisualsStatusText.Describe(status);
+        CosmeticsStatusText.Text = text;
+        SkyStatusText.Text = text;
     }
 
     private void OnGameStateClientPropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -2131,6 +2333,8 @@ public partial class MainWindow : Window
         SetKeybindButtonContent(KeybindTrajectoriesButton, "trajectories");
         SetKeybindButtonContent(KeybindMurderMysteryButton, "murdermystery");
         SetKeybindButtonContent(KeybindBreakProgressButton, "breakprogress");
+        SetKeybindButtonContent(KeybindCosmeticsButton, "cosmetics");
+        SetKeybindButtonContent(KeybindSkyButton, "sky");
         SetKeybindButtonContent(KeybindPanicButton, "panic");
         AutoRodActionBindButton.Content = _pendingAutoRodActionBind
             ? "Action: [Press key or mouse...]"

@@ -1,0 +1,29 @@
+{
+  "name": "Aurora",
+  "time": 18000,
+  "colors": {
+    "day": {
+      "sky": "#050818",
+      "fog": "#0b1426",
+      "cloud": "#080e1f",
+      "sunset": "#3fbf9a"
+    },
+    "night": {
+      "sky": "#050818",
+      "fog": "#0b1426",
+      "cloud": "#080e1f",
+      "sunset": "#3fbf9a"
+    }
+  },
+  "stars": 1.0,
+  "skybox": {
+    "texture": "sky.jpg",
+    "dayBrightness": 1.0,
+    "nightBrightness": 1.0,
+    "rotation": [
+      0.0,
+      0.3,
+      0.0
+    ]
+  }
+}

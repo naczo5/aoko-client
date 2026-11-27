@@ -105,6 +105,8 @@ public static class ModuleCatalog
         new("trajectories", "Trajectories", "cfg.trajectories", c => c.TrajectoriesEnabled, Beta: true),
         new("murdermystery", "Murder Mystery", "cfg.murderMystery", c => c.MurderMysteryEnabled, Beta: true),
         new("breakprogress", "Break Progress", "cfg.breakProgress", c => c.BreakProgressEnabled, Beta: true),
+        new("cosmetics", "Cosmetics", "cfg.cosmeticsEnabled", c => c.CosmeticsEnabled, Beta: true),
+        new("sky", "Sky", "cfg.skyEnabled", c => c.SkyEnabled, Beta: true),
 
         // Keybind-only emergency action — not a toggleable feature module.
         new("panic", "Panic", "", _ => false,

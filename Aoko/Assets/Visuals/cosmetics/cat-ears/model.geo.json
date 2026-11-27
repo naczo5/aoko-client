@@ -1,0 +1,197 @@
+{
+  "format_version": "1.12.0",
+  "minecraft:geometry": [
+    {
+      "description": {
+        "identifier": "geometry.aoko.cat_ears",
+        "texture_width": 64,
+        "texture_height": 64,
+        "visible_bounds_width": 4,
+        "visible_bounds_height": 4,
+        "visible_bounds_offset": [
+          0,
+          1.5,
+          0
+        ]
+      },
+      "bones": [
+        {
+          "name": "ear_left",
+          "pivot": [
+            2.5,
+            32,
+            -1.5
+          ],
+          "cubes": [
+            {
+              "origin": [
+                1.0,
+                32,
+                -2.0
+              ],
+              "size": [
+                3,
+                2,
+                2
+              ],
+              "uv": [
+                0,
+                0
+              ],
+              "pivot": [
+                2.5,
+                32,
+                -1.5
+              ],
+              "rotation": [
+                0,
+                0,
+                -8
+              ]
+            },
+            {
+              "origin": [
+                1.5,
+                34,
+                -2.0
+              ],
+              "size": [
+                2,
+                2,
+                2
+              ],
+              "uv": [
+                10,
+                0
+              ],
+              "pivot": [
+                2.5,
+                32,
+                -1.5
+              ],
+              "rotation": [
+                0,
+                0,
+                -8
+              ]
+            },
+            {
+              "origin": [
+                2.0,
+                36,
+                -1.5
+              ],
+              "size": [
+                1,
+                1,
+                1
+              ],
+              "uv": [
+                18,
+                0
+              ],
+              "pivot": [
+                2.5,
+                32,
+                -1.5
+              ],
+              "rotation": [
+                0,
+                0,
+                -8
+              ]
+            }
+          ]
+        },
+        {
+          "name": "ear_right",
+          "pivot": [
+            -2.5,
+            32,
+            -1.5
+          ],
+          "cubes": [
+            {
+              "origin": [
+                -4.0,
+                32,
+                -2.0
+              ],
+              "size": [
+                3,
+                2,
+                2
+              ],
+              "uv": [
+                22,
+                0
+              ],
+              "pivot": [
+                -2.5,
+                32,
+                -1.5
+              ],
+              "rotation": [
+                0,
+                0,
+                8
+              ]
+            },
+            {
+              "origin": [
+                -3.5,
+                34,
+                -2.0
+              ],
+              "size": [
+                2,
+                2,
+                2
+              ],
+              "uv": [
+                32,
+                0
+              ],
+              "pivot": [
+                -2.5,
+                32,
+                -1.5
+              ],
+              "rotation": [
+                0,
+                0,
+                8
+              ]
+            },
+            {
+              "origin": [
+                -3.0,
+                36,
+                -1.5
+              ],
+              "size": [
+                1,
+                1,
+                1
+              ],
+              "uv": [
+                40,
+                0
+              ],
+              "pivot": [
+                -2.5,
+                32,
+                -1.5
+              ],
+              "rotation": [
+                0,
+                0,
+                8
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

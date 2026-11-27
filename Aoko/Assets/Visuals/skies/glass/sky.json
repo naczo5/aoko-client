@@ -1,0 +1,18 @@
+{
+  "name": "Glass",
+  "colors": {
+    "day": {
+      "sky": "#8fd3f4",
+      "fog": "#d3f1ff",
+      "cloud": "#ffffff",
+      "sunset": "#f08fb4"
+    },
+    "night": {
+      "sky": "#050f26",
+      "fog": "#0b1a38",
+      "cloud": "#16284a",
+      "sunset": "#58c8e8"
+    }
+  },
+  "stars": 1.0
+}

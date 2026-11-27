@@ -7,6 +7,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Diagnostics;
 using System.Linq;
+using Aoko.Core.Visuals;
 
 namespace Aoko.Core;
 
@@ -587,6 +588,8 @@ public class Clicker : INotifyPropertyChanged
             TrajectoriesEnabled = false;
             MurderMysteryEnabled = false;
             BreakProgressEnabled = false;
+            CosmeticsEnabled = false;
+            SkyEnabled = false;
 
             ShowModuleList = false;
             ShowLogo = false;
@@ -2172,6 +2175,116 @@ public class Clicker : INotifyPropertyChanged
             if (_breakProgressEnabled == value) return;
             _breakProgressEnabled = value;
             OnPropertyChanged(nameof(BreakProgressEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _cosmeticsEnabled = false;
+    public bool CosmeticsEnabled
+    {
+        get => _cosmeticsEnabled;
+        set
+        {
+            if (_cosmeticsEnabled == value) return;
+            _cosmeticsEnabled = value;
+            OnPropertyChanged(nameof(CosmeticsEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private string _cosmeticsCape = string.Empty;
+    public string CosmeticsCape
+    {
+        get => _cosmeticsCape;
+        set
+        {
+            string normalized = VisualsIds.Normalize(value);
+            if (_cosmeticsCape == normalized) return;
+            _cosmeticsCape = normalized;
+            OnPropertyChanged(nameof(CosmeticsCape));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private string _cosmeticsHat = string.Empty;
+    public string CosmeticsHat
+    {
+        get => _cosmeticsHat;
+        set
+        {
+            string normalized = VisualsIds.Normalize(value);
+            if (_cosmeticsHat == normalized) return;
+            _cosmeticsHat = normalized;
+            OnPropertyChanged(nameof(CosmeticsHat));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private string _cosmeticsBack = string.Empty;
+    public string CosmeticsBack
+    {
+        get => _cosmeticsBack;
+        set
+        {
+            string normalized = VisualsIds.Normalize(value);
+            if (_cosmeticsBack == normalized) return;
+            _cosmeticsBack = normalized;
+            OnPropertyChanged(nameof(CosmeticsBack));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _skyEnabled = false;
+    public bool SkyEnabled
+    {
+        get => _skyEnabled;
+        set
+        {
+            if (_skyEnabled == value) return;
+            _skyEnabled = value;
+            OnPropertyChanged(nameof(SkyEnabled));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private string _skyPreset = string.Empty;
+    public string SkyPreset
+    {
+        get => _skyPreset;
+        set
+        {
+            string normalized = VisualsIds.Normalize(value);
+            if (_skyPreset == normalized) return;
+            _skyPreset = normalized;
+            OnPropertyChanged(nameof(SkyPreset));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private int _skyTime = -2;
+    /// <summary>-2 uses the preset's time, -1 follows the server, 0..23999 locks the time of day.</summary>
+    public int SkyTime
+    {
+        get => _skyTime;
+        set
+        {
+            int clamped = Math.Clamp(value, -2, 23999);
+            if (_skyTime == clamped) return;
+            _skyTime = clamped;
+            OnPropertyChanged(nameof(SkyTime));
+            StateChanged?.Invoke();
+        }
+    }
+
+    private bool _skyClearWeather = false;
+    public bool SkyClearWeather
+    {
+        get => _skyClearWeather;
+        set
+        {
+            if (_skyClearWeather == value) return;
+            _skyClearWeather = value;
+            OnPropertyChanged(nameof(SkyClearWeather));
             StateChanged?.Invoke();
         }
     }

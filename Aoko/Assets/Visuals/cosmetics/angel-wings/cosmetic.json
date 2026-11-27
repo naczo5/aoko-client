@@ -1,0 +1,38 @@
+{
+  "name": "Angel Wings",
+  "slot": "back",
+  "anchor": "body",
+  "model": "model.geo.json",
+  "texture": "texture.png",
+  "scale": 1.0,
+  "offset": [
+    0,
+    0,
+    0
+  ],
+  "fullbright": false,
+  "translucent": false,
+  "hideWithHelmet": false,
+  "animations": [
+    {
+      "bone": "wing_left",
+      "swing": [
+        0,
+        -18,
+        0
+      ],
+      "speed": 0.6,
+      "phase": 0
+    },
+    {
+      "bone": "wing_right",
+      "swing": [
+        0,
+        18,
+        0
+      ],
+      "speed": 0.6,
+      "phase": 0
+    }
+  ]
+}

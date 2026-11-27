@@ -57,6 +57,7 @@
 #include "jni_core/account_command_router.h"
 #include "reach_core.h"
 #include "reach_bytecode_injector.h"
+#include "visuals_bridge.h"
 
 // Forward declare ImGui Win32 WndProc handler (declaration is in #if 0 block in header)
 extern LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -250,6 +251,8 @@ struct Config {
     bool nametags = false;
     bool nickHiderEnabled = false;
     std::string nickHiderAlias;
+    bool cosmeticsEnabled = false;
+    bool skyEnabled = false;
     bool closestPlayerInfo = false;
     bool fightStatus = false;
     bool nametagShowHealth = true;
@@ -11653,6 +11656,12 @@ extern "C" __declspec(dllexport) void Detach() {
             InterlockedExchange(&g_legacyDetachRequested, 0);
             return 0;
         }
+        if (!visuals::Shutdown(env)) {
+            Log("Detach aborted: Cosmetics/Sky could not be switched off without a JNI environment.");
+            if (attached && g_jvm) g_jvm->DetachCurrentThread();
+            InterlockedExchange(&g_legacyDetachRequested, 0);
+            return 0;
+        }
         lc::ShutdownNickHiderJvmti(env);
         ka_premotion::Shutdown(env);
         ShutdownReach(env);
@@ -13483,6 +13492,8 @@ void RenderHUD(
     if (cfg.murderMystery)     pushMod("Murder Mystery");
     if (cfg.breakProgress)     pushMod("Break Progress");
     if (cfg.hitDelayFixEnabled) pushMod("Hit Delay Fix");
+    if (cfg.cosmeticsEnabled)  pushMod("Cosmetics");
+    if (cfg.skyEnabled)        pushMod("Sky");
 
     std::sort(modEntries.begin(), modEntries.end(),
         [](const aoko::ui::ModuleEntry& a, const aoko::ui::ModuleEntry& b) {
@@ -17535,6 +17546,21 @@ void ParseConfig(const std::string& line) {
         g_config.reachEnabled = reader.GetBool("reachEnabled");
         g_config.velocityEnabled = reader.GetBool("velocityEnabled");
         g_config.hitDelayFixEnabled = reader.GetBool("hitDelayFixEnabled");
+        {
+            visuals::Settings vs;
+            vs.cosmeticsEnabled = reader.GetBool("cosmeticsEnabled");
+            vs.cape = reader.GetString("cosmeticsCape");
+            vs.hat = reader.GetString("cosmeticsHat");
+            vs.back = reader.GetString("cosmeticsBack");
+            vs.skyEnabled = reader.GetBool("skyEnabled");
+            vs.skyPreset = reader.GetString("skyPreset");
+            vs.skyTime = visuals::ClampSkyTime(reader.GetInt("skyTime", -2));
+            vs.skyClearWeather = reader.GetBool("skyClearWeather");
+            if (!visuals::UnescapeJsonString(reader.GetString("visualsDir"), vs.dir)) vs.dir.clear();
+            g_config.cosmeticsEnabled = vs.cosmeticsEnabled;
+            g_config.skyEnabled = vs.skyEnabled;
+            visuals::SetSettings(vs);
+        }
         g_config.autoRodEnabled = reader.GetBool("autoRodEnabled");
         if (!g_config.autoRodEnabled) CancelAutoRodRequests();
         g_config.autoRodSlotMode = lc::ClampInt(reader.GetInt("autoRodSlotMode", g_config.autoRodSlotMode), 0, 9);
@@ -17802,6 +17828,7 @@ void ServerLoop() {
     JNIEnv* env = JniEnv::AttachThisThread(g_jvm, "LegoBridge");
     lc::InstallNickHiderJvmti(g_jvm, lc::NickHiderJvmtiGeneration::Legacy189, Log);
     anti_debuff_jvmti::Install(g_jvm, Log);
+    visuals::Install(g_jvm, visuals::Generation::Legacy189, Log);
     ka_premotion::Install(g_jvm, Log);
     ka_premotion::SetAttackHandler(KillAuraPremotionAttackHandler);
     ka_premotion::SetAttackGate(KillAuraPremotionTickGate);
@@ -18110,6 +18137,10 @@ void ServerLoop() {
                 jsonToSend += ",\"pixelPartyYawDelta\":";
                 jsonToSend += std::to_string(ppYawDelta);
 
+                jsonToSend += ",\"visualsStatus\":\"";
+                jsonToSend += visuals::Status();
+                jsonToSend += "\"";
+
                 jsonToSend += ",\"entities\":";
 
                 std::string entitiesJson = "[]";
@@ -18153,6 +18184,8 @@ void ServerLoop() {
                 lc::FlushNickHiderJvmtiDiagnostics();
                 ka_premotion::RefreshTargets(env);
             }
+            // Cosmetics and sky: defines the helper, arms the hooks and pushes settings when due.
+            visuals::Tick(env);
             // Read config from C# (non-blocking)
             char buf[2048];
             int r = recv(clientSocket, buf, sizeof(buf) - 1, 0);
@@ -18267,6 +18300,7 @@ void ServerLoop() {
         // here: this is the same thread that calls into it, so no other thread can
         // hold the ids when they go.
         SessionHelperBridge::Unload(env);
+        visuals::Shutdown(env);
         const bool antiDebuffSafeToUnload = anti_debuff_jvmti::Shutdown(env);
         if (antiDebuffSafeToUnload) {
             lc::ShutdownNickHiderJvmti(env);

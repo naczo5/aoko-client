@@ -103,6 +103,8 @@ export default defineConfig({
                 { label: 'Trajectories', slug: 'modules/beta/trajectories' },
                 { label: 'Murder Mystery', slug: 'modules/beta/murder-mystery' },
                 { label: 'Break Progress', slug: 'modules/beta/break-progress' },
+                { label: 'Cosmetics', slug: 'modules/beta/cosmetics' },
+                { label: 'Sky', slug: 'modules/beta/sky' },
                 { label: 'No Hurt Cam', slug: 'modules/visual/no-hurt-cam' },
                 { label: 'TNT Timer', slug: 'modules/visual/tnt-timer' },
                 { label: 'Fast Place', slug: 'modules/utility/fast-place' },

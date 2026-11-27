@@ -1,0 +1,38 @@
+{
+  "name": "Cat Ears",
+  "slot": "hat",
+  "anchor": "head",
+  "model": "model.geo.json",
+  "texture": "texture.png",
+  "scale": 1.0,
+  "offset": [
+    0,
+    0,
+    0
+  ],
+  "fullbright": false,
+  "translucent": false,
+  "hideWithHelmet": true,
+  "animations": [
+    {
+      "bone": "ear_left",
+      "swing": [
+        0,
+        0,
+        6
+      ],
+      "speed": 0.35,
+      "phase": 0
+    },
+    {
+      "bone": "ear_right",
+      "swing": [
+        0,
+        0,
+        -6
+      ],
+      "speed": 0.35,
+      "phase": 0
+    }
+  ]
+}

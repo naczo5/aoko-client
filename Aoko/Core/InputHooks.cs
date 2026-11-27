@@ -113,6 +113,8 @@ public static class InputHooks
         ["trajectories"]     = 0,
         ["murdermystery"]    = 0,
         ["breakprogress"]    = 0,
+        ["cosmetics"]        = 0,
+        ["sky"]              = 0,
         ["panic"]            = 0,
         ["hudeditor"]        = 0,
     };
@@ -305,6 +307,8 @@ public static class InputHooks
             case "trajectories":     c.TrajectoriesEnabled = !c.TrajectoriesEnabled; break;
             case "murdermystery":    c.MurderMysteryEnabled = !c.MurderMysteryEnabled; break;
             case "breakprogress":    c.BreakProgressEnabled = !c.BreakProgressEnabled; break;
+            case "cosmetics":        c.CosmeticsEnabled = !c.CosmeticsEnabled; break;
+            case "sky":              c.SkyEnabled = !c.SkyEnabled; break;
             case "hudeditor":        c.HudEditorActive = !c.HudEditorActive; break;
         }
     }

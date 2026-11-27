@@ -1,0 +1,18 @@
+{
+  "name": "Ember",
+  "colors": {
+    "day": {
+      "sky": "#ffa24a",
+      "fog": "#ffc27a",
+      "cloud": "#ffe0b0",
+      "sunset": "#ff6a1f"
+    },
+    "night": {
+      "sky": "#2a060c",
+      "fog": "#3a0c12",
+      "cloud": "#4a1a1c",
+      "sunset": "#ff4a12"
+    }
+  },
+  "stars": 1.0
+}

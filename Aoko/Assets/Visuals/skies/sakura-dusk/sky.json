@@ -1,0 +1,24 @@
+{
+  "name": "Sakura Dusk",
+  "time": 12800,
+  "colors": {
+    "day": {
+      "sky": "#4c3b90",
+      "fog": "#fe9c6d",
+      "cloud": "#704e89",
+      "sunset": "#ff8f6b"
+    },
+    "night": {
+      "sky": "#4c3b90",
+      "fog": "#fe9c6d",
+      "cloud": "#704e89",
+      "sunset": "#ff8f6b"
+    }
+  },
+  "stars": 1.0,
+  "skybox": {
+    "texture": "sky.jpg",
+    "dayBrightness": 1.0,
+    "nightBrightness": 1.0
+  }
+}
