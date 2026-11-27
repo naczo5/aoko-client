@@ -4561,7 +4561,7 @@ impl Shell {
             // deleted without asking would be worse than one that is not drawn.
             Control::PaletteRows { .. } => self.render_palette_rows(theme),
 
-            Control::PaletteNameBox { label } => self.render_palette_name_box(*label, theme),
+            Control::PaletteNameBox { label } => self.render_palette_name_box(label, theme),
 
             Control::PalettePreview { name } => {
                 let preview_accent = Theme::accent_by_name(name);
